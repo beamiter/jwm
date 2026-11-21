@@ -1,0 +1,147 @@
+{
+  "archive": {
+    "entries_sha256": {
+      "README.md": "dc92b692f468acf06db88ed5e877992df8b26bf6f58cfe2c7a3cbd167d461923",
+      "native-video-probe.h264": "a8abec1aeb52fdd973e60b11704f6cbf58cf88ed85b026d1a780b44cb7f724d4",
+      "preflight.c": "645d4024427586c6c70252ba3c160a07dc48c795d480c775953476e4610c5577",
+      "provenance.json": "ada6c6cace8acb8f74a87b9bd535af78f45b9c6fdd6921d0d2646637f2de037f",
+      "raw/map-first.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/map-first.log": "ecc19668a14ededdded66185361afdacca5e6c97b2298174a3d31fc27af15d65",
+      "raw/transfer-first.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/transfer-first.log": "2348ee81c5dd98d1892fe8f18083992df312f1041e166495fb234b747c5a6627",
+      "replay.py": "b016c0c2391416eff29ee145808afc00b24a0978a866426f643eca30742a399b",
+      "run.sh": "d074a29e028a55adaea8e03f127a8ac6e1f62b8364ec2c9a3450aab0e165866b"
+    },
+    "path": "vaapi-cpu-nv12-direct-map-preflight-raw.zip",
+    "sha256": "69c56e37c30604c8bf6faf38add9551eee472761e42d912b3d10ab7cd71721ef"
+  },
+  "interpretation": "Both access orders returned active NV12 and visible RGB bytes identical to the ordinary transfer of the same decoded surface.",
+  "limitations": [
+    "The RGB comparison uses aligned copied input for both paths and does not test libswscale reading directly from a map.",
+    "Same-surface operations may share decoder synchronization and cache effects. No performance or 4K validation was performed."
+  ],
+  "performance_measured": false,
+  "provenance": {
+    "device": {
+      "kernel_driver": "i915",
+      "pci_device": "0x7d67",
+      "pci_revision": "0x06",
+      "pci_vendor": "0x8086",
+      "render_node_name": "renderD128",
+      "source": "read-only Linux sysfs metadata observed after both runs"
+    },
+    "executable_compiler_comment": "GCC: (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "executable_dynamic_dependencies": [
+      "libavcodec.so.60",
+      "libavutil.so.58",
+      "libswscale.so.7",
+      "libc.so.6"
+    ],
+    "ffmpeg": {
+      "fingerprint_scope": "Versions and staged library files inspected after both runs.",
+      "header_runtime_numeric_version_check_required_before_decode": true,
+      "libraries": {
+        "libavcodec": {
+          "soname": "libavcodec.so.60",
+          "staged_file_name": "libavcodec.so.60.31.102",
+          "staged_library_sha256": "5086c1058b497732273c3f71519d54b80a5e16b4e831c35246da87ddd93a6e56",
+          "version": "60.31.102"
+        },
+        "libavutil": {
+          "soname": "libavutil.so.58",
+          "staged_file_name": "libavutil.so.58.29.100",
+          "staged_library_sha256": "11b0836441b899e1b2183fc10eda5a5f637c03547fdfe5b97774e2cbd5aeb72c",
+          "version": "58.29.100"
+        },
+        "libswscale": {
+          "soname": "libswscale.so.7",
+          "staged_file_name": "libswscale.so.7.5.100",
+          "staged_library_sha256": "a2122c6342e9457a9b7faab2d3f7018f3634fdac4d0b25b8ea974eae0277d78c",
+          "version": "7.5.100"
+        }
+      }
+    },
+    "kernel_release": "6.17.0-35-generic",
+    "original_launcher_sha256": "b7f9881109b00127035e34e5fdcf60d1c5e39385a348b69f1d498dccc529f240",
+    "packet": {
+      "bytes": 384,
+      "format": "H.264 Annex B SPS, PPS and IDR",
+      "repository_path": "src/remote/native-video-probe.h264",
+      "sha256": "a8abec1aeb52fdd973e60b11704f6cbf58cf88ed85b026d1a780b44cb7f724d4"
+    },
+    "portable_launcher_sha256": "d074a29e028a55adaea8e03f127a8ac6e1f62b8364ec2c9a3450aab0e165866b",
+    "retained_executable_after_both_runs_sha256": "2c4e9256dfdd5c210bd4c46352f71ee1543f9710ad5e0d89f6e89d24752573c9",
+    "source_sha256": "645d4024427586c6c70252ba3c160a07dc48c795d480c775953476e4610c5577"
+  },
+  "runs": [
+    {
+      "exit_code": 0,
+      "order": "download-first",
+      "raw_stdout_sha256": "2348ee81c5dd98d1892fe8f18083992df312f1041e166495fb234b747c5a6627",
+      "result": {
+        "decoded_size": [
+          256,
+          256
+        ],
+        "decoder": "h264/vaapi",
+        "downloaded_strides": [
+          256,
+          256
+        ],
+        "map": "cpu-nv12-read-direct",
+        "mapped_strides": [
+          256,
+          256
+        ],
+        "nv12_active_bytes_equal": 98304,
+        "order": "download-first",
+        "performance_measured": false,
+        "rgb_crop_bytes_equal": 185991,
+        "rgb_full_bytes_equal": 196608,
+        "status": "pass",
+        "surface_color_range": 0,
+        "surface_colorspace": 2,
+        "tested_crop": [
+          251,
+          247
+        ]
+      }
+    },
+    {
+      "exit_code": 0,
+      "order": "map-first",
+      "raw_stdout_sha256": "ecc19668a14ededdded66185361afdacca5e6c97b2298174a3d31fc27af15d65",
+      "result": {
+        "decoded_size": [
+          256,
+          256
+        ],
+        "decoder": "h264/vaapi",
+        "downloaded_strides": [
+          256,
+          256
+        ],
+        "map": "cpu-nv12-read-direct",
+        "mapped_strides": [
+          256,
+          256
+        ],
+        "nv12_active_bytes_equal": 98304,
+        "order": "map-first",
+        "performance_measured": false,
+        "rgb_crop_bytes_equal": 185991,
+        "rgb_full_bytes_equal": 196608,
+        "status": "pass",
+        "surface_color_range": 0,
+        "surface_colorspace": 2,
+        "tested_crop": [
+          251,
+          247
+        ]
+      }
+    }
+  ],
+  "schema_version": 1,
+  "scope": "Owned Intel VA-API read-only direct NV12 CPU mapping compatibility for the pinned 256x256 H.264 picture",
+  "status": "verified"
+}

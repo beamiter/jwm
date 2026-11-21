@@ -1,0 +1,1811 @@
+{
+  "date": "2026-11-21",
+  "configuration": {
+    "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "build": "working tree debug, --no-default-features --features remote-x11,remote-h264",
+    "host": {
+      "os": "Ubuntu 22.04.5",
+      "kernel": "6.8.0-149-generic",
+      "cpu": "Core i7-13650HX",
+      "gpu": "GeForce RTX 5060 Laptop GPU",
+      "nvidia_driver": "580.178.04",
+      "binary_sha256": "d629c3d752b154241c806a82049d1bd827c7673706050b39fbd7860fa1375b6d",
+      "display": "private Xvfb, 24-bit TrueColor, X11 root capture, CPU scaling"
+    },
+    "viewer": {
+      "os": "Linux Mint 22.3",
+      "kernel": "6.17.0-35-generic",
+      "cpu": "Core Ultra 7 270K Plus",
+      "gpu": "GeForce RTX 5080 and Intel integrated graphics",
+      "nvidia_driver": "595.71.05",
+      "binary_sha256": "858fdf5786195d73f068f2eddd689a3feb9a6771e85de67d6fe9f54a0c881429",
+      "display": "private Xvfb, 24-bit TrueColor, native X11 viewer, 1:1 CPU scaling"
+    },
+    "transport": "authenticated view-only TCP over SSH forwarding between physical machines",
+    "host_frame_rate_ceiling": 15,
+    "h264": {
+      "encoder": "h264_nvenc",
+      "decoder": "VA-API",
+      "chroma": "4:2:0",
+      "target_bps": 6000000
+    },
+    "hevc444": {
+      "encoder": "hevc_nvenc",
+      "decoder": "NVDEC",
+      "chroma": "4:4:4",
+      "target_bps": 10000000,
+      "rgb_conversion": "BILINEAR with full chroma, both directions"
+    },
+    "jpeg": {
+      "fixed_quality": 85
+    }
+  },
+  "measurement": {
+    "sample": "X11 RGB root pixels after the first viewer reporting window with a drawn ACK",
+    "patches": "5x5 mean of each RGB channel at patch centers, with maximum absolute channel error in 8-bit values",
+    "one_pixel_chroma": "difference of mean R minus B on alternating stripe parities excluding 16 edge pixels at each side",
+    "cjk": "RGB absolute channel error on glyph foreground samples with antialias mask >=128 in each glyph line",
+    "iterations": 1
+  },
+  "source_fixture": {
+    "patches": {
+      "gray": [
+        [
+          97,
+          92,
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          205,
+          92,
+          [
+            16,
+            16,
+            16
+          ]
+        ],
+        [
+          313,
+          92,
+          [
+            32,
+            32,
+            32
+          ]
+        ],
+        [
+          421,
+          92,
+          [
+            64,
+            64,
+            64
+          ]
+        ],
+        [
+          529,
+          92,
+          [
+            96,
+            96,
+            96
+          ]
+        ],
+        [
+          637,
+          92,
+          [
+            128,
+            128,
+            128
+          ]
+        ],
+        [
+          745,
+          92,
+          [
+            160,
+            160,
+            160
+          ]
+        ],
+        [
+          853,
+          92,
+          [
+            192,
+            192,
+            192
+          ]
+        ],
+        [
+          961,
+          92,
+          [
+            224,
+            224,
+            224
+          ]
+        ],
+        [
+          1069,
+          92,
+          [
+            240,
+            240,
+            240
+          ]
+        ],
+        [
+          1177,
+          92,
+          [
+            255,
+            255,
+            255
+          ]
+        ]
+      ],
+      "color": [
+        [
+          113,
+          224,
+          [
+            240,
+            35,
+            48
+          ]
+        ],
+        [
+          264,
+          224,
+          [
+            36,
+            216,
+            80
+          ]
+        ],
+        [
+          415,
+          224,
+          [
+            45,
+            94,
+            236
+          ]
+        ],
+        [
+          566,
+          224,
+          [
+            237,
+            196,
+            27
+          ]
+        ],
+        [
+          717,
+          224,
+          [
+            215,
+            65,
+            198
+          ]
+        ],
+        [
+          868,
+          224,
+          [
+            28,
+            181,
+            196
+          ]
+        ],
+        [
+          1019,
+          224,
+          [
+            35,
+            49,
+            74
+          ]
+        ],
+        [
+          1170,
+          224,
+          [
+            220,
+            155,
+            93
+          ]
+        ]
+      ]
+    },
+    "vertical": [
+      48,
+      324,
+      560,
+      464
+    ],
+    "horizontal": [
+      672,
+      324,
+      1184,
+      464
+    ],
+    "text": [
+      48,
+      500,
+      1184,
+      750
+    ],
+    "line_colors": [
+      [
+        194,
+        44,
+        30
+      ],
+      [
+        20,
+        90,
+        240
+      ]
+    ],
+    "text_colors": [
+      [
+        112,
+        193,
+        228
+      ],
+      [
+        21,
+        91,
+        214
+      ]
+    ],
+    "font": "Noto Sans CJK SC Regular",
+    "glyph_sizes": [
+      13,
+      16,
+      22
+    ],
+    "root_background_rgb": [
+      22,
+      28,
+      38
+    ],
+    "gray_patch_first_xy_and_stride": [
+      48,
+      44,
+      108
+    ],
+    "gray_patch_extent_inclusive": [
+      98,
+      96
+    ],
+    "color_patch_first_xy_and_stride": [
+      48,
+      170,
+      151
+    ],
+    "color_patch_extent_inclusive": [
+      137,
+      110
+    ],
+    "glyph_text": "远程控制　细字与彩线　灰阶显示　跨屏呈现验证　0123456789",
+    "glyph_ttc_index": 2,
+    "glyph_ttc_sha256": "b76b0433203017ca80401b2ee0dd69350349871c4b19d504c34dbdd80541690a",
+    "glyph_origins": [
+      [
+        80,
+        530
+      ],
+      [
+        80,
+        593
+      ],
+      [
+        80,
+        656
+      ]
+    ]
+  },
+  "source_and_viewer_dimensions": [
+    1280,
+    800
+  ],
+  "source_rgb_sha256": "6e58bc3ccab6e24ebae51ac809ec555e2edc9d80c9de6805944ec3924ed2a619",
+  "source_xvfb_readback_exact_rgb": true,
+  "trials": {
+    "h264": {
+      "host_mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+      "host_counts": {
+        "sent": 27,
+        "drawn_acks": 26,
+        "h264_frames": 27,
+        "hevc444_frames": 0,
+        "jpeg_atlases": 0
+      },
+      "host_last_sent_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          1280,
+          800
+        ],
+        "geometry_epoch": 2,
+        "sequence": 24,
+        "source_dimensions": [
+          1280,
+          800
+        ],
+        "source_epoch": 1
+      },
+      "viewer_last_decoded_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          1280,
+          800
+        ],
+        "geometry_epoch": 2,
+        "sequence": 24,
+        "source_dimensions": [
+          1280,
+          800
+        ],
+        "source_epoch": 1
+      },
+      "viewer_acked_frames_in_matching_window": 25,
+      "join_session_verified": true,
+      "negotiated_codec": "H.264",
+      "viewer_hardware_downloads_in_matching_window": 25,
+      "host_negotiation": [
+        "jwm-remote: H.264 NVENC negotiated"
+      ],
+      "viewer_decoder_probes": [
+        "jwm-remote: H.264 hardware decoder active (VAAPI)",
+        "jwm-remote: HEVC 4:4:4 hardware decoder active (NVDEC)"
+      ],
+      "viewer_rgb_sha256": "a164b2e433cd4cfd21478e3af11ffa92799f88bce0849398a1f8cbec30eeddf2",
+      "pixels": {
+        "patches": {
+          "gray": {
+            "samples": [
+              {
+                "source_rgb": [
+                  0,
+                  0,
+                  0
+                ],
+                "viewer_rgb": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  16,
+                  16,
+                  16
+                ],
+                "viewer_rgb": [
+                  15.0,
+                  15.0,
+                  15.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  32,
+                  32,
+                  32
+                ],
+                "viewer_rgb": [
+                  30.0,
+                  30.0,
+                  30.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  64,
+                  64,
+                  64
+                ],
+                "viewer_rgb": [
+                  62.0,
+                  62.0,
+                  62.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  96,
+                  96,
+                  96
+                ],
+                "viewer_rgb": [
+                  94.0,
+                  94.0,
+                  94.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  128,
+                  128,
+                  128
+                ],
+                "viewer_rgb": [
+                  126.0,
+                  126.0,
+                  126.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  160,
+                  160,
+                  160
+                ],
+                "viewer_rgb": [
+                  158.0,
+                  158.0,
+                  158.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  192,
+                  192,
+                  192
+                ],
+                "viewer_rgb": [
+                  190.0,
+                  190.0,
+                  190.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  224,
+                  224,
+                  224
+                ],
+                "viewer_rgb": [
+                  222.0,
+                  222.0,
+                  222.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  240,
+                  240,
+                  240
+                ],
+                "viewer_rgb": [
+                  238.0,
+                  238.0,
+                  238.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  255,
+                  255,
+                  255
+                ],
+                "viewer_rgb": [
+                  253.0,
+                  253.0,
+                  253.0
+                ]
+              }
+            ],
+            "max_absolute_channel_error": 2.0
+          },
+          "color": {
+            "samples": [
+              {
+                "source_rgb": [
+                  240,
+                  35,
+                  48
+                ],
+                "viewer_rgb": [
+                  238.0,
+                  34.0,
+                  46.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  36,
+                  216,
+                  80
+                ],
+                "viewer_rgb": [
+                  34.0,
+                  215.0,
+                  79.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  45,
+                  94,
+                  236
+                ],
+                "viewer_rgb": [
+                  42.0,
+                  93.0,
+                  236.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  237,
+                  196,
+                  27
+                ],
+                "viewer_rgb": [
+                  235.0,
+                  194.0,
+                  26.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  215,
+                  65,
+                  198
+                ],
+                "viewer_rgb": [
+                  212.0,
+                  63.0,
+                  196.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  28,
+                  181,
+                  196
+                ],
+                "viewer_rgb": [
+                  27.0,
+                  181.0,
+                  194.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  35,
+                  49,
+                  74
+                ],
+                "viewer_rgb": [
+                  33.0,
+                  48.0,
+                  73.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  220,
+                  155,
+                  93
+                ],
+                "viewer_rgb": [
+                  218.0,
+                  154.0,
+                  91.0
+                ]
+              }
+            ],
+            "max_absolute_channel_error": 3.0
+          }
+        },
+        "one_pixel_chroma": {
+          "vertical": {
+            "source_red_minus_blue_contrast": 384.0,
+            "viewer_red_minus_blue_contrast": 1.0,
+            "retained_percent": 0.26
+          },
+          "horizontal": {
+            "source_red_minus_blue_contrast": 384.0,
+            "viewer_red_minus_blue_contrast": 1.0,
+            "retained_percent": 0.26
+          }
+        },
+        "cjk": {
+          "13": {
+            "foreground_pixels": 1216,
+            "foreground_channel_mae": 12.16,
+            "foreground_channel_p95_error": 29
+          },
+          "16": {
+            "foreground_pixels": 1727,
+            "foreground_channel_mae": 12.54,
+            "foreground_channel_p95_error": 27
+          },
+          "22": {
+            "foreground_pixels": 2664,
+            "foreground_channel_mae": 10.46,
+            "foreground_channel_p95_error": 27
+          }
+        }
+      }
+    },
+    "hevc444": {
+      "host_mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+      "host_counts": {
+        "sent": 23,
+        "drawn_acks": 23,
+        "h264_frames": 0,
+        "hevc444_frames": 23,
+        "jpeg_atlases": 0
+      },
+      "host_last_sent_frame": {
+        "codec": "HEVC 4:4:4",
+        "encoded_dimensions": [
+          1280,
+          800
+        ],
+        "geometry_epoch": 2,
+        "sequence": 20,
+        "source_dimensions": [
+          1280,
+          800
+        ],
+        "source_epoch": 1
+      },
+      "viewer_last_decoded_frame": {
+        "codec": "HEVC 4:4:4",
+        "encoded_dimensions": [
+          1280,
+          800
+        ],
+        "geometry_epoch": 2,
+        "sequence": 20,
+        "source_dimensions": [
+          1280,
+          800
+        ],
+        "source_epoch": 1
+      },
+      "viewer_acked_frames_in_matching_window": 21,
+      "join_session_verified": true,
+      "negotiated_codec": "HEVC 4:4:4",
+      "viewer_hardware_downloads_in_matching_window": 21,
+      "host_negotiation": [
+        "jwm-remote: HEVC 4:4:4 NVENC negotiated"
+      ],
+      "viewer_decoder_probes": [
+        "jwm-remote: H.264 hardware decoder active (VAAPI)",
+        "jwm-remote: HEVC 4:4:4 hardware decoder active (NVDEC)"
+      ],
+      "viewer_rgb_sha256": "6e21c570a17a10fb313ad85c890ba00f2e202a0ff435352af98b98b96941b6e9",
+      "pixels": {
+        "patches": {
+          "gray": {
+            "samples": [
+              {
+                "source_rgb": [
+                  0,
+                  0,
+                  0
+                ],
+                "viewer_rgb": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  16,
+                  16,
+                  16
+                ],
+                "viewer_rgb": [
+                  16.0,
+                  16.0,
+                  16.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  32,
+                  32,
+                  32
+                ],
+                "viewer_rgb": [
+                  31.0,
+                  31.0,
+                  31.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  64,
+                  64,
+                  64
+                ],
+                "viewer_rgb": [
+                  64.0,
+                  64.0,
+                  64.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  96,
+                  96,
+                  96
+                ],
+                "viewer_rgb": [
+                  95.0,
+                  95.0,
+                  95.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  128,
+                  128,
+                  128
+                ],
+                "viewer_rgb": [
+                  128.0,
+                  128.0,
+                  128.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  160,
+                  160,
+                  160
+                ],
+                "viewer_rgb": [
+                  160.0,
+                  160.0,
+                  160.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  192,
+                  192,
+                  192
+                ],
+                "viewer_rgb": [
+                  192.0,
+                  192.0,
+                  192.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  224,
+                  224,
+                  224
+                ],
+                "viewer_rgb": [
+                  224.0,
+                  224.0,
+                  224.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  240,
+                  240,
+                  240
+                ],
+                "viewer_rgb": [
+                  240.0,
+                  240.0,
+                  240.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  255,
+                  255,
+                  255
+                ],
+                "viewer_rgb": [
+                  255.0,
+                  255.0,
+                  255.0
+                ]
+              }
+            ],
+            "max_absolute_channel_error": 1.0
+          },
+          "color": {
+            "samples": [
+              {
+                "source_rgb": [
+                  240,
+                  35,
+                  48
+                ],
+                "viewer_rgb": [
+                  240.0,
+                  35.0,
+                  47.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  36,
+                  216,
+                  80
+                ],
+                "viewer_rgb": [
+                  37.0,
+                  216.0,
+                  80.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  45,
+                  94,
+                  236
+                ],
+                "viewer_rgb": [
+                  44.0,
+                  94.0,
+                  237.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  237,
+                  196,
+                  27
+                ],
+                "viewer_rgb": [
+                  237.0,
+                  196.0,
+                  27.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  215,
+                  65,
+                  198
+                ],
+                "viewer_rgb": [
+                  214.0,
+                  65.0,
+                  197.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  28,
+                  181,
+                  196
+                ],
+                "viewer_rgb": [
+                  29.0,
+                  181.0,
+                  196.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  35,
+                  49,
+                  74
+                ],
+                "viewer_rgb": [
+                  35.0,
+                  49.0,
+                  74.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  220,
+                  155,
+                  93
+                ],
+                "viewer_rgb": [
+                  220.0,
+                  155.0,
+                  93.0
+                ]
+              }
+            ],
+            "max_absolute_channel_error": 1.0
+          }
+        },
+        "one_pixel_chroma": {
+          "vertical": {
+            "source_red_minus_blue_contrast": 384.0,
+            "viewer_red_minus_blue_contrast": 380.05,
+            "retained_percent": 98.97
+          },
+          "horizontal": {
+            "source_red_minus_blue_contrast": 384.0,
+            "viewer_red_minus_blue_contrast": 380.92,
+            "retained_percent": 99.2
+          }
+        },
+        "cjk": {
+          "13": {
+            "foreground_pixels": 1216,
+            "foreground_channel_mae": 1.43,
+            "foreground_channel_p95_error": 4
+          },
+          "16": {
+            "foreground_pixels": 1727,
+            "foreground_channel_mae": 1.33,
+            "foreground_channel_p95_error": 3
+          },
+          "22": {
+            "foreground_pixels": 2664,
+            "foreground_channel_mae": 1.16,
+            "foreground_channel_p95_error": 3
+          }
+        }
+      }
+    },
+    "jpeg": {
+      "host_mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+      "host_counts": {
+        "sent": 2,
+        "drawn_acks": 2,
+        "h264_frames": 0,
+        "hevc444_frames": 0,
+        "jpeg_atlases": 1
+      },
+      "host_last_sent_frame": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          1280,
+          800
+        ],
+        "geometry_epoch": 2,
+        "sequence": 1,
+        "source_dimensions": [
+          1280,
+          800
+        ],
+        "source_epoch": 1
+      },
+      "viewer_last_decoded_frame": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          1280,
+          800
+        ],
+        "geometry_epoch": 2,
+        "sequence": 1,
+        "source_dimensions": [
+          1280,
+          800
+        ],
+        "source_epoch": 1
+      },
+      "viewer_acked_frames_in_matching_window": 2,
+      "join_session_verified": true,
+      "negotiated_codec": "JPEG",
+      "viewer_hardware_downloads_in_matching_window": 0,
+      "host_negotiation": [],
+      "viewer_decoder_probes": [],
+      "viewer_rgb_sha256": "8b1c940bdebc0b112bd3ff12326e0450c7a7d66f3b4ca470814d42573f8a6de0",
+      "pixels": {
+        "patches": {
+          "gray": {
+            "samples": [
+              {
+                "source_rgb": [
+                  0,
+                  0,
+                  0
+                ],
+                "viewer_rgb": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  16,
+                  16,
+                  16
+                ],
+                "viewer_rgb": [
+                  16.0,
+                  16.0,
+                  16.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  32,
+                  32,
+                  32
+                ],
+                "viewer_rgb": [
+                  32.0,
+                  32.0,
+                  32.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  64,
+                  64,
+                  64
+                ],
+                "viewer_rgb": [
+                  64.0,
+                  64.0,
+                  64.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  96,
+                  96,
+                  96
+                ],
+                "viewer_rgb": [
+                  96.0,
+                  96.0,
+                  96.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  128,
+                  128,
+                  128
+                ],
+                "viewer_rgb": [
+                  128.0,
+                  128.0,
+                  128.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  160,
+                  160,
+                  160
+                ],
+                "viewer_rgb": [
+                  160.0,
+                  160.0,
+                  160.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  192,
+                  192,
+                  192
+                ],
+                "viewer_rgb": [
+                  192.0,
+                  192.0,
+                  192.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  224,
+                  224,
+                  224
+                ],
+                "viewer_rgb": [
+                  224.0,
+                  224.0,
+                  224.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  240,
+                  240,
+                  240
+                ],
+                "viewer_rgb": [
+                  240.0,
+                  240.0,
+                  240.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  255,
+                  255,
+                  255
+                ],
+                "viewer_rgb": [
+                  255.0,
+                  255.0,
+                  255.0
+                ]
+              }
+            ],
+            "max_absolute_channel_error": 0.0
+          },
+          "color": {
+            "samples": [
+              {
+                "source_rgb": [
+                  240,
+                  35,
+                  48
+                ],
+                "viewer_rgb": [
+                  240.0,
+                  36.0,
+                  48.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  36,
+                  216,
+                  80
+                ],
+                "viewer_rgb": [
+                  36.0,
+                  216.0,
+                  80.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  45,
+                  94,
+                  236
+                ],
+                "viewer_rgb": [
+                  46.0,
+                  95.0,
+                  236.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  237,
+                  196,
+                  27
+                ],
+                "viewer_rgb": [
+                  237.0,
+                  196.0,
+                  28.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  215,
+                  65,
+                  198
+                ],
+                "viewer_rgb": [
+                  215.0,
+                  65.0,
+                  198.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  28,
+                  181,
+                  196
+                ],
+                "viewer_rgb": [
+                  28.0,
+                  181.0,
+                  195.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  35,
+                  49,
+                  74
+                ],
+                "viewer_rgb": [
+                  35.0,
+                  49.0,
+                  75.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  220,
+                  155,
+                  93
+                ],
+                "viewer_rgb": [
+                  220.0,
+                  154.0,
+                  93.0
+                ]
+              }
+            ],
+            "max_absolute_channel_error": 1.0
+          }
+        },
+        "one_pixel_chroma": {
+          "vertical": {
+            "source_red_minus_blue_contrast": 384.0,
+            "viewer_red_minus_blue_contrast": 379.0,
+            "retained_percent": 98.7
+          },
+          "horizontal": {
+            "source_red_minus_blue_contrast": 384.0,
+            "viewer_red_minus_blue_contrast": 379.0,
+            "retained_percent": 98.7
+          }
+        },
+        "cjk": {
+          "13": {
+            "foreground_pixels": 1216,
+            "foreground_channel_mae": 7.05,
+            "foreground_channel_p95_error": 21
+          },
+          "16": {
+            "foreground_pixels": 1727,
+            "foreground_channel_mae": 6.73,
+            "foreground_channel_p95_error": 19
+          },
+          "22": {
+            "foreground_pixels": 2664,
+            "foreground_channel_mae": 5.83,
+            "foreground_channel_p95_error": 17
+          }
+        }
+      }
+    }
+  },
+  "hevc444_before_conversion_fix": {
+    "conversion": "FAST_BILINEAR with full chroma, both RGB conversion directions",
+    "host_binary_sha256": "0dc5fbdbf251f9b039104c7aaecf44dcba1208edb0b634802bfdc694be012d22",
+    "viewer_binary_sha256": "edd2ef53c411afe10004def102cd755c8a418160485b94a6432d3da18b479cbd",
+    "trial": {
+      "host_mode": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+      "host_counts": {
+        "sent": 24,
+        "drawn_acks": 24,
+        "h264_frames": 0,
+        "hevc444_frames": 24,
+        "jpeg_atlases": 0
+      },
+      "host_last_sent_frame": {
+        "codec": "HEVC 4:4:4",
+        "encoded_dimensions": [
+          1280,
+          800
+        ],
+        "geometry_epoch": 2,
+        "sequence": 21,
+        "source_dimensions": [
+          1280,
+          800
+        ],
+        "source_epoch": 1
+      },
+      "viewer_last_decoded_frame": {
+        "codec": "HEVC 4:4:4",
+        "encoded_dimensions": [
+          1280,
+          800
+        ],
+        "geometry_epoch": 2,
+        "sequence": 22,
+        "source_dimensions": [
+          1280,
+          800
+        ],
+        "source_epoch": 1
+      },
+      "viewer_acked_frames_in_matching_window": 22,
+      "join_session_verified": true,
+      "negotiated_codec": "HEVC 4:4:4",
+      "viewer_hardware_downloads_in_matching_window": 23,
+      "host_negotiation": [
+        "jwm-remote: HEVC 4:4:4 NVENC negotiated"
+      ],
+      "viewer_decoder_probes": [
+        "jwm-remote: H.264 hardware decoder active (VAAPI)",
+        "jwm-remote: HEVC 4:4:4 hardware decoder active (NVDEC)"
+      ],
+      "viewer_rgb_sha256": "a8d506ecd5e5a3dfb6b9ed0fe88fa299b61160b0eba9726f1e030f88aa1ff40f",
+      "pixels": {
+        "patches": {
+          "gray": {
+            "samples": [
+              {
+                "source_rgb": [
+                  0,
+                  0,
+                  0
+                ],
+                "viewer_rgb": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  16,
+                  16,
+                  16
+                ],
+                "viewer_rgb": [
+                  16.0,
+                  16.0,
+                  16.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  32,
+                  32,
+                  32
+                ],
+                "viewer_rgb": [
+                  31.0,
+                  31.0,
+                  31.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  64,
+                  64,
+                  64
+                ],
+                "viewer_rgb": [
+                  64.0,
+                  64.0,
+                  64.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  96,
+                  96,
+                  96
+                ],
+                "viewer_rgb": [
+                  95.0,
+                  95.0,
+                  95.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  128,
+                  128,
+                  128
+                ],
+                "viewer_rgb": [
+                  128.0,
+                  128.0,
+                  128.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  160,
+                  160,
+                  160
+                ],
+                "viewer_rgb": [
+                  160.0,
+                  160.0,
+                  160.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  192,
+                  192,
+                  192
+                ],
+                "viewer_rgb": [
+                  192.0,
+                  192.0,
+                  192.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  224,
+                  224,
+                  224
+                ],
+                "viewer_rgb": [
+                  224.0,
+                  224.0,
+                  224.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  240,
+                  240,
+                  240
+                ],
+                "viewer_rgb": [
+                  240.0,
+                  240.0,
+                  240.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  255,
+                  255,
+                  255
+                ],
+                "viewer_rgb": [
+                  255.0,
+                  255.0,
+                  255.0
+                ]
+              }
+            ],
+            "max_absolute_channel_error": 1.0
+          },
+          "color": {
+            "samples": [
+              {
+                "source_rgb": [
+                  240,
+                  35,
+                  48
+                ],
+                "viewer_rgb": [
+                  240.0,
+                  35.0,
+                  47.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  36,
+                  216,
+                  80
+                ],
+                "viewer_rgb": [
+                  37.0,
+                  216.0,
+                  80.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  45,
+                  94,
+                  236
+                ],
+                "viewer_rgb": [
+                  44.0,
+                  94.0,
+                  237.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  237,
+                  196,
+                  27
+                ],
+                "viewer_rgb": [
+                  237.0,
+                  196.0,
+                  27.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  215,
+                  65,
+                  198
+                ],
+                "viewer_rgb": [
+                  214.0,
+                  65.0,
+                  197.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  28,
+                  181,
+                  196
+                ],
+                "viewer_rgb": [
+                  29.0,
+                  181.0,
+                  196.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  35,
+                  49,
+                  74
+                ],
+                "viewer_rgb": [
+                  35.0,
+                  49.0,
+                  74.0
+                ]
+              },
+              {
+                "source_rgb": [
+                  220,
+                  155,
+                  93
+                ],
+                "viewer_rgb": [
+                  220.0,
+                  155.0,
+                  93.0
+                ]
+              }
+            ],
+            "max_absolute_channel_error": 1.0
+          }
+        },
+        "one_pixel_chroma": {
+          "vertical": {
+            "source_red_minus_blue_contrast": 384.0,
+            "viewer_red_minus_blue_contrast": 280.5,
+            "retained_percent": 73.05
+          },
+          "horizontal": {
+            "source_red_minus_blue_contrast": 384.0,
+            "viewer_red_minus_blue_contrast": 380.01,
+            "retained_percent": 98.96
+          }
+        },
+        "cjk": {
+          "13": {
+            "foreground_pixels": 1216,
+            "foreground_channel_mae": 3.36,
+            "foreground_channel_p95_error": 10
+          },
+          "16": {
+            "foreground_pixels": 1727,
+            "foreground_channel_mae": 3.73,
+            "foreground_channel_p95_error": 12
+          },
+          "22": {
+            "foreground_pixels": 2664,
+            "foreground_channel_mae": 3.24,
+            "foreground_channel_p95_error": 11
+          }
+        }
+      }
+    }
+  },
+  "separate_local_hardware_crop_probe": {
+    "machine": "Linux Mint 22.3, RTX 5080 NVENC, Intel VA-API H.264 or RTX 5080 NVDEC HEVC decode",
+    "command_filter": "remote::h264::tests::hardware_codec_uses_one_access_unit_per_frame_and_validates_sps_dimensions -- --ignored --exact --nocapture",
+    "check": "compared compact cropped RGB rows byte for byte to the same decoded RGB frame before cropping; checked visible edge markers and distinct padded pixels",
+    "effective_matrix_and_range": "libswscale default BT.601, limited range for both test packets",
+    "frames": [
+      {
+        "chroma_location": "Left",
+        "codec": "H.264",
+        "color_primaries": "Unspecified",
+        "color_range": "Unspecified",
+        "color_space": "Unspecified",
+        "color_transfer": "Unspecified",
+        "decoded_rgb_stride": 2016,
+        "download_format": "NV12",
+        "padding_samples": [
+          [
+            641,
+            179,
+            [
+              190,
+              190,
+              190
+            ]
+          ],
+          [
+            320,
+            359,
+            [
+              244,
+              244,
+              244
+            ]
+          ],
+          [
+            641,
+            359,
+            [
+              245,
+              245,
+              245
+            ]
+          ]
+        ],
+        "sps_coded": [
+          656,
+          368
+        ],
+        "sps_visible": [
+          642,
+          360
+        ],
+        "surface": [
+          642,
+          360
+        ],
+        "surface_format": "AV_PIX_FMT_VAAPI",
+        "swscale_full_range": false,
+        "swscale_matrix": 5,
+        "visible": [
+          641,
+          359
+        ],
+        "visible_row_bytes": 1923,
+        "visible_samples": [
+          [
+            320,
+            179,
+            [
+              119,
+              119,
+              119
+            ]
+          ],
+          [
+            640,
+            179,
+            [
+              91,
+              91,
+              91
+            ]
+          ],
+          [
+            320,
+            358,
+            [
+              157,
+              157,
+              157
+            ]
+          ],
+          [
+            640,
+            358,
+            [
+              52,
+              52,
+              52
+            ]
+          ]
+        ]
+      },
+      {
+        "chroma_location": "Unspecified",
+        "codec": "HEVC 4:4:4",
+        "color_primaries": "Unspecified",
+        "color_range": "MPEG",
+        "color_space": "Unspecified",
+        "color_transfer": "Unspecified",
+        "decoded_rgb_stride": 2016,
+        "download_format": "YUV444P",
+        "padding_samples": [
+          [
+            641,
+            179,
+            [
+              246,
+              246,
+              246
+            ]
+          ],
+          [
+            320,
+            359,
+            [
+              246,
+              246,
+              246
+            ]
+          ],
+          [
+            641,
+            359,
+            [
+              246,
+              246,
+              246
+            ]
+          ]
+        ],
+        "sps_coded": [
+          672,
+          384
+        ],
+        "sps_visible": [
+          642,
+          360
+        ],
+        "surface": [
+          642,
+          360
+        ],
+        "surface_format": "AV_PIX_FMT_CUDA",
+        "swscale_full_range": false,
+        "swscale_matrix": 5,
+        "visible": [
+          641,
+          359
+        ],
+        "visible_row_bytes": 1923,
+        "visible_samples": [
+          [
+            320,
+            179,
+            [
+              121,
+              121,
+              121
+            ]
+          ],
+          [
+            640,
+            179,
+            [
+              93,
+              93,
+              93
+            ]
+          ],
+          [
+            320,
+            358,
+            [
+              158,
+              158,
+              158
+            ]
+          ],
+          [
+            640,
+            358,
+            [
+              52,
+              52,
+              52
+            ]
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,463 @@
+{
+  "environment": {
+    "renderer": "virgl (Mesa Intel(R) Graphics (ARL))",
+    "output": "Virtio-gpu Virtual-1, 1024x768",
+    "guest": "QEMU 8.2.2 KVM, Linux 6.17.0-35-generic",
+    "compositor": "jwm --backend wayland-udev",
+    "transport": "Authenticated loopback TCP between an owned Xvfb source and a native Wayland JPEG viewer",
+    "features": [
+      "remote-wayland",
+      "backend-wayland-udev"
+    ],
+    "source_head": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "dirty_source": true,
+    "binary_sha256": {
+      "jwm": "0eaeb63a7ee0bf3516427996a922add0a43fd1dd95f98aa5f4955b871d608250",
+      "jwm-remote": "4d0df536cb39626a477b94dda1f387b52d92d235f711f364fca27e6959901f48"
+    },
+    "script": "scripts/test-remote-wayland-kms.py",
+    "validation_boundary": "Virtual output with real guest DRM events. Physical scanout and input-to-display timing were unmeasured."
+  },
+  "test_configurations": {
+    "default-1": "Generated default config with animations, rounded corners and window decorations",
+    "default-2": "Independent guest boot using the generated default config",
+    "cursor-overlap": "Generated default config with the guest Wayland pointer moved into the viewer",
+    "direct": "Generated default config with behavior.compositor=false"
+  },
+  "trials": [
+    {
+      "trial": "default-1",
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 52,
+              "monotonic_ns": 3845332000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 3845334000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 57,
+              "monotonic_ns": 4526340000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4526341000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "trial": "default-2",
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 49,
+              "monotonic_ns": 3455791000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 3455793000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 53,
+              "monotonic_ns": 4104561000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4104563000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "trial": "cursor-overlap",
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 50,
+              "monotonic_ns": 7115678000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 26
+              }
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 7115681000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 56,
+              "monotonic_ns": 7823921000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 26
+              }
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 7823923000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "trial": "direct",
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 4,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 20,
+              "monotonic_ns": 3180041000,
+              "sequence": 0,
+              "flags": 0
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 3180043000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 27,
+              "monotonic_ns": 3952016000,
+              "sequence": 0,
+              "flags": 0
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 3952018000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

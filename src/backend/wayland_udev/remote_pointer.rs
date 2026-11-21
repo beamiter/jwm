@@ -12,14 +12,18 @@ use smithay::backend::{input::InputTime, renderer::utils::with_renderer_surface_
 use smithay::input::{keyboard::AuthorizedKeyboardSnapshot, pointer::AuthorizedPointerSnapshot};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_server::protocol::{wl_output::Transform, wl_surface::WlSurface};
+use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
-use smithay::utils::SERIAL_COUNTER;
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::server::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
 use smithay::reexports::wayland_server::Weak;
 use smithay::wayland::{
-    compositor::{RectangleKind, SurfaceAttributes, get_children, with_states},
+    compositor::{
+        RectangleKind, SubsurfaceCachedState, SurfaceAttributes, TraversalAction, get_children, with_states,
+        with_surface_tree_downward,
+    },
     shell::xdg::SurfaceCachedState,
     viewporter::ViewportCachedState,
 };
@@ -62,30 +66,82 @@ pub struct LeaseData {
 #[derive(Clone, PartialEq)]
 pub(super) struct Mapping {
     geometry: Option<(i32, i32, i32, i32)>,
+    root_size: (i32, i32),
     region: Option<Vec<(bool, i32, i32, i32, i32)>>,
+    paint_children: Vec<ObjectId>,
 }
-// Only a 1:1 uncropped root buffer is supported. Reject rather than guess a
-// coordinate transform or route a root pixel into a subsurface or decoration.
+impl Mapping {
+    pub(super) fn is_paint_child(&self, surface: &WlSurface) -> bool {
+        self.paint_children.contains(&surface.id())
+    }
+}
 struct NonzeroPointerOffset;
 pub(super) fn mapping(authority: &CaptureAuthority) -> Option<Mapping> {
+    root_mapping(authority, false, false)
+}
+pub(super) fn gesture_mapping(authority: &CaptureAuthority) -> Option<Mapping> {
+    root_mapping(authority, true, false)
+}
+pub(super) fn window_gesture_mapping(authority: &CaptureAuthority) -> Option<Mapping> {
+    root_mapping(authority, true, true)
+}
+pub(super) fn has_empty_input_region(surface: &WlSurface) -> bool {
+    surface.is_alive()
+        && with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .input_region
+                .as_ref()
+                .is_some_and(|region| region.rects.is_empty())
+        })
+}
+fn root_mapping(
+    authority: &CaptureAuthority,
+    allow_window_geometry: bool,
+    dynamic_window_tree: bool,
+) -> Option<Mapping> {
     let surface = &authority.surface;
-    if !get_children(surface).is_empty() {
+    let mut children = if dynamic_window_tree {
+        Vec::new()
+    } else {
+        get_children(surface)
+    };
+    if !allow_window_geometry && !children.is_empty() {
         return None;
     }
+    // A native compositor client can paint its window in subsurfaces while
+    // the root still receives all input. Only an explicit empty input region
+    // on every descendant preserves the original root-only input authority.
+    const MAX_PAINT_CHILDREN: usize = 64;
+    let mut index = 0;
+    while let Some(child) = children.get(index) {
+        if children.len() > MAX_PAINT_CHILDREN || !has_empty_input_region(child) {
+            return None;
+        }
+        let descendants = get_children(child);
+        children.extend(descendants);
+        index += 1;
+    }
+    let paint_children = children.iter().map(Resource::id).collect();
     let size = (authority.width as i32, authority.height as i32);
-    let valid_buffer = with_renderer_surface_state(surface, |state| {
-        state.buffer_size().is_some_and(|s| (s.w, s.h) == size)
-            && state.view().is_some_and(|v| {
-                v.offset.x == 0
-                    && v.offset.y == 0
-                    && v.src.loc.x == 0.0
-                    && v.src.loc.y == 0.0
-                    && (v.src.size.w, v.src.size.h) == (f64::from(size.0), f64::from(size.1))
-                    && (v.dst.w, v.dst.h) == size
-            })
+    // Capture draws at scale 1 in logical surface pixels, including when the
+    // root attaches an integer HiDPI buffer. Viewport transforms need a
+    // different mapping and are rejected below.
+    let (root_size, rendered_scale) = with_renderer_surface_state(surface, |state| {
+        let root = state.buffer_size()?;
+        let view = state.view()?;
+        (view.offset.x == 0
+            && view.offset.y == 0
+            && view.src.loc.x == 0.0
+            && view.src.loc.y == 0.0
+            && (view.src.size.w, view.src.size.h) == (f64::from(root.w), f64::from(root.h))
+            && view.dst == root)
+            .then_some(((root.w, root.h), state.buffer_scale()))
     })
-    .unwrap_or(false);
-    if !valid_buffer {
+    .flatten()?;
+    if !allow_window_geometry && root_size != size {
         return None;
     }
     with_states(surface, |states| {
@@ -94,7 +150,8 @@ pub(super) fn mapping(authority: &CaptureAuthority) -> Option<Mapping> {
         }
         let mut attrs = states.cached_state.get::<SurfaceAttributes>();
         let a = attrs.current();
-        if a.buffer_scale != 1
+        if a.buffer_scale != rendered_scale
+            || (!allow_window_geometry && a.buffer_scale != 1)
             || a.buffer_transform != Transform::Normal
             || a.buffer_delta.is_some_and(|d| d.x != 0 || d.y != 0)
         {
@@ -128,11 +185,137 @@ pub(super) fn mapping(authority: &CaptureAuthority) -> Option<Mapping> {
             .current()
             .geometry
             .map(|g| (g.loc.x, g.loc.y, g.size.w, g.size.h));
-        if geometry.is_some_and(|g| g != (0, 0, size.0, size.1)) {
+        let (x, y, width, height) = geometry.unwrap_or((0, 0, root_size.0, root_size.1));
+        // The same xdg geometry origin used by the capture renderer is the
+        // offset from capture coordinates back into the root's input region.
+        if (width, height) != size
+            || (!allow_window_geometry && (x, y) != (0, 0))
+            || x < 0
+            || y < 0
+            || x.checked_add(width).is_none_or(|right| right > root_size.0)
+            || y.checked_add(height)
+                .is_none_or(|bottom| bottom > root_size.1)
+        {
             return None;
         }
-        Some(Mapping { geometry, region })
+        Some(Mapping {
+            geometry,
+            root_size,
+            region,
+            paint_children,
+        })
     })
+}
+
+type InputRegion = Vec<(bool, Rectangle<i32, Logical>)>;
+
+#[derive(PartialEq)]
+struct HitSurface {
+    surface: WlSurface,
+    bounds: Rectangle<i32, Logical>,
+    region: Option<InputRegion>,
+}
+
+/// Same-client targets in the exact order painted into the shared root.
+/// The frame stores this geometry before sending ready. Live hit testing is
+/// permitted only when the comparable tree still describes the same targets.
+#[derive(PartialEq)]
+pub(crate) struct WindowInputLayout(Vec<HitSurface>);
+
+impl WindowInputLayout {
+    pub(super) fn surface_count(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn snapshot(root: &WlSurface) -> Option<Self> {
+        use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
+
+        let mut budget = 0;
+        let mapped = super::capture_popup_snapshot::validate_tree(root, (0, 0), &mut budget)?;
+        let mut entries = Some(Vec::with_capacity(mapped));
+        with_surface_tree_downward(
+            root,
+            Point::<i32, Logical>::from((0, 0)),
+            |_, states, point| {
+                let view = states
+                    .data_map
+                    .get::<RendererSurfaceStateUserData>()
+                    .and_then(|renderer| renderer.lock().unwrap().view());
+                view.map_or(TraversalAction::SkipChildren, |view| {
+                    TraversalAction::DoChildren(*point + view.offset)
+                })
+            },
+            |surface, states, point| {
+                let Some(view) = states
+                    .data_map
+                    .get::<RendererSurfaceStateUserData>()
+                    .and_then(|renderer| renderer.lock().unwrap().view())
+                else {
+                    return;
+                };
+                if surface != root
+                    && states
+                        .cached_state
+                        .get::<SubsurfaceCachedState>()
+                        .current()
+                        .location
+                        != view.offset
+                {
+                    entries = None;
+                    return;
+                }
+                let mut attrs = states.cached_state.get::<SurfaceAttributes>();
+                let region = attrs.current().input_region.as_ref();
+                if region.is_some_and(|region| region.rects.len() > 256) {
+                    entries = None;
+                    return;
+                }
+                if let Some(entries) = entries.as_mut() {
+                    entries.push(HitSurface {
+                        surface: surface.clone(),
+                        bounds: Rectangle::new(*point + view.offset, view.dst),
+                        region: region.map(|region| {
+                            region
+                                .rects
+                                .iter()
+                                .map(|(kind, bounds)| (matches!(kind, RectangleKind::Add), *bounds))
+                                .collect()
+                        }),
+                    });
+                }
+            },
+            |_, _, _| true,
+        );
+        entries
+            .filter(|entries| entries.len() == mapped && mapped > 0)
+            .map(Self)
+    }
+
+    pub(super) fn hit(&self, point: (f64, f64)) -> Option<(&WlSurface, (f64, f64))> {
+        let p = Point::<f64, Logical>::from(point);
+        self.0.iter().find_map(|target| {
+            if !target.bounds.to_f64().contains(p) {
+                return None;
+            }
+            let offset = p - target.bounds.loc.to_f64();
+            let local = offset.to_i32_floor::<i32>();
+            let accepts = target.region.as_ref().is_none_or(|rects| {
+                rects
+                    .iter()
+                    .rev()
+                    .find(|(_, bounds)| {
+                        let x = i64::from(local.x) - i64::from(bounds.loc.x);
+                        let y = i64::from(local.y) - i64::from(bounds.loc.y);
+                        x >= 0
+                            && x < i64::from(bounds.size.w)
+                            && y >= 0
+                            && y < i64::from(bounds.size.h)
+                    })
+                    .is_some_and(|(add, _)| *add)
+            });
+            accepts.then_some((&target.surface, (offset.x, offset.y)))
+        })
+    }
 }
 fn action_allowed(kind: u32, axes: u32) -> bool {
     axes <= 3
@@ -141,20 +324,32 @@ fn action_allowed(kind: u32, axes: u32) -> bool {
             || (axes & 2 != 0 && matches!(kind, 4 | 5)))
 }
 pub(super) fn point_allowed(mapping: &Mapping, x: u32, y: u32) -> bool {
+    mapped_point(mapping, x, y).is_some()
+}
+pub(super) fn mapped_point(mapping: &Mapping, x: u32, y: u32) -> Option<(f64, f64)> {
+    let (ox, oy, width, height) =
+        mapping
+            .geometry
+            .unwrap_or((0, 0, mapping.root_size.0, mapping.root_size.1));
+    if i64::from(x) >= i64::from(width) || i64::from(y) >= i64::from(height) {
+        return None;
+    }
+    let x = i64::from(x) + i64::from(ox);
+    let y = i64::from(y) + i64::from(oy);
     let Some(region) = &mapping.region else {
-        return true;
+        return Some((x as f64, y as f64));
     };
     let mut inside = false;
     for &(add, rx, ry, rw, rh) in region {
-        if i64::from(x) >= i64::from(rx)
-            && i64::from(y) >= i64::from(ry)
-            && i64::from(x) < i64::from(rx) + i64::from(rw)
-            && i64::from(y) < i64::from(ry) + i64::from(rh)
+        if x >= i64::from(rx)
+            && y >= i64::from(ry)
+            && x < i64::from(rx) + i64::from(rw)
+            && y < i64::from(ry) + i64::from(rh)
         {
             inside = add;
         }
     }
-    inside
+    inside.then_some((x as f64, y as f64))
 }
 pub(crate) fn init(dh: &DisplayHandle) {
     dh.create_global::<JwmWaylandState, JwmRemotePointerManagerV1, _>(3, ManagerData);
@@ -577,7 +772,9 @@ mod coordinate_tests {
     #[test]
     fn region_membership_uses_half_open_bounds_and_ordered_subtraction() {
         let mut mapping = Mapping {
+            paint_children: Vec::new(),
             geometry: None,
+            root_size: (64, 48),
             region: Some(vec![(true, 0, 0, 10, 10), (false, 2, 2, 3, 3)]),
         };
         assert!(point_allowed(&mapping, 0, 0));

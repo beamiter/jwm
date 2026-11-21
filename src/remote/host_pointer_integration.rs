@@ -86,6 +86,7 @@ fn options() -> HostOptions {
         allow_wayland_keyboard: false,
         allow_wayland_pointer: true,
         allow_wayland_control: false,
+        allow_wayland_gestures: false,
         allow_resumable_control: false,
         allow_wayland_text: false,
         allow_static_lossless: false,

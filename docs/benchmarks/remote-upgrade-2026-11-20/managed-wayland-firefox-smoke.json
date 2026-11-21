@@ -1,0 +1,26 @@
+{
+  "application": "Firefox 152.0.5 with native Wayland software WebRender",
+  "machine": "Development machine, Linux Mint 22.3",
+  "environment": "Two private JWM/Smithay displays, independent CLI host and session processes, authenticated loopback TCP, private D-Bus and Firefox profile, mandatory software GLES readback",
+  "source_logical_size": [640, 480],
+  "viewer_size": [640, 480],
+  "drawing_subsurfaces": 1,
+  "input_profile": "Managed Wayland gestures and independently authorized vertical wheel",
+  "actions": ["Ctrl+L and type first URL", "Ctrl+T and type second URL", "Ctrl+Tab", "left click on page content", "vertical mouse wheel", "managed disconnect"],
+  "browser_assertions": {
+    "private_site_received_both_typed_addresses": true,
+    "both_pages_and_tab_switch_visible_in_viewer": true,
+    "page_received_click_and_wheel": true,
+    "reported_vertical_scroll_css_pixels": [316, 319, 317],
+    "matching_pixels_in_lower_region": [7200, 7200, 7200],
+    "host_and_viewer_exited_successfully": true,
+    "runs_passed": 3
+  },
+  "native_regression": {
+    "development_combined_control_cases_passed": 32,
+    "development_pointer_cases_passed": 28,
+    "ubuntu_paint_subsurface_revocation_passed": true,
+    "ubuntu_gedit_retest_buffer_scales": [1, 2]
+  },
+  "physical_input_to_display_latency_measured": false
+}

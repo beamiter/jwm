@@ -1,0 +1,144 @@
+{
+  "archive": {
+    "file": "firefox-x11-hevc444-lossless-option-pair-raw.zip",
+    "sha256": "bdb5aaa583b9f3ec880c54ba4e2df2d2b7bcae84082644203e51ac9dac869e0e"
+  },
+  "controller_exit": 0,
+  "icmp_link": {
+    "after": {
+      "loss_percent": 0.0,
+      "received": 8,
+      "rtt_ms": {
+        "max": 2.688,
+        "mdev": 0.408,
+        "mean": 2.197,
+        "min": 1.521
+      },
+      "transmitted": 8
+    },
+    "before": {
+      "loss_percent": 0.0,
+      "received": 8,
+      "rtt_ms": {
+        "max": 34.558,
+        "mdev": 8.83,
+        "mean": 21.573,
+        "min": 7.888
+      },
+      "transmitted": 8
+    }
+  },
+  "manifest": {
+    "dimensions": [
+      1920,
+      1080
+    ],
+    "hardware_rate_order": [
+      "cbr",
+      "lossless"
+    ],
+    "pins": {
+      "firefox": "ddf58d7cb36bd35e8e9dab7bc70ce31e17340ce87fc7c0fe81e495ccbd863965",
+      "fixtures": {
+        "align.py": "fe94106bf6b328976443ae3a38e6935fefc835a7c76a0d1638eb3c76f480f10d",
+        "browser-trial.html": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+        "dual_browser.py": "54a857a1066f943a7000a5c77457bde7780529533701c63b3590645beb77ec77",
+        "firefox-profile-user.js": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+        "fixture-manifest.json": "b3ad4bac6df43044599c5399a08c47f8bffa5a0a19debf51f121ba25c3a923d7",
+        "geometry_guard.py": "18ea821549cad83ad41d4a92003be9ebcf5d120149f570429b194284ed0c22af",
+        "hevc_evidence.py": "94e11321776c9de25830bff3f2ed2ab44e49c060f5b82fee2be2565c9772fc61",
+        "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+        "run_baseline.py": "5bd348c562da0f6381ca45aca1072a1765d5e8f33b257d0647721e6e87825d46",
+        "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3"
+      },
+      "host": "430def8a30bd75b04adcc068fa7958907d33158f8f99f42ec7628bc6fac7c425",
+      "viewer": "74dc2389d4925354c5ae8fb26d0781ec94e5289a7bdc7fcd839b111a01124709"
+    },
+    "requested_codec": "HEVC 4:4:4",
+    "requested_fps": 30,
+    "requested_trials": 2,
+    "required_runtime_path": {
+      "host": "NVENC",
+      "viewer": "NVDEC"
+    },
+    "score_seconds": 60,
+    "source": "Mint Firefox source and original X11 capture policy",
+    "target": "owned X11 viewer, HEVC 4:4:4 at 1:1",
+    "telemetry_tail_seconds": 8,
+    "transport": "dual",
+    "warm_seconds": 30,
+    "workload": {
+      "motion_visible_label_unchanged": "Motion stops after 30 s.",
+      "original_sha256": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+      "sole_trial_change": {
+        "after": "elapsed >= 105000",
+        "before": "elapsed >= 30000"
+      },
+      "source_fixture": "tests/fixtures/remote-workloads/browser.html",
+      "static_uses_inactive_motion_handler": true,
+      "trial_sha256": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c"
+    }
+  },
+  "schema_version": 1,
+  "scope": "One pinned two-machine 1080p Firefox CBR-to-lossless comparison",
+  "trials": [
+    {
+      "rate_control": "cbr",
+      "result": {
+        "diagnostic_motion_and_static_met": false,
+        "mean_video_payload_mbps": {
+          "motion": 1.3949916913131968,
+          "static": 1.137029168614745
+        },
+        "rate_control": "cbr",
+        "source_motion_fps": 58.983333333333334,
+        "static_source_exact": {
+          "dominant_viewer_mask_matches_source": false,
+          "dominant_viewer_mask_samples": 4621,
+          "source_exact_observed_onsets": 28,
+          "source_exact_onset_interval_median_ms": 2055.72307,
+          "source_exact_samples": 251,
+          "valid_samples": 5400
+        },
+        "viewer_motion_fps": 28.816666666666666,
+        "viewer_motion_gap_ms": {
+          "max": 321.83805,
+          "p50": 33.371382,
+          "p95": 43.603014
+        },
+        "viewer_motion_gate_met": true
+      },
+      "status": "completed",
+      "trial": 1
+    },
+    {
+      "rate_control": "lossless",
+      "result": {
+        "diagnostic_motion_and_static_met": true,
+        "mean_video_payload_mbps": {
+          "motion": 1.4941720941301433,
+          "static": 0.8728035229680556
+        },
+        "rate_control": "lossless",
+        "source_motion_fps": 58.9,
+        "static_source_exact": {
+          "dominant_viewer_mask_matches_source": true,
+          "dominant_viewer_mask_samples": 5400,
+          "source_exact_observed_onsets": 0,
+          "source_exact_onset_interval_median_ms": null,
+          "source_exact_samples": 5400,
+          "valid_samples": 5400
+        },
+        "viewer_motion_fps": 28.766666666666666,
+        "viewer_motion_gap_ms": {
+          "max": 299.858774,
+          "p50": 33.362256,
+          "p95": 44.097253
+        },
+        "viewer_motion_gate_met": true
+      },
+      "status": "completed",
+      "trial": 2
+    }
+  ]
+}

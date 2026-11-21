@@ -1,0 +1,320 @@
+{
+  "environment": {
+    "host": "Development workstation, Linux Mint 22.3, Intel ARL render node /dev/dri/renderD128",
+    "guest": "QEMU 8.2.2 on KVM, Ubuntu Linux kernel 6.17.0-35-generic",
+    "renderer": "virgl (Mesa Intel(R) Graphics (ARL))",
+    "display": "virtio-gpu Virtual-1, 1024x768",
+    "compositor": "jwm --backend wayland-udev",
+    "transport": "Authenticated guest loopback TCP from an owned Xvfb source to the native Wayland JPEG viewer",
+    "features": [
+      "remote-wayland",
+      "backend-wayland-udev"
+    ],
+    "source_head": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "dirty_source": true,
+    "binary_sha256": {
+      "jwm": "3e101ecc4cd18ea3dd825bb4a0a084e48f4ae1b0259ddbdcecc808b060900686",
+      "jwm-remote": "fdc6b6f512deb4de5fd0f272cac167ba56306a745974c396019d90e2f2ba9f9e"
+    },
+    "test": "python3 scripts/test-remote-wayland-kms.py jwm-remote --wayland-display WAYLAND_SOCKET --output Virtual-1 --kms-log JWM_LOG",
+    "measurement": "Guest kernel trace clock mono. These samples are virtual DRM completions, without physical scanout or input-to-display measurements."
+  },
+  "direct_path": {
+    "behavior.compositor": false,
+    "trials": [
+      {
+        "output": "Virtual-1",
+        "drawn_acks": 4,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 19,
+              "monotonic_ns": 3725606000,
+              "sequence": 0,
+              "flags": 0
+            },
+            "guest_kernel_event": {
+              "trace_event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "trace_monotonic_ns": 3725609000,
+              "crtc_index": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 26,
+              "monotonic_ns": 4547629000,
+              "sequence": 0,
+              "flags": 0
+            },
+            "guest_kernel_event": {
+              "trace_event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "trace_monotonic_ns": 4547633000,
+              "crtc_index": 0,
+              "sequence": 0
+            }
+          }
+        ],
+        "trial": 1
+      },
+      {
+        "output": "Virtual-1",
+        "drawn_acks": 4,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 21,
+              "monotonic_ns": 2763036000,
+              "sequence": 0,
+              "flags": 0
+            },
+            "guest_kernel_event": {
+              "trace_event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "trace_monotonic_ns": 2763038000,
+              "crtc_index": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 29,
+              "monotonic_ns": 3507811000,
+              "sequence": 0,
+              "flags": 0
+            },
+            "guest_kernel_event": {
+              "trace_event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "trace_monotonic_ns": 3507813000,
+              "crtc_index": 0,
+              "sequence": 0
+            }
+          }
+        ],
+        "trial": 2
+      },
+      {
+        "output": "Virtual-1",
+        "drawn_acks": 4,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 20,
+              "monotonic_ns": 3128905000,
+              "sequence": 0,
+              "flags": 0
+            },
+            "guest_kernel_event": {
+              "trace_event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "trace_monotonic_ns": 3128907000,
+              "crtc_index": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "submission": 24,
+              "monotonic_ns": 3698597000,
+              "sequence": 0,
+              "flags": 0
+            },
+            "guest_kernel_event": {
+              "trace_event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "trace_monotonic_ns": 3698601000,
+              "crtc_index": 0,
+              "sequence": 0
+            }
+          }
+        ],
+        "trial": 3
+      }
+    ]
+  },
+  "default_effects_path": {
+    "behavior.compositor": true,
+    "viewer_exit_code": 1,
+    "first_feedback": "discarded",
+    "viewer_acked_frames": 0,
+    "failure": {
+      "category": "wayland_presentation_discarded",
+      "cleanup": "unknown",
+      "io_kind": null,
+      "peer_close_code": null,
+      "reconnect_certified": false,
+      "stage": "session"
+    }
+  }
+}

@@ -1,0 +1,527 @@
+{
+  "environment": {
+    "machine": "ubuntu@192.168.0.78",
+    "os": "Ubuntu 22.04.5 LTS, Linux 6.8.0-149-generic",
+    "gpu_renderer": "Mesa Intel(R) Graphics (RPL-S)",
+    "render_node": "/dev/dri/renderD128",
+    "driver": "iHD 22.3.1+ds1-1ubuntu0.1 loaded from a private directory",
+    "ffmpeg": "4.4.2-0ubuntu0.22.04.1",
+    "source": "Private Smithay compositor using JWM toplevel DMA-BUF capture",
+    "transport": "Authenticated loopback TCP between separate jwm-remote CLI processes",
+    "viewer": "Private native Wayland compositor, VA-API decode with downloaded XRGB SHM presentation",
+    "test": "scripts/test-remote-wayland-cli.sh --gpu-capture /dev/dri/renderD128"
+  },
+  "checks": {
+    "viewer_extent": [
+      400,
+      300
+    ],
+    "pixel_order": "BGRX",
+    "sample_sites": [
+      "upper left",
+      "center",
+      "middle of last row"
+    ],
+    "every_checked_pixel": "Expected channel >= 245, other channels <= 12, X = 255",
+    "capture_failure": "Source compositor withdrew the linux-dmabuf global while the second authorized source was active",
+    "fallback": "Same authenticated catalog, source epoch, geometry and viewer surface; fresh JPEG sequence fully acknowledged",
+    "excluded": [
+      "KMS scanout",
+      "Physical input-to-display latency"
+    ]
+  },
+  "trials": [
+    {
+      "trial": 1,
+      "phases": [
+        {
+          "phase": "first",
+          "capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+          "window_seconds": 5.006626498,
+          "last_sent_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              200,
+              150
+            ],
+            "geometry_epoch": 2,
+            "sequence": 98,
+            "source_dimensions": [
+              200,
+              150
+            ],
+            "source_epoch": 1
+          },
+          "sent": 99,
+          "drawn_acks": 99,
+          "h264_frames": 99,
+          "native_dmabuf_import_ms": {
+            "mean": 0.02708546464646465,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.025,
+              "p95_ms": 0.036,
+              "p99_ms": 0.045,
+              "samples": 99
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              0,
+              0,
+              253,
+              255
+            ],
+            [
+              0,
+              0,
+              253,
+              255
+            ],
+            [
+              0,
+              0,
+              253,
+              255
+            ]
+          ]
+        },
+        {
+          "phase": "second",
+          "capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+          "window_seconds": 5.017698273,
+          "last_sent_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 3,
+            "sequence": 197,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "sent": 99,
+          "drawn_acks": 99,
+          "h264_frames": 99,
+          "native_dmabuf_import_ms": {
+            "mean": 0.02997436363636364,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.028,
+              "p95_ms": 0.041,
+              "p99_ms": 0.046,
+              "samples": 99
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              253,
+              0,
+              0,
+              255
+            ],
+            [
+              253,
+              0,
+              0,
+              255
+            ],
+            [
+              253,
+              0,
+              0,
+              255
+            ]
+          ]
+        },
+        {
+          "phase": "fallback",
+          "capture_mode": "wayland-surface/cpu-resize/shm/no-damage/no-cursor",
+          "window_seconds": 5.016302125,
+          "last_sent_frame": {
+            "codec": "JPEG",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 3,
+            "sequence": 199,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "sent": 2,
+          "drawn_acks": 2,
+          "h264_frames": 0,
+          "native_dmabuf_import_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              254,
+              0,
+              0,
+              255
+            ],
+            [
+              254,
+              0,
+              0,
+              255
+            ],
+            [
+              254,
+              0,
+              0,
+              255
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "trial": 2,
+      "phases": [
+        {
+          "phase": "first",
+          "capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+          "window_seconds": 5.010373774,
+          "last_sent_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              200,
+              150
+            ],
+            "geometry_epoch": 2,
+            "sequence": 98,
+            "source_dimensions": [
+              200,
+              150
+            ],
+            "source_epoch": 1
+          },
+          "sent": 99,
+          "drawn_acks": 99,
+          "h264_frames": 99,
+          "native_dmabuf_import_ms": {
+            "mean": 0.0292000101010101,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.027,
+              "p95_ms": 0.041,
+              "p99_ms": 0.062,
+              "samples": 99
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              0,
+              0,
+              253,
+              255
+            ],
+            [
+              0,
+              0,
+              253,
+              255
+            ],
+            [
+              0,
+              0,
+              253,
+              255
+            ]
+          ]
+        },
+        {
+          "phase": "second",
+          "capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+          "window_seconds": 5.014220224,
+          "last_sent_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 3,
+            "sequence": 197,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "sent": 99,
+          "drawn_acks": 99,
+          "h264_frames": 99,
+          "native_dmabuf_import_ms": {
+            "mean": 0.02801850505050505,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.025,
+              "p95_ms": 0.041,
+              "p99_ms": 0.051,
+              "samples": 99
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              253,
+              0,
+              0,
+              255
+            ],
+            [
+              253,
+              0,
+              0,
+              255
+            ],
+            [
+              253,
+              0,
+              0,
+              255
+            ]
+          ]
+        },
+        {
+          "phase": "fallback",
+          "capture_mode": "wayland-surface/cpu-resize/shm/no-damage/no-cursor",
+          "window_seconds": 5.017515522,
+          "last_sent_frame": {
+            "codec": "JPEG",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 3,
+            "sequence": 199,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "sent": 2,
+          "drawn_acks": 2,
+          "h264_frames": 0,
+          "native_dmabuf_import_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              254,
+              0,
+              0,
+              255
+            ],
+            [
+              254,
+              0,
+              0,
+              255
+            ],
+            [
+              254,
+              0,
+              0,
+              255
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "trial": 3,
+      "phases": [
+        {
+          "phase": "first",
+          "capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+          "window_seconds": 5.005141838,
+          "last_sent_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              200,
+              150
+            ],
+            "geometry_epoch": 2,
+            "sequence": 98,
+            "source_dimensions": [
+              200,
+              150
+            ],
+            "source_epoch": 1
+          },
+          "sent": 99,
+          "drawn_acks": 99,
+          "h264_frames": 99,
+          "native_dmabuf_import_ms": {
+            "mean": 0.026029333333333335,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.025,
+              "p95_ms": 0.038,
+              "p99_ms": 0.044,
+              "samples": 99
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              0,
+              0,
+              253,
+              255
+            ],
+            [
+              0,
+              0,
+              253,
+              255
+            ],
+            [
+              0,
+              0,
+              253,
+              255
+            ]
+          ]
+        },
+        {
+          "phase": "second",
+          "capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+          "window_seconds": 5.01448117,
+          "last_sent_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 3,
+            "sequence": 197,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "sent": 99,
+          "drawn_acks": 99,
+          "h264_frames": 99,
+          "native_dmabuf_import_ms": {
+            "mean": 0.028439464646464647,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.026,
+              "p95_ms": 0.04,
+              "p99_ms": 0.061,
+              "samples": 99
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              253,
+              0,
+              0,
+              255
+            ],
+            [
+              253,
+              0,
+              0,
+              255
+            ],
+            [
+              253,
+              0,
+              0,
+              255
+            ]
+          ]
+        },
+        {
+          "phase": "fallback",
+          "capture_mode": "wayland-surface/cpu-resize/shm/no-damage/no-cursor",
+          "window_seconds": 5.014234933,
+          "last_sent_frame": {
+            "codec": "JPEG",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 3,
+            "sequence": 199,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "sent": 2,
+          "drawn_acks": 2,
+          "h264_frames": 0,
+          "native_dmabuf_import_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "rgb_copy_observations": 0,
+          "bgrx_samples": [
+            [
+              254,
+              0,
+              0,
+              255
+            ],
+            [
+              254,
+              0,
+              0,
+              255
+            ],
+            [
+              254,
+              0,
+              0,
+              255
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

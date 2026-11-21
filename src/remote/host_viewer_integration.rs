@@ -110,6 +110,7 @@ fn options() -> HostOptions {
         allow_wayland_keyboard: false,
         allow_wayland_pointer: true,
         allow_wayland_control: false,
+        allow_wayland_gestures: false,
         allow_resumable_control: false,
         allow_wayland_text: false,
         allow_static_lossless: false,
@@ -222,12 +223,14 @@ fn client_options(
     case: Case,
 ) -> ClientOptions {
     ClientOptions {
+        stats_json: false,
         control_duration: Default::default(),
         viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
         viewer_wayland_display: None,
         wayland_keyboard: false,
         wayland_pointer: !matches!(case, Case::ReadOnly),
         wayland_control: false,
+        wayland_gestures: false,
         resumable_control: false,
         wayland_seamless_input: false,
         wayland_text: None,
@@ -252,6 +255,7 @@ fn client_options(
             }
         }),
         window_position: None,
+        x11_parent_window: None,
         frame_limits: Default::default(),
         address: address.to_string(),
         peer_label: label,

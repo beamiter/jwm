@@ -1,0 +1,147 @@
+{
+  "date": "2026-11-21",
+  "scope": "P06 local opt-in X11 read-ahead H.264 queue expiry and input release with a real libswscale conversion held. Host encoder NVENC, viewer VA-API CPU RGB path, two owned Xvfb displays and one authenticated loopback session per arm.",
+  "fixture": "Each arm ran both roles on its own pinned release. The same two-credit path, exact Button1 press/release before F7, second source repaint and scheduled 2550 ms codec hold were used. Timings come from one monotonic clock.",
+  "result": {
+    "fixture_status": "pass",
+    "same_scheduled_hold_ms": 2550.0,
+    "gate_hold_difference_ms": 0.6884360000003653,
+    "arms": [
+      {
+        "arm": "old",
+        "binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+        "session_id": "4aef9187ecee409bfa123c943f385106",
+        "actual_routes": {
+          "host": "root/xrender/shm/no-damage/cursor-events",
+          "viewer": "x11/rgb"
+        },
+        "actual_gate_hold_ms": 2550.551803,
+        "observed_keymap_at_gate_offset_ms": 2244.426804,
+        "keymap_while_held": {
+          "source_down": true,
+          "viewer_down": true
+        },
+        "independent_keyboard_grab": "already_grabbed",
+        "independent_pointer_grab": "already_grabbed",
+        "grab_query_at_gate_offset_ms": 2244.963688,
+        "source_key_up_at_gate_offset_ms": 2254.703419,
+        "source_key_down_to_up_ms": 603.621474,
+        "source_release": "explicit_control_release",
+        "host_max_outstanding": 2,
+        "viewer_exit_status": 1,
+        "host_exit_status": 1,
+        "viewer_diagnostic": {
+          "type": "jwm_remote_command_result",
+          "schema_version": 2,
+          "command": "connect",
+          "outcome": "error",
+          "stage": "session",
+          "category": "io",
+          "io_kind": "timed_out",
+          "peer_close_code": null,
+          "cleanup": "unknown",
+          "reconnect_certified": false
+        }
+      },
+      {
+        "arm": "candidate",
+        "binary_sha256": "34d05abf098d238f3fd4fdaf6c1e875c0516ec312ea67de5011ca8c3ad68c86b",
+        "session_id": "8d267d8e3e57b85867984fca2e15eae8",
+        "actual_routes": {
+          "host": "root/xrender/shm/no-damage/cursor-events",
+          "viewer": "x11/rgb"
+        },
+        "actual_gate_hold_ms": 2551.240239,
+        "observed_keymap_at_gate_offset_ms": 2034.834332,
+        "keymap_while_held": {
+          "source_down": false,
+          "viewer_down": true
+        },
+        "independent_keyboard_grab": "success",
+        "independent_pointer_grab": "success",
+        "grab_query_at_gate_offset_ms": 2036.01099,
+        "source_key_up_at_gate_offset_ms": 2033.639013,
+        "source_key_down_to_up_ms": 381.918977,
+        "source_release": "release_on_queue_expiry",
+        "host_max_outstanding": 2,
+        "viewer_exit_status": 1,
+        "host_exit_status": 1,
+        "viewer_diagnostic": {
+          "type": "jwm_remote_command_result",
+          "schema_version": 2,
+          "command": "connect",
+          "outcome": "error",
+          "stage": "session",
+          "category": "io",
+          "io_kind": "timed_out",
+          "peer_close_code": null,
+          "cleanup": "unknown",
+          "reconnect_certified": false
+        }
+      }
+    ]
+  },
+  "prior_attempts": [
+    {
+      "arm": "old",
+      "status": "invalid_setup",
+      "phase": "mouse_to_keyboard_preflight",
+      "reason": "The first forwarded Button1 press reached the source after the initial drain and was read by the F7 schedule.",
+      "queue_expiry_evidence": false
+    },
+    {
+      "arm": "candidate",
+      "status": "completed_candidate_witness",
+      "session_id": "f6e531053a19f8d91af2c94c816added",
+      "source_key_up_at_gate_offset_ms": 2032.68075,
+      "queue_expiry_evidence": true
+    }
+  ],
+  "provenance": {
+    "fixture_sha256": {
+      "run.py": "db213ebc4039fd649d421779e299fa24eaf3c3713a9a08cb6dd58c5714daeac4",
+      "run-pair.sh": "4a49c98a8ced4e428c0ca06c56f969a0eb43fb7175eaa605e76320fe3ceb0a57",
+      "sws-decode-gate.c": "36cf4cf473f4bfeb82cdfaa6b9498a30dde8425d4cbe4ef7007c146772cf22ff",
+      "sws-decode-gate.so": "e6f9c59f091e022957e714364dcca45d5f14ddbb91efa6d3a6e17fb66f8170f4"
+    },
+    "candidate_build_inputs_sha256": {
+      "src/remote/client.rs": "c5aa6903caaa19ac59e4c6ee7f18b08b81c87183f787500c7b4e4d9238dd7382",
+      "src/remote/client_decode_queue.rs": "012ab3d4c6c8c37436d3029b478ad17b13b353bbd903a78c6c2dfa6479bb790e"
+    },
+    "queue_tests_passed": 5
+  },
+  "interpretation": "The old arm still owned both input grabs and the source held F8 at its pre-release check. The candidate autonomously cleared the source X11 keymap while the viewer key remained held and made both grabs available. The fixture released the codec gate for both arms so they could exit with the expected terminal timeout. These observations concern software authority and queue timing.",
+  "archive": {
+    "file": "x11-read-ahead-queue-expiry-raw.zip",
+    "sha256": "6f79e9d584a9becdcb34542266106e0c1553d94c31f51c7d26527466ba6dfc56",
+    "member_sha256": {
+      "candidate/during-gate.json": "cabe1fa9621a71487ebb1251c080e9a60e2423a4f4bb1605437a2452a38d2dfc",
+      "candidate/fixture.log": "4ea22fcb18c2e0fa61d4e5f1eb7b15f512acc4aa923daeee7505d38683dc1ab1",
+      "candidate/host.log": "285f740d57c4e073d5dbac86bb2117ba56bde0b522c82a908a0e75c1d5147324",
+      "candidate/preflight.json": "8ae46432cd5d597434ebcfe13a619c8fea5b54386a6fba89a22fcd6307134e84",
+      "candidate/result.json": "0daa2e46eab4e862aa176c9906bba111339dc7b38302f762943283a6934ce436",
+      "candidate/viewer.log": "89eaa8394dc3215f07d36afb41f5518fac9ea833d20fe192c9947cb41a70fea4",
+      "first-attempts/candidate/during-gate.json": "44a37695a04ffa09d0f6f92a753bbf32c7a7bd6489858a3dc841889b27e67464",
+      "first-attempts/candidate/fixture.log": "d6815d64814ee76c84de345203ad168d6f2621bddf3912e60c50ce6c1bf9fa66",
+      "first-attempts/candidate/host.log": "7caae17503e8eb0c97dbab53cb919939b5f2482eb038079b51bbd201246a228d",
+      "first-attempts/candidate/result.json": "1c9244228233b6913143e5cd7700c851a725a8e819fd322e48e2fca27c33ae4c",
+      "first-attempts/candidate/viewer.log": "6b6cec50d46a2aab6a633ff3cfcd526f2ab3e9462e5935f59b1dd16b26aebd77",
+      "first-attempts/old/fixture.log": "6813911335cada94fef40534f24cdf9545750d24a8145790f7d21dbd8aef23f6",
+      "first-attempts/old/host.log": "a32c1a200a2e3ace718c304f860f14d563f24dc7f8c21ad0fad2bffe31ad9c86",
+      "first-attempts/old/viewer.log": "d010904e1c0ac0d8007a2fcc342dc9e515cd9bd43e42aba71826ff00f67125ad",
+      "fixtures/decode-queue-tests.log": "64ef1a89f1f53e536401ad7a89f3776c594f93e209a97e0264e1ff1652d3278c",
+      "fixtures/paired-run.py": "db213ebc4039fd649d421779e299fa24eaf3c3713a9a08cb6dd58c5714daeac4",
+      "fixtures/sws-decode-gate.c": "36cf4cf473f4bfeb82cdfaa6b9498a30dde8425d4cbe4ef7007c146772cf22ff",
+      "old/during-gate.json": "84a9c9dfceacf7d86c2daf0acbda72e3bdeeb36b9d494f2e64524c3d6cfd897a",
+      "old/fixture.log": "282657aa648ff2e208df87db0ec8b997ed2de0311d053439739dabfa4c39875e",
+      "old/host.log": "26c44fa289d5dc09ba05be4944f3ab864274f0d0ae8bbf1553d8886c58c0c9f0",
+      "old/preflight.json": "0236d4764386c2a8e18e7ba0ed301eca92d59b1e39f5d05eef60026e53b01105",
+      "old/result.json": "b423ab9d4f753a84b6073552f75b30dae0f3cb2f58dc606f4eb7dd980229b043",
+      "old/viewer.log": "21cbb87cae2298ebdccd7286a127daf78f80e307402113c40e404ff84fc0b276",
+      "outcomes.tsv": "eaa2e1fc93e5c248032bdb32b7c9f6429bd0ce66ae354e482703438efd6bda7c",
+      "replay.py": "0c65dacb388f09d0dc9383eb5215d46118819e18fc5ad2a041a8391f8029a0ae",
+      "validated-comparison.json": "852df0e65e1fce8f604e7bea8748f2e74b45c3900e0dc4a491cd971de047eb26"
+    },
+    "replay": "python3 replay.py"
+  }
+}

@@ -1,0 +1,1706 @@
+{
+  "status": "complete",
+  "protocol": {
+    "mode_order": [
+      "off",
+      "on"
+    ],
+    "resolution": [
+      1920,
+      1080
+    ],
+    "encoder_fps": 30,
+    "workload_painter_fps": 60,
+    "burn_in_seconds": 60,
+    "retained_seconds": 240,
+    "viewer_sha256": "a62902b410c2672b27103c235cdebbc67f85b986e52bc504f5b8f952383d9155",
+    "observer_sha256": "d981ba7314b92529941e9a24a6d90f36f738e9679bc5abd2f417c6d0df672416",
+    "files_sha256": {
+      "README.md": "65c3f1669cad0cde5d7bafd59e80a397e7bde2107300f56b10f6657e55d18e12",
+      "inspect_rss.py": "6283d9b318d3a822de594c13f7b660c07d795caf923424090a4bf10ffac29d10",
+      "resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2",
+      "run.py": "43d73267d090663ed51236e3965c31f3cdefba52feff9e66711340b66f73c1b2",
+      "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "source.py": "82d70d6c75cbbd1258781c6aaf8602d2bd855d69d640cad302203ef64867d73e"
+    }
+  },
+  "asset_pins": {
+    "jwm-remote": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "p09-workload": "9f4b6b456ba6184250aa856a58925a2f2eae3043f37c384e65114ba02733da96",
+    "source.py": "82d70d6c75cbbd1258781c6aaf8602d2bd855d69d640cad302203ef64867d73e",
+    "inspect_rss.py": "6283d9b318d3a822de594c13f7b660c07d795caf923424090a4bf10ffac29d10",
+    "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+    "resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2"
+  },
+  "terminal": "actual paired controller and all scored endpoints exit 0",
+  "discarded_attempt": {
+    "status": "early_startup_failure_both_arms",
+    "retained_samples": 0,
+    "cause": "private fixture closed controlling key-stdin pipe too early",
+    "recovery": "kept pipe open after flushing key",
+    "controller_exit": 1
+  },
+  "capture_mode_matches": true,
+  "sent_fps_difference": -0.046576359265564804,
+  "arms": {
+    "off": {
+      "status": "complete",
+      "stats_json": false,
+      "host": {
+        "covered_seconds": 230.0,
+        "windows": 46,
+        "counters": {
+          "captured": 6634,
+          "sent": 6616,
+          "drawn_acks": 6616,
+          "bytes": 256364274
+        },
+        "rates_per_second": {
+          "captured": 28.843478260869563,
+          "sent": 28.765217391304347,
+          "drawn_acks": 28.765217391304347,
+          "bytes": 1114627.2782608697
+        },
+        "mode": "root/xrender/shm/no-damage/cursor-events",
+        "host_retained_samples": 48,
+        "rss": {
+          "rss_kib": {
+            "first": 240688,
+            "last": 240792,
+            "min": 240688,
+            "max": 240792,
+            "linear_slope_per_minute": 26.915444922994784,
+            "step_counts": {
+              "4": 26,
+              "0": 21
+            }
+          },
+          "rss_anon_kib": {
+            "first": 80436,
+            "last": 80540,
+            "min": 80436,
+            "max": 80540,
+            "linear_slope_per_minute": 26.915444922994784,
+            "step_counts": {
+              "4": 26,
+              "0": 21
+            }
+          },
+          "rss_file_kib": {
+            "first": 131000,
+            "last": 131000,
+            "min": 131000,
+            "max": 131000,
+            "linear_slope_per_minute": 0.0,
+            "step_counts": {
+              "0": 47
+            }
+          },
+          "rss_shmem_kib": {
+            "first": 29252,
+            "last": 29252,
+            "min": 29252,
+            "max": 29252,
+            "linear_slope_per_minute": 0.0,
+            "step_counts": {
+              "0": 47
+            }
+          },
+          "threads": {
+            "first": 14,
+            "last": 14,
+            "min": 14,
+            "max": 14,
+            "linear_slope_per_minute": 0.0,
+            "step_counts": {
+              "0": 47
+            }
+          },
+          "fds": {
+            "first": 46,
+            "last": 46,
+            "min": 46,
+            "max": 46,
+            "linear_slope_per_minute": 0.0,
+            "step_counts": {
+              "0": 47
+            }
+          }
+        },
+        "vma": {
+          "vma-start": {
+            "sample_start_offset_ms": 0.594294,
+            "sample_duration_ms": 8.637802,
+            "availability": {
+              "smaps_rollup": {
+                "availability": "captured"
+              },
+              "smaps": {
+                "availability": "captured"
+              }
+            },
+            "rollup_kib": {
+              "Rss": 240688,
+              "Pss": 224204,
+              "Pss_Anon": 80436,
+              "Pss_File": 118566,
+              "Pss_Shmem": 25202,
+              "Shared_Clean": 13792,
+              "Shared_Dirty": 8100,
+              "Private_Clean": 109980,
+              "Private_Dirty": 108816,
+              "Anonymous": 80436,
+              "Swap": 0
+            },
+            "vma_kib_by_category": {
+              "anonymous_private": {
+                "mappings": 136,
+                "Size_kib": 13755680,
+                "Rss_kib": 74104,
+                "Pss_kib": 74104,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 74104,
+                "Anonymous_kib": 74104,
+                "Swap_kib": 0
+              },
+              "file_backed_other": {
+                "mappings": 727,
+                "Size_kib": 191932,
+                "Rss_kib": 52588,
+                "Pss_kib": 40074,
+                "Shared_Clean_kib": 13784,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 14028,
+                "Private_Dirty_kib": 24776,
+                "Anonymous_kib": 3624,
+                "Swap_kib": 0
+              },
+              "nvidia_device": {
+                "mappings": 72,
+                "Size_kib": 85408,
+                "Rss_kib": 83160,
+                "Pss_kib": 83157,
+                "Shared_Clean_kib": 4,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 75928,
+                "Private_Dirty_kib": 7228,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              },
+              "process_heap": {
+                "mappings": 1,
+                "Size_kib": 660,
+                "Rss_kib": 548,
+                "Pss_kib": 548,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 548,
+                "Anonymous_kib": 548,
+                "Swap_kib": 0
+              },
+              "nvidia_user_space_library": {
+                "mappings": 12,
+                "Size_kib": 94316,
+                "Rss_kib": 17236,
+                "Pss_kib": 17236,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 15968,
+                "Private_Dirty_kib": 1268,
+                "Anonymous_kib": 1268,
+                "Swap_kib": 0
+              },
+              "shared_memory": {
+                "mappings": 1,
+                "Size_kib": 8100,
+                "Rss_kib": 8100,
+                "Pss_kib": 4050,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 8100,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 0,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              },
+              "ffmpeg_user_space_library": {
+                "mappings": 22,
+                "Size_kib": 18492,
+                "Rss_kib": 4844,
+                "Pss_kib": 4844,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 4056,
+                "Private_Dirty_kib": 788,
+                "Anonymous_kib": 788,
+                "Swap_kib": 0
+              },
+              "process_stack": {
+                "mappings": 1,
+                "Size_kib": 132,
+                "Rss_kib": 104,
+                "Pss_kib": 104,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 104,
+                "Anonymous_kib": 104,
+                "Swap_kib": 0
+              },
+              "special_kernel": {
+                "mappings": 3,
+                "Size_kib": 28,
+                "Rss_kib": 4,
+                "Pss_kib": 0,
+                "Shared_Clean_kib": 4,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 0,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              }
+            }
+          },
+          "vma-end": {
+            "sample_start_offset_ms": 0.806959,
+            "sample_duration_ms": 8.727847,
+            "availability": {
+              "smaps_rollup": {
+                "availability": "captured"
+              },
+              "smaps": {
+                "availability": "captured"
+              }
+            },
+            "rollup_kib": {
+              "Rss": 240796,
+              "Pss": 224312,
+              "Pss_Anon": 80544,
+              "Pss_File": 118566,
+              "Pss_Shmem": 25202,
+              "Shared_Clean": 13792,
+              "Shared_Dirty": 8100,
+              "Private_Clean": 108256,
+              "Private_Dirty": 110648,
+              "Anonymous": 80544,
+              "Swap": 0
+            },
+            "vma_kib_by_category": {
+              "anonymous_private": {
+                "mappings": 136,
+                "Size_kib": 13755680,
+                "Rss_kib": 74212,
+                "Pss_kib": 74212,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 74212,
+                "Anonymous_kib": 74212,
+                "Swap_kib": 0
+              },
+              "file_backed_other": {
+                "mappings": 727,
+                "Size_kib": 191932,
+                "Rss_kib": 52588,
+                "Pss_kib": 40074,
+                "Shared_Clean_kib": 13784,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 14028,
+                "Private_Dirty_kib": 24776,
+                "Anonymous_kib": 3624,
+                "Swap_kib": 0
+              },
+              "nvidia_device": {
+                "mappings": 72,
+                "Size_kib": 85408,
+                "Rss_kib": 83160,
+                "Pss_kib": 83157,
+                "Shared_Clean_kib": 4,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 74204,
+                "Private_Dirty_kib": 8952,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              },
+              "process_heap": {
+                "mappings": 1,
+                "Size_kib": 660,
+                "Rss_kib": 548,
+                "Pss_kib": 548,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 548,
+                "Anonymous_kib": 548,
+                "Swap_kib": 0
+              },
+              "nvidia_user_space_library": {
+                "mappings": 12,
+                "Size_kib": 94316,
+                "Rss_kib": 17236,
+                "Pss_kib": 17236,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 15968,
+                "Private_Dirty_kib": 1268,
+                "Anonymous_kib": 1268,
+                "Swap_kib": 0
+              },
+              "shared_memory": {
+                "mappings": 1,
+                "Size_kib": 8100,
+                "Rss_kib": 8100,
+                "Pss_kib": 4050,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 8100,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 0,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              },
+              "ffmpeg_user_space_library": {
+                "mappings": 22,
+                "Size_kib": 18492,
+                "Rss_kib": 4844,
+                "Pss_kib": 4844,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 4056,
+                "Private_Dirty_kib": 788,
+                "Anonymous_kib": 788,
+                "Swap_kib": 0
+              },
+              "process_stack": {
+                "mappings": 1,
+                "Size_kib": 132,
+                "Rss_kib": 104,
+                "Pss_kib": 104,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 104,
+                "Anonymous_kib": 104,
+                "Swap_kib": 0
+              },
+              "special_kernel": {
+                "mappings": 3,
+                "Size_kib": 28,
+                "Rss_kib": 4,
+                "Pss_kib": 0,
+                "Shared_Clean_kib": 4,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 0,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              }
+            }
+          }
+        },
+        "vma_changes": {
+          "maps_start": 975,
+          "maps_end": 975,
+          "added_ranges": 0,
+          "removed_ranges": 0,
+          "matched_ranges_with_rss_or_anonymous_change": 1,
+          "largest_changes_in_matched_ranges": [
+            {
+              "category": "anonymous_private",
+              "size_kib": 42088,
+              "rss_start_kib": 34832,
+              "rss_end_kib": 34940,
+              "rss_delta_kib": 108,
+              "anonymous_delta_kib": 108
+            }
+          ]
+        },
+        "samples": [
+          {
+            "elapsed_seconds": 0.009669374,
+            "rss_kib": 240688,
+            "rss_anon_kib": 80436,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 5.00079519,
+            "rss_kib": 240692,
+            "rss_anon_kib": 80440,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 10.000888343,
+            "rss_kib": 240692,
+            "rss_anon_kib": 80440,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 15.000803707,
+            "rss_kib": 240696,
+            "rss_anon_kib": 80444,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 20.000779492,
+            "rss_kib": 240696,
+            "rss_anon_kib": 80444,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 25.000762058,
+            "rss_kib": 240700,
+            "rss_anon_kib": 80448,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 30.000782452,
+            "rss_kib": 240700,
+            "rss_anon_kib": 80448,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 35.000807703,
+            "rss_kib": 240704,
+            "rss_anon_kib": 80452,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 40.000769912,
+            "rss_kib": 240708,
+            "rss_anon_kib": 80456,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 45.000908503,
+            "rss_kib": 240708,
+            "rss_anon_kib": 80456,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 50.001353294,
+            "rss_kib": 240712,
+            "rss_anon_kib": 80460,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 55.000880427,
+            "rss_kib": 240712,
+            "rss_anon_kib": 80460,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 60.000836019,
+            "rss_kib": 240716,
+            "rss_anon_kib": 80464,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 65.000866058,
+            "rss_kib": 240716,
+            "rss_anon_kib": 80464,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 70.000833431,
+            "rss_kib": 240720,
+            "rss_anon_kib": 80468,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 75.000874163,
+            "rss_kib": 240720,
+            "rss_anon_kib": 80468,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 80.000801749,
+            "rss_kib": 240724,
+            "rss_anon_kib": 80472,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 85.000801239,
+            "rss_kib": 240728,
+            "rss_anon_kib": 80476,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 90.000886976,
+            "rss_kib": 240728,
+            "rss_anon_kib": 80476,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 95.000880896,
+            "rss_kib": 240732,
+            "rss_anon_kib": 80480,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 100.001230762,
+            "rss_kib": 240732,
+            "rss_anon_kib": 80480,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 105.001318484,
+            "rss_kib": 240736,
+            "rss_anon_kib": 80484,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 110.001074741,
+            "rss_kib": 240736,
+            "rss_anon_kib": 80484,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 115.001298759,
+            "rss_kib": 240740,
+            "rss_anon_kib": 80488,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 120.000802313,
+            "rss_kib": 240740,
+            "rss_anon_kib": 80488,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 125.000990541,
+            "rss_kib": 240744,
+            "rss_anon_kib": 80492,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 130.001341467,
+            "rss_kib": 240748,
+            "rss_anon_kib": 80496,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 135.001265099,
+            "rss_kib": 240748,
+            "rss_anon_kib": 80496,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 140.000761054,
+            "rss_kib": 240752,
+            "rss_anon_kib": 80500,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 145.000821219,
+            "rss_kib": 240752,
+            "rss_anon_kib": 80500,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 150.000754176,
+            "rss_kib": 240756,
+            "rss_anon_kib": 80504,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 155.000782641,
+            "rss_kib": 240756,
+            "rss_anon_kib": 80504,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 160.001290793,
+            "rss_kib": 240760,
+            "rss_anon_kib": 80508,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 165.001288739,
+            "rss_kib": 240764,
+            "rss_anon_kib": 80512,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 170.001314,
+            "rss_kib": 240764,
+            "rss_anon_kib": 80512,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 175.000889232,
+            "rss_kib": 240768,
+            "rss_anon_kib": 80516,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 180.000787535,
+            "rss_kib": 240768,
+            "rss_anon_kib": 80516,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 185.000801235,
+            "rss_kib": 240772,
+            "rss_anon_kib": 80520,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 190.000858966,
+            "rss_kib": 240772,
+            "rss_anon_kib": 80520,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 195.000779001,
+            "rss_kib": 240776,
+            "rss_anon_kib": 80524,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 200.000799574,
+            "rss_kib": 240780,
+            "rss_anon_kib": 80528,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 205.001103667,
+            "rss_kib": 240780,
+            "rss_anon_kib": 80528,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 210.000773632,
+            "rss_kib": 240784,
+            "rss_anon_kib": 80532,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 215.000797681,
+            "rss_kib": 240784,
+            "rss_anon_kib": 80532,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 220.000801085,
+            "rss_kib": 240788,
+            "rss_anon_kib": 80536,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 225.000754983,
+            "rss_kib": 240788,
+            "rss_anon_kib": 80536,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 230.000886409,
+            "rss_kib": 240792,
+            "rss_anon_kib": 80540,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 235.00080155,
+            "rss_kib": 240792,
+            "rss_anon_kib": 80540,
+            "rss_file_kib": 131000,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          }
+        ]
+      },
+      "viewer": {
+        "covered_seconds": 235.071976861,
+        "windows": 47,
+        "counters": {
+          "received": 6755,
+          "drawn": 6755,
+          "acked": 6755
+        },
+        "rates_per_second": {
+          "received": 28.73587949615231,
+          "drawn": 28.73587949615231,
+          "acked": 28.73587949615231
+        }
+      },
+      "session_binding": "private generated key and one host --once via owned SSH loopback; host JSON ID absent",
+      "independent_markers": {
+        "unique": 6896,
+        "visible_fps": 28.733333333333334
+      },
+      "retained_seconds": 240
+    },
+    "on": {
+      "status": "complete",
+      "stats_json": true,
+      "host": {
+        "covered_seconds": 230.373017742,
+        "windows": 46,
+        "counters": {
+          "captured": 6634,
+          "sent": 6616,
+          "drawn_acks": 6616,
+          "bytes": 256373382
+        },
+        "rates_per_second": {
+          "captured": 28.79677518236779,
+          "sent": 28.718641032038782,
+          "drawn_acks": 28.718641032038782,
+          "bytes": 1112862.0205301924
+        },
+        "mode": "root/xrender/shm/no-damage/cursor-events",
+        "host_retained_samples": 48,
+        "rss": {
+          "rss_kib": {
+            "first": 235400,
+            "last": 235504,
+            "min": 235400,
+            "max": 235504,
+            "linear_slope_per_minute": 26.803415908815364,
+            "step_counts": {
+              "4": 26,
+              "0": 21
+            }
+          },
+          "rss_anon_kib": {
+            "first": 74548,
+            "last": 74652,
+            "min": 74548,
+            "max": 74652,
+            "linear_slope_per_minute": 26.803415908815364,
+            "step_counts": {
+              "4": 26,
+              "0": 21
+            }
+          },
+          "rss_file_kib": {
+            "first": 131600,
+            "last": 131600,
+            "min": 131600,
+            "max": 131600,
+            "linear_slope_per_minute": 0.0,
+            "step_counts": {
+              "0": 47
+            }
+          },
+          "rss_shmem_kib": {
+            "first": 29252,
+            "last": 29252,
+            "min": 29252,
+            "max": 29252,
+            "linear_slope_per_minute": 0.0,
+            "step_counts": {
+              "0": 47
+            }
+          },
+          "threads": {
+            "first": 14,
+            "last": 14,
+            "min": 14,
+            "max": 14,
+            "linear_slope_per_minute": 0.0,
+            "step_counts": {
+              "0": 47
+            }
+          },
+          "fds": {
+            "first": 46,
+            "last": 46,
+            "min": 46,
+            "max": 46,
+            "linear_slope_per_minute": 0.0,
+            "step_counts": {
+              "0": 47
+            }
+          }
+        },
+        "vma": {
+          "vma-start": {
+            "sample_start_offset_ms": 0.609942,
+            "sample_duration_ms": 8.606604,
+            "availability": {
+              "smaps_rollup": {
+                "availability": "captured"
+              },
+              "smaps": {
+                "availability": "captured"
+              }
+            },
+            "rollup_kib": {
+              "Rss": 235400,
+              "Pss": 218910,
+              "Pss_Anon": 74548,
+              "Pss_File": 119160,
+              "Pss_Shmem": 25202,
+              "Shared_Clean": 13804,
+              "Shared_Dirty": 8100,
+              "Private_Clean": 110568,
+              "Private_Dirty": 102928,
+              "Anonymous": 74548,
+              "Swap": 0
+            },
+            "vma_kib_by_category": {
+              "anonymous_private": {
+                "mappings": 133,
+                "Size_kib": 13749604,
+                "Rss_kib": 68216,
+                "Pss_kib": 68216,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 68216,
+                "Anonymous_kib": 68216,
+                "Swap_kib": 0
+              },
+              "file_backed_other": {
+                "mappings": 727,
+                "Size_kib": 191932,
+                "Rss_kib": 53108,
+                "Pss_kib": 40589,
+                "Shared_Clean_kib": 13796,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 14536,
+                "Private_Dirty_kib": 24776,
+                "Anonymous_kib": 3624,
+                "Swap_kib": 0
+              },
+              "nvidia_device": {
+                "mappings": 72,
+                "Size_kib": 85408,
+                "Rss_kib": 83160,
+                "Pss_kib": 83157,
+                "Shared_Clean_kib": 4,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 75928,
+                "Private_Dirty_kib": 7228,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              },
+              "process_heap": {
+                "mappings": 1,
+                "Size_kib": 660,
+                "Rss_kib": 548,
+                "Pss_kib": 548,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 548,
+                "Anonymous_kib": 548,
+                "Swap_kib": 0
+              },
+              "shared_memory": {
+                "mappings": 1,
+                "Size_kib": 8100,
+                "Rss_kib": 8100,
+                "Pss_kib": 4050,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 8100,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 0,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              },
+              "nvidia_user_space_library": {
+                "mappings": 12,
+                "Size_kib": 94316,
+                "Rss_kib": 17244,
+                "Pss_kib": 17244,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 15976,
+                "Private_Dirty_kib": 1268,
+                "Anonymous_kib": 1268,
+                "Swap_kib": 0
+              },
+              "ffmpeg_user_space_library": {
+                "mappings": 22,
+                "Size_kib": 18492,
+                "Rss_kib": 4916,
+                "Pss_kib": 4916,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 4128,
+                "Private_Dirty_kib": 788,
+                "Anonymous_kib": 788,
+                "Swap_kib": 0
+              },
+              "process_stack": {
+                "mappings": 1,
+                "Size_kib": 132,
+                "Rss_kib": 104,
+                "Pss_kib": 104,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 104,
+                "Anonymous_kib": 104,
+                "Swap_kib": 0
+              },
+              "special_kernel": {
+                "mappings": 3,
+                "Size_kib": 28,
+                "Rss_kib": 4,
+                "Pss_kib": 0,
+                "Shared_Clean_kib": 4,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 0,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              }
+            }
+          },
+          "vma-end": {
+            "sample_start_offset_ms": 0.618065,
+            "sample_duration_ms": 7.860814,
+            "availability": {
+              "smaps_rollup": {
+                "availability": "captured"
+              },
+              "smaps": {
+                "availability": "captured"
+              }
+            },
+            "rollup_kib": {
+              "Rss": 235508,
+              "Pss": 219018,
+              "Pss_Anon": 74656,
+              "Pss_File": 119160,
+              "Pss_Shmem": 25202,
+              "Shared_Clean": 13804,
+              "Shared_Dirty": 8100,
+              "Private_Clean": 108844,
+              "Private_Dirty": 104760,
+              "Anonymous": 74656,
+              "Swap": 0
+            },
+            "vma_kib_by_category": {
+              "anonymous_private": {
+                "mappings": 133,
+                "Size_kib": 13749604,
+                "Rss_kib": 68324,
+                "Pss_kib": 68324,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 68324,
+                "Anonymous_kib": 68324,
+                "Swap_kib": 0
+              },
+              "file_backed_other": {
+                "mappings": 727,
+                "Size_kib": 191932,
+                "Rss_kib": 53108,
+                "Pss_kib": 40589,
+                "Shared_Clean_kib": 13796,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 14536,
+                "Private_Dirty_kib": 24776,
+                "Anonymous_kib": 3624,
+                "Swap_kib": 0
+              },
+              "nvidia_device": {
+                "mappings": 72,
+                "Size_kib": 85408,
+                "Rss_kib": 83160,
+                "Pss_kib": 83157,
+                "Shared_Clean_kib": 4,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 74204,
+                "Private_Dirty_kib": 8952,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              },
+              "process_heap": {
+                "mappings": 1,
+                "Size_kib": 660,
+                "Rss_kib": 548,
+                "Pss_kib": 548,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 548,
+                "Anonymous_kib": 548,
+                "Swap_kib": 0
+              },
+              "shared_memory": {
+                "mappings": 1,
+                "Size_kib": 8100,
+                "Rss_kib": 8100,
+                "Pss_kib": 4050,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 8100,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 0,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              },
+              "nvidia_user_space_library": {
+                "mappings": 12,
+                "Size_kib": 94316,
+                "Rss_kib": 17244,
+                "Pss_kib": 17244,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 15976,
+                "Private_Dirty_kib": 1268,
+                "Anonymous_kib": 1268,
+                "Swap_kib": 0
+              },
+              "ffmpeg_user_space_library": {
+                "mappings": 22,
+                "Size_kib": 18492,
+                "Rss_kib": 4916,
+                "Pss_kib": 4916,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 4128,
+                "Private_Dirty_kib": 788,
+                "Anonymous_kib": 788,
+                "Swap_kib": 0
+              },
+              "process_stack": {
+                "mappings": 1,
+                "Size_kib": 132,
+                "Rss_kib": 104,
+                "Pss_kib": 104,
+                "Shared_Clean_kib": 0,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 104,
+                "Anonymous_kib": 104,
+                "Swap_kib": 0
+              },
+              "special_kernel": {
+                "mappings": 3,
+                "Size_kib": 28,
+                "Rss_kib": 4,
+                "Pss_kib": 0,
+                "Shared_Clean_kib": 4,
+                "Shared_Dirty_kib": 0,
+                "Private_Clean_kib": 0,
+                "Private_Dirty_kib": 0,
+                "Anonymous_kib": 0,
+                "Swap_kib": 0
+              }
+            }
+          }
+        },
+        "vma_changes": {
+          "maps_start": 972,
+          "maps_end": 972,
+          "added_ranges": 0,
+          "removed_ranges": 0,
+          "matched_ranges_with_rss_or_anonymous_change": 1,
+          "largest_changes_in_matched_ranges": [
+            {
+              "category": "anonymous_private",
+              "size_kib": 42084,
+              "rss_start_kib": 34832,
+              "rss_end_kib": 34940,
+              "rss_delta_kib": 108,
+              "anonymous_delta_kib": 108
+            }
+          ]
+        },
+        "samples": [
+          {
+            "elapsed_seconds": 0.009653803,
+            "rss_kib": 235400,
+            "rss_anon_kib": 74548,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 5.00093514,
+            "rss_kib": 235404,
+            "rss_anon_kib": 74552,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 10.000827114,
+            "rss_kib": 235404,
+            "rss_anon_kib": 74552,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 15.000852287,
+            "rss_kib": 235408,
+            "rss_anon_kib": 74556,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 20.000915026,
+            "rss_kib": 235408,
+            "rss_anon_kib": 74556,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 25.000918311,
+            "rss_kib": 235412,
+            "rss_anon_kib": 74560,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 30.000871704,
+            "rss_kib": 235412,
+            "rss_anon_kib": 74560,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 35.000762655,
+            "rss_kib": 235416,
+            "rss_anon_kib": 74564,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 40.000835528,
+            "rss_kib": 235416,
+            "rss_anon_kib": 74564,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 45.000897083,
+            "rss_kib": 235420,
+            "rss_anon_kib": 74568,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 50.000844442,
+            "rss_kib": 235424,
+            "rss_anon_kib": 74572,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 55.000769819,
+            "rss_kib": 235424,
+            "rss_anon_kib": 74572,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 60.000896125,
+            "rss_kib": 235428,
+            "rss_anon_kib": 74576,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 65.000855375,
+            "rss_kib": 235428,
+            "rss_anon_kib": 74576,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 70.000850303,
+            "rss_kib": 235432,
+            "rss_anon_kib": 74580,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 75.000766684,
+            "rss_kib": 235432,
+            "rss_anon_kib": 74580,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 80.000857347,
+            "rss_kib": 235436,
+            "rss_anon_kib": 74584,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 85.000819965,
+            "rss_kib": 235440,
+            "rss_anon_kib": 74588,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 90.000764827,
+            "rss_kib": 235440,
+            "rss_anon_kib": 74588,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 95.001148945,
+            "rss_kib": 235444,
+            "rss_anon_kib": 74592,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 100.001227479,
+            "rss_kib": 235444,
+            "rss_anon_kib": 74592,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 105.001164365,
+            "rss_kib": 235448,
+            "rss_anon_kib": 74596,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 110.001096989,
+            "rss_kib": 235448,
+            "rss_anon_kib": 74596,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 115.000794303,
+            "rss_kib": 235452,
+            "rss_anon_kib": 74600,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 120.000852989,
+            "rss_kib": 235452,
+            "rss_anon_kib": 74600,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 125.000876784,
+            "rss_kib": 235456,
+            "rss_anon_kib": 74604,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 130.001032513,
+            "rss_kib": 235460,
+            "rss_anon_kib": 74608,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 135.000913899,
+            "rss_kib": 235460,
+            "rss_anon_kib": 74608,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 140.000610915,
+            "rss_kib": 235464,
+            "rss_anon_kib": 74612,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 145.000991963,
+            "rss_kib": 235464,
+            "rss_anon_kib": 74612,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 150.000865488,
+            "rss_kib": 235468,
+            "rss_anon_kib": 74616,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 155.000898668,
+            "rss_kib": 235472,
+            "rss_anon_kib": 74620,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 160.000838672,
+            "rss_kib": 235472,
+            "rss_anon_kib": 74620,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 165.000878233,
+            "rss_kib": 235472,
+            "rss_anon_kib": 74620,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 170.000796274,
+            "rss_kib": 235476,
+            "rss_anon_kib": 74624,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 175.000771772,
+            "rss_kib": 235480,
+            "rss_anon_kib": 74628,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 180.000861844,
+            "rss_kib": 235480,
+            "rss_anon_kib": 74628,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 185.000795458,
+            "rss_kib": 235484,
+            "rss_anon_kib": 74632,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 190.000872912,
+            "rss_kib": 235484,
+            "rss_anon_kib": 74632,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 195.000875579,
+            "rss_kib": 235488,
+            "rss_anon_kib": 74636,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 200.000869228,
+            "rss_kib": 235488,
+            "rss_anon_kib": 74636,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 205.00075477,
+            "rss_kib": 235492,
+            "rss_anon_kib": 74640,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 210.000794229,
+            "rss_kib": 235492,
+            "rss_anon_kib": 74640,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 215.001266951,
+            "rss_kib": 235496,
+            "rss_anon_kib": 74644,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 220.001093359,
+            "rss_kib": 235500,
+            "rss_anon_kib": 74648,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 225.001029651,
+            "rss_kib": 235500,
+            "rss_anon_kib": 74648,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 230.000776245,
+            "rss_kib": 235504,
+            "rss_anon_kib": 74652,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          },
+          {
+            "elapsed_seconds": 235.000844363,
+            "rss_kib": 235504,
+            "rss_anon_kib": 74652,
+            "rss_file_kib": 131600,
+            "rss_shmem_kib": 29252,
+            "threads": 14,
+            "fds": 46
+          }
+        ]
+      },
+      "viewer": {
+        "covered_seconds": 230.04528006500001,
+        "windows": 46,
+        "counters": {
+          "received": 6606,
+          "drawn": 6606,
+          "acked": 6606
+        },
+        "rates_per_second": {
+          "received": 28.716085798993372,
+          "drawn": 28.716085798993372,
+          "acked": 28.716085798993372
+        }
+      },
+      "session_binding": "matching host and viewer correlation ID",
+      "independent_markers": {
+        "unique": 6891,
+        "visible_fps": 28.7125
+      },
+      "retained_seconds": 240
+    }
+  },
+  "scope": "Two fixed 240s arms on the same Ubuntu NVENC host and pinned client. No X server or GPU memory attribution. VMA categories discard absolute paths and addresses. The JSON toggle bundles output with optional stage instrumentation."
+}

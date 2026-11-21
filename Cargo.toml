@@ -111,10 +111,10 @@ backend-x11rb = ["x11-backends", "dep:x11rb"]
 # x11rb or xcb backend.
 remote-x11 = ["dep:rayon", "dep:x11rb", "x11rb/image", "dep:sha2", "dep:chacha20poly1305", "dep:snow", "dep:zeroize", "xbar_core/x11-connection"]
 # Opt-in NVENC encoding and hardware decoding linked to the system FFmpeg.
-remote-h264 = ["remote-x11", "dep:ffmpeg-next"]
+remote-h264 = ["remote-x11", "dep:ffmpeg-next", "dep:libloading", "dep:gbm"]
 # Alternate JPEG encoder for controlled performance comparisons.
 remote-fast-jpeg = ["remote-x11", "dep:jpeg-encoder"]
-# Native Wayland single-surface source; the shared viewer remains X11.
+# Native Wayland single-surface capture and native Wayland viewing.
 remote-wayland = ["remote-x11", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-scanner", "xkbcommon/x11", "dep:xcb"]
 # XCB transport + shared X11 compositor.
 backend-xcb = ["x11-backends", "dep:xcb"]

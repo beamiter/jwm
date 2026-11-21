@@ -1,5 +1,6 @@
 //! A single client bundle state, not two parallel legacy leases.
 use super::*;
+use crate::remote::engine::WaylandInputState;
 use crate::remote::wayland_control_wire::*;
 #[path = "client_control_repair.rs"]
 mod repair;
@@ -20,6 +21,7 @@ pub(super) struct ClientControl {
     receipts: std::collections::VecDeque<(DrawnScope, bool)>,
     pub(super) scroll_enabled: bool,
     pub(super) horizontal_enabled: bool,
+    pub(super) gestures: bool,
     pub(super) digest: Option<[u8; 32]>,
     request: Option<(ControlRequest, Instant)>,
     pub(super) epoch: Option<u64>,
@@ -27,6 +29,7 @@ pub(super) struct ClientControl {
     pub(super) ended: bool,
     terminal_seen: bool,
     terminal_failure: Option<&'static str>,
+    managed_release_deadline: Option<Instant>,
     sequence: u64,
     held: std::collections::BTreeSet<u16>,
     presented: Option<(DrawnScope, Instant)>,
@@ -34,6 +37,12 @@ pub(super) struct ClientControl {
     consumed: Option<DrawnScope>,
     left_down: bool,
     click: Option<(DrawnScope, i16, i16, Instant)>,
+    drag: Option<Drag>,
+}
+struct Drag {
+    scope: DrawnScope,
+    pending_motion: Option<(u16, u16)>,
+    next_motion_at: Instant,
 }
 impl ClientControl {
     #[cfg(any(feature = "remote-wayland", test))]
@@ -177,14 +186,62 @@ impl ClientControl {
     pub(super) fn configured(&self) -> bool {
         self.digest.is_some()
     }
+    pub(super) fn accepts_input(&self) -> bool {
+        !self.ended && self.managed_release_deadline.is_none()
+    }
+    pub(super) fn managed_input(&self) -> Option<WaylandInputState> {
+        self.configured().then(|| {
+            match (
+                self.managed_release_deadline.is_some(),
+                self.ended,
+                self.activated,
+            ) {
+                (true, true, _) => WaylandInputState::Released,
+                (true, false, _) => WaylandInputState::Releasing,
+                (false, true, _) => WaylandInputState::Unavailable,
+                (false, false, true) => WaylandInputState::Active,
+                _ => WaylandInputState::Pending,
+            }
+        })
+    }
+    pub(super) fn begin_managed_release(&mut self, now: Instant) -> Option<ControlRevoke> {
+        let lease_epoch = self.epoch?;
+        if !self.activated || !self.accepts_input() {
+            return None;
+        }
+        self.managed_release_deadline = Some(now + Duration::from_secs(5));
+        Some(ControlRevoke { lease_epoch })
+    }
+    pub(super) fn managed_release_deadline(&self) -> Option<Instant> {
+        self.managed_release_deadline.filter(|_| !self.ended)
+    }
     pub(super) fn needs_request(&self) -> bool {
-        self.configured() && !self.ended && self.request.is_none()
+        self.configured() && self.accepts_input() && self.request.is_none()
+    }
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn cancel_unsent_request(&mut self, request: ControlRequest) {
+        if self.epoch.is_none() && self.request.is_some_and(|(pending, _)| pending == request) {
+            self.request = None;
+        }
     }
     pub(super) fn check(&mut self, scope: (u64, u64), now: Instant) -> RemoteResult<()> {
         if let Some(reason) = self.terminal_failure {
             return Err(invalid_data(reason).into());
         }
         if self.ended {
+            return Ok(());
+        }
+        if let Some(deadline) = self.managed_release_deadline {
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Wayland input release unconfirmed",
+                )
+                .into());
+            }
+            // The host may have already queued an ordinary status before it
+            // reaches the revoke. Only its matching terminal status completes
+            // release, and no input is emitted while waiting for it.
             return Ok(());
         }
         if self.resumable_enabled {
@@ -210,7 +267,7 @@ impl ClientControl {
         self.click = None;
     }
     pub(super) fn presented(&mut self, scope: DrawnScope, now: Instant) -> Option<ControlRequest> {
-        if !self.configured() || self.ended {
+        if !self.configured() || !self.accepts_input() {
             return None;
         }
         if !self.receipts.iter().any(|(seen, _)| *seen == scope) {
@@ -260,6 +317,15 @@ impl ClientControl {
                 != (request.scope.source_epoch, request.scope.geometry_epoch)
         {
             return Err(invalid_data("control status revived or changed source").into());
+        }
+        if self.managed_release_deadline.is_some()
+            && self.epoch == Some(status.lease_epoch)
+            && matches!(
+                status.status,
+                ControlStatusKind::Waiting | ControlStatusKind::PointerReady
+            )
+        {
+            return Ok(());
         }
         match status.status {
             ControlStatusKind::Granted => {
@@ -344,7 +410,8 @@ impl ClientControl {
                         if self.ready == Some(scope) || self.consumed == Some(scope) {
                             return Err(invalid_data("control Ready replay").into());
                         }
-                        if self.held.is_empty()
+                        if self.drag.is_none()
+                            && held_keys_permit_pointer(&self.held, self.gestures)
                             && self.latest_decoded.is_none_or(|decoded| decoded == scope)
                             && at.elapsed() < super::super::wayland_pointer_wire::FRAME_MAX_AGE
                         {
@@ -364,13 +431,15 @@ impl ClientControl {
             self.ready = None;
             self.click = None;
             self.held.clear();
+            self.drag = None;
         }
         Ok(())
     }
     pub(super) fn ready_sequence(&self) -> Option<u64> {
         if !self.activated
-            || self.ended
-            || !self.held.is_empty()
+            || !self.accepts_input()
+            || self.drag.is_some()
+            || !held_keys_permit_pointer(&self.held, self.gestures)
             || self.repair_blocked()
             || !self.resumable_input_active()
         {
@@ -397,7 +466,46 @@ impl ClientControl {
         self.ready = None;
         self.click = None;
         self.held.clear();
+        self.drag = None;
         self.epoch.map(|lease_epoch| ControlRevoke { lease_epoch })
+    }
+
+    pub(super) fn next_drag_motion(&self) -> Option<Instant> {
+        self.drag
+            .as_ref()
+            .filter(|drag| drag.pending_motion.is_some())
+            .filter(|_| self.accepts_input())
+            .map(|drag| drag.next_motion_at)
+    }
+
+    pub(super) fn discard_drag_motion(&mut self) {
+        if let Some(drag) = &mut self.drag {
+            drag.pending_motion = None;
+        }
+    }
+
+    pub(super) fn take_drag_motion(
+        &mut self,
+        now: Instant,
+        before_edge: bool,
+    ) -> RemoteResult<Option<ControlAction>> {
+        if !self.accepts_input() {
+            return Ok(None);
+        }
+        let Some(drag) = self
+            .drag
+            .as_mut()
+            .filter(|drag| before_edge || now >= drag.next_motion_at)
+        else {
+            return Ok(None);
+        };
+        let Some((x, y)) = drag.pending_motion.take() else {
+            return Ok(None);
+        };
+        let scope = drag.scope;
+        drag.next_motion_at = now + Duration::from_millis(17);
+        self.next_action(scope, ControlActionKind::DragMotion { x, y })
+            .map(Some)
     }
     pub(super) fn event(
         &mut self,
@@ -406,7 +514,7 @@ impl ClientControl {
     ) -> RemoteResult<Option<ControlAction>> {
         use super::super::x11_viewer::WaylandPointerEventKind as P;
         self.repair_event(event, now)?;
-        if self.ended {
+        if !self.accepts_input() {
             return Ok(None);
         }
         if !self.resumable_input_active() {
@@ -416,13 +524,6 @@ impl ClientControl {
         let scope;
         match *event {
             ViewerEvent::Key { keycode, pressed } => {
-                if !self.activated || self.epoch.is_none() || self.left_down || self.click.is_some()
-                {
-                    return Err(invalid_data(
-                        "control key before activation or during pointer gesture",
-                    )
-                    .into());
-                }
                 let code = keycode
                     .checked_sub(8)
                     .filter(|v| *v > 0)
@@ -432,6 +533,16 @@ impl ClientControl {
                     return Err(invalid_data("control key not allowed").into());
                 }
                 let code = u16::from(code);
+                if !self.activated
+                    || self.epoch.is_none()
+                    || ((self.left_down || self.drag.is_some() || self.click.is_some())
+                        && !(self.gestures && is_gesture_modifier(code)))
+                {
+                    return Err(invalid_data(
+                        "control key before activation or during pointer gesture",
+                    )
+                    .into());
+                }
                 if (pressed && (self.held.len() >= 32 || !self.held.insert(code)))
                     || (!pressed && !self.held.remove(&code))
                 {
@@ -447,7 +558,7 @@ impl ClientControl {
             }
             ViewerEvent::WaylandPointerButtonCancel { pressed } => {
                 // False cancellation can be synthesized by a new mapping, not physical input.
-                if pressed && !self.held.is_empty() {
+                if pressed && !held_keys_permit_pointer(&self.held, self.gestures) {
                     return Err(invalid_data("control pointer conflicts with held keys").into());
                 }
                 self.left_down = pressed;
@@ -458,6 +569,28 @@ impl ClientControl {
                 self.click = None;
                 return Ok(None);
             }
+            ViewerEvent::WaylandDragMotion {
+                frame_sequence,
+                geometry_epoch,
+                x,
+                y,
+            } => {
+                if let Some(drag) = self.drag.as_mut().filter(|drag| {
+                    drag.scope.frame_sequence == frame_sequence
+                        && drag.scope.geometry_epoch == geometry_epoch
+                }) {
+                    drag.pending_motion = Some((x, y));
+                }
+                return Ok(None);
+            }
+            ViewerEvent::WaylandDragRelease { .. } => {
+                self.left_down = false;
+                let Some(drag) = self.drag.take() else {
+                    return Ok(None);
+                };
+                scope = drag.scope;
+                kind = ControlActionKind::DragRelease;
+            }
             ViewerEvent::WaylandPointer {
                 frame_sequence,
                 geometry_epoch,
@@ -467,7 +600,7 @@ impl ClientControl {
                 local_y,
                 kind: pk,
             } => {
-                if !self.held.is_empty() {
+                if !held_keys_permit_pointer(&self.held, self.gestures) {
                     return Err(invalid_data("control pointer conflicts with held keys").into());
                 }
                 if matches!(
@@ -498,6 +631,14 @@ impl ClientControl {
                 }
                 scope = self.ready.unwrap();
                 match pk {
+                    P::LeftDown if self.gestures => {
+                        self.drag = Some(Drag {
+                            scope,
+                            next_motion_at: now,
+                            pending_motion: None,
+                        });
+                        kind = ControlActionKind::DragStart { x, y };
+                    }
                     P::LeftDown => {
                         self.click = Some((scope, local_x, local_y, now));
                         return Ok(None);
@@ -531,17 +672,25 @@ impl ClientControl {
             }
             _ => return Ok(None),
         }
+        self.next_action(scope, kind).map(Some)
+    }
+
+    fn next_action(
+        &mut self,
+        scope: DrawnScope,
+        kind: ControlActionKind,
+    ) -> RemoteResult<ControlAction> {
         self.sequence = self
             .sequence
             .checked_add(1)
             .filter(|v| *v <= MAX_SEQUENCE)
             .ok_or_else(|| invalid_data("control sequence exhausted"))?;
-        Ok(Some(ControlAction {
+        Ok(ControlAction {
             scope,
             lease_epoch: self.epoch.unwrap(),
             sequence: self.sequence,
             kind,
-        }))
+        })
     }
 }
 #[cfg(test)]

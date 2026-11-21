@@ -1,0 +1,762 @@
+{
+  "environment": {
+    "guest": "QEMU 8.2.2 KVM, Linux 6.17.0-35-generic",
+    "renderer": "virgl (Mesa Intel(R) Graphics (ARL))",
+    "compositor": "jwm --backend wayland-udev",
+    "transport": "Authenticated loopback TCP between an owned Xvfb source and a native Wayland JPEG viewer",
+    "features": [
+      "remote-wayland",
+      "backend-wayland-udev"
+    ],
+    "source_head": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "dirty_source": true,
+    "binary_sha256": {
+      "jwm": "4d6283942c01a00253a4501649c8c8fb873833fa57913165b1fec45e4274ceb0",
+      "jwm-remote": "347985c566b71d0829d369995ce86a2bd2745cad584d69ef6770047cf7761f15"
+    },
+    "outputs": [
+      {
+        "name": "Virtual-1",
+        "desktop_rect": [
+          0,
+          0,
+          1024,
+          768
+        ],
+        "scale": 1,
+        "transform": "Normal",
+        "drm_crtc_index": 0
+      },
+      {
+        "name": "Virtual-2",
+        "desktop_rect": [
+          1024,
+          0,
+          1024,
+          768
+        ],
+        "scale": 1,
+        "transform": "Normal",
+        "drm_crtc_index": 1
+      }
+    ],
+    "script": "scripts/test-remote-wayland-kms.py",
+    "validation_boundary": "Guest compositor output readback and kernel DRM events on two virtual outputs."
+  },
+  "trials": [
+    {
+      "trial": "effects-1",
+      "effects": true,
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 123,
+              "monotonic_ns": 4094040000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4094042000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 186,
+              "monotonic_ns": 4817798000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  1043,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4817800000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-1",
+          "to": "Virtual-2"
+        }
+      },
+      "deferred_while_crossing": {
+        "commit": 3,
+        "desktop_rect": [
+          728,
+          57,
+          1008,
+          700
+        ]
+      }
+    },
+    {
+      "trial": "direct-1",
+      "effects": false,
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 41,
+              "monotonic_ns": 3487426000,
+              "sequence": 0,
+              "flags": 0,
+              "direct": true
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 3487427000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 112,
+              "monotonic_ns": 4335573000,
+              "sequence": 0,
+              "flags": 0,
+              "direct": true
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4335575000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-1",
+          "to": "Virtual-2"
+        }
+      },
+      "deferred_while_crossing": {
+        "commit": 7,
+        "desktop_rect": [
+          1008,
+          60,
+          1008,
+          700
+        ]
+      }
+    },
+    {
+      "trial": "effects-2",
+      "effects": true,
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 135,
+              "monotonic_ns": 3907123000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 3907125000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 194,
+              "monotonic_ns": 4801573000,
+              "sequence": 0,
+              "flags": 0,
+              "composited": {
+                "visible_rect": [
+                  1043,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4801574000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-1",
+          "to": "Virtual-2"
+        }
+      },
+      "deferred_while_crossing": {
+        "commit": 3,
+        "desktop_rect": [
+          930,
+          57,
+          1008,
+          700
+        ]
+      }
+    },
+    {
+      "trial": "direct-2",
+      "effects": false,
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 4,
+        "phases": [
+          {
+            "expected_rgb": [
+              204,
+              34,
+              68
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 41,
+              "monotonic_ns": 3090073000,
+              "sequence": 0,
+              "flags": 0,
+              "direct": true
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 3090074000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              34,
+              68,
+              204
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 96,
+              "monotonic_ns": 3654121000,
+              "sequence": 0,
+              "flags": 0,
+              "direct": true
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 3654125000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-1",
+          "to": "Virtual-2"
+        }
+      },
+      "deferred_while_crossing": {
+        "commit": 9,
+        "desktop_rect": [
+          251,
+          60,
+          1008,
+          700
+        ]
+      }
+    }
+  ],
+  "mixed_scale_probe": {
+    "output_scales": {
+      "Virtual-1": 1,
+      "Virtual-2": 2
+    },
+    "configuration": "Output management v2 SetScale with no adaptive-sync request",
+    "scale_apply_succeeded": true,
+    "viewer_failure": "wayland_presentation_discarded",
+    "drawn_acks": 0
+  }
+}

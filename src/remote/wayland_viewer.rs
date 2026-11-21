@@ -16,14 +16,17 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use wayland_client::backend::WaylandError;
 use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
-use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 #[path = "wayland_viewer_damage.rs"]
 mod damage;
+#[cfg(feature = "remote-h264")]
+#[path = "wayland_viewer_gpu.rs"]
+mod gpu;
 #[path = "wayland_viewer_handoff.rs"]
 mod handoff;
 #[path = "wayland_viewer_keyboard.rs"]
@@ -141,6 +144,7 @@ pub(crate) fn with_wayland_presented_time_observer<T>(
     run()
 }
 const TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_DIMENSION: u16 = 16_384;
 const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_RETAINED_BYTES: usize = 128 * 1024 * 1024;
 // Separate bounded upload working storage, not part of the SHM allocation budget.
@@ -149,13 +153,20 @@ const MAX_UPLOAD_SCRATCH_BYTES: usize = 256 * 1024;
 fn dimensions(width: u16, height: u16) -> RemoteResult<()> {
     if width == 0
         || height == 0
-        || width > 16384
-        || height > 16384
+        || width > MAX_DIMENSION
+        || height > MAX_DIMENSION
         || u64::from(width) * u64::from(height) > MAX_PIXELS
     {
         return Err("Wayland viewer dimensions exceed bounded SHM capacity".into());
     }
     Ok(())
+}
+
+fn bounded_buffer_scale((width, height): (u16, u16), preferred: i32) -> u16 {
+    let pixels = u64::from(width) * u64::from(height);
+    let cap = (MAX_PIXELS / pixels).isqrt() as u16;
+    let cap = cap.min(MAX_DIMENSION / width.max(height)).max(1);
+    preferred.clamp(1, i32::from(cap)) as u16
 }
 /// Upload complete native-endian XRGB rows, including black letterbox pixels.
 /// All scratch is caller-owned and reused; write_all handles partial writes and
@@ -183,16 +194,15 @@ fn upload_xrgb(
         ));
     }
     let rows_per_chunk = scratch.len() / row_bytes;
+    let encoded = u16::try_from(image.width())
+        .ok()
+        .zip(u16::try_from(image.height()).ok());
+    let layout = encoded
+        .and_then(|encoded| damage::Layout::new(encoded, (width, height)))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid upload image size"))?;
     let (iw, ih) = (u64::from(image.width()), u64::from(image.height()));
-    let (dw, dh) = if u64::from(width) * ih <= u64::from(height) * iw {
-        (u32::from(width), (u64::from(width) * ih / iw).max(1) as u32)
-    } else {
-        (
-            (u64::from(height) * iw / ih).max(1) as u32,
-            u32::from(height),
-        )
-    };
-    let (ox, oy) = ((u32::from(width) - dw) / 2, (u32::from(height) - dh) / 2);
+    let (dw, dh) = (u32::from(layout.content.0), u32::from(layout.content.1));
+    let (ox, oy) = (u32::from(layout.offset.0), u32::from(layout.offset.1));
     for first_y in (0..usize::from(height)).step_by(rows_per_chunk) {
         let rows = rows_per_chunk.min(usize::from(height) - first_y);
         let chunk = &mut scratch[..rows * row_bytes];
@@ -217,7 +227,7 @@ fn upload_xrgb(
     Ok(())
 }
 
-fn socket_path(display: Option<&str>) -> RemoteResult<PathBuf> {
+pub(super) fn socket_path(display: Option<&str>) -> RemoteResult<PathBuf> {
     let name = display
         .map(str::to_owned)
         .or_else(|| std::env::var("WAYLAND_DISPLAY").ok())
@@ -246,8 +256,42 @@ struct Pending {
     source_epoch: u64,
     geometry_epoch: u64,
     generation: u64,
+    acknowledge: bool,
     presented: bool,
     started: Instant,
+}
+
+struct ObsoleteFeedback {
+    token: u64,
+    started: Instant,
+}
+
+#[derive(Debug)]
+pub(super) struct PresentationDiscarded;
+
+impl std::fmt::Display for PresentationDiscarded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Wayland compositor discarded frame; no presentation ACK")
+    }
+}
+
+impl std::error::Error for PresentationDiscarded {}
+
+enum Failure {
+    Message(&'static str),
+    Discarded,
+}
+
+impl From<&'static str> for Failure {
+    fn from(message: &'static str) -> Self {
+        Self::Message(message)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewportRedraw {
+    AwaitingAck,
+    AlreadyAcked,
 }
 #[derive(Clone, Copy)]
 struct SlotMeta {
@@ -346,15 +390,39 @@ impl State {
         if pointer_events.iter().any(|event| {
             matches!(
                 event,
-                ViewerEvent::WaylandPointerCancel | ViewerEvent::WaylandPointerButtonCancel { .. }
+                ViewerEvent::WaylandPointerCancel
+                    | ViewerEvent::WaylandPointerButtonCancel { .. }
+                    | ViewerEvent::WaylandDragRelease { cancelled: true }
             )
         }) {
             // Layout/new-frame cancellation also clears already collected pointer
             // edges. Keyboard dispatch order is retained.
-            self.control_events
-                .retain(|event| matches!(event, ViewerEvent::Key { .. }));
+            self.control_events.retain(|event| {
+                matches!(
+                    event,
+                    ViewerEvent::Key { .. } | ViewerEvent::WaylandDragRelease { .. }
+                )
+            });
         }
-        self.control_events.extend(pointer_events);
+        for event in pointer_events {
+            use super::x11_viewer::WaylandPointerEventKind::{LeftDown, Motion};
+            if self.pointer.gestures
+                && matches!((self.control_events.last(), event),
+                    (Some(ViewerEvent::WaylandPointer { frame_sequence: old, kind: Motion, .. }),
+                     ViewerEvent::WaylandPointer { frame_sequence, kind: LeftDown, .. }) if *old == frame_sequence)
+            {
+                // The press carries the current position and the frame's only ticket.
+                self.control_events.pop();
+            }
+            if matches!(event, ViewerEvent::WaylandDragMotion { .. })
+                && let Some(last @ ViewerEvent::WaylandDragMotion { .. }) =
+                    self.control_events.last_mut()
+            {
+                *last = event;
+            } else {
+                self.control_events.push(event);
+            }
+        }
         if self.control_events.len() > 64 {
             self.keyboard.revoke("Wayland control event bound exceeded");
             self.pointer.revoke("Wayland control event bound exceeded");
@@ -367,10 +435,27 @@ struct Retirement {
     bytes: usize,
     started: Instant,
 }
+struct SourceChange {
+    started: Instant,
+    accepted: bool,
+}
+
+struct OutputScale {
+    name: u32,
+    output: wl_output::WlOutput,
+    committed: i32,
+    pending: Option<i32>,
+    entered: bool,
+}
+
 struct State {
+    #[cfg(feature = "remote-h264")]
+    gpu: gpu::State,
     #[cfg(all(test, feature = "backend-wayland-udev"))]
     popup_live: std::sync::Arc<popup_presentation::Live>,
     control_mode: bool,
+    managed_control_viewport: bool,
+    managed_resize_pending: bool,
     handoff: handoff::Handoff,
     control_events: Vec<ViewerEvent>,
     pointer: pointer::Pointer,
@@ -384,22 +469,57 @@ struct State {
     configured: bool,
     width: u16,
     height: u16,
+    outputs: Vec<OutputScale>,
+    preferred_scale: Option<i32>,
     proposed: Option<(u16, u16)>,
+    role_id: u64,
+    source_change: Option<SourceChange>,
     generation: u64,
     scope: Option<(u64, u64)>,
     pending: Option<Pending>,
+    // Current and retiring commits share a two-feedback limit. Storage is
+    // accounted separately and always needs its own buffer release.
+    obsolete_feedback: Vec<ObsoleteFeedback>,
+    viewport_redraw: Option<ViewportRedraw>,
+    view_only_session: bool,
     slots: Vec<Slot>,
     retirement: Option<Retirement>,
     blocked_since: Option<Instant>,
     completed: Vec<u64>,
     closed: bool,
-    failure: Option<String>,
+    failure: Option<Failure>,
 }
 impl State {
+    fn buffer_scale(&self) -> u16 {
+        let preference = self.preferred_scale.unwrap_or_else(|| {
+            self.outputs
+                .iter()
+                .filter(|output| output.entered)
+                .map(|output| output.committed)
+                .max()
+                .unwrap_or(1)
+        });
+        bounded_buffer_scale((self.width, self.height), preference)
+    }
+
+    fn buffer_size(&self) -> (u16, u16) {
+        let scale = self.buffer_scale();
+        (self.width * scale, self.height * scale)
+    }
+
+    fn scale_changed(&mut self, previous: u16) {
+        if self.configured && previous != self.buffer_scale() {
+            self.resize_viewport();
+        }
+    }
+
     fn check(&mut self) -> RemoteResult<()> {
         self.handoff.check()?;
-        if let Some(error) = &self.failure {
-            return Err(error.clone().into());
+        if let Some(failure) = &self.failure {
+            return Err(match failure {
+                Failure::Message(message) => (*message).into(),
+                Failure::Discarded => PresentationDiscarded.into(),
+            });
         }
         if let Some(retirement) = &self.retirement {
             if retirement.started.elapsed() >= TIMEOUT {
@@ -419,24 +539,50 @@ impl State {
         {
             return Err("Wayland presentation deadline expired".into());
         }
-        if self.blocked_since.is_some_and(|at| at.elapsed() >= TIMEOUT)
-            && self.slots.iter().filter(|p| p.meta.busy).count() >= 2
+        if self
+            .obsolete_feedback
+            .iter()
+            .any(|feedback| feedback.started.elapsed() >= TIMEOUT)
         {
-            return Err("both Wayland SHM slots remained busy past deadline".into());
+            return Err("obsolete Wayland presentation deadline expired".into());
+        }
+        if self
+            .source_change
+            .as_ref()
+            .is_some_and(|change| change.started.elapsed() >= TIMEOUT)
+        {
+            return Err("Wayland source switch deadline expired".into());
+        }
+        if self.blocked_since.is_some_and(|at| at.elapsed() >= TIMEOUT) && self.storage_blocked() {
+            return Err("both Wayland frame buffers remained busy past deadline".into());
         }
         Ok(())
     }
-    fn advance_generation(&mut self) {
+
+    fn storage_blocked(&self) -> bool {
+        #[cfg(feature = "remote-h264")]
+        if self.gpu.storage_blocked() {
+            return true;
+        }
+        self.slots.iter().filter(|slot| slot.meta.busy).count() >= 2
+    }
+    fn invalidate_layout(&mut self) {
+        self.pointer.revoke("Wayland pointer geometry changed");
+        if self.keyboard.requested {
+            self.keyboard.revoke("Wayland viewer geometry changed");
+        }
+        self.invalidate_viewport();
+    }
+
+    fn invalidate_viewport(&mut self) {
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         self.popup_live.invalidate();
-        self.pointer.revoke("Wayland pointer geometry changed");
         // Even a resize-and-restore invalidates every cached destination.
         for slot in &mut self.slots {
             slot.damage = damage::SlotDamage::default();
         }
-        if self.keyboard.requested {
-            self.keyboard.revoke("Wayland viewer geometry changed");
-        }
+        #[cfg(feature = "remote-h264")]
+        self.gpu.invalidate_backings();
         self.generation = match self.generation.checked_add(1) {
             Some(next) => next,
             None => {
@@ -444,12 +590,141 @@ impl State {
                 return;
             }
         };
-        if self.pending.as_ref().is_some_and(|p| !p.presented) || !self.completed.is_empty() {
-            // The existing client ACK ledger cannot retire a discarded sequence.
-            // Fail closed rather than pretending an obsolete commit was drawn.
+    }
+
+    fn is_view_only_session(&self) -> bool {
+        self.view_only_session && !self.keyboard.requested && !self.pointer.requested
+    }
+
+    fn supports_continuous_viewport(&self) -> bool {
+        self.is_view_only_session() || self.managed_control_viewport
+    }
+
+    fn pending_is_obsolete(&self, pending: &Pending) -> bool {
+        self.supports_continuous_viewport()
+            && self.viewport_redraw.is_some()
+            && pending.generation != self.generation
+    }
+
+    fn advance_generation(&mut self) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| !pending.presented && !self.pending_is_obsolete(pending))
+            || !self.completed.is_empty()
+        {
             self.failure = Some("Wayland surface changed before presentation completed".into());
         }
+        self.invalidate_layout();
         self.completed.clear();
+    }
+
+    fn resize_viewport(&mut self) {
+        if !self.supports_continuous_viewport() {
+            self.advance_generation();
+            return;
+        }
+        let acknowledge = self.viewport_redraw == Some(ViewportRedraw::AwaitingAck)
+            || !self.completed.is_empty()
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.acknowledge && !pending.presented);
+        if self.managed_control_viewport {
+            self.pointer.invalidate_mapping();
+            self.managed_resize_pending = true;
+        }
+        self.invalidate_viewport();
+        self.viewport_redraw = Some(if acknowledge {
+            ViewportRedraw::AwaitingAck
+        } else {
+            ViewportRedraw::AlreadyAcked
+        });
+        self.completed.clear();
+    }
+
+    fn finish_feedback(&mut self, token: u64, presented: bool) -> Result<(), Failure> {
+        if let Some(index) = self
+            .obsolete_feedback
+            .iter()
+            .position(|feedback| feedback.token == token)
+        {
+            let feedback = self.obsolete_feedback.swap_remove(index);
+            if feedback.started.elapsed() >= TIMEOUT {
+                return Err("obsolete Wayland presentation deadline expired".into());
+            }
+            return Ok(());
+        }
+        let obsolete = self
+            .pending
+            .as_ref()
+            .is_some_and(|p| self.pending_is_obsolete(p));
+        let pending = self
+            .pending
+            .as_mut()
+            .filter(|p| p.token == token && !p.presented)
+            .ok_or("stale or duplicate Wayland presentation feedback")?;
+        if pending.started.elapsed() >= TIMEOUT {
+            return Err("Wayland presentation deadline expired".into());
+        }
+        if obsolete {
+            pending.presented = true;
+            return Ok(());
+        }
+        if !presented {
+            return Err(Failure::Discarded);
+        }
+        if pending.generation != self.generation
+            || self.scope != Some((pending.source_epoch, pending.geometry_epoch))
+        {
+            return Err("stale or duplicate Wayland presentation feedback".into());
+        }
+        pending.presented = true;
+        if pending.acknowledge {
+            if !self.completed.is_empty() {
+                return Err("unconsumed Wayland presentation completion".into());
+            }
+            self.pointer.presented(pending.mapping);
+            self.completed.push(pending.sequence);
+        }
+        Ok(())
+    }
+
+    fn retire_feedback(&mut self, pending: Pending) {
+        self.obsolete_feedback.push(ObsoleteFeedback {
+            token: pending.token,
+            started: pending.started,
+        });
+    }
+}
+
+struct ViewerSurface {
+    surface: wl_surface::WlSurface,
+    xdg_surface: xdg_surface::XdgSurface,
+    toplevel: xdg_toplevel::XdgToplevel,
+}
+
+impl ViewerSurface {
+    fn create(state: &State, qh: &QueueHandle<State>, title: &str) -> Self {
+        let id = state.role_id;
+        let surface = state.compositor.as_ref().unwrap().create_surface(qh, id);
+        surface.set_buffer_scale(1);
+        let xdg_surface = state.wm.as_ref().unwrap().get_xdg_surface(&surface, qh, id);
+        let toplevel = xdg_surface.get_toplevel(qh, id);
+        toplevel.set_title(title.to_owned());
+        toplevel.set_app_id("jwm-remote-readonly".into());
+        surface.commit();
+        Self {
+            surface,
+            xdg_surface,
+            toplevel,
+        }
+    }
+
+    fn destroy(&self) {
+        self.toplevel.destroy();
+        self.xdg_surface.destroy();
+        self.surface.destroy();
     }
 }
 
@@ -460,9 +735,7 @@ pub(super) struct WaylandViewer {
     conn: Connection,
     queue: EventQueue<State>,
     state: State,
-    surface: wl_surface::WlSurface,
-    _xdg_surface: xdg_surface::XdgSurface,
-    toplevel: xdg_toplevel::XdgToplevel,
+    role: ViewerSurface,
     base_title: String,
     pointer_title_status: Option<&'static str>,
     token: u64,
@@ -471,6 +744,8 @@ pub(super) struct WaylandViewer {
     // Retain the actual submitted predecessor, not the last received frame.
     // Tile snapshots can patch this canvas across latest-only mailbox drops.
     last_frame: Option<RecyclableDecodedFrame>,
+    #[cfg(feature = "remote-h264")]
+    last_native: Option<(ffmpeg_next::frame::Video, super::frame::FrameInfo)>,
     write_pending: std::cell::Cell<bool>,
 }
 impl WaylandViewer {
@@ -512,9 +787,13 @@ impl WaylandViewer {
         let qh = queue.handle();
         let registry = conn.display().get_registry(&qh, ());
         let mut state = State {
+            #[cfg(feature = "remote-h264")]
+            gpu: gpu::State::new(),
             #[cfg(all(test, feature = "backend-wayland-udev"))]
             popup_live: std::sync::Arc::new(popup_presentation::Live::default()),
             control_mode: false,
+            managed_control_viewport: false,
+            managed_resize_pending: false,
             control_events: Vec::new(),
             handoff: handoff::Handoff::default(),
             pointer: pointer::Pointer::default(),
@@ -528,10 +807,17 @@ impl WaylandViewer {
             configured: false,
             width,
             height,
+            outputs: Vec::new(),
+            preferred_scale: None,
             proposed: None,
+            role_id: 1,
+            source_change: None,
             generation: 1,
             scope: None,
             pending: None,
+            obsolete_feedback: Vec::with_capacity(2),
+            viewport_redraw: None,
+            view_only_session: false,
             slots: Vec::new(),
             retirement: None,
             blocked_since: None,
@@ -556,17 +842,7 @@ impl WaylandViewer {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        let surface = state.compositor.as_ref().unwrap().create_surface(&qh, ());
-        surface.set_buffer_scale(1);
-        let xdg_surface = state
-            .wm
-            .as_ref()
-            .unwrap()
-            .get_xdg_surface(&surface, &qh, ());
-        let toplevel = xdg_surface.get_toplevel(&qh, ());
-        toplevel.set_title(title.to_owned());
-        toplevel.set_app_id("jwm-remote-readonly".into());
-        surface.commit();
+        let role = ViewerSurface::create(&state, &qh, title);
         while !state.configured {
             pump_connection(&conn, &mut queue, &mut state)?;
             if state.closed {
@@ -582,15 +858,15 @@ impl WaylandViewer {
             conn,
             queue,
             state,
-            surface,
-            _xdg_surface: xdg_surface,
-            toplevel,
+            role,
             base_title: title.to_owned(),
             pointer_title_status: None,
             token: 0,
             slot_identity: 0,
             upload_scratch: vec![0; MAX_UPLOAD_SCRATCH_BYTES].into_boxed_slice(),
             last_frame: None,
+            #[cfg(feature = "remote-h264")]
+            last_native: None,
             write_pending: std::cell::Cell::new(false),
             #[cfg(all(test, feature = "backend-wayland-udev"))]
             popup_presentation: popup_presentation::Bridge::default(),
@@ -618,19 +894,15 @@ impl WaylandViewer {
         }
         // Released storage remains allocated and charged until reused or safely
         // replaced. Presentation alone never makes its bytes writable.
-        if self
-            .state
-            .slots
-            .iter()
-            .filter(|slot| slot.meta.busy)
-            .count()
-            >= 2
-        {
+        if self.state.storage_blocked() {
             self.state.blocked_since.get_or_insert_with(Instant::now);
         } else {
             self.state.blocked_since = None;
         }
         Ok(work)
+    }
+    pub(super) fn enable_view_only_session(&mut self) {
+        self.state.view_only_session = true;
     }
     fn keyboard_fence(&mut self, deadline: Instant) -> RemoteResult<()> {
         let id = self
@@ -660,6 +932,8 @@ impl WaylandViewer {
         &mut self,
         scroll_enabled: bool,
         horizontal_enabled: bool,
+        managed_viewport: bool,
+        gestures: bool,
     ) -> RemoteResult<[u8; 32]> {
         if self.state.keyboard.requested || self.state.pointer.requested || self.state.control_mode
         {
@@ -668,7 +942,14 @@ impl WaylandViewer {
             );
         }
         let deadline = Instant::now() + TIMEOUT;
+        let fresh_role = managed_viewport && self.state.is_view_only_session();
+        if fresh_role {
+            self.state.keyboard.reset_for_new_role();
+        }
         self.keyboard_fence(deadline)?;
+        if fresh_role {
+            self.state.pointer.reset_for_new_role();
+        }
         if self.state.keyboard.ambiguous || self.state.keyboard.seats.len() != 1 {
             return Err("Wayland control requires exactly one unambiguous seat".into());
         }
@@ -677,12 +958,14 @@ impl WaylandViewer {
             return Err("Wayland control requires a frame-capable seat".into());
         }
         self.state.control_mode = true;
+        self.state.managed_control_viewport = managed_viewport;
         self.state.pointer.scroll_enabled = scroll_enabled;
         self.state.pointer.horizontal_enabled = horizontal_enabled;
+        self.state.pointer.gestures = gestures;
         self.state.keyboard.requested = true;
         self.state.pointer.requested = true;
-        self.state.keyboard.surface = Some(self.surface.clone());
-        self.state.pointer.surface = Some(self.surface.clone());
+        self.state.keyboard.surface = Some(self.role.surface.clone());
+        self.state.pointer.surface = Some(self.role.surface.clone());
         let seat = self
             .registry
             .bind::<wayland_client::protocol::wl_seat::WlSeat, _, _>(
@@ -693,7 +976,7 @@ impl WaylandViewer {
             );
         self.state.keyboard.seat = Some(seat.clone());
         self.state.pointer.seat = Some(seat);
-        self.toplevel.set_app_id("jwm-remote-control".into());
+        self.role.toplevel.set_app_id("jwm-remote-control".into());
         loop {
             self.pump()?;
             self.state.keyboard.check()?;
@@ -709,7 +992,7 @@ impl WaylandViewer {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
-    /// False means an orderly close cancelled admission; never input authority.
+    /// A close or a managed configure awaiting presentation defers admission.
     pub(super) fn check_wayland_control(&mut self, initial: bool) -> RemoteResult<bool> {
         if !self.state.control_mode {
             return Err("Wayland control is disabled".into());
@@ -718,6 +1001,9 @@ impl WaylandViewer {
         self.state.control_collect();
         self.state.keyboard.check()?;
         if self.state.closed {
+            return Ok(false);
+        }
+        if initial && self.state.managed_resize_pending {
             return Ok(false);
         }
         if initial
@@ -729,6 +1015,8 @@ impl WaylandViewer {
                         event,
                         ViewerEvent::Key { .. }
                             | ViewerEvent::WaylandPointer { .. }
+                            | ViewerEvent::WaylandDragMotion { .. }
+                            | ViewerEvent::WaylandDragRelease { .. }
                             | ViewerEvent::WaylandPointerButtonCancel { pressed: true }
                     )
                 })
@@ -751,6 +1039,58 @@ impl WaylandViewer {
             .revoke("Wayland control permanently disabled");
         self.state.control_events.clear();
     }
+    pub(super) fn release_managed_control(&mut self) -> RemoteResult<()> {
+        if self.state.is_view_only_session() {
+            return Ok(());
+        }
+        if !self.state.control_mode || self.state.handoff.enabled {
+            return Err("managed release requires one-shot Wayland control".into());
+        }
+        self.disable_wayland_control();
+        if let Some(keyboard) = self.state.keyboard.device.take() {
+            keyboard.release();
+        }
+        if let Some(pointer) = self.state.pointer.device.take() {
+            pointer.release();
+        }
+        // Combined control binds one seat and uses the same proxy for both devices.
+        self.state.pointer.seat = None;
+        if let Some(seat) = self.state.keyboard.seat.take() {
+            seat.release();
+        }
+        self.state.keyboard.requested = false;
+        self.state.pointer.requested = false;
+        self.state.control_mode = false;
+        self.state.managed_control_viewport = false;
+        self.state.managed_resize_pending = false;
+        self.enable_view_only_session();
+        self.prepare_wait()
+    }
+    pub(super) fn managed_control_focus_left(&self) -> bool {
+        let reasons = [self.state.keyboard.revoked, self.state.pointer.revoked];
+        self.state.control_mode
+            && !self.state.handoff.enabled
+            && self.state.failure.is_none()
+            && reasons.iter().any(Option::is_some)
+            && reasons.into_iter().flatten().all(|reason| {
+                matches!(
+                    reason,
+                    keyboard::FOCUS_LEFT | pointer::FOCUS_LEFT | pointer::WINDOW_DEACTIVATED
+                )
+            })
+    }
+
+    pub(super) fn managed_layout_generation(&self) -> Option<u64> {
+        self.state
+            .managed_control_viewport
+            .then_some(self.state.generation)
+    }
+
+    pub(super) fn managed_control_focus_ready(&self) -> bool {
+        self.state.managed_control_viewport
+            && self.state.keyboard.clean_ready()
+            && self.state.pointer.focus_ready()
+    }
     pub(super) fn enable_wayland_keyboard(
         &mut self,
         _display: Option<&str>,
@@ -769,8 +1109,8 @@ impl WaylandViewer {
             return Err("Wayland keyboard requires repeat-info capable seat".into());
         }
         self.state.keyboard.requested = true;
-        self.toplevel.set_app_id("jwm-remote-keyboard".into());
-        self.state.keyboard.surface = Some(self.surface.clone());
+        self.role.toplevel.set_app_id("jwm-remote-keyboard".into());
+        self.state.keyboard.surface = Some(self.role.surface.clone());
         self.state.keyboard.seat = Some(
             self.registry
                 .bind::<wayland_client::protocol::wl_seat::WlSeat, _, _>(
@@ -853,8 +1193,8 @@ impl WaylandViewer {
         self.state.pointer.requested = true;
         self.state.pointer.scroll_enabled = scroll_enabled;
         self.state.pointer.horizontal_enabled = horizontal_enabled;
-        self.state.pointer.surface = Some(self.surface.clone());
-        self.toplevel.set_app_id("jwm-remote-pointer".into());
+        self.state.pointer.surface = Some(self.role.surface.clone());
+        self.role.toplevel.set_app_id("jwm-remote-pointer".into());
         self.state.pointer.seat = Some(self.registry.bind(
             name,
             version.min(7),
@@ -957,6 +1297,14 @@ impl WaylandViewer {
     }
     pub(super) fn wayland_pointer_presented(&mut self, sequence: u64) {
         self.state.pointer.confirm(sequence);
+        if self
+            .state
+            .pointer
+            .mapping()
+            .is_some_and(|map| map.sequence == sequence)
+        {
+            self.state.managed_resize_pending = false;
+        }
     }
     /// A host Ready is not local scroll readiness until the event-history fence
     /// completed for this exact currently presented mapping.
@@ -987,7 +1335,8 @@ impl WaylandViewer {
             status
         };
         if pointer_title_status_changed(&mut self.pointer_title_status, status) {
-            self.toplevel
+            self.role
+                .toplevel
                 .set_title(format!("{} — {status}", self.base_title));
         }
     }
@@ -1065,19 +1414,41 @@ impl WaylandViewer {
         (self.state.width, self.state.height)
     }
     pub(super) fn can_submit_frame(&self) -> bool {
+        let pending_blocks =
+            self.state.pending.as_ref().is_some_and(|pending| {
+                !pending.presented && !self.state.pending_is_obsolete(pending)
+            });
+        #[cfg(feature = "remote-h264")]
+        if self.state.gpu.storage_blocked() {
+            return false;
+        }
         !self.state.closed
+            && self.state.configured
+            && self.state.obsolete_feedback.len()
+                + usize::from(self.state.pending.as_ref().is_some_and(|p| !p.presented))
+                < 2
+            && self
+                .state
+                .source_change
+                .as_ref()
+                .is_none_or(|change| change.accepted)
             && self.state.retirement.is_none()
             && storage_can_submit(
-                self.state.pending.is_some(),
+                pending_blocks,
                 !self.state.completed.is_empty(),
                 self.state.slots.len(),
                 self.state.slots.iter().any(|slot| !slot.meta.busy),
             )
             && self.state.failure.is_none()
     }
-    pub(super) fn draw_recyclable(
+    pub(super) fn draw_recyclable(&mut self, frame: RecyclableDecodedFrame) -> RemoteResult<bool> {
+        self.draw_rgb(frame, true)
+    }
+
+    pub(super) fn draw_rgb(
         &mut self,
         mut frame: RecyclableDecodedFrame,
+        acknowledge: bool,
     ) -> RemoteResult<bool> {
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         self.state.popup_live.invalidate();
@@ -1086,26 +1457,69 @@ impl WaylandViewer {
             return Ok(false);
         }
         self.pump()?;
+        #[cfg(feature = "remote-h264")]
+        self.state.gpu.invalidate_backings();
         if !self.can_submit_frame() {
             return Ok(false);
         }
-        self.state.pointer.invalidate_mapping();
         let scope = (frame.source_epoch(), frame.geometry_epoch());
+        self.prepare_draw_scope(scope)?;
+        let Some(index) = self.prepare_slot()? else {
+            return Ok(false);
+        };
+        if let Some(previous) = self.last_frame.as_mut() {
+            frame.reuse_canvas_from(previous);
+        }
+        let delta = incremental_damage(self.last_frame.as_ref(), &frame, self.state.buffer_size());
+        // Replace immediately after transferring its RGB allocation. On any
+        // upload error below the session ends without attaching partial pixels.
+        self.last_frame = None;
+        self.commit_prepared(index, &frame, delta, acknowledge)?;
+        #[cfg(feature = "remote-h264")]
+        {
+            self.last_native = None;
+            self.state.gpu.leave_native();
+        }
+        self.last_frame = Some(frame);
+        Ok(true)
+    }
+
+    fn prepare_draw_scope(&mut self, scope: (u64, u64)) -> RemoteResult<()> {
+        self.state.pointer.invalidate_frame_mapping();
         if self.state.scope.is_some_and(|old| old.0 != scope.0) {
-            return self.invalidate_source(String::new()).map(|()| false);
+            return self.invalidate_source(String::new(), false);
         }
         if self.state.scope.is_some_and(|old| old != scope) {
             self.state.advance_generation();
         }
-        self.state.check()?;
-        self.state.scope = Some(scope);
-        if let Some(previous) = self.last_frame.as_mut() {
-            frame.reuse_canvas_from(previous);
+        self.state.check()
+    }
+
+    fn prepare_slot(&mut self) -> RemoteResult<Option<usize>> {
+        // The retirement fence can dispatch a newer configure. Replan after
+        // the old storage is retired, before writing a replacement buffer.
+        while !self.state.closed {
+            let (width, height) = self.state.buffer_size();
+            let metas: Vec<_> = self.state.slots.iter().map(|slot| slot.meta).collect();
+            match plan_slot(&metas, (width, height))? {
+                SlotPlan::Reuse(index) => return Ok(Some(index)),
+                SlotPlan::Replace(index) => self.retire_slot(index)?,
+                SlotPlan::Allocate => {
+                    let bytes = usize::from(width) * usize::from(height) * 4;
+                    return self.allocate_slot(width, height, bytes).map(Some);
+                }
+            }
         }
-        let delta = incremental_damage(self.last_frame.as_ref(), &frame, self.viewport());
-        // Replace immediately after transferring its RGB allocation. On any
-        // upload error below the session ends without attaching partial pixels.
-        self.last_frame = None;
+        Ok(None)
+    }
+
+    fn commit_prepared(
+        &mut self,
+        index: usize,
+        frame: &RecyclableDecodedFrame,
+        delta: Option<super::frame::DamageRegions>,
+        acknowledge: bool,
+    ) -> RemoteResult<()> {
         let image = frame.image();
         if image.width() == 0 || image.height() == 0 {
             return Err("empty Wayland frame".into());
@@ -1114,26 +1528,13 @@ impl WaylandViewer {
             u16::try_from(image.width())?,
             u16::try_from(image.height())?,
         )?;
-        let (width, height) = self.viewport();
+        let (width, height) = self.state.buffer_size();
         dimensions(width, height)?;
         // Busy slots accumulate metadata only; release is still the sole
         // permission to write their storage. Each slot may lag by many commits.
         for slot in &mut self.state.slots {
             slot.damage.accumulate(delta, (width, height));
         }
-        let bytes = usize::from(width) * usize::from(height) * 4;
-        let metas: Vec<_> = self.state.slots.iter().map(|slot| slot.meta).collect();
-        let plan = plan_slot(&metas, (width, height))?;
-        let index = match plan {
-            SlotPlan::Reuse(index) => index,
-            SlotPlan::Replace(index) => {
-                // Destroy and close idle old-size storage BEFORE allocating;
-                // temporary allocations must not exceed the same byte budget.
-                self.retire_slot(index)?;
-                self.allocate_slot(width, height, bytes)?
-            }
-            SlotPlan::Allocate => self.allocate_slot(width, height, bytes)?,
-        };
         let slot = &mut self.state.slots[index];
         if slot.meta.busy {
             return Err("refusing to overwrite busy Wayland SHM storage".into());
@@ -1159,34 +1560,71 @@ impl WaylandViewer {
             )?;
         }
         slot.damage.uploaded();
+        let buffer = slot.buffer.clone();
+        slot.meta.busy = true;
+        self.commit_buffer(
+            &buffer,
+            frame.sequence(),
+            (frame.source_epoch(), frame.geometry_epoch()),
+            (image.width() as u16, image.height() as u16),
+            (frame.source_width(), frame.source_height()),
+            dirty,
+            acknowledge,
+        )
+    }
+
+    fn commit_buffer(
+        &mut self,
+        buffer: &wl_buffer::WlBuffer,
+        sequence: u64,
+        scope: (u64, u64),
+        encoded: (u16, u16),
+        source: (u16, u16),
+        dirty: super::frame::DamageRegions,
+        acknowledge: bool,
+    ) -> RemoteResult<()> {
+        let (width, height) = self.state.buffer_size();
+        let scale = self.state.buffer_scale();
         self.token = self
             .token
             .checked_add(1)
             .ok_or("Wayland viewer token exhausted")?;
+        if let Some(previous) = self.state.pending.take()
+            && !previous.presented
+        {
+            if !self.state.obsolete_feedback.is_empty()
+                || !self.state.pending_is_obsolete(&previous)
+            {
+                return Err("cannot retire current Wayland presentation".into());
+            }
+            self.state.retire_feedback(previous);
+        }
+        self.state.viewport_redraw = None;
+        self.state.scope = Some(scope);
         let qh = self.queue.handle();
-        let buffer = slot.buffer.clone();
-        slot.meta.busy = true;
         let _feedback =
             self.state
                 .presentation
                 .as_ref()
                 .unwrap()
-                .feedback(&self.surface, &qh, self.token);
+                .feedback(&self.role.surface, &qh, self.token);
         self.state.pending = Some(Pending {
             mapping: pointer::Mapping {
-                sequence: frame.sequence(),
+                sequence,
                 source_epoch: scope.0,
                 geometry_epoch: scope.1,
                 generation: self.state.generation,
-                viewport: (width, height),
-                encoded: (frame.image().width() as u16, frame.image().height() as u16),
-                source: (frame.source_width(), frame.source_height()),
+                viewport: self.viewport(),
+                buffer_scale: scale,
+                encoded,
+                source,
             },
             token: self.token,
-            sequence: frame.sequence(),
+            sequence,
             source_epoch: scope.0,
             geometry_epoch: scope.1,
             generation: self.state.generation,
+            acknowledge,
             presented: false,
             started: Instant::now(),
         });
@@ -1197,26 +1635,28 @@ impl WaylandViewer {
         let commit_observer = CONTROL_FRAME_OBSERVER.with(|slot| slot.borrow().clone());
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         let mut commit_observation = commit_observer.as_ref().map(|o| o.lock().unwrap());
-        self.surface.attach(Some(&buffer), 0, 0);
+        self.role.surface.set_buffer_scale(i32::from(scale));
+        self.role.surface.attach(Some(buffer), 0, 0);
         // The slot's accumulated damage covers every change since the last
         // attached image too. Keepalives/NativeProof still require a fresh
         // compositor redraw and presentation proof, even with zero SHM writes.
         if dirty.as_slice().is_empty() {
-            self.surface
+            self.role
+                .surface
                 .damage_buffer(0, 0, i32::from(width), i32::from(height));
         }
         for &(x, y, w, h) in dirty.as_slice() {
-            self.surface
+            self.role
+                .surface
                 .damage_buffer(i32::from(x), i32::from(y), i32::from(w), i32::from(h));
         }
-        self.surface.commit();
+        self.role.surface.commit();
         self.prepare_wait()?;
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         if let Some(observation) = commit_observation.as_mut() {
-            observation.0 = Some(frame.sequence());
+            observation.0 = Some(sequence);
         }
-        self.last_frame = Some(frame);
-        Ok(true)
+        Ok(())
     }
     fn retire_slot(&mut self, index: usize) -> RemoteResult<()> {
         if self.state.retirement.is_some() || self.state.slots[index].meta.busy {
@@ -1237,11 +1677,12 @@ impl WaylandViewer {
         while self.state.retirement.is_some() {
             self.prepare_wait()?;
             pump_connection(&self.conn, &mut self.queue, &mut self.state)?;
-            if self.state.closed
-                || !retirement_scope_matches(
-                    snapshot,
-                    (self.state.generation, self.viewport(), self.state.scope),
-                )
+            if !self.state.supports_continuous_viewport()
+                && (self.state.closed
+                    || !retirement_scope_matches(
+                        snapshot,
+                        (self.state.generation, self.viewport(), self.state.scope),
+                    ))
             {
                 return Err("Wayland viewer changed while retiring SHM storage".into());
             }
@@ -1354,7 +1795,21 @@ impl WaylandViewer {
             .pending
             .as_ref()
             .map(|p| p.started + TIMEOUT)
-            .or_else(|| self.state.blocked_since.map(|at| at + TIMEOUT));
+            .into_iter()
+            .chain(
+                self.state
+                    .obsolete_feedback
+                    .iter()
+                    .map(|feedback| feedback.started + TIMEOUT),
+            )
+            .chain(
+                self.state
+                    .source_change
+                    .as_ref()
+                    .map(|change| change.started + TIMEOUT),
+            )
+            .chain(self.state.blocked_since.map(|at| at + TIMEOUT))
+            .min();
         let pending = match (pending, self.state.pointer.deadline()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -1372,6 +1827,11 @@ impl WaylandViewer {
     pub(super) fn user_close_requested(&self) -> bool {
         self.state.closed
     }
+    pub(super) fn request_close(&mut self) {
+        self.state.closed = true;
+        #[cfg(all(test, feature = "backend-wayland-udev"))]
+        self.state.popup_live.end();
+    }
     pub(super) fn prepare_frame_geometry(&mut self, epoch: u64) -> RemoteResult<bool> {
         let changed = self.state.scope.is_some_and(|(_, old)| old != epoch);
         if changed {
@@ -1382,18 +1842,91 @@ impl WaylandViewer {
     }
     pub(super) fn refresh_pending_redraw(&mut self) -> RemoteResult<()> {
         self.pump()?;
-        Ok(())
+        if !self.can_submit_frame()
+            || self.state.viewport_redraw.is_none()
+            || self.last_frame.is_none()
+        {
+            return Ok(());
+        }
+        let Some(index) = self.prepare_slot()? else {
+            return Ok(());
+        };
+        let acknowledge = self.state.viewport_redraw == Some(ViewportRedraw::AwaitingAck);
+        let frame = self.last_frame.take().unwrap();
+        let result = self.commit_prepared(index, &frame, None, acknowledge);
+        self.last_frame = Some(frame);
+        result
     }
-    pub(super) fn invalidate_source(&mut self, _label: String) -> RemoteResult<()> {
-        // A source switch would require a complete xdg unmap/remap handshake.
-        // First-stage native viewer deliberately does not support that flow.
+    pub(super) fn begin_source_change(&mut self) -> RemoteResult<()> {
+        if !self.state.is_view_only_session()
+            || !self.state.configured
+            || self.state.source_change.is_some()
+        {
+            return Err("Wayland source selection requires a configured view-only session".into());
+        }
+        self.state.role_id = self
+            .state
+            .role_id
+            .checked_add(1)
+            .ok_or("Wayland surface role identity exhausted")?;
+        self.state.source_change = Some(SourceChange {
+            started: Instant::now(),
+            accepted: false,
+        });
+        self.state.invalidate_layout();
+        self.state.configured = false;
+        self.state.proposed = None;
+        self.state.preferred_scale = None;
+        for output in &mut self.state.outputs {
+            output.entered = false;
+        }
+        self.state.scope = None;
+        self.state.completed.clear();
+        self.state.viewport_redraw = None;
+        self.last_frame = None;
+        if let Some(previous) = self.state.pending.take()
+            && !previous.presented
+        {
+            self.state.retire_feedback(previous);
+        }
+        self.state.check()?;
+        self.role.destroy();
+        #[cfg(feature = "remote-h264")]
+        {
+            self.last_native = None;
+            self.state.gpu.reset_role();
+        }
+        self.base_title = "jwm-remote — switching source".into();
+        self.role = ViewerSurface::create(&self.state, &self.queue.handle(), &self.base_title);
+        self.prepare_wait()
+    }
+
+    pub(super) fn invalidate_source(
+        &mut self,
+        label: String,
+        explicitly_selected: bool,
+    ) -> RemoteResult<()> {
+        if explicitly_selected
+            && let Some(change) = self
+                .state
+                .source_change
+                .as_mut()
+                .filter(|change| !change.accepted)
+        {
+            change.accepted = true;
+            self.set_source_label(label);
+            return self.state.check();
+        }
         self.state.pointer.revoke("Wayland pointer source changed");
-        self.state.failure =
-            Some("Wayland viewer source switching is unsupported; session closed".into());
+        self.state.failure = Some(
+            "Wayland viewer rejected a source change without a matching view-only selection".into(),
+        );
         self.state.completed.clear();
         self.state.check()
     }
-    pub(super) fn source_presented(&mut self, _epoch: u64) {}
+    pub(super) fn source_presented(&mut self, _epoch: u64) {
+        self.state.source_change = None;
+    }
     pub(super) fn set_source_label(&mut self, label: String) {
         let label: String = label
             .chars()
@@ -1403,7 +1936,7 @@ impl WaylandViewer {
         if label != self.base_title {
             self.base_title = label;
             self.pointer_title_status = None;
-            self.toplevel.set_title(self.base_title.clone());
+            self.role.toplevel.set_title(self.base_title.clone());
         }
     }
 }
@@ -1499,6 +2032,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } => {
                 match interface.as_str() {
+                    #[cfg(feature = "remote-h264")]
+                    "zwp_linux_dmabuf_v1" if version >= 4 => {
+                        state.gpu.global.get_or_insert(name);
+                        return;
+                    }
                     "jwm_remote_viewer_handoff_manager_v1"
                         if state.handoff.manager.is_none() && version >= 2 =>
                     {
@@ -1513,6 +2051,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                             .pointer
                             .revoke("Wayland pointer seat topology changed");
                         state.keyboard.global(name, version);
+                        return;
+                    }
+                    "wl_output" if version >= 2 => {
+                        state.outputs.push(OutputScale {
+                            name,
+                            output: registry.bind(name, version.min(3), qh, ()),
+                            committed: 1,
+                            pending: None,
+                            entered: false,
+                        });
                         return;
                     }
                     "wl_compositor" if state.compositor.is_none() && version >= 4 => {
@@ -1536,6 +2084,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 }
             }
             wl_registry::Event::GlobalRemove { name } => {
+                #[cfg(feature = "remote-h264")]
+                state.gpu.remove_global(name);
+                if let Some(index) = state.outputs.iter().position(|output| output.name == name) {
+                    let previous = state.buffer_scale();
+                    let output = state.outputs.swap_remove(index).output;
+                    if output.version() >= 3 {
+                        output.release();
+                    }
+                    state.scale_changed(previous);
+                }
                 if state.handoff.global == Some(name) && state.handoff.enabled {
                     state.handoff.fail("local handoff global removed");
                 }
@@ -1545,6 +2103,35 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 state.keyboard.removed(name);
                 if state.globals.contains(&name) {
                     state.failure = Some("required Wayland global removed".into());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+impl Dispatch<wl_output::WlOutput, ()> for State {
+    fn event(
+        state: &mut Self,
+        output: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let previous = state.buffer_scale();
+        let Some(output) = state
+            .outputs
+            .iter_mut()
+            .find(|entry| &entry.output == output)
+        else {
+            return;
+        };
+        match event {
+            wl_output::Event::Scale { factor } if factor > 0 => output.pending = Some(factor),
+            wl_output::Event::Done => {
+                if let Some(factor) = output.pending.take() {
+                    output.committed = factor;
+                    state.scale_changed(previous);
                 }
             }
             _ => {}
@@ -1582,15 +2169,18 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for State {
         }
     }
 }
-impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
+impl Dispatch<xdg_toplevel::XdgToplevel, u64> for State {
     fn event(
         state: &mut Self,
         _: &xdg_toplevel::XdgToplevel,
         event: xdg_toplevel::Event,
-        _: &(),
+        role_id: &u64,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if *role_id != state.role_id {
+            return;
+        }
         match event {
             xdg_toplevel::Event::Configure {
                 width,
@@ -1603,6 +2193,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                     .pointer
                     .activation_for_handoff(&states, state.handoff.expects_focus_exit());
                 if state.pointer.requested
+                    && !state.managed_control_viewport
                     && state.configured
                     && ((width != 0 && width != i32::from(state.width))
                         || (height != 0 && height != i32::from(state.height)))
@@ -1635,19 +2226,21 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         }
     }
 }
-impl Dispatch<xdg_surface::XdgSurface, ()> for State {
+impl Dispatch<xdg_surface::XdgSurface, u64> for State {
     fn event(
         state: &mut Self,
         surface: &xdg_surface::XdgSurface,
         event: xdg_surface::Event,
-        _: &(),
+        role_id: &u64,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let xdg_surface::Event::Configure { serial } = event {
+        if *role_id == state.role_id
+            && let xdg_surface::Event::Configure { serial } = event
+        {
             if let Some((w, h)) = state.proposed.take() {
                 if state.configured && (w, h) != (state.width, state.height) {
-                    state.advance_generation();
+                    state.resize_viewport();
                 }
                 state.width = w;
                 state.height = h;
@@ -1657,18 +2250,44 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
         }
     }
 }
-impl Dispatch<wl_surface::WlSurface, ()> for State {
+impl Dispatch<wl_surface::WlSurface, u64> for State {
     fn event(
         state: &mut Self,
         _: &wl_surface::WlSurface,
         event: wl_surface::Event,
-        _: &(),
+        role_id: &u64,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if *role_id != state.role_id {
+            return;
+        }
+        let previous = state.buffer_scale();
         match event {
-            wl_surface::Event::PreferredBufferScale { factor } if factor != 1 => {
-                state.failure = Some("Wayland viewer only supports buffer scale one".into())
+            wl_surface::Event::PreferredBufferScale { factor } => {
+                if factor <= 0 {
+                    state.failure = Some("Wayland compositor sent an invalid buffer scale".into());
+                } else {
+                    state.preferred_scale = Some(factor);
+                }
+            }
+            wl_surface::Event::Enter { output } => {
+                if let Some(entry) = state
+                    .outputs
+                    .iter_mut()
+                    .find(|entry| entry.output == output)
+                {
+                    entry.entered = true;
+                }
+            }
+            wl_surface::Event::Leave { output } => {
+                if let Some(entry) = state
+                    .outputs
+                    .iter_mut()
+                    .find(|entry| entry.output == output)
+                {
+                    entry.entered = false;
+                }
             }
             wl_surface::Event::PreferredBufferTransform { transform }
                 if transform
@@ -1678,6 +2297,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
             }
             _ => {}
         }
+        state.scale_changed(previous);
     }
 }
 impl Dispatch<wl_callback::WlCallback, u64> for State {
@@ -1727,32 +2347,16 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, u64> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        match event {
-            wp_presentation_feedback::Event::Presented { .. } => match state.pending.as_mut() {
-                Some(p)
-                    if p.token == *token
-                        && !p.presented
-                        && p.generation == state.generation
-                        && state.scope == Some((p.source_epoch, p.geometry_epoch)) =>
-                {
-                    p.presented = true;
-                    state.pointer.presented(p.mapping);
-                    if state.completed.is_empty() {
-                        state.completed.push(p.sequence);
-                    } else {
-                        state.failure = Some("unconsumed Wayland presentation completion".into());
-                    }
-                }
-                _ => {
-                    state.failure = Some("stale or duplicate Wayland presentation feedback".into())
-                }
-            },
-            wp_presentation_feedback::Event::Discarded => {
-                state.failure =
-                    Some("Wayland compositor discarded frame; no presentation ACK".into())
+        let result = match event {
+            wp_presentation_feedback::Event::Presented { .. } => {
+                state.finish_feedback(*token, true)
             }
-            wp_presentation_feedback::Event::SyncOutput { .. } => {}
-            _ => state.failure = Some("unsupported Wayland presentation feedback".into()),
+            wp_presentation_feedback::Event::Discarded => state.finish_feedback(*token, false),
+            wp_presentation_feedback::Event::SyncOutput { .. } => Ok(()),
+            _ => Err("unsupported Wayland presentation feedback".into()),
+        };
+        if let Err(error) = result {
+            state.failure = Some(error);
         }
     }
 }
@@ -1893,6 +2497,15 @@ mod tests {
         assert!(!storage_can_submit(false, false, 2, false));
         assert!(storage_can_submit(false, false, 2, true));
         assert!(!storage_can_submit(false, false, 3, true));
+    }
+
+    #[test]
+    fn viewer_output_scale_respects_the_physical_buffer_budget() {
+        assert_eq!(bounded_buffer_scale((400, 300), 2), 2);
+        assert_eq!(bounded_buffer_scale((1920, 1080), 3), 2);
+        assert_eq!(bounded_buffer_scale((3840, 2160), 2), 1);
+        assert_eq!(bounded_buffer_scale((MAX_DIMENSION, 1), 2), 1);
+        assert_eq!(bounded_buffer_scale((1, 1), i32::MAX), 4096);
     }
 
     #[test]

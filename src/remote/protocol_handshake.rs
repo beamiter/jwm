@@ -131,10 +131,14 @@ fn verify_finished(
     }
     Ok(())
 }
-fn extract(boxed: &[u8; KEYBOX_LEN]) -> SessionKeys {
+fn extract(boxed: &[u8; KEYBOX_LEN], public_context: &[u8]) -> SessionKeys {
+    // Correlate host and viewer logs using only the public, authenticated
+    // version headers and random nonces. No key material enters diagnostics.
+    let public_context_digest = Sha256::digest(public_context);
     let mut keys = SessionKeys {
         c2s: [0; 32],
         s2c: [0; 32],
+        correlation_id: u128::from_be_bytes(public_context_digest[..16].try_into().unwrap()),
     };
     keys.c2s.copy_from_slice(&boxed[64..96]);
     keys.s2c.copy_from_slice(&boxed[96..128]);
@@ -175,7 +179,7 @@ pub(super) fn client<S: Read + Write>(
         &mut state,
         &finished(b"jwm-v3/server-finished", &hash, &digest),
     )?;
-    Ok(extract(&boxed))
+    Ok(extract(&boxed, &context))
 }
 
 pub(super) fn server<S: Read + Write>(
@@ -215,5 +219,5 @@ pub(super) fn server<S: Read + Write>(
         &mut state,
         &finished(b"jwm-v3/server-finished", &hash, &digest)[..],
     )?;
-    Ok(extract(&boxed))
+    Ok(extract(&boxed, &context))
 }

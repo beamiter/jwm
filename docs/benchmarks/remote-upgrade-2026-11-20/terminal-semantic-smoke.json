@@ -1,0 +1,61 @@
+{
+  "frontend_tests_passed": 163,
+  "native_webview": {
+    "clean_exit": true,
+    "detached": true,
+    "markers": [
+      "SEMANTIC_READY",
+      "AFTER_RECONNECT"
+    ],
+    "reconnected": true,
+    "visible_output_before_detach": true,
+    "visible_output_generated_while_detached": true,
+    "webview": "WebKitGTK on private Xvfb"
+  },
+  "pty_runs": {
+    "development": {
+      "bridge_tests_passed": 14,
+      "delta_bytes": 19271,
+      "snapshot_bytes": 101391
+    },
+    "ubuntu_192_168_0_78": {
+      "bridge_tests_passed": 14,
+      "delta_bytes": 25613,
+      "snapshot_bytes": 101391
+    }
+  },
+  "scope": "Aether Linux PTY, local Tauri IPC, standalone OpenSSH and native SSH Terminal tab",
+  "ssh_host": {
+    "client": "development machine",
+    "host": "ubuntu@192.168.0.78",
+    "transport_protocol": 1,
+    "connections_per_run": 4,
+    "runs_passed": 5,
+    "initial_snapshot_record_bytes": 101431,
+    "unacknowledged_delta_record_bytes": [12968, 12969],
+    "independent_ssh_connections_closed_abruptly": true,
+    "same_shell_variable_after_reconnect": true,
+    "output_generated_while_disconnected_recovered": true,
+    "unacknowledged_recovery_retried_identically": true,
+    "stale_ack_input_and_close_rejected": true,
+    "fresh_attach_read_only": true,
+    "owned_pty_reaped": true,
+    "bridge_tests_passed_on_each_machine": 17
+  },
+  "ssh_webview": {
+    "client": "Aether WebKitGTK on private Xvfb on the development machine",
+    "host": "ubuntu@192.168.0.78",
+    "repeatable_runs_passed": 3,
+    "actual_ssh_children_per_run": 3,
+    "owned_open_ssh_child_killed": true,
+    "disconnect_output_restored_in_actual_canvas": true,
+    "new_input_on_resumed_original_shell": true,
+    "fresh_attachment_read_only": true,
+    "attempted_read_only_write_created_no_remote_file": true,
+    "remote_pty_reaped_after_close": true,
+    "native_client_exited_successfully": true,
+    "bridge_tests_passed_on_each_machine": 19
+  },
+  "tauri_tests_passed": 4,
+  "wire_test": "16 rows by 80 columns; encoded JSON length of the same publication as a row delta and full snapshot"
+}

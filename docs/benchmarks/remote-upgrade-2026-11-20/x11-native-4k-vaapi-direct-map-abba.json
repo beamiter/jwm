@@ -1,0 +1,3110 @@
+{
+  "schema_version": 1,
+  "protocol": {
+    "schema_version": 1,
+    "label": "vaapi-direct-map-4k",
+    "order": [
+      "off",
+      "on",
+      "on",
+      "off",
+      "off",
+      "on",
+      "on",
+      "off"
+    ],
+    "scenario": "4K native-size X11 CPU viewer VA-API direct map",
+    "dimensions": [
+      3840,
+      2160
+    ],
+    "requested_fps": 30,
+    "source_requested_fps": 60,
+    "host_scaling_policy": "auto",
+    "viewer_scaling_policy": "cpu",
+    "warmup_seconds": 30,
+    "score_seconds": 60,
+    "observer_seconds": 105,
+    "retry_failed_trial": false,
+    "binary_pins": {
+      "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+      "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136",
+      "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+      "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9"
+    },
+    "fixture_sources_sha256": {
+      "fixture_4k.py": "72fb5b451d15cab3321929c8cb05469290c1c401d4aa294d12a94445151a9518",
+      "source.py": "f71c60e20a755e598f813a572bfc5ebe9cd4141374197f51ce3f08d202b2a153",
+      "processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "p09-workload.c": "47f6fd3ad8606673e78680846dad7b749598238153e9abddf328d2cdea89e06e",
+      "run_abba.py": "6d0f5454becbaf0156e8c6e4f4576841e361b2584f071db6ae65ee336efc3517"
+    }
+  },
+  "controller_exit": 0,
+  "status": "complete",
+  "independent_arm_summaries": {
+    "off": {
+      "trial_count": 4,
+      "trial_unique_fps": {
+        "minimum": 13.05,
+        "median": 13.25,
+        "maximum": 15.4
+      },
+      "trial_observer_gap_p95_ms": {
+        "minimum": 132.77388,
+        "median": 140.17288200000002,
+        "maximum": 155.566528
+      },
+      "trial_observer_longest_gap_ms": {
+        "minimum": 280.92929,
+        "median": 369.514046,
+        "maximum": 526.123315
+      },
+      "trial_capture_window_p50_medians_ms": {
+        "minimum": 11.5825,
+        "median": 11.6205,
+        "maximum": 11.6765
+      },
+      "trial_readback_window_p50_medians_ms": {
+        "minimum": 3.91,
+        "median": 3.923,
+        "maximum": 3.931
+      },
+      "trials_meeting_existing_27_unique_fps_target": 0,
+      "stages": {
+        "host": {
+          "capture": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3352,
+            "window_p50_ms": {
+              "minimum": 11.329,
+              "median": 11.635000000000002,
+              "maximum": 11.805
+            },
+            "window_p95_ms": {
+              "minimum": 13.572,
+              "median": 15.088000000000001,
+              "maximum": 20.266
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-04-off-fixed",
+              "window": 11,
+              "p99_ms": 26.715
+            }
+          },
+          "core_getimage": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "shm_getimage": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3352,
+            "window_p50_ms": {
+              "minimum": 3.752,
+              "median": 3.925,
+              "maximum": 4.177
+            },
+            "window_p95_ms": {
+              "minimum": 6.285,
+              "median": 7.552,
+              "maximum": 9.469
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-04-off-fixed",
+              "window": 1,
+              "p99_ms": 16.562
+            }
+          },
+          "x11_rgb_conversion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3352,
+            "window_p50_ms": {
+              "minimum": 7.316,
+              "median": 7.6545000000000005,
+              "maximum": 7.703
+            },
+            "window_p95_ms": {
+              "minimum": 7.796,
+              "median": 8.535,
+              "maximum": 10.858
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-05-off-fixed",
+              "window": 11,
+              "p99_ms": 15.467
+            }
+          },
+          "x11_cpu_resize": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "mailbox_age": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3299,
+            "window_p50_ms": {
+              "minimum": 21.328,
+              "median": 31.731,
+              "maximum": 50.267
+            },
+            "window_p95_ms": {
+              "minimum": 51.843,
+              "median": 110.07050000000001,
+              "maximum": 127.116
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-04-off-fixed",
+              "window": 5,
+              "p99_ms": 135.692
+            }
+          },
+          "h264_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3298,
+            "window_p50_ms": {
+              "minimum": 33.994,
+              "median": 35.54,
+              "maximum": 35.784
+            },
+            "window_p95_ms": {
+              "minimum": 35.331,
+              "median": 36.573,
+              "maximum": 41.567
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-05-off-fixed",
+              "window": 1,
+              "p99_ms": 46.788
+            }
+          },
+          "nvenc_rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3298,
+            "window_p50_ms": {
+              "minimum": 2.698,
+              "median": 2.8085,
+              "maximum": 2.884
+            },
+            "window_p95_ms": {
+              "minimum": 3.173,
+              "median": 3.4145,
+              "maximum": 4.963
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-04-off-fixed",
+              "window": 7,
+              "p99_ms": 7.645
+            }
+          },
+          "nvenc_rgb_to_yuv": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3298,
+            "window_p50_ms": {
+              "minimum": 23.167,
+              "median": 24.842,
+              "maximum": 24.963
+            },
+            "window_p95_ms": {
+              "minimum": 24.581,
+              "median": 25.269,
+              "maximum": 29.939
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-05-off-fixed",
+              "window": 11,
+              "p99_ms": 35.234
+            }
+          },
+          "nvenc_submit": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3298,
+            "window_p50_ms": {
+              "minimum": 7.612,
+              "median": 7.6985,
+              "maximum": 7.831
+            },
+            "window_p95_ms": {
+              "minimum": 8.023,
+              "median": 8.1575,
+              "maximum": 8.333
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-05-off-fixed",
+              "window": 7,
+              "p99_ms": 11.253
+            }
+          },
+          "nvenc_output": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3298,
+            "window_p50_ms": {
+              "minimum": 0.003,
+              "median": 0.003,
+              "maximum": 0.003
+            },
+            "window_p95_ms": {
+              "minimum": 0.003,
+              "median": 0.004,
+              "maximum": 0.006
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-01-off-fixed",
+              "window": 3,
+              "p99_ms": 0.012
+            }
+          },
+          "writer_lock": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3298,
+            "window_p50_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.0
+            },
+            "window_p95_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.001
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-08-off-fixed",
+              "window": 1,
+              "p99_ms": 0.01
+            }
+          },
+          "socket_write": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3298,
+            "window_p50_ms": {
+              "minimum": 0.302,
+              "median": 0.309,
+              "maximum": 0.317
+            },
+            "window_p95_ms": {
+              "minimum": 0.327,
+              "median": 0.3565,
+              "maximum": 0.596
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-08-off-fixed",
+              "window": 10,
+              "p99_ms": 0.752
+            }
+          },
+          "credit_wait": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3299,
+            "window_p50_ms": {
+              "minimum": 8.271,
+              "median": 27.552,
+              "maximum": 48.771
+            },
+            "window_p95_ms": {
+              "minimum": 37.421,
+              "median": 99.47,
+              "maximum": 247.706
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-01-off-fixed",
+              "window": 10,
+              "p99_ms": 356.136
+            }
+          },
+          "send_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3299,
+            "window_p50_ms": {
+              "minimum": 67.869,
+              "median": 118.517,
+              "maximum": 147.549
+            },
+            "window_p95_ms": {
+              "minimum": 83.231,
+              "median": 144.26850000000002,
+              "maximum": 390.267
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-01-off-fixed",
+              "window": 10,
+              "p99_ms": 601.088
+            }
+          },
+          "capture_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3299,
+            "window_p50_ms": {
+              "minimum": 137.41,
+              "median": 196.1525,
+              "maximum": 244.817
+            },
+            "window_p95_ms": {
+              "minimum": 179.058,
+              "median": 289.17,
+              "maximum": 527.746
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-01-off-fixed",
+              "window": 10,
+              "p99_ms": 671.984
+            }
+          }
+        },
+        "viewer": {
+          "decode_path_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3300,
+            "window_p50_ms": {
+              "minimum": 32.627,
+              "median": 48.8425,
+              "maximum": 53.254
+            },
+            "window_p95_ms": {
+              "minimum": 45.46,
+              "median": 85.9255,
+              "maximum": 87.163
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-04-off-fixed",
+              "window": 12,
+              "p99_ms": 105.925
+            }
+          },
+          "vaapi_decode_call": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3300,
+            "window_p50_ms": {
+              "minimum": 0.601,
+              "median": 0.776,
+              "maximum": 0.851
+            },
+            "window_p95_ms": {
+              "minimum": 0.7,
+              "median": 0.992,
+              "maximum": 1.043
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-08-off-fixed",
+              "window": 7,
+              "p99_ms": 5.426
+            }
+          },
+          "vaapi_download": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3300,
+            "window_p50_ms": {
+              "minimum": 11.817,
+              "median": 17.3205,
+              "maximum": 19.681
+            },
+            "window_p95_ms": {
+              "minimum": 13.706,
+              "median": 22.613999999999997,
+              "maximum": 29.869
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-05-off-fixed",
+              "window": 5,
+              "p99_ms": 71.028
+            }
+          },
+          "vaapi_direct_map": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "yuv_to_rgb": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3300,
+            "window_p50_ms": {
+              "minimum": 17.853,
+              "median": 27.9125,
+              "maximum": 30.629
+            },
+            "window_p95_ms": {
+              "minimum": 26.44,
+              "median": 58.766999999999996,
+              "maximum": 59.49
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-01-off-fixed",
+              "window": 4,
+              "p99_ms": 61.082
+            }
+          },
+          "rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3300,
+            "window_p50_ms": {
+              "minimum": 2.204,
+              "median": 2.613,
+              "maximum": 2.79
+            },
+            "window_p95_ms": {
+              "minimum": 2.357,
+              "median": 4.5525,
+              "maximum": 5.118
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-05-off-fixed",
+              "window": 9,
+              "p99_ms": 6.323
+            }
+          },
+          "decode_queue": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "presentation_queue": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3297,
+            "window_p50_ms": {
+              "minimum": 0.061,
+              "median": 0.1395,
+              "maximum": 0.18
+            },
+            "window_p95_ms": {
+              "minimum": 0.161,
+              "median": 0.2045,
+              "maximum": 0.246
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-08-off-fixed",
+              "window": 7,
+              "p99_ms": 0.317
+            }
+          },
+          "presentation_completion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3297,
+            "window_p50_ms": {
+              "minimum": 16.34,
+              "median": 20.661,
+              "maximum": 44.535
+            },
+            "window_p95_ms": {
+              "minimum": 17.832,
+              "median": 33.3625,
+              "maximum": 76.697
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-01-off-fixed",
+              "window": 2,
+              "p99_ms": 92.824
+            }
+          },
+          "native_submit": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          }
+        }
+      },
+      "vaapi_map_route_totals": {
+        "mapped_frames": 0,
+        "fallback_frames": 0,
+        "staged_bytes": 0,
+        "download_observations": 3300,
+        "conversion_observations": 3300,
+        "active_windows": 48,
+        "windows_with_successful_maps": 0,
+        "windows_with_fallback_frames": 0,
+        "all_failed_or_disabled_windows": 0
+      }
+    },
+    "on": {
+      "trial_count": 4,
+      "trial_unique_fps": {
+        "minimum": 13.966666666666667,
+        "median": 14.583333333333332,
+        "maximum": 15.9
+      },
+      "trial_observer_gap_p95_ms": {
+        "minimum": 132.65419,
+        "median": 138.517377,
+        "maximum": 150.435953
+      },
+      "trial_observer_longest_gap_ms": {
+        "minimum": 304.0495,
+        "median": 463.80138650000004,
+        "maximum": 590.477657
+      },
+      "trial_capture_window_p50_medians_ms": {
+        "minimum": 11.586500000000001,
+        "median": 11.625250000000001,
+        "maximum": 11.666
+      },
+      "trial_readback_window_p50_medians_ms": {
+        "minimum": 3.8970000000000002,
+        "median": 3.9165,
+        "maximum": 3.9314999999999998
+      },
+      "trials_meeting_existing_27_unique_fps_target": 0,
+      "stages": {
+        "host": {
+          "capture": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3598,
+            "window_p50_ms": {
+              "minimum": 11.123,
+              "median": 11.621,
+              "maximum": 11.993
+            },
+            "window_p95_ms": {
+              "minimum": 13.343,
+              "median": 14.560500000000001,
+              "maximum": 17.961
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-02-on-fixed",
+              "window": 11,
+              "p99_ms": 25.701
+            }
+          },
+          "core_getimage": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "shm_getimage": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3598,
+            "window_p50_ms": {
+              "minimum": 3.692,
+              "median": 3.9130000000000003,
+              "maximum": 4.055
+            },
+            "window_p95_ms": {
+              "minimum": 6.092,
+              "median": 6.939500000000001,
+              "maximum": 9.011
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-06-on-fixed",
+              "window": 12,
+              "p99_ms": 14.062
+            }
+          },
+          "x11_rgb_conversion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3598,
+            "window_p50_ms": {
+              "minimum": 6.651,
+              "median": 7.652,
+              "maximum": 7.744
+            },
+            "window_p95_ms": {
+              "minimum": 7.901,
+              "median": 8.532499999999999,
+              "maximum": 9.785
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-02-on-fixed",
+              "window": 11,
+              "p99_ms": 16.439
+            }
+          },
+          "x11_cpu_resize": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "mailbox_age": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 20.4,
+              "median": 27.937,
+              "maximum": 77.337
+            },
+            "window_p95_ms": {
+              "minimum": 52.419,
+              "median": 107.968,
+              "maximum": 126.565
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-02-on-fixed",
+              "window": 3,
+              "p99_ms": 132.745
+            }
+          },
+          "h264_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 33.951,
+              "median": 35.522,
+              "maximum": 35.821
+            },
+            "window_p95_ms": {
+              "minimum": 35.941,
+              "median": 37.2855,
+              "maximum": 42.513
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-07-on-fixed",
+              "window": 6,
+              "p99_ms": 47.629
+            }
+          },
+          "nvenc_rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 2.691,
+              "median": 2.7874999999999996,
+              "maximum": 2.975
+            },
+            "window_p95_ms": {
+              "minimum": 3.15,
+              "median": 3.4234999999999998,
+              "maximum": 5.134
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-03-on-fixed",
+              "window": 2,
+              "p99_ms": 7.632
+            }
+          },
+          "nvenc_rgb_to_yuv": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 23.197,
+              "median": 24.827,
+              "maximum": 24.951
+            },
+            "window_p95_ms": {
+              "minimum": 25.007,
+              "median": 25.9005,
+              "maximum": 30.403
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-07-on-fixed",
+              "window": 6,
+              "p99_ms": 36.988
+            }
+          },
+          "nvenc_submit": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 7.634,
+              "median": 7.699,
+              "maximum": 7.816
+            },
+            "window_p95_ms": {
+              "minimum": 8.004,
+              "median": 8.1475,
+              "maximum": 8.409
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-07-on-fixed",
+              "window": 10,
+              "p99_ms": 10.259
+            }
+          },
+          "nvenc_output": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 0.003,
+              "median": 0.003,
+              "maximum": 0.003
+            },
+            "window_p95_ms": {
+              "minimum": 0.003,
+              "median": 0.004,
+              "maximum": 0.006
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-03-on-fixed",
+              "window": 4,
+              "p99_ms": 0.039
+            }
+          },
+          "writer_lock": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.0
+            },
+            "window_p95_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.001
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-03-on-fixed",
+              "window": 5,
+              "p99_ms": 0.009
+            }
+          },
+          "socket_write": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 0.299,
+              "median": 0.3095,
+              "maximum": 0.32
+            },
+            "window_p95_ms": {
+              "minimum": 0.325,
+              "median": 0.3535,
+              "maximum": 0.623
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-02-on-fixed",
+              "window": 5,
+              "p99_ms": 0.683
+            }
+          },
+          "credit_wait": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 4.677,
+              "median": 21.847,
+              "maximum": 79.097
+            },
+            "window_p95_ms": {
+              "minimum": 34.527,
+              "median": 94.00550000000001,
+              "maximum": 258.845
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-02-on-fixed",
+              "window": 12,
+              "p99_ms": 474.827
+            }
+          },
+          "send_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 66.224,
+              "median": 95.89699999999999,
+              "maximum": 141.107
+            },
+            "window_p95_ms": {
+              "minimum": 70.905,
+              "median": 136.962,
+              "maximum": 407.54
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-06-on-fixed",
+              "window": 11,
+              "p99_ms": 633.416
+            }
+          },
+          "capture_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3556,
+            "window_p50_ms": {
+              "minimum": 134.269,
+              "median": 183.2395,
+              "maximum": 290.755
+            },
+            "window_p95_ms": {
+              "minimum": 170.651,
+              "median": 276.332,
+              "maximum": 544.352
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-06-on-fixed",
+              "window": 11,
+              "p99_ms": 690.816
+            }
+          }
+        },
+        "viewer": {
+          "decode_path_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3521,
+            "window_p50_ms": {
+              "minimum": 30.673,
+              "median": 43.9405,
+              "maximum": 63.74
+            },
+            "window_p95_ms": {
+              "minimum": 36.108,
+              "median": 82.2245,
+              "maximum": 83.826
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-07-on-fixed",
+              "window": 9,
+              "p99_ms": 84.598
+            }
+          },
+          "vaapi_decode_call": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3521,
+            "window_p50_ms": {
+              "minimum": 0.596,
+              "median": 0.752,
+              "maximum": 0.896
+            },
+            "window_p95_ms": {
+              "minimum": 0.649,
+              "median": 0.9804999999999999,
+              "maximum": 1.034
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-03-on-fixed",
+              "window": 5,
+              "p99_ms": 1.169
+            }
+          },
+          "vaapi_download": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "vaapi_direct_map": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3521,
+            "window_p50_ms": {
+              "minimum": 9.551,
+              "median": 13.477,
+              "maximum": 17.377
+            },
+            "window_p95_ms": {
+              "minimum": 10.654,
+              "median": 17.848,
+              "maximum": 19.086
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-07-on-fixed",
+              "window": 7,
+              "p99_ms": 19.243
+            }
+          },
+          "yuv_to_rgb": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3521,
+            "window_p50_ms": {
+              "minimum": 18.545,
+              "median": 27.255499999999998,
+              "maximum": 42.28
+            },
+            "window_p95_ms": {
+              "minimum": 22.628,
+              "median": 58.963499999999996,
+              "maximum": 60.063
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-02-on-fixed",
+              "window": 4,
+              "p99_ms": 60.881
+            }
+          },
+          "rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3521,
+            "window_p50_ms": {
+              "minimum": 2.195,
+              "median": 2.5774999999999997,
+              "maximum": 3.078
+            },
+            "window_p95_ms": {
+              "minimum": 2.285,
+              "median": 4.7995,
+              "maximum": 5.541
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-06-on-fixed",
+              "window": 10,
+              "p99_ms": 18.042
+            }
+          },
+          "decode_queue": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "presentation_queue": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3522,
+            "window_p50_ms": {
+              "minimum": 0.126,
+              "median": 0.139,
+              "maximum": 0.182
+            },
+            "window_p95_ms": {
+              "minimum": 0.171,
+              "median": 0.2045,
+              "maximum": 0.253
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-06-on-fixed",
+              "window": 1,
+              "p99_ms": 0.414
+            }
+          },
+          "presentation_completion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3522,
+            "window_p50_ms": {
+              "minimum": 16.126,
+              "median": 20.269,
+              "maximum": 40.691
+            },
+            "window_p95_ms": {
+              "minimum": 17.062,
+              "median": 32.6385,
+              "maximum": 67.117
+            },
+            "largest_window_p99": {
+              "case": "vaapi-direct-map-4k-02-on-fixed",
+              "window": 1,
+              "p99_ms": 82.023
+            }
+          },
+          "native_submit": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          }
+        }
+      },
+      "vaapi_map_route_totals": {
+        "mapped_frames": 3521,
+        "fallback_frames": 0,
+        "staged_bytes": 43806873600,
+        "download_observations": 0,
+        "conversion_observations": 3521,
+        "active_windows": 48,
+        "windows_with_successful_maps": 48,
+        "windows_with_fallback_frames": 0,
+        "all_failed_or_disabled_windows": 0
+      }
+    }
+  },
+  "trials": [
+    {
+      "block": 1,
+      "slot": 1,
+      "mode": "off",
+      "accepted_case": "vaapi-direct-map-4k-01-off-fixed",
+      "attempts": [
+        {
+          "name": "vaapi-direct-map-4k-01-off-fixed",
+          "raw_directory": "vaapi-direct-map-4k-01-off-fixed",
+          "status": "valid",
+          "metrics": {
+            "observer_run_seconds": 105.000302587,
+            "source_replayed_submit_fps": 60.0129832207835,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "842c5861fa4f1bda11af9ee0933789fe",
+            "case": "vaapi-direct-map-4k-01-off-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 3,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.054657351,
+              "viewer": 60.033626485
+            },
+            "unique_fps": 13.066666666666666,
+            "p95_gap_ms": 139.422509,
+            "max_gap_ms": 526.123315,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 526.123315,
+                "measured_start_offset_ms": 44620.104522,
+                "from_marker": 4754,
+                "to_marker": 4776
+              },
+              {
+                "gap_ms": 407.781006,
+                "measured_start_offset_ms": 43623.183403,
+                "from_marker": 4697,
+                "to_marker": 4715
+              },
+              {
+                "gap_ms": 261.374147,
+                "measured_start_offset_ms": 44326.785731,
+                "from_marker": 4734,
+                "to_marker": 4742
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 796,
+              "window_p50_ms": {
+                "minimum": 11.329,
+                "median": 11.5825,
+                "maximum": 11.729
+              },
+              "window_p95_ms": {
+                "minimum": 14.32,
+                "median": 15.099499999999999,
+                "maximum": 17.902
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-01-off-fixed",
+                "window": 12,
+                "p99_ms": 23.246
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 796,
+              "window_p50_ms": {
+                "minimum": 3.834,
+                "median": 3.9165,
+                "maximum": 3.992
+              },
+              "window_p95_ms": {
+                "minimum": 6.719,
+                "median": 7.531499999999999,
+                "maximum": 9.23
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-01-off-fixed",
+                "window": 12,
+                "p99_ms": 11.205
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 796,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 18.65221425630776,
+            "source_submit_fps": 60.0129832207835,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false,
+            "vaapi_map_route": {
+              "mapped_frames": 0,
+              "fallback_frames": 0,
+              "staged_bytes": 0,
+              "download_observations": 787,
+              "conversion_observations": 787,
+              "active_windows": 12,
+              "windows_with_successful_maps": 0,
+              "windows_with_fallback_frames": 0,
+              "all_failed_or_disabled_windows": 0,
+              "windows": [
+                {
+                  "window": 1,
+                  "seconds": 5.000549812,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 69,
+                  "conversion_observations": 69
+                },
+                {
+                  "window": 2,
+                  "seconds": 5.00106908,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 63,
+                  "conversion_observations": 63
+                },
+                {
+                  "window": 3,
+                  "seconds": 5.000992923,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 69,
+                  "conversion_observations": 69
+                },
+                {
+                  "window": 4,
+                  "seconds": 5.000751938,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 64,
+                  "conversion_observations": 64
+                },
+                {
+                  "window": 5,
+                  "seconds": 5.007622269,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 67,
+                  "conversion_observations": 67
+                },
+                {
+                  "window": 6,
+                  "seconds": 5.000843751,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 65,
+                  "conversion_observations": 65
+                },
+                {
+                  "window": 7,
+                  "seconds": 5.001113665,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 64,
+                  "conversion_observations": 64
+                },
+                {
+                  "window": 8,
+                  "seconds": 5.000442166,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 61,
+                  "conversion_observations": 61
+                },
+                {
+                  "window": 9,
+                  "seconds": 5.015429012,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 55,
+                  "conversion_observations": 55
+                },
+                {
+                  "window": 10,
+                  "seconds": 5.001002129,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 73,
+                  "conversion_observations": 73
+                },
+                {
+                  "window": 11,
+                  "seconds": 5.003502951,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 70,
+                  "conversion_observations": 70
+                },
+                {
+                  "window": 12,
+                  "seconds": 5.000306789,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 67,
+                  "conversion_observations": 67
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "slot": 2,
+      "mode": "on",
+      "accepted_case": "vaapi-direct-map-4k-02-on-fixed",
+      "attempts": [
+        {
+          "name": "vaapi-direct-map-4k-02-on-fixed",
+          "raw_directory": "vaapi-direct-map-4k-02-on-fixed",
+          "status": "valid",
+          "metrics": {
+            "observer_run_seconds": 105.00098668,
+            "source_replayed_submit_fps": 60.01325102502486,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "7995c18bb43bed235059b693b334757e",
+            "case": "vaapi-direct-map-4k-02-on-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 2,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.127094691,
+              "viewer": 60.024741139
+            },
+            "unique_fps": 14.633333333333333,
+            "p95_gap_ms": 150.435953,
+            "max_gap_ms": 533.02387,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 533.02387,
+                "measured_start_offset_ms": 57699.789866,
+                "from_marker": 5363,
+                "to_marker": 5379
+              },
+              {
+                "gap_ms": 289.435369,
+                "measured_start_offset_ms": 58408.381087,
+                "from_marker": 5414,
+                "to_marker": 5420
+              },
+              {
+                "gap_ms": 260.335973,
+                "measured_start_offset_ms": 57017.455823,
+                "from_marker": 5322,
+                "to_marker": 5339
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 897,
+              "window_p50_ms": {
+                "minimum": 11.123,
+                "median": 11.586500000000001,
+                "maximum": 11.807
+              },
+              "window_p95_ms": {
+                "minimum": 13.343,
+                "median": 14.299,
+                "maximum": 16.641
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-02-on-fixed",
+                "window": 11,
+                "p99_ms": 25.701
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 897,
+              "window_p50_ms": {
+                "minimum": 3.692,
+                "median": 3.8970000000000002,
+                "maximum": 3.987
+              },
+              "window_p95_ms": {
+                "minimum": 6.092,
+                "median": 6.7275,
+                "maximum": 9.011
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-02-on-fixed",
+                "window": 3,
+                "p99_ms": 11.874
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 897,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 20.933824101572704,
+            "source_submit_fps": 60.01325102502486,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false,
+            "vaapi_map_route": {
+              "mapped_frames": 848,
+              "fallback_frames": 0,
+              "staged_bytes": 10550476800,
+              "download_observations": 0,
+              "conversion_observations": 848,
+              "active_windows": 12,
+              "windows_with_successful_maps": 12,
+              "windows_with_fallback_frames": 0,
+              "all_failed_or_disabled_windows": 0,
+              "windows": [
+                {
+                  "window": 1,
+                  "seconds": 5.000264029,
+                  "mapped_frames": 65,
+                  "fallback_frames": 0,
+                  "staged_bytes": 808704000,
+                  "download_observations": 0,
+                  "conversion_observations": 65
+                },
+                {
+                  "window": 2,
+                  "seconds": 5.001070631,
+                  "mapped_frames": 64,
+                  "fallback_frames": 0,
+                  "staged_bytes": 796262400,
+                  "download_observations": 0,
+                  "conversion_observations": 64
+                },
+                {
+                  "window": 3,
+                  "seconds": 5.00081393,
+                  "mapped_frames": 80,
+                  "fallback_frames": 0,
+                  "staged_bytes": 995328000,
+                  "download_observations": 0,
+                  "conversion_observations": 80
+                },
+                {
+                  "window": 4,
+                  "seconds": 5.000276169,
+                  "mapped_frames": 93,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1157068800,
+                  "download_observations": 0,
+                  "conversion_observations": 93
+                },
+                {
+                  "window": 5,
+                  "seconds": 5.005256353,
+                  "mapped_frames": 96,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1194393600,
+                  "download_observations": 0,
+                  "conversion_observations": 96
+                },
+                {
+                  "window": 6,
+                  "seconds": 5.000860389,
+                  "mapped_frames": 88,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1094860800,
+                  "download_observations": 0,
+                  "conversion_observations": 88
+                },
+                {
+                  "window": 7,
+                  "seconds": 5.000994741,
+                  "mapped_frames": 68,
+                  "fallback_frames": 0,
+                  "staged_bytes": 846028800,
+                  "download_observations": 0,
+                  "conversion_observations": 68
+                },
+                {
+                  "window": 8,
+                  "seconds": 5.011221149,
+                  "mapped_frames": 62,
+                  "fallback_frames": 0,
+                  "staged_bytes": 771379200,
+                  "download_observations": 0,
+                  "conversion_observations": 62
+                },
+                {
+                  "window": 9,
+                  "seconds": 5.000926069,
+                  "mapped_frames": 61,
+                  "fallback_frames": 0,
+                  "staged_bytes": 758937600,
+                  "download_observations": 0,
+                  "conversion_observations": 61
+                },
+                {
+                  "window": 10,
+                  "seconds": 5.001132271,
+                  "mapped_frames": 68,
+                  "fallback_frames": 0,
+                  "staged_bytes": 846028800,
+                  "download_observations": 0,
+                  "conversion_observations": 68
+                },
+                {
+                  "window": 11,
+                  "seconds": 5.00076971,
+                  "mapped_frames": 43,
+                  "fallback_frames": 0,
+                  "staged_bytes": 534988800,
+                  "download_observations": 0,
+                  "conversion_observations": 43
+                },
+                {
+                  "window": 12,
+                  "seconds": 5.001155698,
+                  "mapped_frames": 60,
+                  "fallback_frames": 0,
+                  "staged_bytes": 746496000,
+                  "download_observations": 0,
+                  "conversion_observations": 60
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "slot": 3,
+      "mode": "on",
+      "accepted_case": "vaapi-direct-map-4k-03-on-fixed",
+      "attempts": [
+        {
+          "name": "vaapi-direct-map-4k-03-on-fixed",
+          "raw_directory": "vaapi-direct-map-4k-03-on-fixed",
+          "status": "valid",
+          "metrics": {
+            "observer_run_seconds": 105.00115324,
+            "source_replayed_submit_fps": 60.01220723564721,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "0031d090312ed27cca78472769bc1151",
+            "case": "vaapi-direct-map-4k-03-on-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 1,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.099522777000004,
+              "viewer": 60.021142946
+            },
+            "unique_fps": 13.966666666666667,
+            "p95_gap_ms": 138.196133,
+            "max_gap_ms": 304.0495,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 304.0495,
+                "measured_start_offset_ms": 11666.834821,
+                "from_marker": 2585,
+                "to_marker": 2599
+              },
+              {
+                "gap_ms": 265.052895,
+                "measured_start_offset_ms": 10461.871642,
+                "from_marker": 2520,
+                "to_marker": 2534
+              },
+              {
+                "gap_ms": 246.644513,
+                "measured_start_offset_ms": 11270.6776,
+                "from_marker": 2567,
+                "to_marker": 2579
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 848,
+              "window_p50_ms": {
+                "minimum": 11.441,
+                "median": 11.666,
+                "maximum": 11.993
+              },
+              "window_p95_ms": {
+                "minimum": 13.917,
+                "median": 14.852,
+                "maximum": 17.961
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-03-on-fixed",
+                "window": 3,
+                "p99_ms": 24.746
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 848,
+              "window_p50_ms": {
+                "minimum": 3.808,
+                "median": 3.924,
+                "maximum": 4.055
+              },
+              "window_p95_ms": {
+                "minimum": 6.229,
+                "median": 7.08,
+                "maximum": 8.935
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-03-on-fixed",
+                "window": 12,
+                "p99_ms": 12.289
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 848,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 19.967848005263367,
+            "source_submit_fps": 60.01220723564721,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false,
+            "vaapi_map_route": {
+              "mapped_frames": 836,
+              "fallback_frames": 0,
+              "staged_bytes": 10401177600,
+              "download_observations": 0,
+              "conversion_observations": 836,
+              "active_windows": 12,
+              "windows_with_successful_maps": 12,
+              "windows_with_fallback_frames": 0,
+              "all_failed_or_disabled_windows": 0,
+              "windows": [
+                {
+                  "window": 1,
+                  "seconds": 5.000874957,
+                  "mapped_frames": 71,
+                  "fallback_frames": 0,
+                  "staged_bytes": 883353600,
+                  "download_observations": 0,
+                  "conversion_observations": 71
+                },
+                {
+                  "window": 2,
+                  "seconds": 5.000207148,
+                  "mapped_frames": 52,
+                  "fallback_frames": 0,
+                  "staged_bytes": 646963200,
+                  "download_observations": 0,
+                  "conversion_observations": 52
+                },
+                {
+                  "window": 3,
+                  "seconds": 5.000896589,
+                  "mapped_frames": 68,
+                  "fallback_frames": 0,
+                  "staged_bytes": 846028800,
+                  "download_observations": 0,
+                  "conversion_observations": 68
+                },
+                {
+                  "window": 4,
+                  "seconds": 5.004620524,
+                  "mapped_frames": 69,
+                  "fallback_frames": 0,
+                  "staged_bytes": 858470400,
+                  "download_observations": 0,
+                  "conversion_observations": 69
+                },
+                {
+                  "window": 5,
+                  "seconds": 5.001101632,
+                  "mapped_frames": 74,
+                  "fallback_frames": 0,
+                  "staged_bytes": 920678400,
+                  "download_observations": 0,
+                  "conversion_observations": 74
+                },
+                {
+                  "window": 6,
+                  "seconds": 5.000502663,
+                  "mapped_frames": 69,
+                  "fallback_frames": 0,
+                  "staged_bytes": 858470400,
+                  "download_observations": 0,
+                  "conversion_observations": 69
+                },
+                {
+                  "window": 7,
+                  "seconds": 5.010402175,
+                  "mapped_frames": 74,
+                  "fallback_frames": 0,
+                  "staged_bytes": 920678400,
+                  "download_observations": 0,
+                  "conversion_observations": 74
+                },
+                {
+                  "window": 8,
+                  "seconds": 5.000323668,
+                  "mapped_frames": 74,
+                  "fallback_frames": 0,
+                  "staged_bytes": 920678400,
+                  "download_observations": 0,
+                  "conversion_observations": 74
+                },
+                {
+                  "window": 9,
+                  "seconds": 5.000444046,
+                  "mapped_frames": 71,
+                  "fallback_frames": 0,
+                  "staged_bytes": 883353600,
+                  "download_observations": 0,
+                  "conversion_observations": 71
+                },
+                {
+                  "window": 10,
+                  "seconds": 5.000783427,
+                  "mapped_frames": 76,
+                  "fallback_frames": 0,
+                  "staged_bytes": 945561600,
+                  "download_observations": 0,
+                  "conversion_observations": 76
+                },
+                {
+                  "window": 11,
+                  "seconds": 5.000325809,
+                  "mapped_frames": 71,
+                  "fallback_frames": 0,
+                  "staged_bytes": 883353600,
+                  "download_observations": 0,
+                  "conversion_observations": 71
+                },
+                {
+                  "window": 12,
+                  "seconds": 5.000660308,
+                  "mapped_frames": 67,
+                  "fallback_frames": 0,
+                  "staged_bytes": 833587200,
+                  "download_observations": 0,
+                  "conversion_observations": 67
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "slot": 4,
+      "mode": "off",
+      "accepted_case": "vaapi-direct-map-4k-04-off-fixed",
+      "attempts": [
+        {
+          "name": "vaapi-direct-map-4k-04-off-fixed",
+          "raw_directory": "vaapi-direct-map-4k-04-off-fixed",
+          "status": "valid",
+          "metrics": {
+            "observer_run_seconds": 105.000247331,
+            "source_replayed_submit_fps": 60.01170983550574,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "b455d68e379c67cd32ddfb0208c70953",
+            "case": "vaapi-direct-map-4k-04-off-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 3,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.097787383000004,
+              "viewer": 60.024973416
+            },
+            "unique_fps": 13.05,
+            "p95_gap_ms": 155.566528,
+            "max_gap_ms": 280.92929,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 280.92929,
+                "measured_start_offset_ms": 23465.848702,
+                "from_marker": 3296,
+                "to_marker": 3306
+              },
+              {
+                "gap_ms": 278.845243,
+                "measured_start_offset_ms": 22752.211371,
+                "from_marker": 3261,
+                "to_marker": 3267
+              },
+              {
+                "gap_ms": 252.308743,
+                "measured_start_offset_ms": 24478.859729,
+                "from_marker": 3363,
+                "to_marker": 3377
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 804,
+              "window_p50_ms": {
+                "minimum": 11.531,
+                "median": 11.6765,
+                "maximum": 11.796
+              },
+              "window_p95_ms": {
+                "minimum": 13.662,
+                "median": 14.853,
+                "maximum": 17.937
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-04-off-fixed",
+                "window": 11,
+                "p99_ms": 26.715
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 804,
+              "window_p50_ms": {
+                "minimum": 3.841,
+                "median": 3.931,
+                "maximum": 4.177
+              },
+              "window_p95_ms": {
+                "minimum": 6.285,
+                "median": 7.294499999999999,
+                "maximum": 9.469
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-04-off-fixed",
+                "window": 1,
+                "p99_ms": 16.562
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 804,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 18.612789600244373,
+            "source_submit_fps": 60.01170983550574,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false,
+            "vaapi_map_route": {
+              "mapped_frames": 0,
+              "fallback_frames": 0,
+              "staged_bytes": 0,
+              "download_observations": 773,
+              "conversion_observations": 773,
+              "active_windows": 12,
+              "windows_with_successful_maps": 0,
+              "windows_with_fallback_frames": 0,
+              "all_failed_or_disabled_windows": 0,
+              "windows": [
+                {
+                  "window": 1,
+                  "seconds": 5.000601756,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 59,
+                  "conversion_observations": 59
+                },
+                {
+                  "window": 2,
+                  "seconds": 5.000704689,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 68,
+                  "conversion_observations": 68
+                },
+                {
+                  "window": 3,
+                  "seconds": 5.000634879,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 73,
+                  "conversion_observations": 73
+                },
+                {
+                  "window": 4,
+                  "seconds": 5.000776612,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 50,
+                  "conversion_observations": 50
+                },
+                {
+                  "window": 5,
+                  "seconds": 5.000598585,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 60,
+                  "conversion_observations": 60
+                },
+                {
+                  "window": 6,
+                  "seconds": 5.011056092,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 64,
+                  "conversion_observations": 64
+                },
+                {
+                  "window": 7,
+                  "seconds": 5.000756446,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 62,
+                  "conversion_observations": 62
+                },
+                {
+                  "window": 8,
+                  "seconds": 5.001167736,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 64,
+                  "conversion_observations": 64
+                },
+                {
+                  "window": 9,
+                  "seconds": 5.001716963,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 60,
+                  "conversion_observations": 60
+                },
+                {
+                  "window": 10,
+                  "seconds": 5.001005687,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 55,
+                  "conversion_observations": 55
+                },
+                {
+                  "window": 11,
+                  "seconds": 5.000333406,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 90,
+                  "conversion_observations": 90
+                },
+                {
+                  "window": 12,
+                  "seconds": 5.005620565,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 68,
+                  "conversion_observations": 68
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "slot": 5,
+      "mode": "off",
+      "accepted_case": "vaapi-direct-map-4k-05-off-fixed",
+      "attempts": [
+        {
+          "name": "vaapi-direct-map-4k-05-off-fixed",
+          "raw_directory": "vaapi-direct-map-4k-05-off-fixed",
+          "status": "valid",
+          "metrics": {
+            "observer_run_seconds": 105.000437193,
+            "source_replayed_submit_fps": 60.01138604613827,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "0d907d804d1e452fe3276da8a85d7e29",
+            "case": "vaapi-direct-map-4k-05-off-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 4,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.117149773,
+              "viewer": 60.02969318
+            },
+            "unique_fps": 15.4,
+            "p95_gap_ms": 132.77388,
+            "max_gap_ms": 362.92209,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 362.92209,
+                "measured_start_offset_ms": 37029.108062,
+                "from_marker": 4129,
+                "to_marker": 4140
+              },
+              {
+                "gap_ms": 273.917715,
+                "measured_start_offset_ms": 36443.243556,
+                "from_marker": 4089,
+                "to_marker": 4097
+              },
+              {
+                "gap_ms": 271.090273,
+                "measured_start_offset_ms": 37854.823975,
+                "from_marker": 4164,
+                "to_marker": 4174
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 932,
+              "window_p50_ms": {
+                "minimum": 11.472,
+                "median": 11.653500000000001,
+                "maximum": 11.805
+              },
+              "window_p95_ms": {
+                "minimum": 13.572,
+                "median": 15.954,
+                "maximum": 20.266
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-05-off-fixed",
+                "window": 11,
+                "p99_ms": 24.571
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 932,
+              "window_p50_ms": {
+                "minimum": 3.752,
+                "median": 3.91,
+                "maximum": 4.071
+              },
+              "window_p95_ms": {
+                "minimum": 6.309,
+                "median": 7.4845,
+                "maximum": 9.261
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-05-off-fixed",
+                "window": 10,
+                "p99_ms": 13.675
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 932,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 21.978943662319654,
+            "source_submit_fps": 60.01138604613827,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false,
+            "vaapi_map_route": {
+              "mapped_frames": 0,
+              "fallback_frames": 0,
+              "staged_bytes": 0,
+              "download_observations": 936,
+              "conversion_observations": 936,
+              "active_windows": 12,
+              "windows_with_successful_maps": 0,
+              "windows_with_fallback_frames": 0,
+              "all_failed_or_disabled_windows": 0,
+              "windows": [
+                {
+                  "window": 1,
+                  "seconds": 5.0006542,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 77,
+                  "conversion_observations": 77
+                },
+                {
+                  "window": 2,
+                  "seconds": 5.000545485,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 75,
+                  "conversion_observations": 75
+                },
+                {
+                  "window": 3,
+                  "seconds": 5.006954138,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 67,
+                  "conversion_observations": 67
+                },
+                {
+                  "window": 4,
+                  "seconds": 5.001137071,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 67,
+                  "conversion_observations": 67
+                },
+                {
+                  "window": 5,
+                  "seconds": 5.000068166,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 70,
+                  "conversion_observations": 70
+                },
+                {
+                  "window": 6,
+                  "seconds": 5.000715751,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 73,
+                  "conversion_observations": 73
+                },
+                {
+                  "window": 7,
+                  "seconds": 5.000519832,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 52,
+                  "conversion_observations": 52
+                },
+                {
+                  "window": 8,
+                  "seconds": 5.000340199,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 91,
+                  "conversion_observations": 91
+                },
+                {
+                  "window": 9,
+                  "seconds": 5.000928643,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 93,
+                  "conversion_observations": 93
+                },
+                {
+                  "window": 10,
+                  "seconds": 5.016703132,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 94,
+                  "conversion_observations": 94
+                },
+                {
+                  "window": 11,
+                  "seconds": 5.000728861,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 94,
+                  "conversion_observations": 94
+                },
+                {
+                  "window": 12,
+                  "seconds": 5.000397702,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 83,
+                  "conversion_observations": 83
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "slot": 6,
+      "mode": "on",
+      "accepted_case": "vaapi-direct-map-4k-06-on-fixed",
+      "attempts": [
+        {
+          "name": "vaapi-direct-map-4k-06-on-fixed",
+          "raw_directory": "vaapi-direct-map-4k-06-on-fixed",
+          "status": "valid",
+          "metrics": {
+            "observer_run_seconds": 105.000449711,
+            "source_replayed_submit_fps": 60.01250392700208,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "3c81c580349fd888ae59525d4c6123c1",
+            "case": "vaapi-direct-map-4k-06-on-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 8,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.062883311,
+              "viewer": 60.040887387
+            },
+            "unique_fps": 15.9,
+            "p95_gap_ms": 132.65419,
+            "max_gap_ms": 590.477657,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 590.477657,
+                "measured_start_offset_ms": 49366.417938,
+                "from_marker": 4862,
+                "to_marker": 4880
+              },
+              {
+                "gap_ms": 383.650983,
+                "measured_start_offset_ms": 50230.949274,
+                "from_marker": 4903,
+                "to_marker": 4919
+              },
+              {
+                "gap_ms": 313.365426,
+                "measured_start_offset_ms": 50767.518168,
+                "from_marker": 4945,
+                "to_marker": 4949
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 967,
+              "window_p50_ms": {
+                "minimum": 11.459,
+                "median": 11.594000000000001,
+                "maximum": 11.732
+              },
+              "window_p95_ms": {
+                "minimum": 13.823,
+                "median": 14.5275,
+                "maximum": 14.999
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-06-on-fixed",
+                "window": 3,
+                "p99_ms": 23.756
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 967,
+              "window_p50_ms": {
+                "minimum": 3.751,
+                "median": 3.9314999999999998,
+                "maximum": 4.03
+              },
+              "window_p95_ms": {
+                "minimum": 6.582,
+                "median": 6.862500000000001,
+                "maximum": 7.499
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-06-on-fixed",
+                "window": 12,
+                "p99_ms": 14.062
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 967,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 22.72654079778431,
+            "source_submit_fps": 60.01250392700208,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false,
+            "vaapi_map_route": {
+              "mapped_frames": 957,
+              "fallback_frames": 0,
+              "staged_bytes": 11906611200,
+              "download_observations": 0,
+              "conversion_observations": 957,
+              "active_windows": 12,
+              "windows_with_successful_maps": 12,
+              "windows_with_fallback_frames": 0,
+              "all_failed_or_disabled_windows": 0,
+              "windows": [
+                {
+                  "window": 1,
+                  "seconds": 5.000795565,
+                  "mapped_frames": 94,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1169510400,
+                  "download_observations": 0,
+                  "conversion_observations": 94
+                },
+                {
+                  "window": 2,
+                  "seconds": 5.001086966,
+                  "mapped_frames": 94,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1169510400,
+                  "download_observations": 0,
+                  "conversion_observations": 94
+                },
+                {
+                  "window": 3,
+                  "seconds": 5.0006824,
+                  "mapped_frames": 95,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1181952000,
+                  "download_observations": 0,
+                  "conversion_observations": 95
+                },
+                {
+                  "window": 4,
+                  "seconds": 5.004396121,
+                  "mapped_frames": 96,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1194393600,
+                  "download_observations": 0,
+                  "conversion_observations": 96
+                },
+                {
+                  "window": 5,
+                  "seconds": 5.000394263,
+                  "mapped_frames": 96,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1194393600,
+                  "download_observations": 0,
+                  "conversion_observations": 96
+                },
+                {
+                  "window": 6,
+                  "seconds": 5.01475093,
+                  "mapped_frames": 87,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1082419200,
+                  "download_observations": 0,
+                  "conversion_observations": 87
+                },
+                {
+                  "window": 7,
+                  "seconds": 5.004490086,
+                  "mapped_frames": 69,
+                  "fallback_frames": 0,
+                  "staged_bytes": 858470400,
+                  "download_observations": 0,
+                  "conversion_observations": 69
+                },
+                {
+                  "window": 8,
+                  "seconds": 5.000491112,
+                  "mapped_frames": 72,
+                  "fallback_frames": 0,
+                  "staged_bytes": 895795200,
+                  "download_observations": 0,
+                  "conversion_observations": 72
+                },
+                {
+                  "window": 9,
+                  "seconds": 5.00053025,
+                  "mapped_frames": 65,
+                  "fallback_frames": 0,
+                  "staged_bytes": 808704000,
+                  "download_observations": 0,
+                  "conversion_observations": 65
+                },
+                {
+                  "window": 10,
+                  "seconds": 5.000353185,
+                  "mapped_frames": 50,
+                  "fallback_frames": 0,
+                  "staged_bytes": 622080000,
+                  "download_observations": 0,
+                  "conversion_observations": 50
+                },
+                {
+                  "window": 11,
+                  "seconds": 5.00010556,
+                  "mapped_frames": 68,
+                  "fallback_frames": 0,
+                  "staged_bytes": 846028800,
+                  "download_observations": 0,
+                  "conversion_observations": 68
+                },
+                {
+                  "window": 12,
+                  "seconds": 5.012810949,
+                  "mapped_frames": 71,
+                  "fallback_frames": 0,
+                  "staged_bytes": 883353600,
+                  "download_observations": 0,
+                  "conversion_observations": 71
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "slot": 7,
+      "mode": "on",
+      "accepted_case": "vaapi-direct-map-4k-07-on-fixed",
+      "attempts": [
+        {
+          "name": "vaapi-direct-map-4k-07-on-fixed",
+          "raw_directory": "vaapi-direct-map-4k-07-on-fixed",
+          "status": "valid",
+          "metrics": {
+            "observer_run_seconds": 105.000592126,
+            "source_replayed_submit_fps": 60.012663381027124,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "6e8048e681bff0f055bda92ef9c47dbc",
+            "case": "vaapi-direct-map-4k-07-on-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 7,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.078568770000004,
+              "viewer": 60.027558692
+            },
+            "unique_fps": 14.533333333333333,
+            "p95_gap_ms": 138.838621,
+            "max_gap_ms": 394.578903,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 394.578903,
+                "measured_start_offset_ms": 2669.615404,
+                "from_marker": 2054,
+                "to_marker": 2060
+              },
+              {
+                "gap_ms": 258.565085,
+                "measured_start_offset_ms": 44763.065378,
+                "from_marker": 4581,
+                "to_marker": 4593
+              },
+              {
+                "gap_ms": 252.883614,
+                "measured_start_offset_ms": 3104.922701,
+                "from_marker": 2068,
+                "to_marker": 2086
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 886,
+              "window_p50_ms": {
+                "minimum": 11.524,
+                "median": 11.656500000000001,
+                "maximum": 11.913
+              },
+              "window_p95_ms": {
+                "minimum": 14.215,
+                "median": 14.660499999999999,
+                "maximum": 15.375
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-07-on-fixed",
+                "window": 1,
+                "p99_ms": 24.004
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 886,
+              "window_p50_ms": {
+                "minimum": 3.837,
+                "median": 3.909,
+                "maximum": 3.982
+              },
+              "window_p95_ms": {
+                "minimum": 6.554,
+                "median": 6.987,
+                "maximum": 7.817
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-07-on-fixed",
+                "window": 4,
+                "p99_ms": 13.596
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 886,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 20.92971736417082,
+            "source_submit_fps": 60.012663381027124,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false,
+            "vaapi_map_route": {
+              "mapped_frames": 880,
+              "fallback_frames": 0,
+              "staged_bytes": 10948608000,
+              "download_observations": 0,
+              "conversion_observations": 880,
+              "active_windows": 12,
+              "windows_with_successful_maps": 12,
+              "windows_with_fallback_frames": 0,
+              "all_failed_or_disabled_windows": 0,
+              "windows": [
+                {
+                  "window": 1,
+                  "seconds": 5.001061563,
+                  "mapped_frames": 70,
+                  "fallback_frames": 0,
+                  "staged_bytes": 870912000,
+                  "download_observations": 0,
+                  "conversion_observations": 70
+                },
+                {
+                  "window": 2,
+                  "seconds": 5.000181711,
+                  "mapped_frames": 70,
+                  "fallback_frames": 0,
+                  "staged_bytes": 870912000,
+                  "download_observations": 0,
+                  "conversion_observations": 70
+                },
+                {
+                  "window": 3,
+                  "seconds": 5.005827732,
+                  "mapped_frames": 83,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1032652800,
+                  "download_observations": 0,
+                  "conversion_observations": 83
+                },
+                {
+                  "window": 4,
+                  "seconds": 5.006354708,
+                  "mapped_frames": 90,
+                  "fallback_frames": 0,
+                  "staged_bytes": 1119744000,
+                  "download_observations": 0,
+                  "conversion_observations": 90
+                },
+                {
+                  "window": 5,
+                  "seconds": 5.001026581,
+                  "mapped_frames": 77,
+                  "fallback_frames": 0,
+                  "staged_bytes": 958003200,
+                  "download_observations": 0,
+                  "conversion_observations": 77
+                },
+                {
+                  "window": 6,
+                  "seconds": 5.000935167,
+                  "mapped_frames": 74,
+                  "fallback_frames": 0,
+                  "staged_bytes": 920678400,
+                  "download_observations": 0,
+                  "conversion_observations": 74
+                },
+                {
+                  "window": 7,
+                  "seconds": 5.00105627,
+                  "mapped_frames": 70,
+                  "fallback_frames": 0,
+                  "staged_bytes": 870912000,
+                  "download_observations": 0,
+                  "conversion_observations": 70
+                },
+                {
+                  "window": 8,
+                  "seconds": 5.000634587,
+                  "mapped_frames": 74,
+                  "fallback_frames": 0,
+                  "staged_bytes": 920678400,
+                  "download_observations": 0,
+                  "conversion_observations": 74
+                },
+                {
+                  "window": 9,
+                  "seconds": 5.000885304,
+                  "mapped_frames": 71,
+                  "fallback_frames": 0,
+                  "staged_bytes": 883353600,
+                  "download_observations": 0,
+                  "conversion_observations": 71
+                },
+                {
+                  "window": 10,
+                  "seconds": 5.008119936,
+                  "mapped_frames": 74,
+                  "fallback_frames": 0,
+                  "staged_bytes": 920678400,
+                  "download_observations": 0,
+                  "conversion_observations": 74
+                },
+                {
+                  "window": 11,
+                  "seconds": 5.000562743,
+                  "mapped_frames": 66,
+                  "fallback_frames": 0,
+                  "staged_bytes": 821145600,
+                  "download_observations": 0,
+                  "conversion_observations": 66
+                },
+                {
+                  "window": 12,
+                  "seconds": 5.00091239,
+                  "mapped_frames": 61,
+                  "fallback_frames": 0,
+                  "staged_bytes": 758937600,
+                  "download_observations": 0,
+                  "conversion_observations": 61
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "slot": 8,
+      "mode": "off",
+      "accepted_case": "vaapi-direct-map-4k-08-off-fixed",
+      "attempts": [
+        {
+          "name": "vaapi-direct-map-4k-08-off-fixed",
+          "raw_directory": "vaapi-direct-map-4k-08-off-fixed",
+          "status": "valid",
+          "metrics": {
+            "observer_run_seconds": 105.00092512,
+            "source_replayed_submit_fps": 60.012537587977,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "412514f7ba242e47e1b0cf9a472ac892",
+            "case": "vaapi-direct-map-4k-08-off-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 1,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.070420138,
+              "viewer": 60.047236632
+            },
+            "unique_fps": 13.433333333333334,
+            "p95_gap_ms": 140.923255,
+            "max_gap_ms": 376.106002,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 376.106002,
+                "measured_start_offset_ms": 15481.161248,
+                "from_marker": 2826,
+                "to_marker": 2843
+              },
+              {
+                "gap_ms": 314.857246,
+                "measured_start_offset_ms": 15989.554347,
+                "from_marker": 2851,
+                "to_marker": 2863
+              },
+              {
+                "gap_ms": 270.873149,
+                "measured_start_offset_ms": 17013.852653,
+                "from_marker": 2926,
+                "to_marker": 2928
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 820,
+              "window_p50_ms": {
+                "minimum": 11.404,
+                "median": 11.5875,
+                "maximum": 11.789
+              },
+              "window_p95_ms": {
+                "minimum": 14.367,
+                "median": 15.3725,
+                "maximum": 20.104
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-08-off-fixed",
+                "window": 12,
+                "p99_ms": 22.913
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 820,
+              "window_p50_ms": {
+                "minimum": 3.765,
+                "median": 3.9295,
+                "maximum": 4.091
+              },
+              "window_p95_ms": {
+                "minimum": 6.685,
+                "median": 7.8055,
+                "maximum": 9.219
+              },
+              "largest_window_p99": {
+                "case": "vaapi-direct-map-4k-08-off-fixed",
+                "window": 4,
+                "p99_ms": 11.517
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 820,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 19.170965366221953,
+            "source_submit_fps": 60.012537587977,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false,
+            "vaapi_map_route": {
+              "mapped_frames": 0,
+              "fallback_frames": 0,
+              "staged_bytes": 0,
+              "download_observations": 804,
+              "conversion_observations": 804,
+              "active_windows": 12,
+              "windows_with_successful_maps": 0,
+              "windows_with_fallback_frames": 0,
+              "all_failed_or_disabled_windows": 0,
+              "windows": [
+                {
+                  "window": 1,
+                  "seconds": 5.000797608,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 72,
+                  "conversion_observations": 72
+                },
+                {
+                  "window": 2,
+                  "seconds": 5.000514743,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 82,
+                  "conversion_observations": 82
+                },
+                {
+                  "window": 3,
+                  "seconds": 5.000261232,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 59,
+                  "conversion_observations": 59
+                },
+                {
+                  "window": 4,
+                  "seconds": 5.000700769,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 71,
+                  "conversion_observations": 71
+                },
+                {
+                  "window": 5,
+                  "seconds": 5.001147597,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 68,
+                  "conversion_observations": 68
+                },
+                {
+                  "window": 6,
+                  "seconds": 5.000832594,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 60,
+                  "conversion_observations": 60
+                },
+                {
+                  "window": 7,
+                  "seconds": 5.000352346,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 64,
+                  "conversion_observations": 64
+                },
+                {
+                  "window": 8,
+                  "seconds": 5.00044075,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 66,
+                  "conversion_observations": 66
+                },
+                {
+                  "window": 9,
+                  "seconds": 5.019589743,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 69,
+                  "conversion_observations": 69
+                },
+                {
+                  "window": 10,
+                  "seconds": 5.008407348,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 65,
+                  "conversion_observations": 65
+                },
+                {
+                  "window": 11,
+                  "seconds": 5.000730343,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 63,
+                  "conversion_observations": 63
+                },
+                {
+                  "window": 12,
+                  "seconds": 5.013461559,
+                  "mapped_frames": 0,
+                  "fallback_frames": 0,
+                  "staged_bytes": 0,
+                  "download_observations": 65,
+                  "conversion_observations": 65
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "adjacent_pairs": [
+    {
+      "slots": [
+        1,
+        2
+      ],
+      "execution_order": [
+        "off",
+        "on"
+      ],
+      "status": "valid",
+      "on_minus_off_unique_fps": 1.5666666666666664,
+      "on_minus_off_observer_gap_p95_ms": 11.013444000000021,
+      "on_minus_off_observer_max_gap_ms": 6.90055499999994
+    },
+    {
+      "slots": [
+        3,
+        4
+      ],
+      "execution_order": [
+        "on",
+        "off"
+      ],
+      "status": "valid",
+      "on_minus_off_unique_fps": 0.9166666666666661,
+      "on_minus_off_observer_gap_p95_ms": -17.370395000000002,
+      "on_minus_off_observer_max_gap_ms": 23.120210000000043
+    },
+    {
+      "slots": [
+        5,
+        6
+      ],
+      "execution_order": [
+        "off",
+        "on"
+      ],
+      "status": "valid",
+      "on_minus_off_unique_fps": 0.5,
+      "on_minus_off_observer_gap_p95_ms": -0.11968999999999141,
+      "on_minus_off_observer_max_gap_ms": 227.555567
+    },
+    {
+      "slots": [
+        7,
+        8
+      ],
+      "execution_order": [
+        "on",
+        "off"
+      ],
+      "status": "valid",
+      "on_minus_off_unique_fps": 1.0999999999999996,
+      "on_minus_off_observer_gap_p95_ms": -2.0846340000000225,
+      "on_minus_off_observer_max_gap_ms": 18.472901000000036
+    }
+  ],
+  "all_on_trials_show_mapping": true,
+  "every_active_on_window_has_some_mapped_frames": true,
+  "all_on_trials_meet_27_unique_fps": false,
+  "candidate_27_fps_qualification": false,
+  "staged_nv12_bytes_per_mapped_frame": 12441600,
+  "link": {
+    "before": {
+      "sha256_before_omission": "2422f9e3bb85a325940db4d990777c8dac4b01d6042336f0f15ba75dea9c9e67",
+      "packets": {
+        "transmitted": 8,
+        "received": 8
+      },
+      "rtt_ms": {
+        "min": 7.755,
+        "mean": 50.722,
+        "max": 93.585,
+        "mdev": 30.071
+      }
+    },
+    "after": {
+      "sha256_before_omission": "7cb54db9c39e09e9bd7c2515b6f5732214d5799a83cdc6d6b51ffd5248eee4b2",
+      "packets": {
+        "transmitted": 8,
+        "received": 8
+      },
+      "rtt_ms": {
+        "min": 1.593,
+        "mean": 45.911,
+        "max": 111.468,
+        "mdev": 46.428
+      }
+    }
+  },
+  "controller": {
+    "sha256_before_omission": "1fab326b72e56ced6d48bd3c30c5fca4df3446b1e283911f3297500699135e15",
+    "recognized_reasons": [],
+    "terminal_error_types": [],
+    "reported_starts": [
+      "vaapi-direct-map-4k-01-off-fixed",
+      "vaapi-direct-map-4k-02-on-fixed",
+      "vaapi-direct-map-4k-03-on-fixed",
+      "vaapi-direct-map-4k-04-off-fixed",
+      "vaapi-direct-map-4k-05-off-fixed",
+      "vaapi-direct-map-4k-06-on-fixed",
+      "vaapi-direct-map-4k-07-on-fixed",
+      "vaapi-direct-map-4k-08-off-fixed"
+    ],
+    "reported_failures": []
+  },
+  "method": "One pinned Ubuntu fixed H.264 NVENC host using exact MIT-SHM readback; one pinned Mint caller-supplied binary using VA-API and CPU X11 RGB presentation with the flag unset or set to 1. Software stage summaries use whole telemetry windows and their per-window quantiles. Per-window fallback counts include frames after a decoder scope stopped retrying. Only visible, increasing source markers in the exact local 60-second interval count toward 27 FPS. Raw logs retain typed records and sanitized failure/route diagnostics.",
+  "viewer_build": {
+    "viewer_binary_sha256": "95214a236de3206de7f50b3c6f5860b275519b1515607ef185a60e7a21825fb9",
+    "viewer_binary_bytes": 14500848,
+    "source_sha256": {
+      "Cargo.toml": "9dd243ceb81417a3781afabf9b040a105ad39eb63d18af118ac43a232d1c0ae6",
+      "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+      "src/remote/h264.rs": "a0e864918ca6da7eb48e5f9246e8e8260fe79105fa1b7570ceb4735b00e28cbe",
+      "src/remote/client.rs": "5d5213e18a097a1cd66b037bb51a1a997049a787360c81f27d13f7f0dcdd1614"
+    },
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "release_profile": "optimized",
+    "release_exit": 0,
+    "ffmpeg_sonames": [
+      "libavcodec.so.60",
+      "libavutil.so.58",
+      "libswscale.so.7"
+    ],
+    "tests": {
+      "remote-unit": {
+        "passed": 1123,
+        "failed": 0,
+        "ignored": 32,
+        "measured": 0,
+        "filtered_out": 5306,
+        "exit_status": 0,
+        "finished_seconds": 15.6
+      },
+      "vaapi-device-test": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 6460,
+        "exit_status": 0,
+        "finished_seconds": 0.04,
+        "test_case": "remote::h264::tests::direct_vaapi_map_matches_download_and_recovers_on_same_surface"
+      }
+    },
+    "evidence_member": "build/evidence.json",
+    "scope": "Verified candidate build and retained Cargo test records. The release binary hash is verified against the viewer pin. The test counts describe separate Cargo test executables from the retained build lane."
+  },
+  "archive": {
+    "path": "x11-native-4k-vaapi-direct-map-abba-raw.zip",
+    "sha256": "b39fa97eae70fc90939bd662c3f0166fcf5847583c58716852a8e6557b2406d5",
+    "entries": {
+      "run/protocol.json": "db1cf923f8f36c09b222c210c3428e3d6e0040d25ee970ab7297345ebcb64ea9",
+      "run/terminal.json": "8d637aabc6862582fab77a7d9a9eff4782681c4766162bea6e03155fc5ff6f49",
+      "fixture/fixture_4k.py": "02dce888528d37f16717ced3796abe3d93596cf2ab562ad798ac7317488b163f",
+      "fixture/source.py": "f71c60e20a755e598f813a572bfc5ebe9cd4141374197f51ce3f08d202b2a153",
+      "fixture/processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "fixture/p09-workload.c": "47f6fd3ad8606673e78680846dad7b749598238153e9abddf328d2cdea89e06e",
+      "fixture/run_abba.py": "6d0f5454becbaf0156e8c6e4f4576841e361b2584f071db6ae65ee336efc3517",
+      "fixture/build_provenance.py": "af5fea98dcaa907872ab776c6d311493e6e88c426d77f5a3d2ae4f842fd53dfb",
+      "fixture/direct_stats.py": "13d4ccc1b788d8ad233d62a75cb0a45857a9d2bc10b09352d4908abd0da401dc",
+      "fixture/evidence_io.py": "d406162fa931f8f34acc210c292191125edfe70fdd2306daa5cc872b8546cff5",
+      "fixture/finalize_abba.py": "0ee5c39e48a529ae8f7d6ebef0b9ce2ea98a85e030e38d93812a6fb1e5cc8cf6",
+      "fixture/stages.py": "e4a825d5666fc9702f3a8e8ba9e88f006ea642e9ab7a4e09e1a16a01eda17ce9",
+      "fixture/publish_direct_map.py": "bfa8c8aaeebcbf078603d976953933a871baa6cf7c97dc14d661dd1d34b432ae",
+      "fixture/source-archive-sha256.json": "16a01f2ba927d9ccd35bbca1e21e06bc79242eafd20a33d3e70cbd04b2f2b577",
+      "run/vaapi-direct-map-4k-01-off-fixed/result.json": "df6d5fc3ca14a343bd05768ac1175a071138f77f5e8b6345b3641b87742eeaf5",
+      "run/vaapi-direct-map-4k-01-off-fixed/observed.jsonl": "ad03c9cb38c448be5fbdb84245a10b704cb7b088dcd5e4c2ac479f05c3fdc9bb",
+      "run/vaapi-direct-map-4k-01-off-fixed/viewer-clock.jsonl": "cd3696ea6c2cae623ad443077472534e0fa797c8de59d20a8a7ce9e5714e2157",
+      "run/vaapi-direct-map-4k-01-off-fixed/retained-host.jsonl": "934f59d6131bca16c904e7124a6f87a617ac83f9b85477dff3ed52e123f294f1",
+      "run/vaapi-direct-map-4k-01-off-fixed/retained-viewer.jsonl": "aace09c81880922205995e1201f38a265579eab52bf8cd47dafd1621becca86f",
+      "run/vaapi-direct-map-4k-01-off-fixed/retained-markers.jsonl": "7b19b8fa72cb721ded07f4b849e5da3cd0f550256f999e4094b34ee13f485c40",
+      "run/vaapi-direct-map-4k-01-off-fixed/remote/paint.jsonl": "0e30582e7af57c096d3ac457af66c036def8a2f566757a8a45a471cd59aa4046",
+      "run/vaapi-direct-map-4k-01-off-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/vaapi-direct-map-4k-01-off-fixed/viewer-control.json": "0bae78fc077c0d7a15978129382f70432c036fd7d79f466e4f288403071e5e1f",
+      "run/vaapi-direct-map-4k-01-off-fixed/remote/host-telemetry.jsonl": "145f604f6e86d746a8a2d4401d0c8c7745975c9df3b1112a2e5c642336c4f64e",
+      "run/vaapi-direct-map-4k-01-off-fixed/viewer-telemetry.jsonl": "76b0d220c3e71609c071c3f196eff97a65222e09d1b94f3a0688bcfd54abdf69",
+      "run/vaapi-direct-map-4k-01-off-fixed/diagnostics.json": "fbe86fee32141cd0b0b289b75a46e277526f14cb133445a384057f76b9f85b09",
+      "run/vaapi-direct-map-4k-02-on-fixed/result.json": "7e6cbe03d71104caa190d8bcea413fc814ede8febd52e1e69aafcb04f1464657",
+      "run/vaapi-direct-map-4k-02-on-fixed/observed.jsonl": "a6d1d9907d52ab12937adfbd26473cb57e3d35c2c6fe1bdeb242f324a27952e2",
+      "run/vaapi-direct-map-4k-02-on-fixed/viewer-clock.jsonl": "a9d2fec33110bbfed1ee6582a0331193bad6eff677c808f00df7313985c65fc1",
+      "run/vaapi-direct-map-4k-02-on-fixed/retained-host.jsonl": "733e70a230c7f2873e36abea4fa6aba195209b8e0edd15390d6ac39a4fdb38be",
+      "run/vaapi-direct-map-4k-02-on-fixed/retained-viewer.jsonl": "e7d0f2918e39bae7b05e629b146cea49fdd736bef37fafa0e876bc04453a5a74",
+      "run/vaapi-direct-map-4k-02-on-fixed/retained-markers.jsonl": "7363eecc56c811943040cdd3082cd14d2b006e3b2862c88962bd0d69dbd31caf",
+      "run/vaapi-direct-map-4k-02-on-fixed/remote/paint.jsonl": "49018ed18a9be1c4415cc7f98086dd897351104738627612f9644e69041a08b7",
+      "run/vaapi-direct-map-4k-02-on-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/vaapi-direct-map-4k-02-on-fixed/viewer-control.json": "536262afb1d961158579dce7c683dda2ff87cdd4270b0978b4766d6ad66ea3f4",
+      "run/vaapi-direct-map-4k-02-on-fixed/remote/host-telemetry.jsonl": "eca0e2b4f3ebbe5b0edc7a9c18cc5e036966ba0d1a7ce5ad94bbcd18e060682a",
+      "run/vaapi-direct-map-4k-02-on-fixed/viewer-telemetry.jsonl": "64f27ad3e14c354717bd9b89457866ca6fc5df6d2526d3a62d0cae73e449e311",
+      "run/vaapi-direct-map-4k-02-on-fixed/diagnostics.json": "cdb16b967847db7ffce09af1f0ca6ad669eeb4fac6131b00e060a9426949becc",
+      "run/vaapi-direct-map-4k-03-on-fixed/result.json": "5efe4eaee8c483d8d038858fc243971545998be4fd4fbca5c973c910ceffe48a",
+      "run/vaapi-direct-map-4k-03-on-fixed/observed.jsonl": "c2c1767581809b4db378d9bf2c8bbd09916de2373e0ef4261febe018126bfb37",
+      "run/vaapi-direct-map-4k-03-on-fixed/viewer-clock.jsonl": "ffaa88b53525cda6e162a9ec8369a6df30809ba809d695d20a569d886c4a84de",
+      "run/vaapi-direct-map-4k-03-on-fixed/retained-host.jsonl": "6e051b3ebb6bdaa17a859c031820a831964f266a050aeb98a1a8d5b12706eab2",
+      "run/vaapi-direct-map-4k-03-on-fixed/retained-viewer.jsonl": "e0c0226f74191bd6538499eb823854fd79bbe40239d76c0e5f7315c3259cbcbc",
+      "run/vaapi-direct-map-4k-03-on-fixed/retained-markers.jsonl": "8de6625542b09c671688fb23cc1c5b2f83aeaf709fc7371d52afbc6120b00f3e",
+      "run/vaapi-direct-map-4k-03-on-fixed/remote/paint.jsonl": "64146781a40cf76c59d51f66570d3f4046b3fe0768806fb2075e55231808f738",
+      "run/vaapi-direct-map-4k-03-on-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/vaapi-direct-map-4k-03-on-fixed/viewer-control.json": "536262afb1d961158579dce7c683dda2ff87cdd4270b0978b4766d6ad66ea3f4",
+      "run/vaapi-direct-map-4k-03-on-fixed/remote/host-telemetry.jsonl": "11d7a6241bd905e7d200ba222efa1fdeda9a84e91850cb9292a713f67fbcc014",
+      "run/vaapi-direct-map-4k-03-on-fixed/viewer-telemetry.jsonl": "0565f6ce938e9d80e2a86a7bfffb0435063d5252d83378730911eb05865aeb22",
+      "run/vaapi-direct-map-4k-03-on-fixed/diagnostics.json": "656491a62c9150b466acd9ccc9291acdd808b28c748d12f35ef5e533e1a192b8",
+      "run/vaapi-direct-map-4k-04-off-fixed/result.json": "217a9297b2350da7c1da7086b716706785d6c054d13bf02afe40c1373f4e82c4",
+      "run/vaapi-direct-map-4k-04-off-fixed/observed.jsonl": "2345aac2ceefb3487ffae97f92778fc0d26f2f36b76bceb672af6a0cb1fa53c4",
+      "run/vaapi-direct-map-4k-04-off-fixed/viewer-clock.jsonl": "40c4f7c6ec637dc09d0e6ce2175e54beef6de0eca9be3140705e567cae5cda0d",
+      "run/vaapi-direct-map-4k-04-off-fixed/retained-host.jsonl": "e878294a41ec2edb8f7206e9c5010f493478be0142f28684993228d549143f4f",
+      "run/vaapi-direct-map-4k-04-off-fixed/retained-viewer.jsonl": "21c708ec0b6e5598b9a6a15590c13e4401674e766186de4ef493ad4fc01a748d",
+      "run/vaapi-direct-map-4k-04-off-fixed/retained-markers.jsonl": "439e35e2c4fce0b6d0a6a2a9cf997d7c03c958a247a9ee1c3c8447c946db3ad5",
+      "run/vaapi-direct-map-4k-04-off-fixed/remote/paint.jsonl": "b96a9f619597886211a6650af886f238d23b6dd0c860402d1029b77c92325cff",
+      "run/vaapi-direct-map-4k-04-off-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/vaapi-direct-map-4k-04-off-fixed/viewer-control.json": "0bae78fc077c0d7a15978129382f70432c036fd7d79f466e4f288403071e5e1f",
+      "run/vaapi-direct-map-4k-04-off-fixed/remote/host-telemetry.jsonl": "76e67802f30629aa3e0b04ccaed9d1b0e653cae1ccc464f69e3813d96e79f696",
+      "run/vaapi-direct-map-4k-04-off-fixed/viewer-telemetry.jsonl": "3f30dba6c2b7614e32ac47edc92711cfbb5a96126c6041fc9a4fdbdb64bbccb1",
+      "run/vaapi-direct-map-4k-04-off-fixed/diagnostics.json": "10344fd2573ddae3b76274f9e4dabb51c3577300aa36d1bc01b3fa45bd30e6b0",
+      "run/vaapi-direct-map-4k-05-off-fixed/result.json": "dd3d928241fa7e70d08c033ebbca0d08a6769fd4128de9fa179ba3f632d7e707",
+      "run/vaapi-direct-map-4k-05-off-fixed/observed.jsonl": "656f4b55612bbe9cddc72c3922ecbb68b374ac69c49945468253351c17d1b09c",
+      "run/vaapi-direct-map-4k-05-off-fixed/viewer-clock.jsonl": "687f1fa91a7e163e0ae86ff0109da84e4e351c27213ed13fd09b0fd5b219c293",
+      "run/vaapi-direct-map-4k-05-off-fixed/retained-host.jsonl": "3b4be1369634209b52bce0391381cdcebb2e293cc21c26631c5ec3a076341983",
+      "run/vaapi-direct-map-4k-05-off-fixed/retained-viewer.jsonl": "ea1444414dfc249d994b94575c97f323479e864271c788e64661d64fac379b0d",
+      "run/vaapi-direct-map-4k-05-off-fixed/retained-markers.jsonl": "9ba99720bb61f7889a375395238a7cc57299ee7b0825df5583df5d1c71db0834",
+      "run/vaapi-direct-map-4k-05-off-fixed/remote/paint.jsonl": "d967eeb927804bad44d722bbf61a80d9f4875cfe4f681ef38f5fbf7478130d72",
+      "run/vaapi-direct-map-4k-05-off-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/vaapi-direct-map-4k-05-off-fixed/viewer-control.json": "0bae78fc077c0d7a15978129382f70432c036fd7d79f466e4f288403071e5e1f",
+      "run/vaapi-direct-map-4k-05-off-fixed/remote/host-telemetry.jsonl": "ceea008a4b53f3c6c75f3c2b724aa76de69751e266d3d51365fc95ee51c1e074",
+      "run/vaapi-direct-map-4k-05-off-fixed/viewer-telemetry.jsonl": "eb01de179448215b7ed36d5e3924766ae84374f693d0e2ce2d499bd59c1ccec0",
+      "run/vaapi-direct-map-4k-05-off-fixed/diagnostics.json": "002df07aba00809dc89066597da55a8366df0aab285826e7e407aed781f588f4",
+      "run/vaapi-direct-map-4k-06-on-fixed/result.json": "594b03bc78be5af1d384406b4eaa3254c953e6fb43226555e26fcc14c3e06ec7",
+      "run/vaapi-direct-map-4k-06-on-fixed/observed.jsonl": "86de1aca6c04bde9200ccc166a481fb575471d4a99a26cfe5100be4c9fabd066",
+      "run/vaapi-direct-map-4k-06-on-fixed/viewer-clock.jsonl": "78cdfa925790ffff1f86e6a13a5bf38a4c42f393b1db4f5ebb7c4913d8929d80",
+      "run/vaapi-direct-map-4k-06-on-fixed/retained-host.jsonl": "c74210d05237fb11827abfd49e84c53082f53a79dac327129423c0977745ca78",
+      "run/vaapi-direct-map-4k-06-on-fixed/retained-viewer.jsonl": "7b7fc973576d8988a035ae813db209fe01bd757052649d437f792a1da917184a",
+      "run/vaapi-direct-map-4k-06-on-fixed/retained-markers.jsonl": "2dae6a03c8b9b2cd71a9adef7789b36186d41920e927cbf2c09ded099cc42af6",
+      "run/vaapi-direct-map-4k-06-on-fixed/remote/paint.jsonl": "ae7cb313c5ff6fc6b3c1abd12e9feea0e049a8c680d6c8963e8796b85d440547",
+      "run/vaapi-direct-map-4k-06-on-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/vaapi-direct-map-4k-06-on-fixed/viewer-control.json": "536262afb1d961158579dce7c683dda2ff87cdd4270b0978b4766d6ad66ea3f4",
+      "run/vaapi-direct-map-4k-06-on-fixed/remote/host-telemetry.jsonl": "e41e37bd3aea9c217b67c522f74f6592ce9038dddd7900e3460f3a594668411a",
+      "run/vaapi-direct-map-4k-06-on-fixed/viewer-telemetry.jsonl": "dc397e80bc06b34ea382fd41eafe41ff1c18183812b7e17f4526a68ecb947030",
+      "run/vaapi-direct-map-4k-06-on-fixed/diagnostics.json": "bf365a64d1b12c1f8a5c21ba888c03b4a76c3e7251c343419a82a518bf1e5ed6",
+      "run/vaapi-direct-map-4k-07-on-fixed/result.json": "cd044b82474b0053330f72e4c3c00fd3176901391b102253d880741eca16abe6",
+      "run/vaapi-direct-map-4k-07-on-fixed/observed.jsonl": "476028c5d3d39f20325dea994344992d494ed7ab30c3c6c0539f4399e6057a34",
+      "run/vaapi-direct-map-4k-07-on-fixed/viewer-clock.jsonl": "f8dfe943735304b1b9f4051474d4241b51870a1e090d22ed3866238b49858a25",
+      "run/vaapi-direct-map-4k-07-on-fixed/retained-host.jsonl": "04b572d01ee18d324cfb70a1948570258cdc2de124df6ad8cc262c1b41129f5e",
+      "run/vaapi-direct-map-4k-07-on-fixed/retained-viewer.jsonl": "71225c86776f113c3275c4e754d12b2755b2f2165961070402071d491928dda2",
+      "run/vaapi-direct-map-4k-07-on-fixed/retained-markers.jsonl": "4313551621e08d46a8b97c53f4e77940b5bba13f52fd8f0b116d86469e542d11",
+      "run/vaapi-direct-map-4k-07-on-fixed/remote/paint.jsonl": "3154b73e49893591d9de19e8e1af2dee6231fd71bc5aa8ee80fbdf67e3d96d6f",
+      "run/vaapi-direct-map-4k-07-on-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/vaapi-direct-map-4k-07-on-fixed/viewer-control.json": "536262afb1d961158579dce7c683dda2ff87cdd4270b0978b4766d6ad66ea3f4",
+      "run/vaapi-direct-map-4k-07-on-fixed/remote/host-telemetry.jsonl": "2ca29fa510a16739ecc5e3ca4b41acc8a0525b0cce7ee869b48dfd5f3002d3cf",
+      "run/vaapi-direct-map-4k-07-on-fixed/viewer-telemetry.jsonl": "08262ec29058681d4ec365f18ca990410d720de5872390113517581b0b2c6b3d",
+      "run/vaapi-direct-map-4k-07-on-fixed/diagnostics.json": "79f7063acf290e8c71453c8df4a6c722382eed8f4141d83893178763ea247138",
+      "run/vaapi-direct-map-4k-08-off-fixed/result.json": "2ac305d26bca56a7c462778bfe90e892c410452a0587f6986416f156172f850c",
+      "run/vaapi-direct-map-4k-08-off-fixed/observed.jsonl": "44099171923ae1bcba053c975387b5e9aeca88243aaf3dbe1c0bc9e675acbcf0",
+      "run/vaapi-direct-map-4k-08-off-fixed/viewer-clock.jsonl": "601647663298e1b1585b12143becd2a6b5fd3c8631b59632585123a8441f87c6",
+      "run/vaapi-direct-map-4k-08-off-fixed/retained-host.jsonl": "552d2b1b0ea75e949776057f67eaf54c75743e66e19e4d8f75eb9c08bfe3cc49",
+      "run/vaapi-direct-map-4k-08-off-fixed/retained-viewer.jsonl": "5d6e9049a2152ec18b6b06271331df2ccf11334f5ac1545a2946e7b18d72ab0f",
+      "run/vaapi-direct-map-4k-08-off-fixed/retained-markers.jsonl": "a2791e418d56ce973d0126ff34c47f895ef7b73dadab93c874d26e6bfb868645",
+      "run/vaapi-direct-map-4k-08-off-fixed/remote/paint.jsonl": "c8875b50c2a97642904af5fddfe545c081cb5e00a3c4fcf1cf0220877bd572a0",
+      "run/vaapi-direct-map-4k-08-off-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/vaapi-direct-map-4k-08-off-fixed/viewer-control.json": "0bae78fc077c0d7a15978129382f70432c036fd7d79f466e4f288403071e5e1f",
+      "run/vaapi-direct-map-4k-08-off-fixed/remote/host-telemetry.jsonl": "ccda2813527f8320d74d256de2b71dcaceed60e1742e691f22f4e9fe1c69cfe3",
+      "run/vaapi-direct-map-4k-08-off-fixed/viewer-telemetry.jsonl": "03c861bc0c1f579b933744b43d7530671437063a0d9a6f2f3bc623908a7e16a8",
+      "run/vaapi-direct-map-4k-08-off-fixed/diagnostics.json": "12525a968fafae69c638162b22880a44ad6855009aa30afbd419fc8539653077",
+      "run/controller.json": "d1d73de16efd6678957525333c7e89ae6db6b329750c170c5749b3f5fe09d149",
+      "run/link-before.json": "108d655090379edc6b2ac16fc4157d3ce56f4ce191d1ace9e55cd8a38a997eb7",
+      "run/link-after.json": "37d8ceff0c1db0a70065ce8f0432daf8ebe34d8af71d17bea3f0cfa702056adf",
+      "build/evidence.json": "0d5c537eb645abc3f14845f87b356ae5002c1b219c0be6e079127102d1f81380"
+    }
+  }
+}

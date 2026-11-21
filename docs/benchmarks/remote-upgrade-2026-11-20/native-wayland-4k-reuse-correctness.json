@@ -1,0 +1,426 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-21",
+  "scope": "P10 Intel native Wayland correctness with opt-in XRGB DMA-BUF backing reuse",
+  "pins": {
+    "binaries": {
+      "release": {
+        "name": "jwm-remote",
+        "sha256": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1",
+        "independently_rehashed": true,
+        "abba_equal": true
+      },
+      "observer": {
+        "name": "observer",
+        "sha256": "74579fbf4f7f1104814bcd4fb444aa9d225a4c3d05d81a06966409fe00c85b24",
+        "independently_rehashed": true,
+        "abba_equal": true
+      }
+    },
+    "selected_build_sources": {
+      "src/remote/gpu_present.rs": "b19dea4d460f97138a0832e702a2d0126283f2a3a0cd776b1e0fc4fe0683e7bb",
+      "src/remote/wayland_viewer_gpu.rs": "b4573452b28764307b02b9d9cdf04d5cb3befaaa8a604e740f6a0110a6fe1292",
+      "src/remote/wayland_viewer.rs": "9076782a242a0af424acc17e73d1b1f493323ce71cdb823c79e975df0a85690b",
+      "src/remote/host_wayland_gpu_4k_integration.rs": "4a2c7e767cd433d055711647dd68b7a86a332ea44808fdbf94ab68fa4ddbf8da",
+      "src/remote/host_wayland_gpu_4k_marker_integration.rs": "27b488d7897bba31635bacdf987592da4f14c4ff3c5fe3481c0d4e4602d47cc2"
+    },
+    "render_node": "/dev/dri/renderD128",
+    "render_node_device": 57984,
+    "environment": {
+      "JWM_REMOTE_WAYLAND_REUSE_RGB": "1",
+      "JWM_REQUIRE_HEADLESS_GL": "1",
+      "EGL_PLATFORM": "surfaceless",
+      "LIBGL_ALWAYS_SOFTWARE": null
+    },
+    "execution": {
+      "observer_test_flags": [
+        "--ignored",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "timeout_per_case_seconds": 120,
+      "observer_cargo_features": [
+        "remote-wayland",
+        "backend-wayland-udev",
+        "remote-h264"
+      ],
+      "release_cargo_features": [
+        "remote-x11",
+        "remote-wayland",
+        "remote-h264"
+      ],
+      "binary_pin_check": "Successful sha256sum --check printed for both artifacts before the hardware tests."
+    },
+    "unredacted_log_hashes": {
+      "native_cli_wayland_gpu_viewer_presents_owned_4k_region.log": "2ec0911cee4e18dd743bf992f369693c22af067dc80c0f0627c9110bc43deade",
+      "native_cli_wayland_gpu_viewer_presents_and_recovers_from_import_rejection.log": "b52251527a6295a89d72111f0901876db1a65c7948df8a61905299c52e7903e3",
+      "hardware-wrapper-source.log": "d9d3becd5054fa09817d9e7a0a6484a3d43b0b1fcd05ac297568e7e6aa5ec8dc"
+    },
+    "separate_same_binary_reuse_proof": {
+      "artifact": "native-wayland-4k-reuse-preflight.json",
+      "run_id": 88,
+      "confirmed_activation": true,
+      "viewer_sha256": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1",
+      "observer_sha256": "74579fbf4f7f1104814bcd4fb444aa9d225a4c3d05d81a06966409fe00c85b24",
+      "native_preparations": 792,
+      "rgb_target_allocations": 2,
+      "fresh_wayland_dmabuf_imports": 792
+    }
+  },
+  "native_4k": {
+    "test_passed": true,
+    "test_exit": 0,
+    "duration_seconds": 6.63,
+    "host_exit": 0,
+    "viewer_exit": 0,
+    "endpoint_exit_evidence": "Successful test after assertions on both child process exit statuses.",
+    "renderer": "Mesa Intel(R) Graphics (ARL)",
+    "render_node_device": 57984,
+    "private_compositor_completions": 51,
+    "last_completion_monotonic_us": 55622239192,
+    "roi_xywh": [
+      16,
+      16,
+      96,
+      96
+    ],
+    "roi_bytes_each": 36864,
+    "rgba_quadrants": {
+      "top_left_red": [
+        240,
+        17,
+        15,
+        255
+      ],
+      "top_right_green": [
+        16,
+        239,
+        15,
+        255
+      ],
+      "bottom_left_blue": [
+        16,
+        16,
+        240,
+        255
+      ],
+      "bottom_right_yellow": [
+        240,
+        240,
+        17,
+        255
+      ]
+    },
+    "session_alias": "region-session",
+    "endpoint_windows": {
+      "source_epoch": 1,
+      "geometry_epoch": 2,
+      "source_size": [
+        3840,
+        2160
+      ],
+      "encoded_size": [
+        3840,
+        2160
+      ],
+      "last_frame_codec": "H.264",
+      "host_capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+      "host_sent_last_sequence": 49,
+      "host_drawn_acks": 49,
+      "host_sent": 50,
+      "host_outstanding": 1,
+      "host_h264_frames": 50,
+      "host_jpeg_atlases": 0,
+      "host_native_dmabuf_imports": 50,
+      "host_shm_readback_bytes": null,
+      "viewer_decoded_last_sequence": 50,
+      "viewer_presented_frames": 50,
+      "viewer_native_presented_frames": 50,
+      "viewer_drawn_acks": 50,
+      "viewer_hardware_downloads": 0,
+      "viewer_last_presentation_path": "wayland-vaapi-dmabuf"
+    },
+    "source_content": "Static 3840×2160 source with four asymmetric color quadrants.",
+    "attachment_evidence": "Each completion asserted a single untransformed imported XRGB8888 root, full visible 4K geometry, and quadrant colors from actual ROI framebuffer readback."
+  },
+  "pipeline_recovery": {
+    "test_passed": true,
+    "test_exit": 0,
+    "duration_seconds": 26.34,
+    "host_exit": 0,
+    "viewer_exit": 0,
+    "endpoint_exit_evidence": "Successful test after assertions on both child process exit statuses.",
+    "session_alias": "recovery-session",
+    "viewer_terminal_state": "closed",
+    "resize_viewport": [
+      481,
+      320
+    ],
+    "matched_endpoint_windows": {
+      "first": {
+        "source_epoch": 1,
+        "geometry_epoch": 2,
+        "source_size": [
+          200,
+          150
+        ],
+        "encoded_size": [
+          200,
+          150
+        ],
+        "last_frame_codec": "H.264",
+        "host_capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "host_sent_last_sequence": 97,
+        "host_drawn_acks": 98,
+        "host_sent": 98,
+        "host_outstanding": 0,
+        "host_h264_frames": 98,
+        "host_jpeg_atlases": 0,
+        "host_native_dmabuf_imports": 98,
+        "host_shm_readback_bytes": null,
+        "viewer_decoded_last_sequence": 99,
+        "viewer_presented_frames": 100,
+        "viewer_native_presented_frames": 100,
+        "viewer_drawn_acks": 100,
+        "viewer_hardware_downloads": 0,
+        "viewer_last_presentation_path": "wayland-vaapi-dmabuf",
+        "three_bgrx_readback_samples": [
+          [
+            0,
+            1,
+            255,
+            255
+          ],
+          [
+            0,
+            1,
+            255,
+            255
+          ],
+          [
+            0,
+            1,
+            255,
+            255
+          ]
+        ]
+      },
+      "resized": {
+        "source_epoch": 1,
+        "geometry_epoch": 3,
+        "source_size": [
+          200,
+          150
+        ],
+        "encoded_size": [
+          200,
+          150
+        ],
+        "last_frame_codec": "H.264",
+        "host_capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "host_sent_last_sequence": 196,
+        "host_drawn_acks": 99,
+        "host_sent": 99,
+        "host_outstanding": 0,
+        "host_h264_frames": 99,
+        "host_jpeg_atlases": 0,
+        "host_native_dmabuf_imports": 99,
+        "host_shm_readback_bytes": null,
+        "viewer_decoded_last_sequence": 198,
+        "viewer_presented_frames": 98,
+        "viewer_native_presented_frames": 98,
+        "viewer_drawn_acks": 98,
+        "viewer_hardware_downloads": 0,
+        "viewer_last_presentation_path": "wayland-vaapi-dmabuf",
+        "three_bgrx_readback_samples": [
+          [
+            0,
+            0,
+            0,
+            255
+          ],
+          [
+            0,
+            1,
+            255,
+            255
+          ],
+          [
+            0,
+            1,
+            255,
+            255
+          ]
+        ]
+      },
+      "second": {
+        "source_epoch": 2,
+        "geometry_epoch": 5,
+        "source_size": [
+          240,
+          180
+        ],
+        "encoded_size": [
+          240,
+          180
+        ],
+        "last_frame_codec": "H.264",
+        "host_capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "host_sent_last_sequence": 295,
+        "host_drawn_acks": 99,
+        "host_sent": 99,
+        "host_outstanding": 0,
+        "host_h264_frames": 99,
+        "host_jpeg_atlases": 0,
+        "host_native_dmabuf_imports": 99,
+        "host_shm_readback_bytes": null,
+        "viewer_decoded_last_sequence": 297,
+        "viewer_presented_frames": 99,
+        "viewer_native_presented_frames": 99,
+        "viewer_drawn_acks": 99,
+        "viewer_hardware_downloads": 0,
+        "viewer_last_presentation_path": "wayland-vaapi-dmabuf",
+        "three_bgrx_readback_samples": [
+          [
+            255,
+            0,
+            1,
+            255
+          ],
+          [
+            255,
+            0,
+            1,
+            255
+          ],
+          [
+            255,
+            0,
+            1,
+            255
+          ]
+        ]
+      },
+      "fallback": {
+        "source_epoch": 2,
+        "geometry_epoch": 5,
+        "source_size": [
+          240,
+          180
+        ],
+        "encoded_size": [
+          240,
+          180
+        ],
+        "last_frame_codec": "H.264",
+        "host_capture_mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "host_sent_last_sequence": 394,
+        "host_drawn_acks": 99,
+        "host_sent": 99,
+        "host_outstanding": 0,
+        "host_h264_frames": 99,
+        "host_jpeg_atlases": 0,
+        "host_native_dmabuf_imports": 99,
+        "host_shm_readback_bytes": null,
+        "viewer_decoded_last_sequence": 396,
+        "viewer_presented_frames": 99,
+        "viewer_native_presented_frames": 1,
+        "viewer_drawn_acks": 99,
+        "viewer_hardware_downloads": 99,
+        "viewer_last_presentation_path": "rgb",
+        "three_bgrx_readback_samples": [
+          [
+            253,
+            0,
+            0,
+            255
+          ],
+          [
+            253,
+            0,
+            0,
+            255
+          ],
+          [
+            253,
+            0,
+            0,
+            255
+          ]
+        ]
+      },
+      "capture_fallback": {
+        "source_epoch": 2,
+        "geometry_epoch": 5,
+        "source_size": [
+          240,
+          180
+        ],
+        "encoded_size": [
+          240,
+          180
+        ],
+        "last_frame_codec": "JPEG",
+        "host_capture_mode": "wayland-surface/cpu-resize/shm/no-damage/no-cursor",
+        "host_sent_last_sequence": 398,
+        "host_drawn_acks": 4,
+        "host_sent": 4,
+        "host_outstanding": 0,
+        "host_h264_frames": 2,
+        "host_jpeg_atlases": 1,
+        "host_native_dmabuf_imports": 2,
+        "host_shm_readback_bytes": 16761600,
+        "viewer_decoded_last_sequence": 398,
+        "viewer_presented_frames": 3,
+        "viewer_native_presented_frames": 0,
+        "viewer_drawn_acks": 3,
+        "viewer_hardware_downloads": 0,
+        "viewer_last_presentation_path": "rgb",
+        "three_bgrx_readback_samples": [
+          [
+            254,
+            0,
+            0,
+            255
+          ],
+          [
+            254,
+            0,
+            0,
+            255
+          ],
+          [
+            254,
+            0,
+            0,
+            255
+          ]
+        ]
+      }
+    },
+    "asserted_transitions": [
+      "Same viewer role after resize, with a black letterbox and red pixels on a fresh native frame.",
+      "Fresh viewer role after authorized switch to the distinct blue source under the same authenticated session.",
+      "Injected viewer import rejection led to actual SHM with CPU RGB delivery while the host remained on DMA-BUF H.264.",
+      "Withdrawing the capture DMA-BUF global led to actual SHM/JPEG and drawn acknowledgement on the same blue source, geometry and viewer role."
+    ],
+    "window_scope": "Endpoint reporting windows are independently timed. The import-rejection window may include prior native presentations. The final capture transition window includes preceding H.264 records and ends with JPEG."
+  },
+  "measurement_limits": "The hardware cases exercise the enabled code path and record lifecycle/correctness assertions. Separate same-binary phase evidence confirms actual reuse. The 4K hardware case is a static pattern and the transition case uses 200×150 and 240×180 sources. Both are private GPU compositors without physical scanout.",
+  "archive": {
+    "path": "native-wayland-4k-reuse-correctness-raw.zip",
+    "sha256": "713936ba6d5935bb7f4dcb664fe679047cc69dd01f1ea1298df8f765f42d27b6",
+    "entries": {
+      "README.md": "bf9ff34c3dfa702fdc6944b2dd8a758e1f3f09369e31d0902f294ddf778cd8bb",
+      "checks/host_wayland_gpu_4k_integration.rs": "4a2c7e767cd433d055711647dd68b7a86a332ea44808fdbf94ab68fa4ddbf8da",
+      "checks/reviewed-exec-and-pixel-inspector.rs.txt": "0810f719ade1b9039b2ad277d791bafe390381f51e721ba47c24589641615564",
+      "checks/reviewed-recovery-test.rs.txt": "d04548d3c7813f3c0eab606b75b1307b3b42c86ba96721f973747ced6af486ad",
+      "pins.json": "8f3b06463aece96458dcd23de73fd5b0cf8885061faa7796a8a7c92d730f2cb1",
+      "replay.py": "f75c999d1ab7ebe718a7f2aeb7472d33bd00ada596e55f8877da281f54d21314",
+      "runs/hardware-wrapper.log": "0584672f3eee16570f1827ea1ba06a4c1773e408b506dd70881c200033a68f44",
+      "runs/native_cli_wayland_gpu_viewer_presents_and_recovers_from_import_rejection.log": "bab3c9bd7be40c87a195c598374f9c0955b47dd3c46cb43e1e1cd17811e45488",
+      "runs/native_cli_wayland_gpu_viewer_presents_owned_4k_region.log": "592c7e536daaad66a96b62e37d291e92a687847619737a294a9ce414a7538eb3"
+    },
+    "redaction": "Per-case session aliases and removal of private path prefixes from the runner excerpts."
+  }
+}

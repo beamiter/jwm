@@ -573,6 +573,8 @@ pub struct CaptureFrameData {
     pub captured: AtomicBool,
     pub(crate) ready: AtomicBool,
     pub(crate) ready_stamp: Mutex<Option<(u64, Instant)>>,
+    #[cfg(feature = "backend-wayland-udev")]
+    pub(super) window_input_layout: Mutex<Option<Arc<super::remote_pointer::WindowInputLayout>>>,
     pub(crate) family_proof: Mutex<Option<Arc<super::capture_popup_authority::FamilyProof>>>,
     /// `None` for a frame of a stopped session; capturing it fails.
     pub source: Option<CaptureSource>,
@@ -610,12 +612,18 @@ unsafe impl Send for PendingImageCapture {}
 // publish ready authority or authorize input from an unrendered frame.
 impl PendingImageCapture {
     #[cfg(feature = "backend-wayland-udev")]
-    pub(crate) fn mark_ready(&self) {
+    pub(crate) fn mark_ready(&self, state: &JwmWaylandState, rendered_elements: usize) {
         if let Some(data) = self.frame.data::<CaptureFrameData>() {
             if data.ready.load(Ordering::Acquire) {
                 return;
             }
             if let CaptureSource::Toplevel(authority) = &self.source {
+                if super::remote_control::needs_window_input_layout(state, authority) {
+                    *data.window_input_layout.lock().unwrap() =
+                        super::remote_pointer::WindowInputLayout::snapshot(&authority.surface)
+                            .filter(|layout| layout.surface_count() == rendered_elements)
+                            .map(Arc::new);
+                }
                 if authority.family.as_ref().is_some_and(|family| {
                     data.family_proof
                         .lock()
@@ -1274,6 +1282,8 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
                         captured: AtomicBool::new(false),
                         ready: AtomicBool::new(false),
                         ready_stamp: Mutex::new(None),
+                        #[cfg(feature = "backend-wayland-udev")]
+                        window_input_layout: Mutex::new(None),
                         family_proof: Mutex::new(None),
                         source,
                         session: resource.downgrade(),

@@ -1,0 +1,109 @@
+{
+  "binary_sha256": "653d8f4d4624c4349152416b2685eefe7e5ef29d063bf6a80f3ec186467a655c",
+  "trials": [
+    {
+      "scenario": "no-viewer-consent",
+      "initial_clipboard": {
+        "direction": null,
+        "file_limit_bytes": "0",
+        "mode": null,
+        "transfer": null
+      },
+      "viewer_exit": 0,
+      "host_exit": 0,
+      "closed_snapshot_cleared": true
+    },
+    {
+      "scenario": "no-host-consent",
+      "initial_clipboard": {
+        "direction": null,
+        "file_limit_bytes": "0",
+        "mode": null,
+        "transfer": null
+      },
+      "viewer_exit": 0,
+      "host_exit": 0,
+      "closed_snapshot_cleared": true
+    },
+    {
+      "scenario": "direction-mismatch",
+      "initial_clipboard": {
+        "direction": null,
+        "file_limit_bytes": "0",
+        "mode": null,
+        "transfer": null
+      },
+      "viewer_exit": 0,
+      "host_exit": 0,
+      "closed_snapshot_cleared": true
+    },
+    {
+      "scenario": "to-host-transfer",
+      "initial_clipboard": {
+        "direction": "to-host",
+        "file_limit_bytes": "12582912",
+        "mode": "all",
+        "transfer": null
+      },
+      "completed_partial": {
+        "bytes_processed": "135000",
+        "direction": "to-host",
+        "kind": "files",
+        "total_bytes": "5242915"
+      },
+      "completed_file_sha256": "2e7cab6314e9614b6f2da12630661c3038e5592025f6534ba5823c3b340a1cb6",
+      "cancelled_partial": {
+        "bytes_processed": "217500",
+        "direction": "to-host",
+        "kind": "files",
+        "total_bytes": "8388641"
+      },
+      "narrowed": {
+        "direction": "to-host",
+        "file_limit_bytes": "0",
+        "mode": "text-images",
+        "transfer": null
+      },
+      "restriction_confirmed_and_partial_removed": true,
+      "restriction_base_key": "Pause",
+      "switch_preserved_narrowing": true,
+      "viewer_exit": 0,
+      "host_exit": 0,
+      "closed_snapshot_cleared": true
+    },
+    {
+      "scenario": "from-host-transfer",
+      "initial_clipboard": {
+        "direction": "from-host",
+        "file_limit_bytes": "12582912",
+        "mode": "all",
+        "transfer": null
+      },
+      "completed_partial": {
+        "bytes_processed": "108750",
+        "direction": "from-host",
+        "kind": "files",
+        "total_bytes": "5242915"
+      },
+      "completed_file_sha256": "2e7cab6314e9614b6f2da12630661c3038e5592025f6534ba5823c3b340a1cb6",
+      "cancelled_partial": {
+        "bytes_processed": "82500",
+        "direction": "from-host",
+        "kind": "files",
+        "total_bytes": "8388641"
+      },
+      "narrowed": {
+        "direction": "from-host",
+        "file_limit_bytes": "0",
+        "mode": "text-images",
+        "transfer": null
+      },
+      "restriction_confirmed_and_partial_removed": true,
+      "restriction_base_key": "Pause",
+      "switch_preserved_narrowing": true,
+      "viewer_exit": 0,
+      "host_exit": 0,
+      "closed_snapshot_cleared": true
+    }
+  ]
+}

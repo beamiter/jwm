@@ -73,6 +73,89 @@ pub struct DecodedFrame {
     pub image: RgbImage,
 }
 
+/// An immutable snapshot prepared for presentation in its authenticated scope.
+pub(super) enum FrameLease {
+    Cpu(RecyclableDecodedFrame),
+    #[cfg(feature = "remote-h264")]
+    Vaapi {
+        pixels: ffmpeg_next::frame::Video,
+        info: FrameInfo,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct FrameInfo {
+    pub(super) session_epoch: u128,
+    pub(super) source_epoch: u64,
+    pub(super) geometry_epoch: u64,
+    pub(super) sequence: u64,
+    pub(super) source_size: (u16, u16),
+    pub(super) encoded_size: (u32, u32),
+}
+
+impl FrameLease {
+    pub(super) fn info(&self) -> FrameInfo {
+        match self {
+            Self::Cpu(frame) => FrameInfo {
+                session_epoch: u128::from_be_bytes(frame.scope.session_epoch),
+                source_epoch: frame.source_epoch(),
+                geometry_epoch: frame.geometry_epoch(),
+                sequence: frame.sequence(),
+                source_size: (frame.source_width(), frame.source_height()),
+                encoded_size: frame.dimensions(),
+            },
+            #[cfg(feature = "remote-h264")]
+            Self::Vaapi { info, .. } => *info,
+        }
+    }
+
+    pub(super) fn with_scope(self, session_epoch: u128, source_epoch: u64) -> Self {
+        match self {
+            Self::Cpu(frame) => Self::Cpu(
+                frame
+                    .with_session_epoch(session_epoch)
+                    .with_source_epoch(source_epoch),
+            ),
+            #[cfg(feature = "remote-h264")]
+            Self::Vaapi { pixels, mut info } => {
+                info.session_epoch = session_epoch;
+                info.source_epoch = source_epoch;
+                Self::Vaapi { pixels, info }
+            }
+        }
+    }
+
+    pub(super) fn cpu(&self) -> Option<&RecyclableDecodedFrame> {
+        match self {
+            Self::Cpu(frame) => Some(frame),
+            #[cfg(feature = "remote-h264")]
+            Self::Vaapi { .. } => None,
+        }
+    }
+
+    pub(super) fn source_epoch(&self) -> u64 {
+        self.info().source_epoch
+    }
+
+    pub(super) fn geometry_epoch(&self) -> u64 {
+        self.info().geometry_epoch
+    }
+
+    pub(super) fn sequence(&self) -> u64 {
+        self.info().sequence
+    }
+
+    pub(super) fn dimensions(&self) -> (u32, u32) {
+        self.info().encoded_size
+    }
+
+    pub(super) fn shares_unchanged_tiles(&self, previous: &Self) -> bool {
+        self.cpu()
+            .zip(previous.cpu())
+            .is_some_and(|(new, old)| new.shares_unchanged_tiles(old))
+    }
+}
+
 /// A decoded frame whose RGB allocation returns to the client's small pool.
 ///
 /// This stays crate-private so the public `DecodedFrame` and `Viewer::draw`
@@ -265,19 +348,68 @@ impl TileSnapshot {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct RecyclableDecodedFrame {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameScope {
+    session_epoch: [u8; 16],
     source_epoch: u64,
     geometry_epoch: u64,
+}
+
+impl Default for FrameScope {
+    fn default() -> Self {
+        Self {
+            session_epoch: [0; 16],
+            source_epoch: 1,
+            geometry_epoch: 0,
+        }
+    }
+}
+
+/// Owns one packed RGB allocation. Read access is immutable after publication.
+/// The presenter can patch storage only when it takes the lease from its
+/// previous frame, and the pool receives the allocation after the lease ends.
+#[derive(Debug)]
+struct CpuFrameLease {
+    image: Option<RgbImage>,
+    pool: SharedDecodeBufferPool,
+}
+
+impl CpuFrameLease {
+    fn new(image: RgbImage, pool: SharedDecodeBufferPool) -> Self {
+        Self {
+            image: Some(image),
+            pool,
+        }
+    }
+
+    fn image(&self) -> &RgbImage {
+        self.image.as_ref().expect("live CPU frame lease")
+    }
+
+    fn into_image(mut self) -> RgbImage {
+        self.image.take().expect("live CPU frame lease")
+    }
+}
+
+impl Drop for CpuFrameLease {
+    fn drop(&mut self) {
+        if let Some(image) = self.image.take() {
+            recycle_decode_buffer(&self.pool, image.into_raw());
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RecyclableDecodedFrame {
+    scope: FrameScope,
     sequence: u64,
     source_width: u16,
     source_height: u16,
-    image: Option<RgbImage>,
     pool: SharedDecodeBufferPool,
     damage: Option<FrameDamage>,
     encoded_dimensions: (u32, u32),
     tiles: Option<TileSnapshot>,
-    materialized: OnceLock<RgbImage>,
+    materialized: OnceLock<CpuFrameLease>,
 }
 
 impl RecyclableDecodedFrame {
@@ -289,17 +421,15 @@ impl RecyclableDecodedFrame {
         pool: SharedDecodeBufferPool,
     ) -> Self {
         Self {
-            source_epoch: 1,
-            geometry_epoch: 0,
+            scope: FrameScope::default(),
             sequence,
             source_width,
             source_height,
             encoded_dimensions: image.dimensions(),
-            image: Some(image),
+            materialized: OnceLock::from(CpuFrameLease::new(image, Arc::clone(&pool))),
             pool,
             damage: None,
             tiles: None,
-            materialized: OnceLock::new(),
         }
     }
 
@@ -311,12 +441,10 @@ impl RecyclableDecodedFrame {
         pool: SharedDecodeBufferPool,
     ) -> Self {
         Self {
-            source_epoch: 1,
-            geometry_epoch: 0,
+            scope: FrameScope::default(),
             sequence,
             source_width,
             source_height,
-            image: None,
             pool,
             damage: None,
             encoded_dimensions: (tiles.width, tiles.height),
@@ -326,25 +454,45 @@ impl RecyclableDecodedFrame {
     }
 
     pub(crate) fn with_source_epoch(mut self, epoch: u64) -> Self {
-        self.source_epoch = epoch;
+        self.scope.source_epoch = epoch;
+        self
+    }
+
+    pub(super) fn with_session_epoch(mut self, epoch: u128) -> Self {
+        self.scope.session_epoch = epoch.to_be_bytes();
         self
     }
 
     pub(crate) fn source_epoch(&self) -> u64 {
-        self.source_epoch
+        self.scope.source_epoch
     }
 
     pub(crate) fn with_geometry_epoch(mut self, epoch: u64) -> Self {
-        self.geometry_epoch = epoch;
+        self.scope.geometry_epoch = epoch;
         self
     }
 
     pub(crate) fn geometry_epoch(&self) -> u64 {
-        self.geometry_epoch
+        self.scope.geometry_epoch
     }
 
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         self.encoded_dimensions
+    }
+
+    pub(super) fn has_tile_snapshot(&self) -> bool {
+        self.tiles.is_some()
+    }
+
+    pub(super) fn shares_unchanged_tiles(&self, previous: &Self) -> bool {
+        self.scope == previous.scope
+            && (self.source_width, self.source_height)
+                == (previous.source_width, previous.source_height)
+            && self
+                .tiles
+                .as_ref()
+                .zip(previous.tiles.as_ref())
+                .is_some_and(|(tiles, previous)| Arc::ptr_eq(&tiles.pixels, &previous.pixels))
     }
 
     /// Transfer the viewer's allocation and patch only changed shared tiles.
@@ -353,23 +501,19 @@ impl RecyclableDecodedFrame {
         let Some(tiles) = self.tiles.as_ref() else {
             return;
         };
-        if self.source_epoch != previous.source_epoch
-            || self.geometry_epoch != previous.geometry_epoch
+        if self.scope != previous.scope
             || self.dimensions() != previous.dimensions()
             || (self.source_width, self.source_height)
                 != (previous.source_width, previous.source_height)
         {
             return;
         }
-        let Some(mut image) = previous
-            .image
-            .take()
-            .or_else(|| previous.materialized.take())
-        else {
+        let Some(mut lease) = previous.materialized.take() else {
             return;
         };
-        let regions = tiles.apply(&mut image, previous.tiles.as_ref());
-        self.image = Some(image);
+        let image = lease.image.as_mut().expect("live CPU frame lease");
+        let regions = tiles.apply(image, previous.tiles.as_ref());
+        self.materialized = OnceLock::from(lease);
         self.damage = Some(FrameDamage {
             base_sequence: previous.sequence,
             regions,
@@ -413,14 +557,16 @@ impl RecyclableDecodedFrame {
 
     #[must_use]
     pub(crate) fn image(&self) -> &RgbImage {
-        self.image.as_ref().unwrap_or_else(|| {
-            self.materialized.get_or_init(|| {
-                self.tiles
+        self.materialized
+            .get_or_init(|| {
+                let image = self
+                    .tiles
                     .as_ref()
                     .expect("frame has RGB or tile storage")
-                    .materialize()
+                    .materialize();
+                CpuFrameLease::new(image, Arc::clone(&self.pool))
             })
-        })
+            .image()
     }
 
     fn into_decoded(mut self) -> DecodedFrame {
@@ -428,19 +574,10 @@ impl RecyclableDecodedFrame {
             sequence: self.sequence,
             source_width: self.source_width,
             source_height: self.source_height,
-            image: self
-                .image
-                .take()
-                .or_else(|| self.materialized.take())
-                .unwrap_or_else(|| self.tiles.as_ref().expect("tile frame").materialize()),
-        }
-    }
-}
-
-impl Drop for RecyclableDecodedFrame {
-    fn drop(&mut self) {
-        if let Some(image) = self.image.take().or_else(|| self.materialized.take()) {
-            recycle_decode_buffer(&self.pool, image.into_raw());
+            image: self.materialized.take().map_or_else(
+                || self.tiles.as_ref().expect("tile frame").materialize(),
+                CpuFrameLease::into_image,
+            ),
         }
     }
 }
@@ -604,7 +741,7 @@ pub(crate) fn decode_rgb8_into_pool(
         )
         .into());
     }
-    let mut pixels = prepare_decode_buffer(pool, expected_len)?;
+    let (mut pixels, _) = prepare_decode_buffer(pool, expected_len, false)?;
     // The tolerant JPEG backend can return success after only a partial scan.
     // A recycled buffer must never contribute pixels from its previous frame.
     pixels.clear();
@@ -621,12 +758,28 @@ pub(crate) fn decode_rgb8_into_pool(
     })
 }
 
-fn prepare_decode_buffer(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DecodeBufferAllocation {
+    Reused,
+    Fresh,
+    Grown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DecodeBufferCheckout {
+    pub(super) allocation: DecodeBufferAllocation,
+    pub(super) requested_bytes: usize,
+    pub(super) capacity_added_bytes: usize,
+}
+
+pub(super) fn prepare_decode_buffer(
     pool: &SharedDecodeBufferPool,
     expected_len: usize,
-) -> RemoteResult<Vec<u8>> {
+    measure: bool,
+) -> RemoteResult<(Vec<u8>, Option<DecodeBufferCheckout>)> {
     let mut pixels = take_decode_buffer(pool, expected_len);
-    if pixels.capacity() < expected_len
+    let previous_capacity = pixels.capacity();
+    if previous_capacity < expected_len
         // `try_reserve_exact` is relative to Vec::len(), not its capacity. A
         // retained buffer can have a shorter previous-frame length, so reserve
         // exactly the additional elements needed from that logical length.
@@ -638,7 +791,18 @@ fn prepare_decode_buffer(
         ))
         .into());
     }
-    Ok(pixels)
+    let checkout = measure.then(|| DecodeBufferCheckout {
+        allocation: if previous_capacity >= expected_len {
+            DecodeBufferAllocation::Reused
+        } else if previous_capacity == 0 {
+            DecodeBufferAllocation::Fresh
+        } else {
+            DecodeBufferAllocation::Grown
+        },
+        requested_bytes: expected_len,
+        capacity_added_bytes: pixels.capacity() - previous_capacity,
+    });
+    Ok((pixels, checkout))
 }
 
 fn take_decode_buffer(pool: &SharedDecodeBufferPool, required_len: usize) -> Vec<u8> {
@@ -759,6 +923,25 @@ mod tests {
     }
 
     #[test]
+    fn new_session_cannot_take_the_previous_cpu_frame_lease() {
+        let canvas = RgbImage::from_pixel(4, 4, image::Rgb([7, 10, 13]));
+        let snapshot = TileSnapshot::update(&canvas, None, &[15], 2);
+        let pool = new_decode_buffer_pool();
+        let mut previous =
+            RecyclableDecodedFrame::from_tiles(1, 4, 4, snapshot.clone(), Arc::clone(&pool))
+                .with_session_epoch(1);
+        let _ = previous.image();
+        let mut next = RecyclableDecodedFrame::from_tiles(1, 4, 4, snapshot, Arc::clone(&pool))
+            .with_session_epoch(2);
+        next.reuse_canvas_from(&mut previous);
+        assert!(next.materialized.get().is_none());
+        assert_eq!(previous.image(), &canvas);
+        assert_eq!(decode_pool_snapshot(&pool).0, 0);
+        drop(previous);
+        assert_eq!(decode_pool_snapshot(&pool).0, 1);
+    }
+
+    #[test]
     fn damage_merges_bridges_and_caps_fragmentation_and_area() {
         let mut regions = DamageRegions::default();
         regions.add((0, 0, 2, 2), (100, 100));
@@ -804,7 +987,6 @@ mod tests {
         let pool = new_decode_buffer_pool();
         let mut displayed =
             RecyclableDecodedFrame::from_tiles(1, 5, 3, original.clone(), pool.clone());
-        assert!(displayed.image.is_none());
         assert!(displayed.materialized.get().is_none());
         let pointer = displayed.image().as_raw().as_ptr();
         canvas.put_pixel(0, 0, image::Rgb([90, 0, 0]));
@@ -1155,6 +1337,49 @@ mod tests {
     }
 
     #[test]
+    fn detailed_decode_checkout_distinguishes_reserve_growth_and_reuse() {
+        let pool = new_decode_buffer_pool();
+        let (fresh, checkout) = prepare_decode_buffer(&pool, 64, true).unwrap();
+        let fresh_capacity = fresh.capacity();
+        let pointer = fresh.as_ptr();
+        assert_eq!(
+            checkout,
+            Some(DecodeBufferCheckout {
+                allocation: DecodeBufferAllocation::Fresh,
+                requested_bytes: 64,
+                capacity_added_bytes: fresh_capacity,
+            })
+        );
+
+        recycle_decode_buffer(&pool, fresh);
+        let (fitting, checkout) = prepare_decode_buffer(&pool, 63, true).unwrap();
+        assert_eq!(fitting.as_ptr(), pointer);
+        assert_eq!(
+            checkout,
+            Some(DecodeBufferCheckout {
+                allocation: DecodeBufferAllocation::Reused,
+                requested_bytes: 63,
+                capacity_added_bytes: 0,
+            })
+        );
+
+        recycle_decode_buffer(&pool, fitting);
+        let requested = fresh_capacity + 1;
+        let (grown, checkout) = prepare_decode_buffer(&pool, requested, true).unwrap();
+        assert_eq!(
+            checkout,
+            Some(DecodeBufferCheckout {
+                allocation: DecodeBufferAllocation::Grown,
+                requested_bytes: requested,
+                capacity_added_bytes: grown.capacity() - fresh_capacity,
+            })
+        );
+        recycle_decode_buffer(&pool, grown);
+        let (_, checkout) = prepare_decode_buffer(&pool, 63, false).unwrap();
+        assert_eq!(checkout, None);
+    }
+
+    #[test]
     fn poisoned_pool_recovers_for_recycle_and_checkout() {
         let pool = new_decode_buffer_pool();
         let poisoned = Arc::clone(&pool);
@@ -1260,7 +1485,7 @@ mod tests {
         let pool = new_decode_buffer_pool();
         recycle_decode_buffer(&pool, Vec::with_capacity(1_024));
         let before = decode_pool_snapshot(&pool);
-        let result = prepare_decode_buffer(&pool, usize::MAX);
+        let result = prepare_decode_buffer(&pool, usize::MAX, true);
 
         assert!(result.is_err());
         assert_eq!(decode_pool_snapshot(&pool), before);

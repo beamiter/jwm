@@ -1,0 +1,109 @@
+{
+  "access_unit_limit_bytes": 1048576,
+  "archive": {
+    "entries_sha256": {
+      "first-attempt/chroma-witness-encode.log": "33379135cdf5c04d2fce70747da6e8369fbac19f96036ac811c363b7b61f299e",
+      "first-attempt/mint-result.json": "97aeb5d4e1e86a4b65806f0018db18f67614b4b2af98230c522af25ce532ea87",
+      "mint/chroma-witness-encode.log": "b8fcf5ba3442e7453f5025fcb54bc6ff89a6078f939b510583a23bb1e11d477a",
+      "mint/chroma-witness-software.log": "ddd4a1c2627acd1543748d7149ce16eb27183b23d11ad652722b156671b32981",
+      "mint/chroma-witness.hevc": "872e7209149e8d2881274653c3a86f21d6f4f5d84adb05fba4527e5cdc5f3eef",
+      "mint/mint-result.json": "1eabcd8621cf3ae6f19e4ec6ffbb76a84a676709a0a4d31f24a2d30832125302",
+      "mint/xterm-crop-encode.log": "8e665f471f602e1bda7cf0d2074878be63c4858c13421c06b3e723d79d32683f",
+      "mint/xterm-crop-software.log": "e570ed74f9e465dcf502a8adf87c90a3018eea299780a195e9d27fc05396f1fd",
+      "mint/xterm-crop.hevc": "606a27e2d914e64599d400fb98afa3aeaf1869269f945cc4d8cc028a9d4aa13a",
+      "mint/xterm-full-encode.log": "5dd5ce213a36bf2aabb3b37df8b6c0c9aca6c8ba2e14785b91655854d654115a",
+      "mint/xterm-full-software.log": "cd65046d2bead5e14064de93a1e078ae56712454939bf983068cdcea0a36a66d",
+      "mint/xterm-full.hevc": "a1da37acacefe535aafa5df2b38f8199a77a91f8a727cee4b0b71e3e7872cb3d",
+      "replay/preflight.py": "0f820b3bfc67ce6ce26accbee2812b72ddaa3f35d92206455376a1fcc7d0e8fd",
+      "ubuntu/chroma-witness-cuda.log": "f3f90815d35d926c31d6c229dda5774402956aed04b119bd2d3a7d8696117b13",
+      "ubuntu/chroma-witness-software.log": "0b53b9d0c3ba8c03828a5c037a479a1485cb5f7b2a3147b7a0e779edcf507630",
+      "ubuntu/peer-result.json": "7335efb91800f448d4a5902bfb4b65571ce581567d174aca6c5ba028b2237b1f",
+      "ubuntu/xterm-crop-cuda.log": "20985f36d578106999cd23e499a91de398914e8f0aa267a0f3d5e09e92229f5d",
+      "ubuntu/xterm-crop-software.log": "eeaa9bd5b1975604394930ca1a3940b0134fa1ea1f989f662a2264a0094ac915",
+      "ubuntu/xterm-full-cuda.log": "6b828bb44f466b192b5b4112a67d1b37e1118df3a6324d4136b5c8aaea9bc97e",
+      "ubuntu/xterm-full-software.log": "899c8fa2d78c991de35086f49b4fe3b5ab1c04448d5de99f581234b84bf816cb"
+    },
+    "path": "hevc444-lossless-device-preflight-raw.zip",
+    "sha256": "bdffeec1d7af9730139038b1f403f04ebb470455abd50a34c9a9af5ecf493c35"
+  },
+  "cases": [
+    {
+      "decoded_frames_exact": {
+        "mint_software": 81,
+        "ubuntu_nvdec": 81,
+        "ubuntu_software": 81
+      },
+      "dimensions": [
+        1200,
+        240
+      ],
+      "largest_access_unit_bytes": 111106,
+      "name": "xterm-crop",
+      "required_idr_indices": [
+        0,
+        60,
+        77
+      ],
+      "stream_sha256": "606a27e2d914e64599d400fb98afa3aeaf1869269f945cc4d8cc028a9d4aa13a"
+    },
+    {
+      "decoded_frames_exact": {
+        "mint_software": 81,
+        "ubuntu_nvdec": 81,
+        "ubuntu_software": 81
+      },
+      "dimensions": [
+        1920,
+        1080
+      ],
+      "largest_access_unit_bytes": 520973,
+      "name": "xterm-full",
+      "required_idr_indices": [
+        0,
+        60,
+        77
+      ],
+      "stream_sha256": "a1da37acacefe535aafa5df2b38f8199a77a91f8a727cee4b0b71e3e7872cb3d"
+    },
+    {
+      "decoded_frames_exact": {
+        "mint_software": 81,
+        "ubuntu_nvdec": 81,
+        "ubuntu_software": 81
+      },
+      "dimensions": [
+        256,
+        256
+      ],
+      "largest_access_unit_bytes": 230358,
+      "name": "chroma-witness",
+      "required_idr_indices": [
+        0,
+        60,
+        77
+      ],
+      "stream_sha256": "872e7209149e8d2881274653c3a86f21d6f4f5d84adb05fba4527e5cdc5f3eef"
+    }
+  ],
+  "codec_config": {
+    "encoder": "hevc_nvenc",
+    "fps": 30,
+    "frames_per_case": 81,
+    "gop": 60,
+    "pixel_format": "yuv444p",
+    "preset": "p3",
+    "profile": "rext",
+    "qp": 0,
+    "rc": "constqp",
+    "tune": "lossless"
+  },
+  "first_attempt": "The 128 by 96 non-neutral chroma witness was below the encoder minimum. A new witness qualified at 256 by 256.",
+  "mint_encoder": "RTX 5080 NVENC, system FFmpeg 6.1.1-3ubuntu5",
+  "schema_version": 1,
+  "scope": "Fixed-input CLI device preflight for HEVC lossless 4:4:4. This measures decoded plane equality after RGB-to-YUV conversion.",
+  "source_archive": {
+    "path": "x11-terminal-scroll-hevc444-pilot-raw.zip",
+    "sha256": "59c2ed26f5381a650dcc3bfe3315aeb8cae5dc74a8b300e5b177dea15e1be003"
+  },
+  "ubuntu_decoder": "RTX 5060 Laptop NVDEC, system FFmpeg 4.4.2-0ubuntu0.22.04.1"
+}

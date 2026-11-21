@@ -55,6 +55,7 @@ fn host_options(allow: bool) -> host::HostOptions {
         allow_static_lossless: false,
         allow_wayland_pointer: false,
         allow_wayland_control: false,
+        allow_wayland_gestures: false,
         allow_resumable_control: false,
         allow_wayland_scroll: false,
         allow_wayland_horizontal_scroll: false,
@@ -268,6 +269,7 @@ fn exercise(
     let (client_tx, client_done) = mpsc::channel();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
+            stats_json: false,
             control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
@@ -275,6 +277,7 @@ fn exercise(
             wayland_text: requested.map(|text| ExplicitText::new(text.into_bytes()).unwrap()),
             wayland_pointer: false,
             wayland_control: false,
+            wayland_gestures: false,
             resumable_control: false,
             wayland_seamless_input: false,
             static_lossless: false,
@@ -285,6 +288,7 @@ fn exercise(
             follow_source_size: false,
             window_size: None,
             window_position: None,
+            x11_parent_window: None,
             frame_limits: Default::default(),
             address: address.to_string(),
             peer_label: "owned one-shot text".into(),

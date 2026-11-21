@@ -6,6 +6,8 @@ use wayland_client::protocol::{wl_pointer, wl_seat};
 
 const MAX_EVENTS: usize = 32;
 pub(super) struct PointerSeat;
+pub(super) const FOCUS_LEFT: &str = "Wayland pointer left own surface";
+pub(super) const WINDOW_DEACTIVATED: &str = "Wayland pointer window deactivated";
 pub(super) struct PointerFence(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Mapping {
@@ -14,6 +16,7 @@ pub(super) struct Mapping {
     pub(super) geometry_epoch: u64,
     pub(super) generation: u64,
     pub(super) viewport: (u16, u16),
+    pub(super) buffer_scale: u16,
     pub(super) encoded: (u16, u16),
     pub(super) source: (u16, u16),
 }
@@ -33,15 +36,18 @@ fn map_point(map: Mapping, x: f64, y: f64) -> Option<(u16, u16, i16, i16)> {
     {
         return None;
     }
-    let (w, h) = (u64::from(map.viewport.0), u64::from(map.viewport.1));
+    let layout = super::damage::Layout::new(
+        map.encoded,
+        (
+            map.viewport.0.checked_mul(map.buffer_scale)?,
+            map.viewport.1.checked_mul(map.buffer_scale)?,
+        ),
+    )?;
     let (iw, ih) = (u64::from(map.encoded.0), u64::from(map.encoded.1));
-    let (dw, dh) = if w * ih <= h * iw {
-        (w, (w * ih / iw).max(1))
-    } else {
-        ((h * iw / ih).max(1), h)
-    };
-    let (ox, oy) = ((w - dw) / 2, (h - dh) / 2);
-    let (px, py) = (x.floor() as u64, y.floor() as u64);
+    let (dw, dh) = (u64::from(layout.content.0), u64::from(layout.content.1));
+    let (ox, oy) = (u64::from(layout.offset.0), u64::from(layout.offset.1));
+    let scale = f64::from(map.buffer_scale);
+    let (px, py) = ((x * scale).floor() as u64, (y * scale).floor() as u64);
     if px < ox || py < oy || px >= ox + dw || py >= oy + dh {
         return None;
     }
@@ -50,8 +56,8 @@ fn map_point(map: Mapping, x: f64, y: f64) -> Option<(u16, u16, i16, i16)> {
     Some((
         u16::try_from(sx).ok()?,
         u16::try_from(sy).ok()?,
-        i16::try_from(px).ok()?,
-        i16::try_from(py).ok()?,
+        i16::try_from(x.floor() as u16).ok()?,
+        i16::try_from(y.floor() as u16).ok()?,
     ))
 }
 #[derive(Default)]
@@ -70,6 +76,7 @@ struct ScrollFrame {
 pub(super) struct Pointer {
     pub(super) scroll_enabled: bool,
     pub(super) horizontal_enabled: bool,
+    pub(super) gestures: bool,
     ready: Option<u64>,
     frame_axis: bool,
     #[cfg(test)]
@@ -94,6 +101,7 @@ pub(super) struct Pointer {
     position: Option<(f64, f64)>,
     left_down: bool,
     observed_down: Option<Mapping>,
+    drag_mapping: Option<Mapping>,
     mapping: Option<Mapping>,
     // Last actually displayed image geometry survives a pending frame upload.
     // It is only hit-test evidence, never a usable remote input proof.
@@ -120,6 +128,7 @@ impl Pointer {
     pub(super) fn suspend_local_frame(&mut self) {
         self.ready = None;
         self.observed_down = None;
+        self.drag_mapping = None;
         self.frame_events.clear();
         self.completed.clear();
         self.frame_started = None;
@@ -151,6 +160,7 @@ impl Pointer {
         self.confirmed = None;
         self.ready = None;
         self.observed_down = None;
+        self.drag_mapping = None;
         self.frame_events.clear();
         self.completed.clear();
         self.frame_started = None;
@@ -170,7 +180,7 @@ impl Pointer {
         if self.ready == ready {
             return;
         }
-        if self.frame_started.is_some() {
+        if self.frame_started.is_some() && !self.drag_input_pending() {
             self.discard_frame = true;
             self.scroll = ScrollFrame::default();
         }
@@ -193,6 +203,19 @@ impl Pointer {
             && self
                 .mapping
                 .is_some_and(|map| self.confirmed == Some(map.sequence))
+    }
+    pub(super) fn focus_ready(&self) -> bool {
+        self.focused && self.activated && self.revoked.is_none() && !self.control_busy()
+    }
+
+    pub(super) fn reset_for_new_role(&mut self) {
+        *self = Self {
+            activated: self.activated,
+            activation_seen: self.activation_seen,
+            fence: self.fence,
+            fence_done: self.fence_done,
+            ..Self::default()
+        };
     }
     pub(super) fn check(&mut self) {
         if self.frame_started.is_some_and(|at| at.elapsed() >= TIMEOUT) {
@@ -224,6 +247,7 @@ impl Pointer {
         self.frame_started.map(|at| at + TIMEOUT)
     }
     pub(super) fn invalidate_mapping(&mut self) {
+        let release_drag = self.drag_mapping.take().is_some() || self.drag_input_pending();
         self.mapping = None;
         self.confirmed = None;
         self.ready = None;
@@ -238,15 +262,43 @@ impl Pointer {
         }
         self.scroll = ScrollFrame::default();
         if self.requested && self.revoked.is_none() {
-            self.completed
-                .push(ViewerEvent::WaylandPointerButtonCancel {
+            self.completed.push(if release_drag {
+                ViewerEvent::WaylandDragRelease { cancelled: true }
+            } else {
+                ViewerEvent::WaylandPointerButtonCancel {
                     pressed: self.left_down,
-                });
+                }
+            });
+        }
+    }
+    fn drag_input_pending(&self) -> bool {
+        self.drag_mapping.is_some()
+            || self
+                .frame_events
+                .iter()
+                .chain(&self.completed)
+                .any(|event| {
+                    matches!(
+                        event,
+                        ViewerEvent::WaylandDragMotion { .. }
+                            | ViewerEvent::WaylandDragRelease { .. }
+                    )
+                })
+    }
+    pub(super) fn invalidate_frame_mapping(&mut self) {
+        if self.drag_input_pending() {
+            // The gesture uses its original viewport and capture geometry.
+            // A newer commit of the same layout does not cancel its release.
+            self.mapping = None;
+            self.confirmed = None;
+            self.ready = None;
+        } else {
+            self.invalidate_mapping();
         }
     }
     pub(super) fn presented(&mut self, mapping: Mapping) {
         if self.requested && self.revoked.is_none() {
-            if self.frame_started.is_some() {
+            if self.frame_started.is_some() && !self.drag_input_pending() {
                 self.discard_frame = true;
                 self.frame_events.clear();
                 self.scroll = ScrollFrame::default();
@@ -281,7 +333,7 @@ impl Pointer {
                 == u32::from(xdg_toplevel::State::Activated)
         });
         if self.activation_seen && !active && !expected_exit {
-            self.revoke("Wayland pointer window deactivated");
+            self.revoke(WINDOW_DEACTIVATED);
         }
         self.activated = active;
         self.activation_seen |= active;
@@ -318,6 +370,12 @@ impl Pointer {
         if self.revoked.is_some() {
             return;
         }
+        if matches!(event, ViewerEvent::WaylandDragMotion { .. })
+            && let Some(last @ ViewerEvent::WaylandDragMotion { .. }) = self.frame_events.last_mut()
+        {
+            *last = event;
+            return;
+        }
         if self.frame_count + self.completed.len() >= MAX_EVENTS {
             self.revoke("Wayland pointer queue overflow");
             return;
@@ -336,6 +394,10 @@ impl Pointer {
         }
         if pressed {
             if self.left_down {
+                if self.gestures {
+                    self.revoke("unbalanced Wayland gesture button");
+                    return;
+                }
                 self.observed_down = None;
                 self.queue(ViewerEvent::WaylandPointerButtonCancel { pressed: true });
                 return;
@@ -347,7 +409,19 @@ impl Pointer {
             } else {
                 None
             };
+            if self.gestures {
+                self.drag_mapping = self.observed_down;
+            }
             self.queue(event);
+        } else if self.gestures {
+            self.left_down = false;
+            self.observed_down = None;
+            let mapped = self.drag_mapping.take().is_some();
+            self.queue(if mapped {
+                ViewerEvent::WaylandDragRelease { cancelled: false }
+            } else {
+                ViewerEvent::WaylandPointerButtonCancel { pressed: false }
+            });
         } else {
             let matched = self.left_down
                 && self.observed_down.is_some()
@@ -359,6 +433,25 @@ impl Pointer {
             } else {
                 ViewerEvent::WaylandPointerButtonCancel { pressed: false }
             });
+        }
+    }
+    fn motion(&mut self) {
+        if let Some(map) = self.drag_mapping {
+            let event = match self.position.and_then(|(x, y)| map_point(map, x, y)) {
+                Some((x, y, _, _)) => ViewerEvent::WaylandDragMotion {
+                    frame_sequence: map.sequence,
+                    geometry_epoch: map.geometry_epoch,
+                    x,
+                    y,
+                },
+                None => {
+                    self.drag_mapping = None;
+                    ViewerEvent::WaylandDragRelease { cancelled: true }
+                }
+            };
+            self.queue(event);
+        } else if !self.gestures || !self.left_down {
+            self.queue(self.scoped(Kind::Motion));
         }
     }
     fn begin_axis(&mut self) -> bool {
@@ -581,12 +674,15 @@ impl Dispatch<wl_seat::WlSeat, PointerSeat> for State {
 impl Dispatch<wl_pointer::WlPointer, ()> for State {
     fn event(
         state: &mut Self,
-        _: &wl_pointer::WlPointer,
+        device: &wl_pointer::WlPointer,
         event: wl_pointer::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if state.pointer.device.as_ref() != Some(device) {
+            return;
+        }
         #[cfg(all(test, feature = "backend-wayland-udev"))]
         if let wl_pointer::Event::Button {
             button: 0x110,
@@ -605,8 +701,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 }
             });
         }
+        let keys_permit_pointer = state.keyboard.permits_pointer(state.pointer.gestures);
         if state.control_mode
-            && state.keyboard.held_keys()
+            && !keys_permit_pointer
             && !(state.handoff.enabled && matches!(&event, wl_pointer::Event::Motion { .. }))
             && matches!(
                 &event,
@@ -657,7 +754,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                     pointer.suspend_local_frame();
                     state.handoff.leave();
                 } else {
-                    pointer.revoke("Wayland pointer left own surface");
+                    pointer.revoke(FOCUS_LEFT);
                 }
             }
             wl_pointer::Event::Motion {
@@ -671,8 +768,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 }
                 pointer.position = Some((surface_x, surface_y));
                 state.handoff.position(pointer.inside_image());
-                if state.handoff.forwarding() && !state.keyboard.held_keys() {
-                    pointer.queue(pointer.scoped(Kind::Motion));
+                if state.handoff.forwarding() && keys_permit_pointer {
+                    pointer.motion();
                 }
             }
             wl_pointer::Event::Button {
@@ -707,6 +804,7 @@ mod tests {
             geometry_epoch: 1,
             generation: 1,
             viewport: (101, 81),
+            buffer_scale: 1,
             encoded: (80, 40),
             source: (160, 80),
         }
@@ -974,6 +1072,19 @@ mod tests {
         pointer.fence = u64::MAX;
         assert!(pointer.begin_fence().is_none());
         assert!(pointer.revoked.is_some());
+    }
+    #[test]
+    fn scaled_mapping_matches_physical_letterbox_at_a_half_logical_pixel() {
+        let map = Mapping {
+            viewport: (101, 80),
+            buffer_scale: 2,
+            encoded: (100, 50),
+            source: (200, 100),
+            ..mapping()
+        };
+        assert_eq!(map_point(map, 0.0, 14.49), None);
+        assert_eq!(map_point(map, 0.0, 14.5), Some((0, 0, 0, 14)));
+        assert_eq!(map_point(map, 0.0, 65.0), None);
     }
     #[test]
     fn mapping_uses_upload_integer_fit_and_rejects_blackbars_or_nonfinite() {

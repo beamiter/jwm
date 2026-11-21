@@ -1,0 +1,1881 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "controller_exit": 0,
+  "result_capture": {
+    "original_sha256": "6ab865399811cccc22033a44124349508cc31df5560405a0b8ae2161c03a2a13",
+    "bytes": 1132218,
+    "status": "captured"
+  },
+  "pilot_kind": "one paired 4K motion and ReleaseAll software loopback diagnostic",
+  "scope": {
+    "dimensions": [
+      3840,
+      2160
+    ],
+    "host_capture_fps": 30,
+    "source_requested_fps": 30,
+    "warmup_seconds": 30,
+    "score_seconds": 60,
+    "planned_input_per_arm": 100,
+    "same_monotonic_clock": true,
+    "topology": "One Mint machine, two owned private Xvfb desktops, authenticated local IPv4 TCP",
+    "route": "Fixed H.264 NVENC encode, VA-API downloads, CPU X11 RGB presentation; clipboard off."
+  },
+  "pins": {
+    "both_endpoints_binary_sha256": "5945a9d94a65699ea0514be3bff6328f976d776ea8e94410d48b451ed034d371",
+    "marker_observer_binary_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+    "fixture_sha256": {
+      "combined.py": "532ab14d67c33c2339c7ba412ffdc13f05044630b6d02c8dac8b98eb635a52b2",
+      "p07_core.py": "94aebcb678fef44d978e57b5d75ac1c5ccf87349624df6617f5efaf5a107e88d",
+      "processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "extract_p07.py": "e79f93cd78416b6d56a45f1565ae73733dabc77aacd402c957d9df3059707cfd",
+      "run.sh": "75904470239b3b992cab9b924fa7b601cbd95475c23c66472f5fd3222363070e",
+      "README.md": "aed59a78e96167b3999514916b44cc1a5e635dabe85feb72e669c092eb3b9c4e"
+    }
+  },
+  "hardware_motion_pair_verified": true,
+  "all_200_input_samples_qualified": true,
+  "arms": [
+    {
+      "arm": "off",
+      "run_id": 1,
+      "fixture_status": "passed",
+      "fixture_error": null,
+      "capture_dir": "run/01-off",
+      "errors": {},
+      "phase_clock_ns": {
+        "warmup_begin": 74421993704573,
+        "score_begin": 74451993704573,
+        "score_end": 74511993704573
+      },
+      "motion": {
+        "source": {
+          "unique_frames": 1800,
+          "unique_fps": 30.0,
+          "gap_p95_ms": 36.004403,
+          "longest_gap_ms": 43.77375,
+          "one_second_bins": [
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30
+          ],
+          "invalid_reads_total": 0,
+          "duplicate_reads_total": 6239
+        },
+        "viewer": {
+          "unique_frames": 1129,
+          "unique_fps": 18.816666666666666,
+          "gap_p95_ms": 104.595552,
+          "longest_gap_ms": 139.557784,
+          "one_second_bins": [
+            23,
+            24,
+            22,
+            22,
+            22,
+            20,
+            22,
+            21,
+            19,
+            20,
+            19,
+            15,
+            13,
+            14,
+            16,
+            14,
+            16,
+            14,
+            17,
+            16,
+            18,
+            17,
+            17,
+            18,
+            17,
+            17,
+            17,
+            15,
+            16,
+            16,
+            17,
+            16,
+            16,
+            16,
+            16,
+            17,
+            16,
+            17,
+            15,
+            14,
+            17,
+            22,
+            22,
+            23,
+            23,
+            21,
+            23,
+            23,
+            23,
+            22,
+            23,
+            22,
+            23,
+            23,
+            20,
+            18,
+            19,
+            22,
+            21,
+            22
+          ],
+          "invalid_reads_total": 0,
+          "duplicate_reads_total": 7226
+        },
+        "painter_submitted": 3185,
+        "painter_deadline_skips": 1
+      },
+      "input": {
+        "counts": {
+          "scheduled": 100,
+          "attempted": 100,
+          "qualified_samples": 100,
+          "timeouts": 0,
+          "explicit_unissued": 0,
+          "slots_not_reached": 0
+        },
+        "same_clock_issue_to_host_X11_edge": {
+          "planned_observations": 100,
+          "replayed_slot_records": 100,
+          "verified_responses": 100,
+          "timeouts": 0,
+          "failed_or_invalid_attempts": 0,
+          "not_issued_slots": 0,
+          "absent_slot_records": 0,
+          "nearest_rank_p95_rank": 95,
+          "p95_ms_over_planned_rank": 22.189966,
+          "p95_planned_rank_unbounded": false,
+          "observed_only_ms": {
+            "minimum": 0.666221,
+            "p50": 1.939627,
+            "p95": 22.189966,
+            "maximum": 32.517117
+          },
+          "planned_rank_at_most_50_ms": true
+        },
+        "same_clock_issue_to_local_observer_reply_bound": {
+          "planned_observations": 100,
+          "replayed_slot_records": 100,
+          "verified_responses": 100,
+          "timeouts": 0,
+          "failed_or_invalid_attempts": 0,
+          "not_issued_slots": 0,
+          "absent_slot_records": 0,
+          "nearest_rank_p95_rank": 95,
+          "p95_ms_over_planned_rank": 22.417945,
+          "p95_planned_rank_unbounded": false,
+          "observed_only_ms": {
+            "minimum": 0.744045,
+            "p50": 2.105948,
+            "p95": 22.417945,
+            "maximum": 32.721749
+          },
+          "planned_rank_at_most_50_ms": true
+        },
+        "input_error": null,
+        "watcher_clean_close": true,
+        "input_teardown_error": null,
+        "terminal_only_replies": null,
+        "input_population_complete": true,
+        "scored_outcomes": [
+          {
+            "slot": 1,
+            "seq": 31,
+            "status": "passed",
+            "latency_ns": 3047332
+          },
+          {
+            "slot": 2,
+            "seq": 32,
+            "status": "passed",
+            "latency_ns": 1907369
+          },
+          {
+            "slot": 3,
+            "seq": 33,
+            "status": "passed",
+            "latency_ns": 7328227
+          },
+          {
+            "slot": 4,
+            "seq": 34,
+            "status": "passed",
+            "latency_ns": 17583507
+          },
+          {
+            "slot": 5,
+            "seq": 35,
+            "status": "passed",
+            "latency_ns": 16250974
+          },
+          {
+            "slot": 6,
+            "seq": 36,
+            "status": "passed",
+            "latency_ns": 2207580
+          },
+          {
+            "slot": 7,
+            "seq": 37,
+            "status": "passed",
+            "latency_ns": 1345438
+          },
+          {
+            "slot": 8,
+            "seq": 38,
+            "status": "passed",
+            "latency_ns": 2166883
+          },
+          {
+            "slot": 9,
+            "seq": 39,
+            "status": "passed",
+            "latency_ns": 22068092
+          },
+          {
+            "slot": 10,
+            "seq": 40,
+            "status": "passed",
+            "latency_ns": 1611073
+          },
+          {
+            "slot": 11,
+            "seq": 41,
+            "status": "passed",
+            "latency_ns": 2318044
+          },
+          {
+            "slot": 12,
+            "seq": 42,
+            "status": "passed",
+            "latency_ns": 5308980
+          },
+          {
+            "slot": 13,
+            "seq": 43,
+            "status": "passed",
+            "latency_ns": 7121081
+          },
+          {
+            "slot": 14,
+            "seq": 44,
+            "status": "passed",
+            "latency_ns": 6303689
+          },
+          {
+            "slot": 15,
+            "seq": 45,
+            "status": "passed",
+            "latency_ns": 2074590
+          },
+          {
+            "slot": 16,
+            "seq": 46,
+            "status": "passed",
+            "latency_ns": 2517494
+          },
+          {
+            "slot": 17,
+            "seq": 47,
+            "status": "passed",
+            "latency_ns": 1510176
+          },
+          {
+            "slot": 18,
+            "seq": 48,
+            "status": "passed",
+            "latency_ns": 18326691
+          },
+          {
+            "slot": 19,
+            "seq": 49,
+            "status": "passed",
+            "latency_ns": 1510214
+          },
+          {
+            "slot": 20,
+            "seq": 50,
+            "status": "passed",
+            "latency_ns": 5671586
+          },
+          {
+            "slot": 21,
+            "seq": 51,
+            "status": "passed",
+            "latency_ns": 1951238
+          },
+          {
+            "slot": 22,
+            "seq": 52,
+            "status": "passed",
+            "latency_ns": 1463300
+          },
+          {
+            "slot": 23,
+            "seq": 53,
+            "status": "passed",
+            "latency_ns": 2080318
+          },
+          {
+            "slot": 24,
+            "seq": 54,
+            "status": "passed",
+            "latency_ns": 2030051
+          },
+          {
+            "slot": 25,
+            "seq": 55,
+            "status": "passed",
+            "latency_ns": 6644465
+          },
+          {
+            "slot": 26,
+            "seq": 56,
+            "status": "passed",
+            "latency_ns": 1615289
+          },
+          {
+            "slot": 27,
+            "seq": 57,
+            "status": "passed",
+            "latency_ns": 7850783
+          },
+          {
+            "slot": 28,
+            "seq": 58,
+            "status": "passed",
+            "latency_ns": 5262958
+          },
+          {
+            "slot": 29,
+            "seq": 59,
+            "status": "passed",
+            "latency_ns": 5664437
+          },
+          {
+            "slot": 30,
+            "seq": 60,
+            "status": "passed",
+            "latency_ns": 2332458
+          },
+          {
+            "slot": 31,
+            "seq": 61,
+            "status": "passed",
+            "latency_ns": 2126882
+          },
+          {
+            "slot": 32,
+            "seq": 62,
+            "status": "passed",
+            "latency_ns": 6856842
+          },
+          {
+            "slot": 33,
+            "seq": 63,
+            "status": "passed",
+            "latency_ns": 1820592
+          },
+          {
+            "slot": 34,
+            "seq": 64,
+            "status": "passed",
+            "latency_ns": 26271404
+          },
+          {
+            "slot": 35,
+            "seq": 65,
+            "status": "passed",
+            "latency_ns": 721873
+          },
+          {
+            "slot": 36,
+            "seq": 66,
+            "status": "passed",
+            "latency_ns": 666221
+          },
+          {
+            "slot": 37,
+            "seq": 67,
+            "status": "passed",
+            "latency_ns": 711078
+          },
+          {
+            "slot": 38,
+            "seq": 68,
+            "status": "passed",
+            "latency_ns": 1436316
+          },
+          {
+            "slot": 39,
+            "seq": 69,
+            "status": "passed",
+            "latency_ns": 1467142
+          },
+          {
+            "slot": 40,
+            "seq": 70,
+            "status": "passed",
+            "latency_ns": 1792787
+          },
+          {
+            "slot": 41,
+            "seq": 71,
+            "status": "passed",
+            "latency_ns": 12425777
+          },
+          {
+            "slot": 42,
+            "seq": 72,
+            "status": "passed",
+            "latency_ns": 3730335
+          },
+          {
+            "slot": 43,
+            "seq": 73,
+            "status": "passed",
+            "latency_ns": 1092486
+          },
+          {
+            "slot": 44,
+            "seq": 74,
+            "status": "passed",
+            "latency_ns": 8544058
+          },
+          {
+            "slot": 45,
+            "seq": 75,
+            "status": "passed",
+            "latency_ns": 30040469
+          },
+          {
+            "slot": 46,
+            "seq": 76,
+            "status": "passed",
+            "latency_ns": 1244309
+          },
+          {
+            "slot": 47,
+            "seq": 77,
+            "status": "passed",
+            "latency_ns": 1768738
+          },
+          {
+            "slot": 48,
+            "seq": 78,
+            "status": "passed",
+            "latency_ns": 1817405
+          },
+          {
+            "slot": 49,
+            "seq": 79,
+            "status": "passed",
+            "latency_ns": 3468296
+          },
+          {
+            "slot": 50,
+            "seq": 80,
+            "status": "passed",
+            "latency_ns": 1864340
+          },
+          {
+            "slot": 51,
+            "seq": 81,
+            "status": "passed",
+            "latency_ns": 1524570
+          },
+          {
+            "slot": 52,
+            "seq": 82,
+            "status": "passed",
+            "latency_ns": 1593903
+          },
+          {
+            "slot": 53,
+            "seq": 83,
+            "status": "passed",
+            "latency_ns": 32347094
+          },
+          {
+            "slot": 54,
+            "seq": 84,
+            "status": "passed",
+            "latency_ns": 3845991
+          },
+          {
+            "slot": 55,
+            "seq": 85,
+            "status": "passed",
+            "latency_ns": 3947460
+          },
+          {
+            "slot": 56,
+            "seq": 86,
+            "status": "passed",
+            "latency_ns": 10188638
+          },
+          {
+            "slot": 57,
+            "seq": 87,
+            "status": "passed",
+            "latency_ns": 2256968
+          },
+          {
+            "slot": 58,
+            "seq": 88,
+            "status": "passed",
+            "latency_ns": 1754920
+          },
+          {
+            "slot": 59,
+            "seq": 89,
+            "status": "passed",
+            "latency_ns": 1467036
+          },
+          {
+            "slot": 60,
+            "seq": 90,
+            "status": "passed",
+            "latency_ns": 1214957
+          },
+          {
+            "slot": 61,
+            "seq": 91,
+            "status": "passed",
+            "latency_ns": 32517117
+          },
+          {
+            "slot": 62,
+            "seq": 92,
+            "status": "passed",
+            "latency_ns": 3019738
+          },
+          {
+            "slot": 63,
+            "seq": 93,
+            "status": "passed",
+            "latency_ns": 3206808
+          },
+          {
+            "slot": 64,
+            "seq": 94,
+            "status": "passed",
+            "latency_ns": 1925188
+          },
+          {
+            "slot": 65,
+            "seq": 95,
+            "status": "passed",
+            "latency_ns": 1024377
+          },
+          {
+            "slot": 66,
+            "seq": 96,
+            "status": "passed",
+            "latency_ns": 918507
+          },
+          {
+            "slot": 67,
+            "seq": 97,
+            "status": "passed",
+            "latency_ns": 1554805
+          },
+          {
+            "slot": 68,
+            "seq": 98,
+            "status": "passed",
+            "latency_ns": 2016358
+          },
+          {
+            "slot": 69,
+            "seq": 99,
+            "status": "passed",
+            "latency_ns": 1485087
+          },
+          {
+            "slot": 70,
+            "seq": 100,
+            "status": "passed",
+            "latency_ns": 3966088
+          },
+          {
+            "slot": 71,
+            "seq": 101,
+            "status": "passed",
+            "latency_ns": 1898810
+          },
+          {
+            "slot": 72,
+            "seq": 102,
+            "status": "passed",
+            "latency_ns": 1111851
+          },
+          {
+            "slot": 73,
+            "seq": 103,
+            "status": "passed",
+            "latency_ns": 2167077
+          },
+          {
+            "slot": 74,
+            "seq": 104,
+            "status": "passed",
+            "latency_ns": 1587204
+          },
+          {
+            "slot": 75,
+            "seq": 105,
+            "status": "passed",
+            "latency_ns": 1743645
+          },
+          {
+            "slot": 76,
+            "seq": 106,
+            "status": "passed",
+            "latency_ns": 21568460
+          },
+          {
+            "slot": 77,
+            "seq": 107,
+            "status": "passed",
+            "latency_ns": 23016950
+          },
+          {
+            "slot": 78,
+            "seq": 108,
+            "status": "passed",
+            "latency_ns": 1939627
+          },
+          {
+            "slot": 79,
+            "seq": 109,
+            "status": "passed",
+            "latency_ns": 1336036
+          },
+          {
+            "slot": 80,
+            "seq": 110,
+            "status": "passed",
+            "latency_ns": 1099804
+          },
+          {
+            "slot": 81,
+            "seq": 111,
+            "status": "passed",
+            "latency_ns": 1803299
+          },
+          {
+            "slot": 82,
+            "seq": 112,
+            "status": "passed",
+            "latency_ns": 2706972
+          },
+          {
+            "slot": 83,
+            "seq": 113,
+            "status": "passed",
+            "latency_ns": 1175291
+          },
+          {
+            "slot": 84,
+            "seq": 114,
+            "status": "passed",
+            "latency_ns": 1272941
+          },
+          {
+            "slot": 85,
+            "seq": 115,
+            "status": "passed",
+            "latency_ns": 1624252
+          },
+          {
+            "slot": 86,
+            "seq": 116,
+            "status": "passed",
+            "latency_ns": 3853683
+          },
+          {
+            "slot": 87,
+            "seq": 117,
+            "status": "passed",
+            "latency_ns": 1949147
+          },
+          {
+            "slot": 88,
+            "seq": 118,
+            "status": "passed",
+            "latency_ns": 2258250
+          },
+          {
+            "slot": 89,
+            "seq": 119,
+            "status": "passed",
+            "latency_ns": 1431757
+          },
+          {
+            "slot": 90,
+            "seq": 120,
+            "status": "passed",
+            "latency_ns": 1685705
+          },
+          {
+            "slot": 91,
+            "seq": 121,
+            "status": "passed",
+            "latency_ns": 1706028
+          },
+          {
+            "slot": 92,
+            "seq": 122,
+            "status": "passed",
+            "latency_ns": 22189966
+          },
+          {
+            "slot": 93,
+            "seq": 123,
+            "status": "passed",
+            "latency_ns": 1430712
+          },
+          {
+            "slot": 94,
+            "seq": 124,
+            "status": "passed",
+            "latency_ns": 1190223
+          },
+          {
+            "slot": 95,
+            "seq": 125,
+            "status": "passed",
+            "latency_ns": 1203529
+          },
+          {
+            "slot": 96,
+            "seq": 126,
+            "status": "passed",
+            "latency_ns": 1260010
+          },
+          {
+            "slot": 97,
+            "seq": 127,
+            "status": "passed",
+            "latency_ns": 1335495
+          },
+          {
+            "slot": 98,
+            "seq": 128,
+            "status": "passed",
+            "latency_ns": 20165527
+          },
+          {
+            "slot": 99,
+            "seq": 129,
+            "status": "passed",
+            "latency_ns": 1553189
+          },
+          {
+            "slot": 100,
+            "seq": 130,
+            "status": "passed",
+            "latency_ns": 1381561
+          }
+        ]
+      },
+      "route_and_worker": {
+        "host_and_viewer_same_authenticated_session": true,
+        "scopes": [
+          [
+            1,
+            2
+          ]
+        ],
+        "interior_telemetry_receipt_windows": 11,
+        "interior_worker_submitted": 0,
+        "interior_presenter_submit_samples": 1017,
+        "host_frames_h264": 2138,
+        "worker": {
+          "scheduled": 0,
+          "prepared": 0,
+          "submitted": 0,
+          "stale": 0,
+          "fallbacks": 0,
+          "stage_samples": 0
+        },
+        "viewer_acked": 2130,
+        "host_drawn_acks": 2130,
+        "hardware_downloads": 2137,
+        "whole_session_host_readback_observations": {
+          "shm_readback_ms": 2144,
+          "core_readback_ms": 0,
+          "cpu_resize_ms": 0
+        },
+        "interior_stage_summaries": {
+          "x11_presenter_submit_ms": {
+            "windows": 11,
+            "observations": 1017,
+            "observation_weighted_mean_ms": 14.344955815142576,
+            "median_window_p95_ms": 21.412,
+            "maximum_window_p95_ms": 30.035
+          },
+          "x11_cpu_prepare_ms": {
+            "windows": 0,
+            "observations": 0
+          },
+          "presentation_completion_ms": {
+            "windows": 11,
+            "observations": 1018,
+            "observation_weighted_mean_ms": 26.459329640471513,
+            "median_window_p95_ms": 33.515,
+            "maximum_window_p95_ms": 68.654
+          },
+          "sender_input_queue_ms": {
+            "windows": 11,
+            "observations": 469,
+            "observation_weighted_mean_ms": 0.1149647931769723,
+            "median_window_p95_ms": 0.18,
+            "maximum_window_p95_ms": 0.2
+          },
+          "sender_control_write_ms": {
+            "windows": 11,
+            "observations": 1752,
+            "observation_weighted_mean_ms": 0.06094035273972603,
+            "median_window_p95_ms": 0.094,
+            "maximum_window_p95_ms": 0.126
+          }
+        }
+      },
+      "hardware_motion_verified": true,
+      "input_population_complete": true,
+      "endpoint_exits": {
+        "host_exit": 0,
+        "viewer_exit": 0,
+        "painter_exit": 0,
+        "source_input_observer_exit": 0,
+        "owned_xvfb_exits": [
+          0,
+          0
+        ],
+        "marker_exits": {
+          "source": 0,
+          "viewer": 0
+        }
+      }
+    },
+    {
+      "arm": "on",
+      "run_id": 2,
+      "fixture_status": "passed",
+      "fixture_error": null,
+      "capture_dir": "run/02-on",
+      "errors": {},
+      "phase_clock_ns": {
+        "warmup_begin": 74528341460672,
+        "score_begin": 74558341460672,
+        "score_end": 74618341460672
+      },
+      "motion": {
+        "source": {
+          "unique_frames": 1800,
+          "unique_fps": 30.0,
+          "gap_p95_ms": 36.105493,
+          "longest_gap_ms": 43.049071,
+          "one_second_bins": [
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            29,
+            31,
+            30
+          ],
+          "invalid_reads_total": 0,
+          "duplicate_reads_total": 6239
+        },
+        "viewer": {
+          "unique_frames": 1143,
+          "unique_fps": 19.05,
+          "gap_p95_ms": 77.677113,
+          "longest_gap_ms": 122.07693,
+          "one_second_bins": [
+            17,
+            18,
+            18,
+            17,
+            18,
+            17,
+            18,
+            17,
+            18,
+            16,
+            16,
+            18,
+            18,
+            20,
+            19,
+            20,
+            19,
+            19,
+            20,
+            20,
+            20,
+            19,
+            19,
+            18,
+            18,
+            23,
+            22,
+            22,
+            22,
+            22,
+            24,
+            23,
+            22,
+            24,
+            23,
+            25,
+            21,
+            19,
+            19,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            19,
+            18,
+            18,
+            19,
+            18,
+            18,
+            18,
+            17,
+            19,
+            17,
+            16,
+            18,
+            17,
+            18,
+            17
+          ],
+          "invalid_reads_total": 0,
+          "duplicate_reads_total": 7433
+        },
+        "painter_submitted": 3177,
+        "painter_deadline_skips": 2
+      },
+      "input": {
+        "counts": {
+          "scheduled": 100,
+          "attempted": 100,
+          "qualified_samples": 100,
+          "timeouts": 0,
+          "explicit_unissued": 0,
+          "slots_not_reached": 0
+        },
+        "same_clock_issue_to_host_X11_edge": {
+          "planned_observations": 100,
+          "replayed_slot_records": 100,
+          "verified_responses": 100,
+          "timeouts": 0,
+          "failed_or_invalid_attempts": 0,
+          "not_issued_slots": 0,
+          "absent_slot_records": 0,
+          "nearest_rank_p95_rank": 95,
+          "p95_ms_over_planned_rank": 9.512083,
+          "p95_planned_rank_unbounded": false,
+          "observed_only_ms": {
+            "minimum": 0.808228,
+            "p50": 1.720819,
+            "p95": 9.512083,
+            "maximum": 21.377265
+          },
+          "planned_rank_at_most_50_ms": true
+        },
+        "same_clock_issue_to_local_observer_reply_bound": {
+          "planned_observations": 100,
+          "replayed_slot_records": 100,
+          "verified_responses": 100,
+          "timeouts": 0,
+          "failed_or_invalid_attempts": 0,
+          "not_issued_slots": 0,
+          "absent_slot_records": 0,
+          "nearest_rank_p95_rank": 95,
+          "p95_ms_over_planned_rank": 9.653597,
+          "p95_planned_rank_unbounded": false,
+          "observed_only_ms": {
+            "minimum": 0.965497,
+            "p50": 1.838505,
+            "p95": 9.653597,
+            "maximum": 21.467767
+          },
+          "planned_rank_at_most_50_ms": true
+        },
+        "input_error": null,
+        "watcher_clean_close": true,
+        "input_teardown_error": null,
+        "terminal_only_replies": null,
+        "input_population_complete": true,
+        "scored_outcomes": [
+          {
+            "slot": 1,
+            "seq": 31,
+            "status": "passed",
+            "latency_ns": 1446556
+          },
+          {
+            "slot": 2,
+            "seq": 32,
+            "status": "passed",
+            "latency_ns": 1028086
+          },
+          {
+            "slot": 3,
+            "seq": 33,
+            "status": "passed",
+            "latency_ns": 958872
+          },
+          {
+            "slot": 4,
+            "seq": 34,
+            "status": "passed",
+            "latency_ns": 1408791
+          },
+          {
+            "slot": 5,
+            "seq": 35,
+            "status": "passed",
+            "latency_ns": 808228
+          },
+          {
+            "slot": 6,
+            "seq": 36,
+            "status": "passed",
+            "latency_ns": 2234490
+          },
+          {
+            "slot": 7,
+            "seq": 37,
+            "status": "passed",
+            "latency_ns": 1581719
+          },
+          {
+            "slot": 8,
+            "seq": 38,
+            "status": "passed",
+            "latency_ns": 1634689
+          },
+          {
+            "slot": 9,
+            "seq": 39,
+            "status": "passed",
+            "latency_ns": 2394351
+          },
+          {
+            "slot": 10,
+            "seq": 40,
+            "status": "passed",
+            "latency_ns": 2015791
+          },
+          {
+            "slot": 11,
+            "seq": 41,
+            "status": "passed",
+            "latency_ns": 11323603
+          },
+          {
+            "slot": 12,
+            "seq": 42,
+            "status": "passed",
+            "latency_ns": 2757490
+          },
+          {
+            "slot": 13,
+            "seq": 43,
+            "status": "passed",
+            "latency_ns": 2220240
+          },
+          {
+            "slot": 14,
+            "seq": 44,
+            "status": "passed",
+            "latency_ns": 9112242
+          },
+          {
+            "slot": 15,
+            "seq": 45,
+            "status": "passed",
+            "latency_ns": 1823517
+          },
+          {
+            "slot": 16,
+            "seq": 46,
+            "status": "passed",
+            "latency_ns": 9146045
+          },
+          {
+            "slot": 17,
+            "seq": 47,
+            "status": "passed",
+            "latency_ns": 2391010
+          },
+          {
+            "slot": 18,
+            "seq": 48,
+            "status": "passed",
+            "latency_ns": 2056079
+          },
+          {
+            "slot": 19,
+            "seq": 49,
+            "status": "passed",
+            "latency_ns": 1262718
+          },
+          {
+            "slot": 20,
+            "seq": 50,
+            "status": "passed",
+            "latency_ns": 2097361
+          },
+          {
+            "slot": 21,
+            "seq": 51,
+            "status": "passed",
+            "latency_ns": 1208341
+          },
+          {
+            "slot": 22,
+            "seq": 52,
+            "status": "passed",
+            "latency_ns": 2005447
+          },
+          {
+            "slot": 23,
+            "seq": 53,
+            "status": "passed",
+            "latency_ns": 1196313
+          },
+          {
+            "slot": 24,
+            "seq": 54,
+            "status": "passed",
+            "latency_ns": 1080660
+          },
+          {
+            "slot": 25,
+            "seq": 55,
+            "status": "passed",
+            "latency_ns": 1001965
+          },
+          {
+            "slot": 26,
+            "seq": 56,
+            "status": "passed",
+            "latency_ns": 1720819
+          },
+          {
+            "slot": 27,
+            "seq": 57,
+            "status": "passed",
+            "latency_ns": 2321774
+          },
+          {
+            "slot": 28,
+            "seq": 58,
+            "status": "passed",
+            "latency_ns": 1853110
+          },
+          {
+            "slot": 29,
+            "seq": 59,
+            "status": "passed",
+            "latency_ns": 1835996
+          },
+          {
+            "slot": 30,
+            "seq": 60,
+            "status": "passed",
+            "latency_ns": 1076171
+          },
+          {
+            "slot": 31,
+            "seq": 61,
+            "status": "passed",
+            "latency_ns": 1070936
+          },
+          {
+            "slot": 32,
+            "seq": 62,
+            "status": "passed",
+            "latency_ns": 1130629
+          },
+          {
+            "slot": 33,
+            "seq": 63,
+            "status": "passed",
+            "latency_ns": 1571605
+          },
+          {
+            "slot": 34,
+            "seq": 64,
+            "status": "passed",
+            "latency_ns": 1870512
+          },
+          {
+            "slot": 35,
+            "seq": 65,
+            "status": "passed",
+            "latency_ns": 1888339
+          },
+          {
+            "slot": 36,
+            "seq": 66,
+            "status": "passed",
+            "latency_ns": 1856823
+          },
+          {
+            "slot": 37,
+            "seq": 67,
+            "status": "passed",
+            "latency_ns": 1494930
+          },
+          {
+            "slot": 38,
+            "seq": 68,
+            "status": "passed",
+            "latency_ns": 3921418
+          },
+          {
+            "slot": 39,
+            "seq": 69,
+            "status": "passed",
+            "latency_ns": 15516676
+          },
+          {
+            "slot": 40,
+            "seq": 70,
+            "status": "passed",
+            "latency_ns": 1713635
+          },
+          {
+            "slot": 41,
+            "seq": 71,
+            "status": "passed",
+            "latency_ns": 20959457
+          },
+          {
+            "slot": 42,
+            "seq": 72,
+            "status": "passed",
+            "latency_ns": 2414164
+          },
+          {
+            "slot": 43,
+            "seq": 73,
+            "status": "passed",
+            "latency_ns": 1117434
+          },
+          {
+            "slot": 44,
+            "seq": 74,
+            "status": "passed",
+            "latency_ns": 1305058
+          },
+          {
+            "slot": 45,
+            "seq": 75,
+            "status": "passed",
+            "latency_ns": 1897584
+          },
+          {
+            "slot": 46,
+            "seq": 76,
+            "status": "passed",
+            "latency_ns": 1827632
+          },
+          {
+            "slot": 47,
+            "seq": 77,
+            "status": "passed",
+            "latency_ns": 1763425
+          },
+          {
+            "slot": 48,
+            "seq": 78,
+            "status": "passed",
+            "latency_ns": 9512083
+          },
+          {
+            "slot": 49,
+            "seq": 79,
+            "status": "passed",
+            "latency_ns": 1279372
+          },
+          {
+            "slot": 50,
+            "seq": 80,
+            "status": "passed",
+            "latency_ns": 1129974
+          },
+          {
+            "slot": 51,
+            "seq": 81,
+            "status": "passed",
+            "latency_ns": 1319717
+          },
+          {
+            "slot": 52,
+            "seq": 82,
+            "status": "passed",
+            "latency_ns": 1042250
+          },
+          {
+            "slot": 53,
+            "seq": 83,
+            "status": "passed",
+            "latency_ns": 2869265
+          },
+          {
+            "slot": 54,
+            "seq": 84,
+            "status": "passed",
+            "latency_ns": 2177272
+          },
+          {
+            "slot": 55,
+            "seq": 85,
+            "status": "passed",
+            "latency_ns": 1925557
+          },
+          {
+            "slot": 56,
+            "seq": 86,
+            "status": "passed",
+            "latency_ns": 2001814
+          },
+          {
+            "slot": 57,
+            "seq": 87,
+            "status": "passed",
+            "latency_ns": 2113459
+          },
+          {
+            "slot": 58,
+            "seq": 88,
+            "status": "passed",
+            "latency_ns": 1446481
+          },
+          {
+            "slot": 59,
+            "seq": 89,
+            "status": "passed",
+            "latency_ns": 1490961
+          },
+          {
+            "slot": 60,
+            "seq": 90,
+            "status": "passed",
+            "latency_ns": 1278663
+          },
+          {
+            "slot": 61,
+            "seq": 91,
+            "status": "passed",
+            "latency_ns": 1633531
+          },
+          {
+            "slot": 62,
+            "seq": 92,
+            "status": "passed",
+            "latency_ns": 6237957
+          },
+          {
+            "slot": 63,
+            "seq": 93,
+            "status": "passed",
+            "latency_ns": 1488232
+          },
+          {
+            "slot": 64,
+            "seq": 94,
+            "status": "passed",
+            "latency_ns": 1462284
+          },
+          {
+            "slot": 65,
+            "seq": 95,
+            "status": "passed",
+            "latency_ns": 1590419
+          },
+          {
+            "slot": 66,
+            "seq": 96,
+            "status": "passed",
+            "latency_ns": 1261749
+          },
+          {
+            "slot": 67,
+            "seq": 97,
+            "status": "passed",
+            "latency_ns": 1737950
+          },
+          {
+            "slot": 68,
+            "seq": 98,
+            "status": "passed",
+            "latency_ns": 847753
+          },
+          {
+            "slot": 69,
+            "seq": 99,
+            "status": "passed",
+            "latency_ns": 1363617
+          },
+          {
+            "slot": 70,
+            "seq": 100,
+            "status": "passed",
+            "latency_ns": 1054959
+          },
+          {
+            "slot": 71,
+            "seq": 101,
+            "status": "passed",
+            "latency_ns": 1453955
+          },
+          {
+            "slot": 72,
+            "seq": 102,
+            "status": "passed",
+            "latency_ns": 7658074
+          },
+          {
+            "slot": 73,
+            "seq": 103,
+            "status": "passed",
+            "latency_ns": 1128550
+          },
+          {
+            "slot": 74,
+            "seq": 104,
+            "status": "passed",
+            "latency_ns": 5985112
+          },
+          {
+            "slot": 75,
+            "seq": 105,
+            "status": "passed",
+            "latency_ns": 1621420
+          },
+          {
+            "slot": 76,
+            "seq": 106,
+            "status": "passed",
+            "latency_ns": 2096854
+          },
+          {
+            "slot": 77,
+            "seq": 107,
+            "status": "passed",
+            "latency_ns": 2505265
+          },
+          {
+            "slot": 78,
+            "seq": 108,
+            "status": "passed",
+            "latency_ns": 2012056
+          },
+          {
+            "slot": 79,
+            "seq": 109,
+            "status": "passed",
+            "latency_ns": 4570219
+          },
+          {
+            "slot": 80,
+            "seq": 110,
+            "status": "passed",
+            "latency_ns": 1831523
+          },
+          {
+            "slot": 81,
+            "seq": 111,
+            "status": "passed",
+            "latency_ns": 1230611
+          },
+          {
+            "slot": 82,
+            "seq": 112,
+            "status": "passed",
+            "latency_ns": 1064307
+          },
+          {
+            "slot": 83,
+            "seq": 113,
+            "status": "passed",
+            "latency_ns": 21377265
+          },
+          {
+            "slot": 84,
+            "seq": 114,
+            "status": "passed",
+            "latency_ns": 1349990
+          },
+          {
+            "slot": 85,
+            "seq": 115,
+            "status": "passed",
+            "latency_ns": 1384197
+          },
+          {
+            "slot": 86,
+            "seq": 116,
+            "status": "passed",
+            "latency_ns": 4968665
+          },
+          {
+            "slot": 87,
+            "seq": 117,
+            "status": "passed",
+            "latency_ns": 1551620
+          },
+          {
+            "slot": 88,
+            "seq": 118,
+            "status": "passed",
+            "latency_ns": 1173736
+          },
+          {
+            "slot": 89,
+            "seq": 119,
+            "status": "passed",
+            "latency_ns": 2052019
+          },
+          {
+            "slot": 90,
+            "seq": 120,
+            "status": "passed",
+            "latency_ns": 1856557
+          },
+          {
+            "slot": 91,
+            "seq": 121,
+            "status": "passed",
+            "latency_ns": 1608923
+          },
+          {
+            "slot": 92,
+            "seq": 122,
+            "status": "passed",
+            "latency_ns": 2051211
+          },
+          {
+            "slot": 93,
+            "seq": 123,
+            "status": "passed",
+            "latency_ns": 9189630
+          },
+          {
+            "slot": 94,
+            "seq": 124,
+            "status": "passed",
+            "latency_ns": 4602471
+          },
+          {
+            "slot": 95,
+            "seq": 125,
+            "status": "passed",
+            "latency_ns": 18551380
+          },
+          {
+            "slot": 96,
+            "seq": 126,
+            "status": "passed",
+            "latency_ns": 918192
+          },
+          {
+            "slot": 97,
+            "seq": 127,
+            "status": "passed",
+            "latency_ns": 1446718
+          },
+          {
+            "slot": 98,
+            "seq": 128,
+            "status": "passed",
+            "latency_ns": 1064544
+          },
+          {
+            "slot": 99,
+            "seq": 129,
+            "status": "passed",
+            "latency_ns": 1442443
+          },
+          {
+            "slot": 100,
+            "seq": 130,
+            "status": "passed",
+            "latency_ns": 2249029
+          }
+        ]
+      },
+      "route_and_worker": {
+        "host_and_viewer_same_authenticated_session": true,
+        "scopes": [
+          [
+            1,
+            2
+          ]
+        ],
+        "interior_telemetry_receipt_windows": 11,
+        "interior_worker_submitted": 1056,
+        "interior_presenter_submit_samples": 1056,
+        "host_frames_h264": 1930,
+        "worker": {
+          "scheduled": 1927,
+          "prepared": 1927,
+          "submitted": 1927,
+          "stale": 0,
+          "fallbacks": 0,
+          "stage_samples": 1927
+        },
+        "viewer_acked": 1928,
+        "host_drawn_acks": 1928,
+        "hardware_downloads": 1929,
+        "whole_session_host_readback_observations": {
+          "shm_readback_ms": 1934,
+          "core_readback_ms": 0,
+          "cpu_resize_ms": 0
+        },
+        "interior_stage_summaries": {
+          "x11_presenter_submit_ms": {
+            "windows": 11,
+            "observations": 1056,
+            "observation_weighted_mean_ms": 4.628928709280303,
+            "median_window_p95_ms": 6.784,
+            "maximum_window_p95_ms": 6.886
+          },
+          "x11_cpu_prepare_ms": {
+            "windows": 11,
+            "observations": 1056,
+            "observation_weighted_mean_ms": 16.40984030208333,
+            "median_window_p95_ms": 23.103,
+            "maximum_window_p95_ms": 23.487
+          },
+          "presentation_completion_ms": {
+            "windows": 11,
+            "observations": 1056,
+            "observation_weighted_mean_ms": 14.338841637310606,
+            "median_window_p95_ms": 19.516,
+            "maximum_window_p95_ms": 22.854
+          },
+          "sender_input_queue_ms": {
+            "windows": 11,
+            "observations": 467,
+            "observation_weighted_mean_ms": 0.10485006852248394,
+            "median_window_p95_ms": 0.18,
+            "maximum_window_p95_ms": 0.217
+          },
+          "sender_control_write_ms": {
+            "windows": 11,
+            "observations": 1797,
+            "observation_weighted_mean_ms": 0.06312305119643852,
+            "median_window_p95_ms": 0.108,
+            "maximum_window_p95_ms": 0.126
+          }
+        }
+      },
+      "hardware_motion_verified": true,
+      "input_population_complete": true,
+      "endpoint_exits": {
+        "host_exit": 0,
+        "viewer_exit": 0,
+        "painter_exit": 0,
+        "source_input_observer_exit": 0,
+        "owned_xvfb_exits": [
+          0,
+          0
+        ],
+        "marker_exits": {
+          "source": 0,
+          "viewer": 0
+        }
+      }
+    }
+  ],
+  "on_minus_off": {
+    "on_minus_off_source_motion": {
+      "unique_fps": 0.0,
+      "gap_p95_ms": 0.10108999999999924,
+      "longest_gap_ms": -0.7246790000000018
+    },
+    "on_minus_off_viewer_motion": {
+      "unique_fps": 0.23333333333333428,
+      "gap_p95_ms": -26.918438999999992,
+      "longest_gap_ms": -17.480853999999994
+    },
+    "on_minus_off_median_window_presenter_p95_ms": -14.628,
+    "on_minus_off_same_clock_issue_to_host_X11_edge_p95_ms": -12.677882999999998,
+    "on_minus_off_same_clock_issue_to_local_observer_reply_bound_p95_ms": -12.764348
+  },
+  "method": "Primary ReleaseAll time is real viewer XTEST F12 issue through observation of the matched host X11 key-up in the owned painter window on one monotonic clock. The same-issuer interval to receipt of that edge on its local observer pipe is a separate conservative software bound. Only samples with all held-state, ordering and cleanup witnesses enter ranks. Unverified slots have an unbounded latency when ranking the planned samples. The presenter stage measures whole UI draw-call time, while the marker observers measure visible source/viewer motion over the common fixed 60 seconds. Receipt-associated telemetry windows are diagnostic. These scopes provide no input-to-photon or external-network measurement.",
+  "archive": {
+    "name": "x11-4k-presenter-preparation-releaseall-pilot-raw.zip",
+    "sha256": "f0cb44f9d3216f7086d640fe9c683bb020e1ae76722377eec1a2f8c935db738d",
+    "members_sha256": {
+      "run/terminal.json": "daf698895a8404359170c5f02da37acc87939c22a1b589998ab925f64c936510",
+      "fixture/combined.py": "532ab14d67c33c2339c7ba412ffdc13f05044630b6d02c8dac8b98eb635a52b2",
+      "fixture/p07_core.py": "94aebcb678fef44d978e57b5d75ac1c5ccf87349624df6617f5efaf5a107e88d",
+      "fixture/processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "fixture/extract_p07.py": "e79f93cd78416b6d56a45f1565ae73733dabc77aacd402c957d9df3059707cfd",
+      "fixture/run.sh": "75904470239b3b992cab9b924fa7b601cbd95475c23c66472f5fd3222363070e",
+      "fixture/README.md": "aed59a78e96167b3999514916b44cc1a5e635dabe85feb72e669c092eb3b9c4e",
+      "fixture/source.sha256": "68be153b46ee231372466137ed19f356cf05883544bfbda3de040f5e2f4b642b",
+      "replay/combined_report.py": "2887b326a219042a651e00243efde7e84523f6ae50ffcf9158e628bc4f9f0d45",
+      "replay/release_metrics.py": "ed7a74aee415c52eeb8dfb014b635d2dc17600451e6c46cf9e391f7f6159228b",
+      "run/controller-diagnostic.json": "e8bcd82eca73744f99d4c12a9834edb53c319d186be0046f25120a1a82b8ea2f",
+      "run/result-capture.json": "264cc90e177aec8c2188519d7421266bdc77c6e46ebc4f22a358c4bc10bc9e08",
+      "run/result.json": "6ab865399811cccc22033a44124349508cc31df5560405a0b8ae2161c03a2a13",
+      "run/01-off/result.json": "b72a52821c134a1af5122a9a3f18492ee02d92cab97f82dfe6f101475f3d1c41",
+      "run/01-off/painter.jsonl": "680e2b1da6fe89585744b0f16ea5a8675aab85d7246c290ed211a037bc03c84a",
+      "run/01-off/viewer-visible-marker.jsonl": "e4893c858a47e2e3c046cc26791be2d5a8672d666e5778ba7dc6a732952d2cd7",
+      "run/01-off/source-visible-marker.jsonl": "91da3b89c9a6857f63d35ab305a3d0d75e1d10c1f152d669d3638174fc885cb1",
+      "run/01-off/input-samples.jsonl": "cb1bb9f03e8c459d62f6e4f3b2009a529b9c71e7e8f14a2aa85d3ddff0e46de6",
+      "run/01-off/viewer-stats-clock.jsonl": "448ee351a6bbf477417877cede6acd95292000eecb71eb2a27720e4062c10a20",
+      "run/01-off/host-stats-clock.jsonl": "605fce53c7f6f4d5ce9e97c17eb20c4df4e13389914292848ba08ee11673634b",
+      "run/01-off/host-stats.jsonl": "9357efef92c81329a50b0f5d153e665eea82f6cdd9c7b70bfc19328429418c71",
+      "run/01-off/viewer-stats.jsonl": "6e14b1f24cf93440b370d3d9cfe239361e44a75270ad82647ea6bdbde5ff25f2",
+      "run/01-off/capture.json": "c4563025e117a73fbfada57dc07dacc44c6f96928bce361ddc969db6ab857df7",
+      "run/02-on/result.json": "f00d71a07ba52c04991df31ecd82175ef2b7c81dad7d044ce02be73c5e819efd",
+      "run/02-on/painter.jsonl": "58708c37021d1b40531a70412373b26c14418e4be9604983fa8bb5637c4bd0fc",
+      "run/02-on/viewer-visible-marker.jsonl": "6709eb88a1505aa729568f4a887479131d8448f0fa1be148121e34a6023eb2f0",
+      "run/02-on/source-visible-marker.jsonl": "eaf13e5d68c493b9f5271cb414e90a98eccbe840317c36f73947755cce92c7a4",
+      "run/02-on/input-samples.jsonl": "155e214dceda32bcd24f26f7efae3867c94198e754ad702c62ac15adad240812",
+      "run/02-on/viewer-stats-clock.jsonl": "52641992acef285a1b99028c2e924e105238b8507dfd5bb8a8909071637c89b0",
+      "run/02-on/host-stats-clock.jsonl": "0de2acb96f3347cdefabf0f37a7c59f65425d6b6102cb0ef1076b61313f2fbe1",
+      "run/02-on/host-stats.jsonl": "a29d5830918029da6ec4772a780e7319f33209fd7e64ae8d4ddc19c5c68a41a6",
+      "run/02-on/viewer-stats.jsonl": "42e3c9da630942d0bf0c67d434d82762dad8a485447f4b8a75d640e3622d7a58",
+      "run/02-on/capture.json": "21ff5c9de59de54dbc4227de9c43239912951def8e73083880322b5819670bf6"
+    }
+  }
+}

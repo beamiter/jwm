@@ -1,0 +1,211 @@
+{
+  "release_sha256": "430def8a30bd75b04adcc068fa7958907d33158f8f99f42ec7628bc6fac7c425",
+  "fixture_sha256": "8f67ceacaedad97a966018e2d224001124c4d1ba11f6e666b7e9fb3497d623e0",
+  "samples": {
+    "initial": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          216,
+          48,
+          32
+        ],
+        [
+          181,
+          62,
+          136
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          70
+        ]
+      ],
+      "bar_rgb": []
+    },
+    "resize_retained": {
+      "size": [
+        1297,
+        973
+      ],
+      "content": [
+        0,
+        122,
+        1297,
+        729
+      ],
+      "rgb": [
+        [
+          215,
+          49,
+          32
+        ],
+        [
+          181,
+          61,
+          138
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          68
+        ]
+      ],
+      "bar_rgb": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "restored_retained": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          215,
+          49,
+          32
+        ],
+        [
+          181,
+          61,
+          138
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          68
+        ]
+      ],
+      "bar_rgb": []
+    },
+    "second_source_scaled": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          34,
+          159,
+          92
+        ],
+        [
+          47,
+          118,
+          201
+        ],
+        [
+          67,
+          152,
+          174
+        ],
+        [
+          75,
+          190,
+          211
+        ]
+      ],
+      "bar_rgb": []
+    }
+  },
+  "initial_native_import_count": 35,
+  "initial_picture_setup_count": 0,
+  "host_suspended_during_resize": true,
+  "viewer_exit": 0,
+  "host_exit": 0,
+  "picture_setup_count": 70,
+  "native_presented": 106,
+  "drawn_acks": 106,
+  "hardware_downloads": 0,
+  "display_launcher_exit": 0,
+  "source_epochs": [
+    "1",
+    "2"
+  ],
+  "controller_exit": 1,
+  "controller_failure": "The libX11 observer was destroyed after its owned Xwayland server had stopped.",
+  "fixture_implementation_sha256": "af267e0eced4525838b2d21686d2a9303d58612cd70fb8401c97234a80ad8a26",
+  "scope": "Unscored exact-size private Xwayland native video, authenticated local loopback to an owned NVENC source. Host paused during local viewport changes.",
+  "archive": {
+    "path": "x11-native-lazy-picture-lifecycle-diagnostic-raw.zip",
+    "sha256": "eea1aaebcb6bfc7336429f48d059d295b84f03196e997c5e236c7ab804ac7bc1",
+    "members": {
+      "fixture/dri3-node.py": "c019f0a6d8020501e6593ef8978361070a30c8bbe408932f5733ccfc4fb0a7c2",
+      "fixture/launch.py": "7eb0debbcff83f68d74d97f4c73de51e705d41f513f605c51d4c2065a55f4367",
+      "fixture/lifecycle.py": "af267e0eced4525838b2d21686d2a9303d58612cd70fb8401c97234a80ad8a26",
+      "fixture/pixels.py": "6cfb0bcabd726fff9960ccc5b75f33be228570e00f5773faa2fdea1e41fa9576",
+      "fixture/previous_probe.py": "67961043a622fa9deaf9e8b63c50725c04102929b8c412ecbb63e64975b77bfd",
+      "fixture/processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "replay.py": "52f2fc7e972241caf02d0f2bf5132a948880d1d572ff5d7a9192eb46126f381c",
+      "result.json": "eef96492e90d5ee3f18969e4a3eddb211c6da78492e34ca341c0cb32ec1438a2",
+      "scope.json": "75258a4e4a8ca7968e81617075c161c588d85b8fbfc07c34676f41a3395934e5",
+      "terminal.txt": "2cd77915416a25c13bdefd51c1a57109aa30c65947178df3f53979fba0ad0949"
+    }
+  }
+}

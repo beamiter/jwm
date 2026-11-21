@@ -1,0 +1,218 @@
+{
+  "release_sha256": "80a046960ffe478ed440547e8d46153594ead329bf87b5f1b0ec907d6eb60016",
+  "fixture_sha256": "8f67ceacaedad97a966018e2d224001124c4d1ba11f6e666b7e9fb3497d623e0",
+  "samples": {
+    "initial": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          216,
+          48,
+          32
+        ],
+        [
+          181,
+          62,
+          136
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          70
+        ]
+      ],
+      "bar_rgb": []
+    },
+    "resize_retained": {
+      "size": [
+        1297,
+        973
+      ],
+      "content": [
+        0,
+        122,
+        1297,
+        729
+      ],
+      "rgb": [
+        [
+          215,
+          49,
+          32
+        ],
+        [
+          181,
+          61,
+          138
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          68
+        ]
+      ],
+      "bar_rgb": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "restored_retained": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          215,
+          49,
+          32
+        ],
+        [
+          181,
+          61,
+          138
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          68
+        ]
+      ],
+      "bar_rgb": []
+    },
+    "second_source_scaled": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          34,
+          159,
+          92
+        ],
+        [
+          47,
+          118,
+          201
+        ],
+        [
+          67,
+          152,
+          174
+        ],
+        [
+          75,
+          190,
+          211
+        ]
+      ],
+      "bar_rgb": []
+    }
+  },
+  "initial_native_import_count": 71,
+  "initial_picture_setup_count": 0,
+  "host_suspended_during_resize": true,
+  "viewer_exit": 0,
+  "host_exit": 0,
+  "picture_setup_count": 70,
+  "prefetch_target": {
+    "initial_sync": 1,
+    "initial_prefetch": 70,
+    "sync": 2,
+    "prefetch": 140,
+    "imports": 142
+  },
+  "native_presented": 142,
+  "drawn_acks": 142,
+  "hardware_downloads": 0,
+  "display_launcher_exit": 0,
+  "source_epochs": [
+    "1",
+    "2"
+  ],
+  "controller_exit": 0,
+  "controller_failure": null,
+  "fixture_implementation_sha256": "c4afae607335968bb9ca9bf22c3e201daf93a3fa22d7173b0e015c612393902b",
+  "scope": "Unscored exact-size private Xwayland native video, authenticated local loopback to an owned NVENC source. Host paused during local viewport changes.",
+  "archive": {
+    "path": "x11-native-prefetch-target-lifecycle-raw.zip",
+    "sha256": "bbdc31a77c975e50c01058a195181e9f0c12e819a5726389b15ae15569f0a29a",
+    "members": {
+      "fixture/dri3-node.py": "c019f0a6d8020501e6593ef8978361070a30c8bbe408932f5733ccfc4fb0a7c2",
+      "fixture/launch.py": "7eb0debbcff83f68d74d97f4c73de51e705d41f513f605c51d4c2065a55f4367",
+      "fixture/lifecycle.py": "c4afae607335968bb9ca9bf22c3e201daf93a3fa22d7173b0e015c612393902b",
+      "fixture/pixels.py": "6cfb0bcabd726fff9960ccc5b75f33be228570e00f5773faa2fdea1e41fa9576",
+      "fixture/previous_probe.py": "67961043a622fa9deaf9e8b63c50725c04102929b8c412ecbb63e64975b77bfd",
+      "fixture/processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "replay.py": "2bf1db69979fe1690f38d04fab588ad6ce3929100baea8db08e7ff264921074b",
+      "result.json": "68f1bd6455681caf48fadec32e795b45492d76212160bb47fdfea4f9b3b3bcee",
+      "scope.json": "6cd1a0943694c32e8ed96ce8e19b880d41d8b5e87603f588c3de251824a02fca",
+      "terminal.txt": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    }
+  }
+}

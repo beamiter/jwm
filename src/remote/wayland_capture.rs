@@ -1,4 +1,4 @@
-//! One local, interactive Wayland toplevel grant, retained on one connection.
+//! Locally selected Wayland toplevel grants retained on one connection.
 //!
 //! No X11 access, output fallback, identifier lookup, reconnection, cursor,
 //! input, clipboard, or native resize. Protocol globals are not a per-client
@@ -11,6 +11,7 @@ pub(super) mod interactive_popup;
 mod text;
 use super::RemoteResult;
 use super::messages::FrameLimits;
+use super::source_session::{MAX_GRANTED_SOURCES, SourceId};
 use super::x11_capture::{CaptureImageRecycler, CaptureOutcome, CapturedFrame, frame_dimensions};
 use crate::readonly_popup_capture_protocol::client::jwm_readonly_popup_capture_manager_v1::{
     self as popup_manager, JwmReadonlyPopupCaptureManagerV1,
@@ -28,7 +29,10 @@ use crate::remote_pointer_protocol::client::{
     jwm_remote_pointer_manager_v1::JwmRemotePointerManagerV1,
 };
 use control::NativeControl;
-use image::{RgbImage, imageops::FilterType};
+#[cfg(feature = "remote-h264")]
+#[path = "wayland_capture_gpu.rs"]
+mod gpu;
+use image::RgbImage;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::memfd::{MFdFlags, memfd_create};
 use std::fs::File;
@@ -86,6 +90,7 @@ const SELECTION_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_TOPLEVELS: usize = 256;
 const MAX_LABEL_BYTES: usize = 256;
 const MAX_SELECTION_BYTES: usize = 32;
+const MAX_SELECTION_LIST_BYTES: usize = 4 * MAX_GRANTED_SOURCES + 1;
 
 struct Toplevel {
     handle: ExtForeignToplevelHandleV1,
@@ -93,6 +98,11 @@ struct Toplevel {
     app_id: String,
     complete: bool,
     closed: bool,
+}
+
+struct ToplevelGrant {
+    handle: ExtForeignToplevelHandleV1,
+    source: ExtImageCaptureSourceV1,
 }
 
 #[derive(Default)]
@@ -127,6 +137,8 @@ struct NativePointer {
 }
 #[derive(Default)]
 struct State {
+    #[cfg(feature = "remote-h264")]
+    gpu: gpu::Gpu,
     interactive_popup: interactive_popup::NativePopup,
     popups: bool,
     popup_manager: Option<JwmReadonlyPopupCaptureManagerV1>,
@@ -162,6 +174,19 @@ struct State {
 }
 
 impl State {
+    fn clear_session_constraints(&mut self) {
+        #[cfg(feature = "remote-h264")]
+        self.gpu.clear_constraints();
+        self.size = None;
+        self.batch_size = None;
+        self.batch_xrgb = false;
+        self.constraints_done = false;
+        self.session_stopped = false;
+        self.frame_failed = false;
+        self.frame_ready = false;
+        self.normal_transform = false;
+    }
+
     fn follow_event(&mut self, event: resize_manager::Event) {
         if self.failed.is_some() {
             return;
@@ -237,6 +262,8 @@ impl State {
 
     fn begin_constraints(&mut self) {
         if self.constraints_done {
+            #[cfg(feature = "remote-h264")]
+            self.gpu.clear_constraints();
             self.constraints_done = false;
             self.batch_size = None;
             self.batch_xrgb = false;
@@ -249,6 +276,7 @@ pub(super) struct WaylandCapture {
     queue: EventQueue<State>,
     state: State,
     source: Option<ExtImageCaptureSourceV1>,
+    grants: Vec<ToplevelGrant>,
     session: Option<ExtImageCopyCaptureSessionV1>,
     inflight: Option<ExtImageCopyCaptureFrameV1>,
     buffer: Option<wl_buffer::WlBuffer>,
@@ -261,6 +289,10 @@ pub(super) struct WaylandCapture {
     resize_sessions: u32,
     applied_follow_epoch: u32,
     recycler: CaptureImageRecycler,
+    xrgb_staging: Vec<u8>,
+    scaler: super::triangle_patch::TrianglePatch,
+    measure_capture: bool,
+    capture_observation: Option<CaptureObservation>,
     control_lease: Option<JwmRemoteControlLeaseV1>,
     pointer_lease: Option<JwmRemotePointerLeaseV1>,
     pointer_ready_at: Option<Instant>,
@@ -269,20 +301,54 @@ pub(super) struct WaylandCapture {
     arm_deadline: Option<Instant>,
 }
 
+pub(super) struct CaptureObservation {
+    pub(super) readback: Duration,
+    pub(super) conversion: Duration,
+    pub(super) resize: Option<Duration>,
+    pub(super) bytes_read: usize,
+    pub(super) staging_grew: bool,
+}
+
 impl WaylandCapture {
+    pub(super) fn enable_capture_metrics(&mut self) {
+        self.measure_capture = true;
+    }
+
+    pub(super) fn take_capture_observation(&mut self) -> Option<CaptureObservation> {
+        self.capture_observation.take()
+    }
+
     pub(super) fn connect(
         display: Option<&str>,
         max_width: u16,
         resize_follow: bool,
         popups: bool,
+        multiple: bool,
     ) -> RemoteResult<Self> {
         let path = socket_path(display)?;
         let stream = jwm_ipc_transport::connect(&path, PROTOCOL_TIMEOUT)?;
-        Self::connect_stream(stream, max_width, resize_follow, popups, |capture| {
-            eprint!("jwm-remote: select Wayland window index: ");
-            io::stderr().flush()?;
-            capture.read_selection(Instant::now() + SELECTION_TIMEOUT)
-        })
+        Self::connect_stream_mode(
+            stream,
+            max_width,
+            resize_follow,
+            popups,
+            false,
+            false,
+            |capture| {
+                let deadline = Instant::now() + SELECTION_TIMEOUT;
+                if multiple {
+                    eprint!("jwm-remote: select Wayland window indices, comma-separated: ");
+                    io::stderr().flush()?;
+                    parse_selection_list(
+                        &capture.read_selection_line(deadline, MAX_SELECTION_LIST_BYTES)?,
+                    )
+                } else {
+                    eprint!("jwm-remote: select Wayland window index: ");
+                    io::stderr().flush()?;
+                    capture.read_selection(deadline).map(|index| vec![index])
+                }
+            },
+        )
     }
 
     /// Exercise the production protocol path against a private test server.
@@ -340,6 +406,7 @@ impl WaylandCapture {
                 .ok_or_else(|| invalid("invalid Wayland test selection index").into())
         })
     }
+    #[cfg(all(test, feature = "backend-wayland-udev"))]
     fn connect_stream(
         stream: UnixStream,
         max_width: u16,
@@ -354,7 +421,7 @@ impl WaylandCapture {
             popups,
             false,
             false,
-            select,
+            |capture| select(capture).map(|index| vec![index]),
         )
     }
     fn connect_stream_mode(
@@ -364,7 +431,7 @@ impl WaylandCapture {
         popups: bool,
         interactive_popup: bool,
         deferred_popup: bool,
-        select: impl FnOnce(&mut Self) -> RemoteResult<usize>,
+        select: impl FnOnce(&mut Self) -> RemoteResult<Vec<usize>>,
     ) -> RemoteResult<Self> {
         if interactive_popup && (resize_follow || popups || max_width != 0) {
             return Err(invalid("interactive family requires an unscaled exclusive root").into());
@@ -384,6 +451,7 @@ impl WaylandCapture {
                 ..Default::default()
             },
             source: None,
+            grants: Vec::new(),
             session: None,
             inflight: None,
             buffer: None,
@@ -396,6 +464,10 @@ impl WaylandCapture {
             resize_sessions: 0,
             applied_follow_epoch: 0,
             recycler: CaptureImageRecycler::default(),
+            xrgb_staging: Vec::new(),
+            scaler: super::triangle_patch::TrianglePatch::default(),
+            measure_capture: false,
+            capture_observation: None,
             control_lease: None,
             pointer_lease: None,
             pointer_ready_at: None,
@@ -434,30 +506,48 @@ impl WaylandCapture {
         if listed.is_empty() {
             return Err(invalid("no live Wayland toplevels are available").into());
         }
-        let index = select(&mut capture)?;
-        if !listed.contains(&index) {
-            return Err(invalid("Wayland index was not in the displayed selection list").into());
+        let indices = select(&mut capture)?;
+        if indices.is_empty()
+            || indices.len() > MAX_GRANTED_SOURCES
+            || (indices.len() > 1 && (resize_follow || popups || interactive_popup))
+        {
+            return Err(invalid("invalid number of authorized Wayland windows").into());
         }
-        let selected = capture
-            .state
-            .toplevels
-            .get(index)
-            .filter(|item| item.complete && !item.closed)
-            .ok_or_else(|| invalid("selected Wayland index is not a live listed window"))?
-            .handle
-            .clone();
-        capture.state.selected = Some(selected.clone());
+        let mut seen = std::collections::HashSet::new();
+        if !indices
+            .iter()
+            .all(|index| listed.contains(index) && seen.insert(*index))
+        {
+            return Err(invalid("Wayland window indices must be distinct and listed").into());
+        }
         // A closed handle during local selection can never become an output,
         // a replacement identifier, or a second interactive selection.
         let deadline = Instant::now() + PROTOCOL_TIMEOUT;
         capture.sync_until(deadline)?;
-        capture.state.check()?;
-        let source = capture
-            .state
-            .source_manager
-            .as_ref()
-            .unwrap()
-            .create_source(&selected, &qh, ());
+        let handles = indices
+            .into_iter()
+            .map(|index| {
+                let item = &capture.state.toplevels[index];
+                if !item.complete || item.closed {
+                    return Err(invalid("selected Wayland index is no longer live"));
+                }
+                Ok(item.handle.clone())
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        capture.state.selected = Some(handles[0].clone());
+        let manager = capture.state.source_manager.as_ref().unwrap();
+        let source = if handles.len() == 1 {
+            manager.create_source(&handles[0], &qh, ())
+        } else {
+            capture.grants = handles
+                .into_iter()
+                .map(|handle| ToplevelGrant {
+                    source: manager.create_source(&handle, &qh, ()),
+                    handle,
+                })
+                .collect();
+            capture.grants[0].source.clone()
+        };
         if deferred_popup {
             if !interactive_popup {
                 return Err(invalid("deferred popup mode is not explicit").into());
@@ -519,35 +609,98 @@ impl WaylandCapture {
             capture.applied_follow_epoch = capture.state.follow_epoch;
             capture.state.session_stopped = false;
         }
-        let session = capture
-            .state
-            .capture_manager
-            .as_ref()
-            .unwrap()
-            .create_session(&source, manager::Options::empty(), &qh, ());
-        capture.source = Some(source);
-        capture.session = Some(session);
-        capture.drive_until(deadline, |state| {
+        capture.open_capture_session(source, deadline)?;
+        Ok(capture)
+    }
+
+    fn open_capture_session(
+        &mut self,
+        source: ExtImageCaptureSourceV1,
+        deadline: Instant,
+    ) -> RemoteResult<()> {
+        let session = self.state.capture_manager.as_ref().unwrap().create_session(
+            &source,
+            manager::Options::empty(),
+            &self.queue.handle(),
+            (),
+        );
+        self.source = Some(source);
+        self.session = Some(session);
+        self.drive_until(deadline, |state| {
             state.constraints_done || state.session_stopped
         })?;
-        if capture.state.session_stopped {
+        if self.state.session_stopped {
             return Err(
                 invalid("Wayland source session stopped before initial constraints").into(),
             );
         }
-        if resize_follow && capture.state.size != capture.state.follow_layout {
+        if self.state.resize_follow && self.state.size != self.state.follow_layout {
             return Err(
                 invalid("Wayland resize-follow constraints disagree with native layout").into(),
             );
         }
-        if popups && !resize_follow && capture.state.size != capture.state.popup_layout {
+        if self.state.popups
+            && !self.state.resize_follow
+            && self.state.size != self.state.popup_layout
+        {
             return Err(
                 invalid("Wayland popup constraints disagree with fixed root canvas").into(),
             );
         }
-        capture.create_buffer()?;
-        capture.sync_until(deadline)?;
-        Ok(capture)
+        self.create_buffer()?;
+        self.sync_until(deadline)
+    }
+
+    pub(super) fn grant_count(&self) -> usize {
+        self.grants.len().max(1)
+    }
+
+    pub(super) fn switch_grant(&mut self, target: SourceId) -> RemoteResult<()> {
+        self.state.check()?;
+        if (self.state.control.enabled && !self.state.control.revoked)
+            || self.control_lease.is_some()
+            || self.state.pointer.enabled
+            || self.state.keyboard.enabled
+            || self.state.text.enabled
+            || self.state.interactive_popup.enabled
+            || self.state.resize_follow
+            || self.state.popups
+            || self.retained_frame.is_some()
+            || self.inflight.is_some()
+        {
+            return Err(
+                invalid("Wayland source switching requires quiescent view-only capture").into(),
+            );
+        }
+        let index = target
+            .0
+            .checked_sub(1)
+            .ok_or_else(|| invalid("unknown Wayland source grant"))?;
+        let grant = self
+            .grants
+            .get(index as usize)
+            .ok_or_else(|| invalid("Wayland source was not granted for switching"))?;
+        let handle = grant.handle.clone();
+        let source = grant.source.clone();
+        if let Some(session) = self.session.take() {
+            session.destroy();
+        }
+        if let Some(buffer) = self.buffer.take() {
+            buffer.destroy();
+        }
+        // Drain all old session callbacks before assigning the new source's
+        // constraints. The old SHM stays charged through this compositor fence.
+        let deadline = Instant::now() + PROTOCOL_TIMEOUT;
+        self.sync_until(deadline)?;
+        self.file = None;
+        self.state.clear_session_constraints();
+        self.state.control.clear_for_new_source();
+        self.state.selected = Some(handle);
+        self.state.check()?;
+        if !self.advance_epoch() {
+            return self.state.check();
+        }
+        self.open_capture_session(source, deadline)
     }
 
     /// Must be enabled before the first frame and only after wire negotiation.
@@ -948,8 +1101,12 @@ impl WaylandCapture {
     }
 
     fn read_selection(&mut self, deadline: Instant) -> RemoteResult<usize> {
+        parse_selection(&self.read_selection_line(deadline, MAX_SELECTION_BYTES)?)
+    }
+
+    fn read_selection_line(&mut self, deadline: Instant, limit: usize) -> RemoteResult<Vec<u8>> {
         let stdin = io::stdin();
-        let mut bytes = Vec::with_capacity(MAX_SELECTION_BYTES);
+        let mut bytes = Vec::with_capacity(limit);
         loop {
             self.state.check()?;
             if Instant::now() >= deadline {
@@ -969,14 +1126,11 @@ impl WaylandCapture {
                 return Err(invalid("Wayland window selection cancelled").into());
             }
             bytes.push(byte[0]);
-            if bytes.len() > MAX_SELECTION_BYTES {
-                return Err(invalid("Wayland window selection exceeds 32 bytes").into());
-            }
             if byte[0] == b'\n' {
-                return parse_selection(&bytes);
+                return Ok(bytes);
             }
-            if bytes.len() == MAX_SELECTION_BYTES {
-                return Err(invalid("Wayland window selection exceeds 32 bytes").into());
+            if bytes.len() == limit {
+                return Err(invalid("Wayland window selection line is too long").into());
             }
         }
     }
@@ -1171,13 +1325,7 @@ impl WaylandCapture {
         // session/buffer. Keep the same derived source and same connection.
         self.sync_until(deadline)?;
         self.file = None;
-        self.state.size = None;
-        self.state.batch_size = None;
-        self.state.batch_xrgb = false;
-        self.state.constraints_done = false;
-        self.state.session_stopped = false;
-        self.state.frame_failed = false;
-        self.state.frame_ready = false;
+        self.state.clear_session_constraints();
         let transitions = u64::from(self.state.follow_epoch - self.applied_follow_epoch);
         self.epoch = self
             .epoch
@@ -1304,7 +1452,7 @@ impl WaylandCapture {
         } else if self.state.control.enabled && !self.control_revoked() && !visual_only {
             self.retained_frame = Some(ready_frame);
             self.pointer_ready_at = Some(Instant::now());
-            if self.state.frame_serial == 1 {
+            if self.arm_deadline.is_none() && self.state.control.awaiting_arm() {
                 self.arm_deadline = Some(Instant::now() + PROTOCOL_TIMEOUT);
             }
         } else if self.state.pointer.enabled && !self.pointer_revoked() && !visual_only {
@@ -1330,29 +1478,50 @@ impl WaylandCapture {
             return Err(invalid("Wayland buffer constraints changed during capture").into());
         }
         let (_, bytes) = buffer_layout(u32::from(width), u32::from(height))?;
-        let mut pixels = Vec::new();
-        pixels.try_reserve_exact(bytes)?;
-        pixels.resize(bytes, 0);
-        self.file.as_ref().unwrap().read_exact_at(&mut pixels, 0)?;
-        let rgb = decode_xrgb(&pixels, width, height)?;
+        let staging_grew = bytes > self.xrgb_staging.capacity();
+        if bytes > self.xrgb_staging.len() {
+            self.xrgb_staging
+                .try_reserve_exact(bytes - self.xrgb_staging.len())?;
+        }
+        self.xrgb_staging.resize(bytes, 0);
+        let readback_started = self.measure_capture.then(Instant::now);
+        self.file
+            .as_ref()
+            .unwrap()
+            .read_exact_at(&mut self.xrgb_staging, 0)?;
+        let readback = readback_started.map(|started| started.elapsed());
+        let conversion_started = self.measure_capture.then(Instant::now);
+        let rgb = decode_xrgb(&self.xrgb_staging, width, height, &mut self.recycler)?;
+        let conversion = conversion_started.map(|started| started.elapsed());
         let (out_width, out_height) =
             frame_dimensions(width, height, self.max_width, self.max_height, self.limits);
         self.limits.validate_dimensions(out_width, out_height)?;
+        let mut resize = None;
         let image = if (out_width, out_height) == (width, height) {
             rgb
         } else {
-            let resized = image::imageops::resize(
-                &rgb,
-                out_width.into(),
-                out_height.into(),
-                FilterType::Triangle,
-            );
+            let started = self.measure_capture.then(Instant::now);
+            let mut pixels = self.recycler.take(out_width, out_height)?;
+            self.scaler
+                .resize_into(&rgb, (out_width, out_height), &mut pixels);
             self.recycler.recycle_image(rgb);
-            resized
+            resize = started.map(|started| started.elapsed());
+            RgbImage::from_raw(out_width.into(), out_height.into(), pixels)
+                .ok_or_else(|| invalid("invalid scaled Wayland image"))?
         };
+        if let (Some(readback), Some(conversion)) = (readback, conversion) {
+            self.capture_observation = Some(CaptureObservation {
+                readback,
+                conversion,
+                resize,
+                bytes_read: bytes,
+                staging_grew,
+            });
+        }
         self.sync_until(deadline)?;
         self.state.check()?;
         if self.state.resize_follow && self.state.session_stopped {
+            self.recycler.recycle_image(image);
             return Ok(CaptureOutcome::NoChange);
         }
         if self.state.interactive_popup.enabled {
@@ -1467,8 +1636,14 @@ impl Drop for WaylandCapture {
         if let Some(session) = self.session.take() {
             session.destroy();
         }
-        if let Some(source) = self.source.take() {
-            source.destroy();
+        if self.grants.is_empty() {
+            if let Some(source) = self.source.take() {
+                source.destroy();
+            }
+        } else {
+            for grant in self.grants.drain(..) {
+                grant.source.destroy();
+            }
         }
         if let Some(buffer) = self.buffer.take() {
             buffer.destroy();
@@ -1495,6 +1670,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 version,
             } if version >= 1 => {
                 let bound = match interface.as_str() {
+                    #[cfg(feature = "remote-h264")]
+                    "zwp_linux_dmabuf_v1"
+                        if version >= 3
+                            && state.gpu.manager.is_none()
+                            && std::env::var_os("JWM_REMOTE_GPU_CAPTURE").is_some() =>
+                    {
+                        state.gpu.manager = Some((name, proxy.bind(name, 3, qh, ())));
+                        false
+                    }
                     "jwm_remote_text_manager_v1" if state.text.manager.is_none() => {
                         state.text.global = Some(name);
                         state.text.manager = Some(proxy.bind(name, 1, qh, ()));
@@ -1523,7 +1707,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                         true
                     }
                     "jwm_remote_control_manager_v1" if state.control.manager.is_none() => {
-                        state.control.manager = Some(proxy.bind(name, version.min(5), qh, ()));
+                        state.control.manager = Some(proxy.bind(name, version.min(7), qh, ()));
                         state.control.global = Some(name);
                         false
                     }
@@ -1580,6 +1764,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             wl_registry::Event::GlobalRemove { name } if state.globals.contains(&name) => {
                 state.fail("required Wayland global was removed")
             }
+            #[cfg(feature = "remote-h264")]
+            wl_registry::Event::GlobalRemove { name } => state.gpu.remove_global(name),
             _ => {}
         }
     }
@@ -1694,8 +1880,19 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State {
                 state.begin_constraints();
                 state.batch_xrgb |= format == WEnum::Value(wl_shm::Format::Xrgb8888);
             }
-            session::Event::DmabufDevice { .. } | session::Event::DmabufFormat { .. } => {
-                state.begin_constraints()
+            session::Event::DmabufDevice { device } => {
+                state.begin_constraints();
+                #[cfg(feature = "remote-h264")]
+                state.gpu.read_device(&device);
+                #[cfg(not(feature = "remote-h264"))]
+                let _ = device;
+            }
+            session::Event::DmabufFormat { format, modifiers } => {
+                state.begin_constraints();
+                #[cfg(feature = "remote-h264")]
+                state.gpu.read_format(format, &modifiers);
+                #[cfg(not(feature = "remote-h264"))]
+                let _ = (format, modifiers);
             }
             session::Event::Done => {
                 if let Some(size) = state.batch_size.filter(|_| state.batch_xrgb) {
@@ -1734,6 +1931,12 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, u64> for State {
             }
             frame::Event::Ready => {
                 state.fail("Wayland frame missing normal transform or duplicated ready")
+            }
+            #[cfg(feature = "remote-h264")]
+            frame::Event::Failed { .. }
+                if state.gpu.capturing && !state.frame_ready && !state.frame_failed =>
+            {
+                state.frame_failed = true
             }
             frame::Event::Failed { .. }
                 if state.resize_follow && !state.frame_ready && !state.frame_failed =>
@@ -1791,11 +1994,33 @@ fn parse_selection(bytes: &[u8]) -> RemoteResult<usize> {
     if bytes.is_empty() || bytes.len() > MAX_SELECTION_BYTES || bytes.last() != Some(&b'\n') {
         return Err(invalid("invalid Wayland window selection line").into());
     }
-    let digits = bytes
+    let line = &bytes[..bytes.len() - 1];
+    parse_selection_index(line.strip_suffix(b"\r").unwrap_or(line))
+}
+
+fn parse_selection_list(bytes: &[u8]) -> RemoteResult<Vec<usize>> {
+    let line = bytes
         .strip_suffix(b"\n")
-        .unwrap()
+        .filter(|_| bytes.len() <= MAX_SELECTION_LIST_BYTES)
+        .ok_or_else(|| invalid("invalid Wayland window selection line"))?;
+    let mut result = Vec::new();
+    for digits in line
         .strip_suffix(b"\r")
-        .unwrap_or(&bytes[..bytes.len() - 1]);
+        .unwrap_or(line)
+        .split(|b| *b == b',')
+    {
+        let index = parse_selection_index(digits.trim_ascii())?;
+        if result.len() == MAX_GRANTED_SOURCES || result.contains(&index) {
+            return Err(
+                invalid("Wayland selection has too many windows or a duplicate index").into(),
+            );
+        }
+        result.push(index);
+    }
+    Ok(result)
+}
+
+fn parse_selection_index(digits: &[u8]) -> RemoteResult<usize> {
     if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return Err(invalid("Wayland window selection must be a decimal index").into());
     }
@@ -1837,19 +2062,35 @@ fn buffer_layout(width: u32, height: u32) -> RemoteResult<(i32, usize)> {
     i32::try_from(bytes)?;
     Ok((i32::try_from(stride)?, bytes))
 }
-fn decode_xrgb(bytes: &[u8], width: u16, height: u16) -> RemoteResult<RgbImage> {
-    let (_, expected) = buffer_layout(u32::from(width), u32::from(height))?;
+fn decode_xrgb(
+    bytes: &[u8],
+    width: u16,
+    height: u16,
+    recycler: &mut CaptureImageRecycler,
+) -> RemoteResult<RgbImage> {
+    let (_stride, expected) = buffer_layout(u32::from(width), u32::from(height))?;
     if bytes.len() != expected {
         return Err(invalid("Wayland SHM buffer length changed").into());
     }
-    let mut rgb = Vec::new();
-    rgb.try_reserve_exact(expected / 4 * 3)?;
-    for pixel in bytes.chunks_exact(4) {
-        let value = u32::from_ne_bytes(pixel.try_into().unwrap());
-        rgb.extend_from_slice(&[(value >> 16) as u8, (value >> 8) as u8, value as u8]);
+    #[cfg(target_endian = "little")]
+    {
+        super::x11_capture::decode_bgrx32_rows_reusing(
+            bytes,
+            width,
+            height,
+            _stride as usize,
+            recycler,
+        )
     }
-    RgbImage::from_raw(u32::from(width), u32::from(height), rgb)
-        .ok_or_else(|| invalid("invalid decoded Wayland image").into())
+    #[cfg(target_endian = "big")]
+    {
+        let mut rgb = recycler.take(width, height)?;
+        for (pixel, output) in bytes.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+            output.copy_from_slice(&pixel[1..4]);
+        }
+        RgbImage::from_raw(u32::from(width), u32::from(height), rgb)
+            .ok_or_else(|| invalid("invalid decoded Wayland image").into())
+    }
 }
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -1926,6 +2167,26 @@ mod tests {
         }
         assert!(parse_selection(&[b'1'; 33]).is_err());
     }
+
+    #[test]
+    fn source_list_preserves_local_grant_order_and_rejects_duplicates() {
+        assert_eq!(parse_selection_list(b"7, 1,256\r\n").unwrap(), [6, 0, 255]);
+        for line in [
+            b"1,01\n".as_slice(),
+            b"0,1\n",
+            b"1,\n",
+            b"1,title\n",
+            b"1,2",
+        ] {
+            assert!(parse_selection_list(line).is_err());
+        }
+        let excess = (1..=MAX_GRANTED_SOURCES + 1)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+            + "\n";
+        assert!(parse_selection_list(excess.as_bytes()).is_err());
+    }
     #[test]
     fn labels_escape_terminal_control_and_are_bounded() {
         let label = safe_label("title\x1b[2J\n\r\t\0\x7f");
@@ -1944,9 +2205,14 @@ mod tests {
     #[test]
     fn xrgb_decoding_uses_native_endian_masks_not_cursor_or_alpha() {
         let bytes = [0x12ff0000_u32.to_ne_bytes(), 0xab00ff00_u32.to_ne_bytes()].concat();
-        let image = decode_xrgb(&bytes, 2, 1).unwrap();
+        let mut recycler = CaptureImageRecycler::default();
+        let image = decode_xrgb(&bytes, 2, 1, &mut recycler).unwrap();
         assert_eq!(image.as_raw(), &[255, 0, 0, 0, 255, 0]);
-        assert!(decode_xrgb(&bytes[..7], 2, 1).is_err());
+        let allocation = image.as_raw().as_ptr();
+        recycler.recycle_image(image);
+        let reused = decode_xrgb(&bytes, 2, 1, &mut recycler).unwrap();
+        assert_eq!(reused.as_raw().as_ptr(), allocation);
+        assert!(decode_xrgb(&bytes[..7], 2, 1, &mut recycler).is_err());
     }
     #[test]
     fn initial_resize_restore_is_terminal_even_before_constraints_done() {

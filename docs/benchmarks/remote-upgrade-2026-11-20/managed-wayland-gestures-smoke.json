@@ -1,0 +1,43 @@
+{
+  "scope": "Managed Wayland gestures through the installed host and session helpers",
+  "protocol": {
+    "application_version": 35,
+    "gesture_input_selector": 3,
+    "native_source_control_version": 6,
+    "explicit_host_and_viewer_consent": true
+  },
+  "environment": "Two private JWM/Smithay displays, mandatory software GLES and authenticated loopback TCP on each machine",
+  "independent_cli": {
+    "development": {"passed": 10, "ignored": 0},
+    "ubuntu_192_168_0_78": {"passed": 10, "ignored": 0},
+    "assertions": {
+      "fresh_presented_proof_while_shift_held": true,
+      "video_presented_during_held_drag": true,
+      "last_motion_delivered_before_release": [108, 80],
+      "viewer_resize_balances_button_and_retains_modifier_and_lease": true,
+      "source_switch_balances_original_button_and_modifier": true,
+      "same_authenticated_session_after_switch": true,
+      "new_source_starts_read_only": true,
+      "explicit_request_obtains_gesture_lease_after_new_presentation": true,
+      "leaving_image_balances_replacement_drag": true,
+      "missing_host_permission_or_native_v6_refused_before_input": true
+    }
+  },
+  "development_remote_suite_before_final_refusal_diagnostics": {
+    "passed": 1369,
+    "failed": 0,
+    "ignored": 52
+  },
+  "terminals": {
+    "built": ["Forge", "Anvil", "Ember", "Frost", "Aether"],
+    "aether_browser_tests_passed": 160,
+    "aether_ipc_tests_passed": 3,
+    "aether_actual_webview_sends_gesture_option": true,
+    "aether_actual_view_only_switch_and_disconnect_on_weston_13": true
+  },
+  "mixed_helper_versions": {
+    "previous_host_refuses_gestures_before_input_activation": true,
+    "x11_view_only_presents_and_disconnects_in_both_directions": true
+  },
+  "physical_input_to_display_latency_measured": false
+}

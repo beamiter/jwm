@@ -23,7 +23,11 @@ pub(super) const VIDEO_FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 pub type RemoteError = Box<dyn Error + Send + Sync>;
 pub type RemoteResult<T> = Result<T, RemoteError>;
 
+#[cfg(feature = "remote-h264")]
+mod adaptive_video;
+pub mod capabilities;
 pub mod client;
+mod client_decode_queue;
 pub mod clipboard_files;
 pub mod clipboard_policy;
 pub mod clipboard_staging_budget;
@@ -35,7 +39,16 @@ mod control_repair_wire;
 pub mod cursor;
 mod deadline;
 mod downscale;
+pub mod engine;
 pub mod frame;
+#[cfg(feature = "remote-h264")]
+mod gpu_encode;
+#[cfg(feature = "remote-h264")]
+use gpu_encode::gpu_host_video;
+#[cfg(feature = "remote-h264")]
+mod gpu_import;
+#[cfg(feature = "remote-h264")]
+mod gpu_present;
 #[cfg(feature = "remote-h264")]
 mod h264;
 #[cfg(feature = "remote-h264")]
@@ -61,6 +74,7 @@ pub mod source_wire;
 pub mod ssh;
 mod ssh_diagnostics;
 mod ssh_session_file;
+mod telemetry;
 mod tile;
 mod triangle_patch;
 pub mod usability;

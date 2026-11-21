@@ -1,0 +1,50 @@
+{
+  "scope": "Native Wayland compositor gestures, scoped popup runtime and regression tests",
+  "display_environment": "Private Wayland displays with mandatory software GLES",
+  "gesture_protocol": {
+    "native_version": 6,
+    "explicit_one_shot_lifetime_seconds": 30,
+    "reuses_original_keyboard_and_pointer_recipients": true,
+    "modifier_click_and_balanced_drag_native_edges_observed": true,
+    "takeover_keyboard_focus_loss_and_disconnect_balance_held_input": true,
+    "new_pointer_receiver_and_focus_reentry_do_not_receive_old_release": true,
+    "binding_v6_without_explicit_gesture_creation_denies_drag": true,
+    "hidpi_test": {
+      "buffer_scale": 2,
+      "root_logical_dimensions": [400, 300],
+      "crop": [8, 12, 380, 270],
+      "captured_points": [[15, 25], [20, 30]],
+      "delivered_root_points": [[23, 37], [28, 42]],
+      "crop_origin_change_released_old_button_and_rejected_stale_motion": true
+    },
+    "remote_cli_and_terminal_gesture_negotiation_exercised": false
+  },
+  "popup_runtime": {
+    "development": {
+      "libwayland_server": "1.22.0",
+      "advertised_popup_manager": true,
+      "compositor_regression_passed": 106,
+      "dedicated_qt_widget_test_passed": true,
+      "qt_widgets_version": "6.4.2",
+      "verified_widget_actions": ["bound private pointer", "opened QMenu", "captured menu", "selected menu item", "retired private seat"],
+      "authenticated_popup_integration_checks_passed": 2
+    },
+    "ubuntu_192_168_0_78_system": {
+      "libwayland_server": "1.20.0",
+      "advertised_popup_manager": false,
+      "native_combined_control_tests_passed": 34
+    },
+    "ubuntu_192_168_0_78_private_process_library": {
+      "libwayland_server": "1.21.0",
+      "package": "Debian libwayland-server0 1.21.0-1",
+      "advertised_popup_manager": true,
+      "compositor_regression_passed": 106,
+      "qt_widget_test_executed": false
+    }
+  },
+  "existing_independent_cli_regression_after_native_gesture_changes": {
+    "development_passed": 8,
+    "ubuntu_192_168_0_78_passed": 8
+  },
+  "physical_display_or_input_latency_measured": false
+}

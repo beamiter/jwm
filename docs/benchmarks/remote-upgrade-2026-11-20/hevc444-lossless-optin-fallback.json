@@ -1,0 +1,166 @@
+{
+  "archive": {
+    "name": "hevc444-lossless-optin-fallback-raw.zip",
+    "sha256": "ffa2079f97807d13d149828d1d02dbde408bc2ff3aa9c0ff67adcb0e882c3d0d"
+  },
+  "binary_sha256": "430def8a30bd75b04adcc068fa7958907d33158f8f99f42ec7628bc6fac7c425",
+  "schema_version": 1,
+  "scope": "Two private 1920x1080 Xvfb displays and authenticated IPv4 loopback, actual GPU codec where available.",
+  "verification": {
+    "scenarios": {
+      "packet-limit": {
+        "failure": "packet-limit",
+        "fallback": "jwm-remote: HEVC 4:4:4 lossless encoding failed, switching to JPEG: video access unit exceeds 1 MiB",
+        "hardware_before_jpeg": [
+          {
+            "drawn_acks_in_window": 69,
+            "scope": {
+              "codec": "HEVC 4:4:4",
+              "encoded_dimensions": [
+                1920,
+                1080
+              ],
+              "geometry_epoch": 2,
+              "sequence": 69,
+              "source_dimensions": [
+                1920,
+                1080
+              ],
+              "source_epoch": 1
+            },
+            "session_id": "authenticated-session"
+          },
+          {
+            "drawn_acks_in_window": 69,
+            "scope": {
+              "codec": "HEVC 4:4:4",
+              "encoded_dimensions": [
+                1920,
+                1080
+              ],
+              "geometry_epoch": 2,
+              "sequence": 68,
+              "source_dimensions": [
+                1920,
+                1080
+              ],
+              "source_epoch": 1
+            },
+            "session_id": "authenticated-session"
+          }
+        ],
+        "initial_rgb": [
+          49,
+          89,
+          178
+        ],
+        "jpeg_after_packet_limit": [
+          {
+            "drawn_acks_in_window": 8,
+            "scope": {
+              "codec": "JPEG",
+              "encoded_dimensions": [
+                1920,
+                1080
+              ],
+              "geometry_epoch": 2,
+              "sequence": 76,
+              "source_dimensions": [
+                1920,
+                1080
+              ],
+              "source_epoch": 1
+            },
+            "session_id": "authenticated-session"
+          },
+          {
+            "drawn_acks_in_window": 8,
+            "scope": {
+              "codec": "JPEG",
+              "encoded_dimensions": [
+                1920,
+                1080
+              ],
+              "geometry_epoch": 2,
+              "sequence": 76,
+              "source_dimensions": [
+                1920,
+                1080
+              ],
+              "source_epoch": 1
+            },
+            "session_id": "authenticated-session"
+          }
+        ],
+        "owned_exits": [
+          0,
+          0
+        ],
+        "restored_rgb": [
+          210,
+          59,
+          48
+        ],
+        "status": "passed"
+      },
+      "unsupported": {
+        "failure": "unsupported",
+        "fallback": "jwm-remote: HEVC 4:4:4 lossless NVENC probe failed: opening NVENC encoder: ",
+        "initial_rgb": [
+          48,
+          89,
+          177
+        ],
+        "negotiated_jpeg": [
+          {
+            "drawn_acks_in_window": 2,
+            "scope": {
+              "codec": "JPEG",
+              "encoded_dimensions": [
+                1920,
+                1080
+              ],
+              "geometry_epoch": 2,
+              "sequence": 1,
+              "source_dimensions": [
+                1920,
+                1080
+              ],
+              "source_epoch": 1
+            },
+            "session_id": "authenticated-session"
+          },
+          {
+            "drawn_acks_in_window": 2,
+            "scope": {
+              "codec": "JPEG",
+              "encoded_dimensions": [
+                1920,
+                1080
+              ],
+              "geometry_epoch": 2,
+              "sequence": 1,
+              "source_dimensions": [
+                1920,
+                1080
+              ],
+              "source_epoch": 1
+            },
+            "session_id": "authenticated-session"
+          }
+        ],
+        "owned_exits": [
+          0,
+          0
+        ],
+        "status": "passed"
+      }
+    },
+    "startup_rejections": 5,
+    "unit_evidence": {
+      "codec_preserves_every_yuv_sample_in_three_native_pictures": true,
+      "non_hevc_rejected_before_device_open": true,
+      "strict_opt_in_parse": true
+    }
+  }
+}

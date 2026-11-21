@@ -337,9 +337,21 @@ impl WaylandViewer {
         self.state.handoff.requested_ttl_ms = remaining_ms;
         self.state.handoff.enabled = true;
         self.state.handoff.session = Some(if manager.version() >= 3 {
-            manager.create_timed(&self.surface, seat, remaining_ms, &self.queue.handle(), ())
+            manager.create_timed(
+                &self.role.surface,
+                seat,
+                remaining_ms,
+                &self.queue.handle(),
+                (),
+            )
         } else {
-            manager.create(&self.surface, seat, remaining_ms, &self.queue.handle(), ())
+            manager.create(
+                &self.role.surface,
+                seat,
+                remaining_ms,
+                &self.queue.handle(),
+                (),
+            )
         });
         while !self.state.handoff.granted {
             self.pump()?;

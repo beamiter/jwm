@@ -1,0 +1,313 @@
+{
+  "source_artifact": "P09 moving markers on an owned Ubuntu Xvfb",
+  "scope": "Isolated actual 4K H.264 native Intel Wayland preflight with uncapped SSH",
+  "run_id": 81,
+  "warmup_seconds": 0,
+  "requested_observe_seconds": 8,
+  "unique_markers": 197,
+  "scored_unique_markers": 197,
+  "unique_markers_per_second": 24.625,
+  "longest_gap_ms": 56.614,
+  "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+  "viewer_binary_sha256": "cc3e71a33f0104342ffed1ad4610a78a610d0d161aff1604988ad6d416b49c0e",
+  "viewer_test_binary_sha256": "40cabdfb4d39c6e0cdc0036fa9f7d904930bd398142add3587897a4b7b9fa710",
+  "observer_start": {
+    "backend": "private-wayland-dmabuf",
+    "height": 2160,
+    "monotonic_ns": 52619453088355,
+    "render_node_device": 57984,
+    "roi": [
+      16,
+      16,
+      96,
+      96
+    ],
+    "roi_bytes": 36864,
+    "role": "observer",
+    "run_id": 81,
+    "scope": {
+      "geometry_epoch": 2,
+      "session_id": "529f247adb17607c2ad0cb22a714c86a",
+      "source_epoch": 1
+    },
+    "score_end_ns": 52627453088355,
+    "score_start_ns": 52619453088355,
+    "type": "p09_start",
+    "width": 3840
+  },
+  "observer_end": {
+    "duplicates": 0,
+    "interrupted": false,
+    "invalid": 0,
+    "longest_scored_gap_ns": 56614000,
+    "monotonic_ns": 52627454032152,
+    "reads": 306,
+    "reordered": 0,
+    "role": "observer",
+    "run_id": 81,
+    "scope": {
+      "geometry_epoch": 2,
+      "session_id": "529f247adb17607c2ad0cb22a714c86a",
+      "source_epoch": 1
+    },
+    "score_end_ns": 52627453088355,
+    "score_start_ns": 52619453088355,
+    "scored_unique": 197,
+    "target_lost": false,
+    "type": "p09_end",
+    "unique": 197,
+    "wrong_run": 0
+  },
+  "host_h264_frames": 308,
+  "host_drawn_acks": 306,
+  "scored_native_trial": false,
+  "viewer_windows_with_native_presentations": [
+    {
+      "acked_frames": 108,
+      "decode_ms": {
+        "mean": 1.2967370825688074,
+        "observations": 109,
+        "quantiles": {
+          "p50_ms": 0.605,
+          "p95_ms": 1.238,
+          "p99_ms": 16.303,
+          "samples": 109
+        }
+      },
+      "final": false,
+      "hardware_download_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "last_decoded_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          3840,
+          2160
+        ],
+        "geometry_epoch": 2,
+        "sequence": 108,
+        "source_dimensions": [
+          3840,
+          2160
+        ],
+        "source_epoch": 1
+      },
+      "last_presentation_path": "wayland-vaapi-dmabuf",
+      "native_preparation_and_submit_ms": {
+        "mean": 34.01520842201835,
+        "observations": 109,
+        "quantiles": {
+          "p50_ms": 33.806,
+          "p95_ms": 37.573,
+          "p99_ms": 37.988,
+          "samples": 109
+        }
+      },
+      "native_presented_frames": 108,
+      "negotiated_codec": "H.264",
+      "presentation_completion_ms": {
+        "mean": 39.32187537962963,
+        "observations": 108,
+        "quantiles": {
+          "p50_ms": 38.86,
+          "p95_ms": 43.035,
+          "p99_ms": 43.917,
+          "samples": 108
+        }
+      },
+      "presentation_queue_ms": {
+        "mean": 3.0788183333333334,
+        "observations": 108,
+        "quantiles": {
+          "p50_ms": 0.187,
+          "p95_ms": 18.047,
+          "p99_ms": 22.322,
+          "samples": 108
+        }
+      },
+      "presented_frames": 108,
+      "session_id": "529f247adb17607c2ad0cb22a714c86a",
+      "window_ms": 5029.920015
+    },
+    {
+      "acked_frames": 123,
+      "decode_ms": {
+        "mean": 0.5588116747967481,
+        "observations": 123,
+        "quantiles": {
+          "p50_ms": 0.551,
+          "p95_ms": 0.674,
+          "p99_ms": 0.774,
+          "samples": 123
+        }
+      },
+      "final": false,
+      "hardware_download_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "last_decoded_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          3840,
+          2160
+        ],
+        "geometry_epoch": 2,
+        "sequence": 231,
+        "source_dimensions": [
+          3840,
+          2160
+        ],
+        "source_epoch": 1
+      },
+      "last_presentation_path": "wayland-vaapi-dmabuf",
+      "native_preparation_and_submit_ms": {
+        "mean": 32.36892855284553,
+        "observations": 123,
+        "quantiles": {
+          "p50_ms": 32.832,
+          "p95_ms": 37.371,
+          "p99_ms": 37.862,
+          "samples": 123
+        }
+      },
+      "native_presented_frames": 123,
+      "negotiated_codec": "H.264",
+      "presentation_completion_ms": {
+        "mean": 37.92339930894309,
+        "observations": 123,
+        "quantiles": {
+          "p50_ms": 38.161,
+          "p95_ms": 42.938,
+          "p99_ms": 43.482,
+          "samples": 123
+        }
+      },
+      "presentation_queue_ms": {
+        "mean": 2.559945845528455,
+        "observations": 123,
+        "quantiles": {
+          "p50_ms": 0.202,
+          "p95_ms": 9.161,
+          "p99_ms": 12.848,
+          "samples": 123
+        }
+      },
+      "presented_frames": 123,
+      "session_id": "529f247adb17607c2ad0cb22a714c86a",
+      "window_ms": 5028.124848
+    },
+    {
+      "acked_frames": 75,
+      "decode_ms": {
+        "mean": 0.55462108,
+        "observations": 75,
+        "quantiles": {
+          "p50_ms": 0.536,
+          "p95_ms": 0.669,
+          "p99_ms": 0.949,
+          "samples": 75
+        }
+      },
+      "final": true,
+      "hardware_download_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "last_decoded_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          3840,
+          2160
+        ],
+        "geometry_epoch": 2,
+        "sequence": 306,
+        "source_dimensions": [
+          3840,
+          2160
+        ],
+        "source_epoch": 1
+      },
+      "last_presentation_path": "wayland-vaapi-dmabuf",
+      "native_preparation_and_submit_ms": {
+        "mean": 32.522101373333335,
+        "observations": 75,
+        "quantiles": {
+          "p50_ms": 32.93,
+          "p95_ms": 37.529,
+          "p99_ms": 37.941,
+          "samples": 75
+        }
+      },
+      "native_presented_frames": 75,
+      "negotiated_codec": "H.264",
+      "presentation_completion_ms": {
+        "mean": 38.20250781333333,
+        "observations": 75,
+        "quantiles": {
+          "p50_ms": 38.698,
+          "p95_ms": 43.022,
+          "p99_ms": 43.558,
+          "samples": 75
+        }
+      },
+      "presentation_queue_ms": {
+        "mean": 3.1340147733333334,
+        "observations": 75,
+        "quantiles": {
+          "p50_ms": 0.187,
+          "p95_ms": 11.403,
+          "p99_ms": 14.437,
+          "samples": 75
+        }
+      },
+      "presented_frames": 75,
+      "session_id": "529f247adb17607c2ad0cb22a714c86a",
+      "window_ms": 3028.033689
+    }
+  ],
+  "source_submitted_frames_per_second": 60.06834260249722,
+  "archive": {
+    "path": "native-wayland-4k-motion-preflight-raw.zip",
+    "sha256": "6891cc6d2ded527a230129589d86f282e01d93ceba9d2d203d0602a60daedb30",
+    "entries": {
+      "fixture/preflight.py": "d99de5c33c0ba4213519af2ec744e4c7abd9610c2d22a453dcf102218169aceb",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/run.sh": "fd63a2cf29f5d6822ad8c3abb515e5deed17d8dacf7ca91db848765c97dbaaa8",
+      "fixture/run-scored.sh": "66f99de374b0665329dbc3111ec284d6ecae59c5984aa6d7bb21e7359676a423",
+      "fixture/marker-source-sha256.txt": "8467e19d6793c65a8cc6f89e8c341a65fc2484bb61f14f72c5c9b33fe4845bf0",
+      "fixture/host_wayland_gpu_4k_marker_integration.rs": "143a43a3f0d988e10854e9041dff9f3570d5e5ba5b48fa51c7e805e2cc6f75d2",
+      "fixture/test-remote-wayland-4k-marker.sh": "8ae5881373f36ab54120083af037e0672d0142487a387d07574b6afdf319d71a",
+      "trace/result.json": "ce8d1fa890877f40b4fd767c63d7dfcf18c0775158ceb8ee8c7fc93adf4b7bbe",
+      "trace/marker-test.log": "3067697f4f354ea6bf9c176de477f135e791515f8583a88cc2f8f3f96774aac1",
+      "trace/source/host.log": "aacfbb3441341d4c4dc030e11e8a9873721d8d1c737417c5faf5090d412cdb65",
+      "trace/source/paint.jsonl": "a75161fec964838fcd2c719c7ef10d31cd660ec3fe417aef09f719839d83d3b3",
+      "trace/viewer/observed.jsonl": "569c42d3499f14430ee3af3079dc7fdc9c6e2d0242e00570021d672e3b507740",
+      "trace/viewer/viewer-events.jsonl": "d94e9bbed239f8cb755daa87ec87201b4fc9710f0fdcc3a488b7c5c57c730a12",
+      "trace/viewer/viewer-clock.jsonl": "66d38739f1574f373d397dea7762f9bba303157d64e8730b088395cf8a1ee12d",
+      "trace/viewer/viewer-stderr.log": "094d937d1ca1ce96c6528829c0f59a2f3c8c523404cdd1bf1f212e0903de1a09"
+    }
+  },
+  "viewer_metric_snapshots_with_native_presentations": 4,
+  "viewer_repeated_metric_snapshots": 1,
+  "viewer_metrics_window_accounting": "Managed snapshots can repeat an unchanged metrics report during a state transition. Only distinct metrics windows appear in this array. The raw managed snapshots remain in the archive."
+}

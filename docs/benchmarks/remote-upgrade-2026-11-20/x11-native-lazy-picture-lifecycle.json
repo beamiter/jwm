@@ -1,0 +1,211 @@
+{
+  "release_sha256": "430def8a30bd75b04adcc068fa7958907d33158f8f99f42ec7628bc6fac7c425",
+  "fixture_sha256": "8f67ceacaedad97a966018e2d224001124c4d1ba11f6e666b7e9fb3497d623e0",
+  "samples": {
+    "initial": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          216,
+          48,
+          32
+        ],
+        [
+          181,
+          62,
+          136
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          70
+        ]
+      ],
+      "bar_rgb": []
+    },
+    "resize_retained": {
+      "size": [
+        1297,
+        973
+      ],
+      "content": [
+        0,
+        122,
+        1297,
+        729
+      ],
+      "rgb": [
+        [
+          215,
+          49,
+          32
+        ],
+        [
+          181,
+          61,
+          138
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          68
+        ]
+      ],
+      "bar_rgb": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "restored_retained": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          215,
+          49,
+          32
+        ],
+        [
+          181,
+          61,
+          138
+        ],
+        [
+          86,
+          174,
+          44
+        ],
+        [
+          224,
+          164,
+          68
+        ]
+      ],
+      "bar_rgb": []
+    },
+    "second_source_scaled": {
+      "size": [
+        3840,
+        2160
+      ],
+      "content": [
+        0,
+        0,
+        3840,
+        2160
+      ],
+      "rgb": [
+        [
+          34,
+          159,
+          92
+        ],
+        [
+          47,
+          118,
+          201
+        ],
+        [
+          67,
+          152,
+          174
+        ],
+        [
+          75,
+          190,
+          211
+        ]
+      ],
+      "bar_rgb": []
+    }
+  },
+  "initial_native_import_count": 35,
+  "initial_picture_setup_count": 0,
+  "host_suspended_during_resize": true,
+  "viewer_exit": 0,
+  "host_exit": 0,
+  "picture_setup_count": 67,
+  "native_presented": 103,
+  "drawn_acks": 103,
+  "hardware_downloads": 0,
+  "display_launcher_exit": 0,
+  "source_epochs": [
+    "1",
+    "2"
+  ],
+  "controller_exit": 0,
+  "controller_failure": null,
+  "fixture_implementation_sha256": "a01dd1ca10488038f52f609efe293f06f9a8b135dd8520fcbdff1f8bdabd5807",
+  "scope": "Unscored exact-size private Xwayland native video, authenticated local loopback to an owned NVENC source. Host paused during local viewport changes.",
+  "archive": {
+    "path": "x11-native-lazy-picture-lifecycle-raw.zip",
+    "sha256": "3882ba160a009b5d1cacb91ba2c28d296a83f730327aba213bb5d28720a5333b",
+    "members": {
+      "fixture/dri3-node.py": "c019f0a6d8020501e6593ef8978361070a30c8bbe408932f5733ccfc4fb0a7c2",
+      "fixture/launch.py": "7eb0debbcff83f68d74d97f4c73de51e705d41f513f605c51d4c2065a55f4367",
+      "fixture/lifecycle.py": "a01dd1ca10488038f52f609efe293f06f9a8b135dd8520fcbdff1f8bdabd5807",
+      "fixture/pixels.py": "6cfb0bcabd726fff9960ccc5b75f33be228570e00f5773faa2fdea1e41fa9576",
+      "fixture/previous_probe.py": "67961043a622fa9deaf9e8b63c50725c04102929b8c412ecbb63e64975b77bfd",
+      "fixture/processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "replay.py": "52f2fc7e972241caf02d0f2bf5132a948880d1d572ff5d7a9192eb46126f381c",
+      "result.json": "91d5b52d57de83af35e0de55339aa3eee00becb674a39bd07f677e4557d4679d",
+      "scope.json": "efa52c96ec7915b7861cabdd4d7866c334ffcf52b2edbde63e6cbe415afa815d",
+      "terminal.txt": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    }
+  }
+}

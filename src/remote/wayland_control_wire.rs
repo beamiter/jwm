@@ -7,6 +7,10 @@ pub const STATUS_LEN: usize = 33;
 pub const ACTION_LEN: usize = 48;
 pub const LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
 pub const MAX_SEQUENCE: u64 = 60_000;
+pub(super) const GESTURE_CONSENT_REQUIRED: &str =
+    "Wayland gestures require explicit host permission";
+pub(super) const GESTURE_NATIVE_V6_REQUIRED: &str =
+    "Wayland gestures require native source control version 6";
 fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid scoped control record")
 }
@@ -33,6 +37,19 @@ fn put_scope(b: &mut [u8], s: DrawnScope) -> RemoteResult<()> {
     put(b, 16, s.frame_sequence);
     scope(b)?;
     Ok(())
+}
+
+pub(super) fn encode_prepare(s: DrawnScope) -> RemoteResult<[u8; 24]> {
+    let mut bytes = [0; 24];
+    put_scope(&mut bytes, s)?;
+    Ok(bytes)
+}
+
+pub(super) fn decode_prepare(bytes: &[u8]) -> RemoteResult<DrawnScope> {
+    if bytes.len() != 24 {
+        return Err(invalid().into());
+    }
+    scope(bytes)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlRequest {
@@ -117,6 +134,34 @@ pub enum ControlActionKind {
     ScrollDown { x: u16, y: u16 },
     ScrollLeft { x: u16, y: u16 },
     ScrollRight { x: u16, y: u16 },
+    DragStart { x: u16, y: u16 },
+    DragMotion { x: u16, y: u16 },
+    DragRelease,
+}
+impl ControlActionKind {
+    pub(super) fn is_gesture_edge(self) -> bool {
+        matches!(
+            self,
+            Self::DragStart { .. } | Self::DragMotion { .. } | Self::DragRelease
+        )
+    }
+}
+
+pub(super) fn is_gesture_modifier(code: u16) -> bool {
+    #[cfg(feature = "remote-wayland")]
+    return crate::remote_keyboard_protocol::gesture_modifier_allowed(u32::from(code));
+    #[cfg(not(feature = "remote-wayland"))]
+    {
+        let _ = code;
+        false
+    }
+}
+
+pub(super) fn held_keys_permit_pointer(
+    held: &std::collections::BTreeSet<u16>,
+    gestures: bool,
+) -> bool {
+    held.is_empty() || (gestures && held.iter().copied().all(is_gesture_modifier))
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlAction {
@@ -147,7 +192,9 @@ impl ControlAction {
             | ControlActionKind::ScrollUp { x, y }
             | ControlActionKind::ScrollDown { x, y }
             | ControlActionKind::ScrollLeft { x, y }
-            | ControlActionKind::ScrollRight { x, y } => {
+            | ControlActionKind::ScrollRight { x, y }
+            | ControlActionKind::DragStart { x, y }
+            | ControlActionKind::DragMotion { x, y } => {
                 b[40] = match self.kind {
                     ControlActionKind::Motion { .. } => 1,
                     ControlActionKind::ClickLeft { .. } => 2,
@@ -155,11 +202,14 @@ impl ControlAction {
                     ControlActionKind::ScrollDown { .. } => 4,
                     ControlActionKind::ScrollLeft { .. } => 5,
                     ControlActionKind::ScrollRight { .. } => 6,
+                    ControlActionKind::DragStart { .. } => 7,
+                    ControlActionKind::DragMotion { .. } => 8,
                     _ => unreachable!(),
                 };
                 b[41..43].copy_from_slice(&x.to_be_bytes());
                 b[43..45].copy_from_slice(&y.to_be_bytes());
             }
+            ControlActionKind::DragRelease => b[40] = 9,
         }
         Ok(b)
     }
@@ -172,7 +222,7 @@ impl ControlAction {
                 code: u16::from_be_bytes([b[41], b[42]]),
                 pressed: b[43] != 0,
             },
-            1..=6 if b[45..].iter().all(|v| *v == 0) => {
+            1..=8 if b[45..].iter().all(|v| *v == 0) => {
                 let x = u16::from_be_bytes([b[41], b[42]]);
                 let y = u16::from_be_bytes([b[43], b[44]]);
                 match b[40] {
@@ -182,9 +232,12 @@ impl ControlAction {
                     4 => ControlActionKind::ScrollDown { x, y },
                     5 => ControlActionKind::ScrollLeft { x, y },
                     6 => ControlActionKind::ScrollRight { x, y },
+                    7 => ControlActionKind::DragStart { x, y },
+                    8 => ControlActionKind::DragMotion { x, y },
                     _ => unreachable!(),
                 }
             }
+            9 if b[41..].iter().all(|v| *v == 0) => ControlActionKind::DragRelease,
             _ => return Err(invalid().into()),
         };
         let s = Self {
@@ -249,6 +302,9 @@ mod tests {
             ControlActionKind::ScrollDown { x: 20, y: 30 },
             ControlActionKind::ScrollLeft { x: 20, y: 30 },
             ControlActionKind::ScrollRight { x: 20, y: 30 },
+            ControlActionKind::DragStart { x: 20, y: 30 },
+            ControlActionKind::DragMotion { x: 20, y: 30 },
+            ControlActionKind::DragRelease,
         ] {
             let a = ControlAction {
                 scope,
@@ -263,11 +319,16 @@ mod tests {
             bad[47] = 1;
             assert!(ControlAction::decode(&bad).is_err());
             bad = b;
-            bad[40] = 7;
+            bad[40] = 10;
             assert!(ControlAction::decode(&bad).is_err());
             bad = b;
             bad[32..40].fill(0);
             assert!(ControlAction::decode(&bad).is_err());
+            if kind == ControlActionKind::DragRelease {
+                let mut bad_release = b;
+                bad_release[41] = 1;
+                assert!(ControlAction::decode(&bad_release).is_err());
+            }
         }
         for status in [
             ControlStatusKind::Granted,

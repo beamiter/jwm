@@ -46,6 +46,10 @@ impl<F> PresentationBatch<F> {
         }
     }
 
+    pub(super) fn callback_count(&self) -> usize {
+        self.callbacks.len()
+    }
+
     /// Consumes the batch once. Invalid evidence discards, never defers/requeues.
     /// `present` receives the verified monotonic timestamp; refresh/flags/output
     /// still require truthful backend metadata. In particular, a successful

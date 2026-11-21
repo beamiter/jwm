@@ -183,6 +183,53 @@ pub(crate) struct HeadlessSmithayGles {
 
 #[cfg(feature = "backend-wayland-udev")]
 impl HeadlessSmithayGles {
+    #[cfg(all(feature = "remote-wayland", feature = "remote-h264"))]
+    pub(crate) fn on_render_node(node: &std::path::Path) -> Result<Self, String> {
+        use smithay::backend::egl::{EGLContext, EGLDisplay};
+        use smithay::backend::renderer::gles::{GlesRenderer, ffi};
+        use std::{ffi::CStr, fs::OpenOptions};
+
+        let serialized = HEADLESS_GL_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(node)
+            .map_err(|e| e.to_string())?;
+        let device = gbm::Device::new(file).map_err(|e| e.to_string())?;
+        let display = unsafe { EGLDisplay::new(device) }.map_err(|e| format!("{e:?}"))?;
+        let context = EGLContext::new(&display).map_err(|e| format!("{e:?}"))?;
+        let mut renderer = unsafe { GlesRenderer::new(context) }.map_err(|e| format!("{e:?}"))?;
+        let name = renderer
+            .with_context(|gl| {
+                let name = unsafe { gl.GetString(ffi::RENDERER) };
+                if name.is_null() {
+                    String::new()
+                } else {
+                    unsafe { CStr::from_ptr(name.cast()) }
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            })
+            .map_err(|e| format!("{e:?}"))?;
+        let normalized = name.to_ascii_lowercase();
+        if name.is_empty()
+            || ["llvmpipe", "softpipe", "swrast"]
+                .iter()
+                .any(|driver| normalized.contains(driver))
+        {
+            return Err(format!(
+                "render node initialized a software GLES renderer: {name}"
+            ));
+        }
+        eprintln!("JWM_NATIVE_WAYLAND_RENDERER={name}");
+        Ok(Self {
+            renderer,
+            _serialized: serialized,
+        })
+    }
+
     pub(crate) fn new() -> Option<Self> {
         let result = Self::try_new();
         if result.is_none()

@@ -43,7 +43,7 @@ pub(crate) fn shm_buffer_file(
     sized_shm_buffer_file(server, client, pixel, W, H)
 }
 
-fn sized_shm_buffer_file(
+pub(crate) fn sized_shm_buffer_file(
     server: &mut Server,
     client: &mut Client,
     pixel: [u8; 4],

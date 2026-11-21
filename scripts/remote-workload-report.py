@@ -12,6 +12,7 @@ MAX_BYTES = 32 * 1024 * 1024
 MAX_LINE = 65536
 MAX_WINDOWS = 10000
 MAX_PHYSICAL_SAMPLES = 10000
+UNOBSERVED_PHYSICAL_OUTCOMES = ('timeout', 'no_response')
 STAGES = (
     'capture_ms', 'mailbox_age_ms', 'credit_wait_ms', 'dirty_scan_ms',
     'atlas_pack_ms', 'jpeg_ms', 'atlas_pack_and_jpeg_ms', 'writer_wait_ms',
@@ -32,6 +33,47 @@ X11_CAPTURE_STAGES = ('monitor_geometry_ms', 'core_readback_ms',
                       'pixel_conversion_ms', 'cpu_resize_ms')
 OPTIONAL_X11_CAPTURE_STAGES = ('shm_readback_ms',)
 POLICY = 'nearest-rank, most recent 128 observations per stage per window'
+VIEWER_COUNTERS = ('received', 'decoded', 'replaced', 'drawn', 'acked')
+VIEWER_STAGES = (
+    'decode_ms', 'presentation_queue_ms', 'presentation_completion_ms',
+    'hardware_decode_ms', 'hardware_download_ms', 'hardware_conversion_ms',
+    'hardware_rgb_copy_ms', 'first_presentation_ms', 'source_switch_presentation_ms',
+    'decode_queue_ms',
+    'cursor_interval_ms', 'sender_control_queue_ms', 'sender_input_queue_ms',
+    'sender_bulk_queue_ms', 'sender_control_write_ms', 'sender_bulk_write_ms',
+    'sender_oldest_queued_ms',
+)
+VIEWER_QUEUE_FIELDS = ('control_records', 'bulk_records', 'control_bytes', 'bulk_bytes')
+NATIVE_VIEWER_STAGE = 'native_preparation_and_submit_ms'
+DIRECT_MAP_STAGE = 'hardware_direct_map_ms'
+X11_PREPARATION_STAGES = ('x11_cpu_prepare_ms', 'x11_presenter_submit_ms')
+X11_PREPARATION_COUNTS = ('scheduled', 'prepared', 'submitted', 'fallbacks', 'stale')
+OPTIONAL_VIEWER_STAGES = (NATIVE_VIEWER_STAGE, 'frame_header_wait_ms',
+                          'frame_body_receive_ms', 'frame_authentication_ms',
+                          DIRECT_MAP_STAGE, *X11_PREPARATION_STAGES)
+NATIVE_RENDER_STAGES = (
+    'va_surface_wait_ms', 'va_frame_export_ms', 'rgb_target_allocation_ms',
+    'egl_prepare_and_submit_ms', 'egl_fence_wait_ms',
+)
+NATIVE_BACKEND_STAGES = {
+    'wayland': (*NATIVE_RENDER_STAGES, 'wayland_dmabuf_import_ms'),
+    'x11': (*NATIVE_RENDER_STAGES, 'x11_dmabuf_import_ms', 'x11_picture_setup_ms',
+            'x11_backing_populate_ms', 'x11_window_submit_ms', 'x11_prefetch_rgb_allocation_ms'),
+}
+HARDWARE_RGB_FIELDS = {
+    'pool': ('fitting_checkouts', 'fresh_reserves', 'growth_reserves',
+             'requested_bytes', 'added_capacity_bytes'),
+    'download': ('empty_targets_populated', 'retained_targets_reused',
+                 'populated_targets_replaced'),
+    'copy': ('full_frame_copies', 'full_frame_bytes', 'banded_copies', 'banded_bytes'),
+}
+VAAPI_MAP_FIELDS = ('mapped_frames', 'staged_bytes', 'fallback_frames')
+VIDEO_CODECS = ('JPEG', 'H.264', 'HEVC 4:4:4')
+HOST_OBSERVED_STAGES = {
+    'hardware_encode_stages': ('padding_ms', 'rgb_copy_ms', 'conversion_ms', 'submit_ms', 'output_ms'),
+    'cursor_stages': ('poll_ms', 'poll_interval_ms'),
+    'wayland_capture': ('readback_ms', 'conversion_ms', 'resize_ms'),
+}
 
 
 def number(value, name, integer=False):
@@ -64,10 +106,11 @@ def bounded_lines(path):
             yield raw.decode('utf-8', errors='strict')
 
 
-def stage_quantile_count(item, stage):
+def stage_quantile_count(item, stage, nullable_mean=False):
     if not isinstance(item, dict):
         raise ValueError('invalid stage object')
-    number(item.get('mean'), stage)
+    if not nullable_mean or item.get('mean') is not None:
+        number(item.get('mean'), stage)
     quantiles = item.get('quantiles')
     if not isinstance(quantiles, dict):
         raise ValueError('invalid quantiles object')
@@ -84,6 +127,87 @@ def stage_quantile_count(item, stage):
         if values != sorted(values):
             raise ValueError('quantiles out of order')
     return count
+
+
+def validate_observed_stage(item, stage):
+    count = stage_quantile_count(item, stage, nullable_mean=True)
+    observations = number(item.get('observations'), stage + '.observations', integer=True)
+    if (observations > 2**64 - 1 or count != min(observations, 128)
+            or (observations == 0) != (item.get('mean') is None)):
+        raise ValueError(f'inconsistent stage observation counts: {stage}')
+
+
+def validate_native_stages(stages, backend, group):
+    if not isinstance(stages, dict) or not stages:
+        raise ValueError('invalid ' + group)
+    for name, item in stages.items():
+        if name not in NATIVE_BACKEND_STAGES[backend]:
+            raise ValueError(f'unknown stage in {group}: {name}')
+        validate_observed_stage(item, group + '.' + name)
+        if item['observations'] == 0:
+            raise ValueError(f'{group} stage has no observations: {name}')
+
+
+def validate_hardware_rgb_work(work):
+    if not isinstance(work, dict):
+        raise ValueError('invalid hardware RGB work object')
+    groups = HARDWARE_RGB_FIELDS
+    if 'vaapi_map' in work:
+        groups = groups | {'vaapi_map': VAAPI_MAP_FIELDS}
+    for group, fields in groups.items():
+        data = work.get(group)
+        if not isinstance(data, dict):
+            raise ValueError(f'invalid hardware RGB work group: {group}')
+        for field in fields:
+            value = data.get(field)
+            if type(value) is not int or not 0 <= value <= 2**64 - 1:
+                raise ValueError(f'invalid hardware RGB work counter: {group}.{field}')
+    pool, download, copy = (work[key] for key in ('pool', 'download', 'copy'))
+    checkouts = pool['fitting_checkouts'] + pool['fresh_reserves'] + pool['growth_reserves']
+    reserves = pool['fresh_reserves'] + pool['growth_reserves']
+    transfers = sum(download[field] for field in HARDWARE_RGB_FIELDS['download'])
+    copies = copy['full_frame_copies'] + copy['banded_copies']
+    copied_bytes = copy['full_frame_bytes'] + copy['banded_bytes']
+    mapped = work.get('vaapi_map', {})
+    mapped_frames = mapped.get('mapped_frames', 0)
+    if (checkouts != transfers + mapped_frames or checkouts != copies
+            or pool['requested_bytes'] != copied_bytes
+            or mapped.get('fallback_frames', 0) > transfers
+            or (mapped_frames == 0) != (mapped.get('staged_bytes', 0) == 0)
+            or (copy['full_frame_copies'] == 0) != (copy['full_frame_bytes'] == 0)
+            or (copy['banded_copies'] == 0) != (copy['banded_bytes'] == 0)
+            or (reserves == 0) != (pool['added_capacity_bytes'] == 0)):
+        raise ValueError('inconsistent hardware RGB work counters')
+
+
+def telemetry_windows(path, kind):
+    for line in bounded_lines(path):
+        if not line.lstrip().startswith('{'):
+            yield None
+            continue
+        try:
+            value = json.loads(line, object_pairs_hook=no_duplicates)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError('invalid JSON object in telemetry input') from exc
+        if not isinstance(value, dict) or value.get('type') != kind:
+            yield None
+            continue
+        if (type(value.get('schema_version')) is not int or value.get('schema_version') != 1
+                or value.get('quantile_policy') != POLICY):
+            raise ValueError('unsupported telemetry schema or timing policy')
+        if not isinstance(value.get('version'), str) or not re.fullmatch(r'[A-Za-z0-9.+_-]{1,64}', value['version']):
+            raise ValueError('invalid build version')
+        commit = value.get('commit')
+        if commit is not None and (not isinstance(commit, str) or not re.fullmatch(r'[0-9a-fA-F]{7,64}', commit)):
+            raise ValueError('invalid build commit')
+        session = value.get('session_id')
+        if session is not None and (not isinstance(session, str) or not re.fullmatch(r'[0-9a-f]{32}', session)):
+            raise ValueError('invalid session ID')
+        if not isinstance(value.get('stages'), dict):
+            raise ValueError('invalid stages object')
+        if number(value.get('window_seconds'), 'window_seconds') <= 0:
+            raise ValueError('window_seconds must be positive')
+        yield value
 
 
 def validate_x11_capture(capture):
@@ -107,28 +231,10 @@ def validate_x11_capture(capture):
 def read_windows(path):
     windows = []
     ignored = 0
-    for line in bounded_lines(path):
-        # Stderr diagnostics are not copied to the report: they can contain
-        # addresses or arbitrary process messages. Only typed records count.
-        if not line.lstrip().startswith('{'):
+    for value in telemetry_windows(path, 'jwm_remote_host_stats'):
+        if value is None:
             ignored += 1
             continue
-        try:
-            value = json.loads(line, object_pairs_hook=no_duplicates)
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise ValueError('invalid JSON object in telemetry input') from exc
-        if not isinstance(value, dict) or value.get('type') != 'jwm_remote_host_stats':
-            ignored += 1
-            continue
-        if type(value.get('schema_version')) is not int or value.get('schema_version') != 1 or value.get('quantile_policy') != POLICY:
-            raise ValueError('unsupported telemetry schema or timing policy')
-        if not isinstance(value.get('version'), str) or not re.fullmatch(r'[A-Za-z0-9.+_-]{1,64}', value['version']):
-            raise ValueError('invalid build version')
-        commit = value.get('commit')
-        if commit is not None and (not isinstance(commit, str) or not re.fullmatch(r'[0-9a-fA-F]{7,64}', commit)):
-            raise ValueError('invalid build commit')
-        if not isinstance(value.get('stages'), dict):
-            raise ValueError('invalid stages object')
         for field in COUNTERS:
             number(value.get(field), field, integer=True)
         for field in OPTIONAL_COUNTERS:
@@ -136,8 +242,20 @@ def read_windows(path):
                 number(value[field], field, integer=True)
         if 'x11_capture' in value:
             validate_x11_capture(value['x11_capture'])
-        if number(value.get('window_seconds'), 'window_seconds') <= 0:
-            raise ValueError('window_seconds must be positive')
+        for group, stages in HOST_OBSERVED_STAGES.items():
+            if group not in value:
+                continue
+            item = value[group]
+            if not isinstance(item, dict):
+                raise ValueError(f'invalid host stage group: {group}')
+            if group == 'wayland_capture':
+                for field in ('readback_bytes', 'staging_growths'):
+                    number(item.get(field), f'{group}.{field}', integer=True)
+                item = item.get('stages')
+                if not isinstance(item, dict):
+                    raise ValueError('invalid Wayland capture stages')
+            for stage in stages:
+                validate_observed_stage(item.get(stage), f'{group}.{stage}')
         for field in ('source_dimensions', 'encoded_dimensions'):
             dims = value.get(field)
             if not isinstance(dims, list) or len(dims) != 2:
@@ -160,6 +278,179 @@ def read_windows(path):
     return windows, ignored
 
 
+def read_viewer_windows(path):
+    windows = []
+    for value in telemetry_windows(path, 'jwm_remote_viewer_stats'):
+        if value is None:
+            continue
+        if value.get('session_id') is None:
+            raise ValueError('viewer session ID is missing')
+        if value.get('viewer_backend') not in ('x11', 'wayland'):
+            raise ValueError('invalid viewer backend')
+        if value.get('negotiated_codec') not in VIDEO_CODECS:
+            raise ValueError('invalid negotiated viewer codec')
+        last_frame = value.get('last_frame')
+        if last_frame is not None and (not isinstance(last_frame, dict) or last_frame.get('codec') not in VIDEO_CODECS):
+            raise ValueError('invalid viewer frame codec')
+        for field in VIEWER_COUNTERS:
+            number(value.get(field), field, integer=True)
+        queue = value.get('sender_max_sampled_at_dequeue')
+        if not isinstance(queue, dict):
+            raise ValueError('invalid sender queue object')
+        for field in VIEWER_QUEUE_FIELDS:
+            number(queue.get(field), 'sender.' + field, integer=True)
+        for stage in VIEWER_STAGES:
+            validate_observed_stage(value['stages'].get(stage), stage)
+        for stage in OPTIONAL_VIEWER_STAGES:
+            if stage in value['stages']:
+                validate_observed_stage(value['stages'][stage], stage)
+        for backend in NATIVE_BACKEND_STAGES:
+            group = f'native_{backend}_stages'
+            if group in value:
+                if value['viewer_backend'] != backend:
+                    label = backend.capitalize()
+                    raise ValueError(f'native {label} stages require the {label} viewer backend')
+                validate_native_stages(value[group], backend, group)
+        if 'x11_cpu_preparation' in value:
+            preparation = value['x11_cpu_preparation']
+            if not isinstance(preparation, dict):
+                raise ValueError('invalid X11 CPU preparation counts')
+            for field in X11_PREPARATION_COUNTS:
+                number(preparation.get(field), 'x11_cpu_preparation.' + field, integer=True)
+            revision = preparation.get('last_submitted_viewport_revision')
+            if revision is not None:
+                number(revision, 'x11 CPU preparation revision', integer=True)
+            if bool(preparation['submitted']) != (revision is not None):
+                raise ValueError('X11 CPU preparation submission revision disagrees with its count')
+            work = value['stages'].get('x11_cpu_prepare_ms')
+            if work and max(preparation['prepared'], preparation['stale']) > work['observations']:
+                raise ValueError('X11 CPU preparation counts exceed work observations')
+        if 'hardware_rgb_work' in value:
+            validate_hardware_rgb_work(value['hardware_rgb_work'])
+            mapping = value['hardware_rgb_work'].get('vaapi_map')
+            timing = value['stages'].get(DIRECT_MAP_STAGE)
+            if mapping is not None and timing is not None and (
+                    mapping['mapped_frames'] != timing['observations']):
+                raise ValueError('inconsistent hardware direct mapping observations')
+        if 'native_presented' in value:
+            native = number(value['native_presented'], 'native_presented', integer=True)
+            if native > value['drawn']:
+                raise ValueError('native presentation count exceeds drawing count')
+            if value.get('last_presentation_path') not in (
+                None, 'rgb', 'x11-vaapi-dmabuf-dri3', 'wayland-vaapi-dmabuf'
+            ):
+                raise ValueError('invalid viewer presentation path')
+        windows.append(value)
+        if len(windows) > MAX_WINDOWS:
+            raise ValueError('too many viewer telemetry windows')
+    if not windows:
+        raise ValueError('no viewer telemetry records')
+    return windows
+
+
+def summarize_observations(reported):
+    observed = [item for item in reported if item['observations'] > 0]
+    count = sum(item['observations'] for item in observed)
+    means = [item['mean'] for item in observed]
+    return {
+        'observations': count,
+        'whole_run_weighted_mean_ms': (sum(item['mean'] * (item['observations'] / count)
+                                           for item in observed) if count else None),
+        'mean_denominator': 'observations',
+        'window_means_range_ms': [min(means), max(means)] if means else None,
+        'max_reported_window_recent_p95_ms': max(
+            (item['quantiles']['p95_ms'] for item in observed), default=None),
+        'whole_run_percentiles': None,
+    }
+
+
+def summarize_viewer(windows, host):
+    builds = {(window['version'], window.get('commit')) for window in windows}
+    if len(builds) != 1:
+        raise ValueError('mixed viewer builds: analyze separate runs')
+    version, commit = next(iter(builds))
+    viewer_ids = {window['session_id'] for window in windows}
+    host_ids = {window['session_id'] for window in host if window.get('session_id') is not None}
+    if host_ids and not (viewer_ids & host_ids):
+        raise ValueError('viewer and host telemetry describe different sessions')
+    summary = {
+        'version': version,
+        'commit': commit,
+        'windows': len(windows),
+        'reported_seconds': sum(window['window_seconds'] for window in windows),
+        'totals': {field: sum(window[field] for window in windows) for field in VIEWER_COUNTERS},
+        'backends': sorted({window['viewer_backend'] for window in windows}),
+        'negotiated_codecs': sorted({window['negotiated_codec'] for window in windows}),
+        'last_frame_codecs_seen': sorted({window['last_frame']['codec']
+                                         for window in windows if window.get('last_frame')}),
+        'sender_max_sampled_at_dequeue': {
+            field: max(window['sender_max_sampled_at_dequeue'][field] for window in windows)
+            for field in VIEWER_QUEUE_FIELDS
+        },
+        'session_matching': {
+            'matched': len(viewer_ids & host_ids),
+            'viewer_only': len(viewer_ids - host_ids),
+            'host_only': len(host_ids - viewer_ids),
+            'host_windows_without_id': sum(window.get('session_id') is None for window in host),
+        },
+        'stages': {stage: summarize_observations(window['stages'][stage] for window in windows)
+                   for stage in VIEWER_STAGES},
+    }
+    native_windows = [window for window in windows if 'native_presented' in window]
+    if native_windows:
+        summary['native_presentation'] = {
+            'windows': len(native_windows),
+            'presented_frames': sum(window['native_presented'] for window in native_windows),
+            'last_paths_seen': sorted({window['last_presentation_path'] for window in native_windows
+                                       if window.get('last_presentation_path') is not None}),
+        }
+    for stage in OPTIONAL_VIEWER_STAGES:
+        reported = [window['stages'][stage] for window in windows if stage in window['stages']]
+        if reported:
+            summary['stages'][stage] = summarize_observations(reported)
+    for backend, stages in NATIVE_BACKEND_STAGES.items():
+        group = f'native_{backend}_stages'
+        native_stage_windows = [window[group] for window in windows if group in window]
+        if not native_stage_windows:
+            continue
+        summary[group] = {}
+        for stage in stages:
+            reported = [window[stage] for window in native_stage_windows if stage in window]
+            if reported:
+                summary[group][stage] = {
+                    'windows': len(reported), **summarize_observations(reported),
+                }
+    rgb_windows = [window['hardware_rgb_work'] for window in windows if 'hardware_rgb_work' in window]
+    if rgb_windows:
+        work_summary = {
+            'windows': len(rgb_windows),
+            'totals': {group: {field: sum(work[group][field] for work in rgb_windows)
+                               for field in fields}
+                       for group, fields in HARDWARE_RGB_FIELDS.items()},
+        }
+        maps = [work['vaapi_map'] for work in rgb_windows if 'vaapi_map' in work]
+        if maps:
+            work_summary['vaapi_map'] = {
+                'windows': len(maps),
+                'totals': {field: sum(mapping[field] for mapping in maps)
+                           for field in VAAPI_MAP_FIELDS},
+            }
+        summary['hardware_rgb_work'] = work_summary
+    x11_windows = [window['x11_cpu_preparation'] for window in windows
+                   if window['viewer_backend'] == 'x11' and 'x11_cpu_preparation' in window]
+    if x11_windows:
+        summary['x11_cpu_preparation'] = {
+            'windows': len(x11_windows),
+            'totals': {key: sum(window[key] for window in x11_windows)
+                       for key in X11_PREPARATION_COUNTS},
+            'last_submitted_viewport_revisions': sorted({
+                window['last_submitted_viewport_revision'] for window in x11_windows
+                if window['last_submitted_viewport_revision'] is not None
+            }),
+        }
+    return summary
+
+
 def physical_samples(path):
     rows = csv.DictReader(bounded_lines(path))
     if rows.fieldnames != ['trial', 'sample', 'latency_ms']:
@@ -179,20 +470,35 @@ def physical_samples(path):
         seen.add(key)
         if len(seen) > MAX_PHYSICAL_SAMPLES:
             raise ValueError('too many physical samples')
-        latency = number(float(row['latency_ms']), 'latency_ms')
-        trials.setdefault(row['trial'], []).append(latency)
+        samples, unobserved = trials.setdefault(row['trial'], ([], {}))
+        latency = row['latency_ms']
+        if latency in UNOBSERVED_PHYSICAL_OUTCOMES:
+            unobserved.setdefault(latency, []).append(key[1])
+        else:
+            samples.append(number(float(latency), 'latency_ms'))
     if not trials:
         raise ValueError('empty physical measurements')
     result = {}
-    for trial, values in sorted(trials.items()):
+    for trial, (values, unobserved) in sorted(trials.items()):
         values.sort()
-        result[trial] = {'samples': len(values), 'mean_ms': sum(values) / len(values),
-                         'p95_ms': values[math.ceil(len(values) * .95) - 1]}
+        attempts = len(values) + sum(len(ids) for ids in unobserved.values())
+        # Place unresolved observations beyond all measured values to bound p95.
+        rank = (95 * attempts + 99) // 100
+        p95 = values[rank - 1] if rank <= len(values) else None
+        result[trial] = {
+            'samples': len(values),
+            'attempts': attempts,
+            'unobserved_sample_ids': {outcome: sorted(ids) for outcome, ids in sorted(unobserved.items())},
+            'mean_ms': sum(values) / len(values) if values else None,
+            'p95_ms': p95,
+            'p95_is_upper_bound': bool(unobserved) and p95 is not None,
+        }
     return {'source': 'operator_supplied_physical_measurements_not_host_ack',
             'trials': result,
-            'minimum_sampling_complete': len(trials) >= 3 and all(len(v) >= 100 for v in trials.values()),
+            'minimum_sampling_complete': len(result) >= 3 and all(t['attempts'] >= 100 for t in result.values()),
             'target_ms': 50,
-            'all_trial_p95_within_target': all(t['p95_ms'] <= 50 for t in result.values()),
+            'all_trial_p95_within_target': all(t['p95_ms'] is not None and t['p95_ms'] <= 50
+                                               for t in result.values()),
             'measurement_method_verified': False}
 
 
@@ -206,19 +512,7 @@ def summarize_x11_capture(windows):
         reported = [capture['stages'][stage] for capture in captures if stage in capture['stages']]
         if not reported and stage in OPTIONAL_X11_CAPTURE_STAGES:
             continue
-        observed = [item for item in reported if item['observations'] > 0]
-        count = sum(item['observations'] for item in observed)
-        means = [item['mean'] for item in observed]
-        stages[stage] = {
-            'observations': count,
-            'whole_run_weighted_mean_ms': (sum(item['mean'] * (item['observations'] / count)
-                                               for item in observed) if count else None),
-            'mean_denominator': 'observations',
-            'window_means_range_ms': [min(means), max(means)] if means else None,
-            'max_reported_window_recent_p95_ms': max(
-                (item['quantiles']['p95_ms'] for item in observed), default=None),
-            'whole_run_percentiles': None,
-        }
+        stages[stage] = summarize_observations(reported)
     return {
         'windows': len(capture_windows),
         'reported_seconds': sum(window['window_seconds'] for window in capture_windows),
@@ -288,13 +582,29 @@ def summarize(windows, ignored, workload, run_id):
         report['counter_windows'] = counter_windows
     if (x11_capture := summarize_x11_capture(windows)) is not None:
         report['x11_capture'] = x11_capture
+    for group, stages in HOST_OBSERVED_STAGES.items():
+        recorded = [window[group] for window in windows if group in window]
+        if not recorded:
+            continue
+        if group == 'wayland_capture':
+            report[group] = {
+                'stages': {stage: summarize_observations(item['stages'][stage] for item in recorded)
+                           for stage in stages},
+                'readback_bytes': sum(item['readback_bytes'] for item in recorded),
+                'staging_growths': sum(item['staging_growths'] for item in recorded),
+            }
+        else:
+            report[group] = {stage: summarize_observations(item[stage] for item in recorded)
+                             for stage in stages}
     return report
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--telemetry', type=Path, required=True)
-    parser.add_argument('--workload', choices=('terminal', 'browser', 'isaac-sim'), required=True)
+    parser.add_argument('--viewer-telemetry', type=Path,
+                        help='viewer JSON stderr log (may be the same SSH log)')
+    parser.add_argument('--workload', choices=('terminal', 'browser', 'blender', 'isaac-sim'), required=True)
     parser.add_argument('--run-id', required=True, help='public non-personal label, 1-64 ASCII letters/digits/_/-')
     parser.add_argument('--physical-csv', type=Path)
     args = parser.parse_args(argv)
@@ -303,6 +613,8 @@ def main(argv=None):
             raise ValueError('invalid run ID')
         windows, ignored = read_windows(args.telemetry)
         result = summarize(windows, ignored, args.workload, args.run_id)
+        if args.viewer_telemetry:
+            result['viewer'] = summarize_viewer(read_viewer_windows(args.viewer_telemetry), windows)
         if args.physical_csv:
             result['physical_input_to_display'] = physical_samples(args.physical_csv)
         print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))

@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "purpose": "P03 RGB copy accounting and documented allocation sites",
+  "artifacts": {
+    "crop_json_sha256": "c39338ff8d7c1f888d3dc86677a0cd896a01303f03d41c5f4fc04abb2ce040f4",
+    "soak_summary_sha256": "b53ad1ddfe796bd6626e1acda52432d634543df7a9e308ae357e8a27cafda907",
+    "soak_archive_sha256": "474fa22fd3928cb636a80b4f440d79cbba04bfc6959a2bda2771fefd19fa3dd4",
+    "soak_archive_member_sha256": {
+      "trace/result.json": "e6d5be00cc2b1654f2ef9144510b6ea50b3b2ee63484fbfe27e853dc576b9185",
+      "trace/viewer-telemetry.jsonl": "b1214ec912d1ce8786d412d15e7067cf2c912c0e6e109c5e3fdcf75f27fd1cf5"
+    },
+    "soak_reported_build": {
+      "features": [
+        "remote-x11",
+        "remote-wayland",
+        "remote-h264"
+      ],
+      "profile": "release, locked, no default features",
+      "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+      "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+      "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5"
+    }
+  },
+  "hardware_crop": {
+    "archive_observation": "One archived hardware RGB crop fixture frame per listed codec.",
+    "archive_check": "compared compact cropped RGB rows byte for byte to the same decoded RGB frame before cropping; checked visible edge markers and distinct padded pixels",
+    "probe_command_filter": "remote::h264::tests::hardware_codec_uses_one_access_unit_per_frame_and_validates_sps_dimensions -- --ignored --exact --nocapture",
+    "binary_attribution": "The color-smoke endpoint build hashes describe the network color trials. The separate crop probe is named by its command filter.",
+    "frames": [
+      {
+        "codec": "H.264",
+        "surface_format": "AV_PIX_FMT_VAAPI",
+        "visible": [
+          641,
+          359
+        ],
+        "decoder_output": [
+          642,
+          360
+        ],
+        "sps_coded": [
+          656,
+          368
+        ],
+        "rgb_stride_bytes": 2016,
+        "per_frame_explicit_rgb_copy": {
+          "baseline_pack_bytes": 693360,
+          "baseline_in_place_crop_bytes": 688434,
+          "baseline_total_bytes": 1381794,
+          "reference_visible_pack_bytes": 690357,
+          "difference_bytes_removed": 691437
+        }
+      },
+      {
+        "codec": "HEVC 4:4:4",
+        "surface_format": "AV_PIX_FMT_CUDA",
+        "visible": [
+          641,
+          359
+        ],
+        "decoder_output": [
+          642,
+          360
+        ],
+        "sps_coded": [
+          672,
+          384
+        ],
+        "rgb_stride_bytes": 2016,
+        "per_frame_explicit_rgb_copy": {
+          "baseline_pack_bytes": 693360,
+          "baseline_in_place_crop_bytes": 688434,
+          "baseline_total_bytes": 1381794,
+          "reference_visible_pack_bytes": 690357,
+          "difference_bytes_removed": 691437
+        }
+      }
+    ]
+  },
+  "hardware_1080p_soak": {
+    "observation": {
+      "raw_viewer_windows": 193,
+      "retained_complete_viewer_windows": 179,
+      "requested_duration_ns": 900000000000,
+      "covered_duration_ns": 895244582295,
+      "head_gap_ns": 22442407,
+      "tail_gap_ns": 4732963292,
+      "interval_clock": "viewer arrival monotonic",
+      "session_id": "a3778b6483363b4b7c9b6be49c80dfdc",
+      "codec": "H.264",
+      "presentation_path": "CPU RGB on X11",
+      "visible_and_decoder_output": [
+        1920,
+        1080
+      ],
+      "decoded_frames": 25679,
+      "stage_observations": {
+        "hardware_decode_ms": 25679,
+        "hardware_download_ms": 25679,
+        "hardware_conversion_ms": 25679,
+        "hardware_rgb_copy_ms": 25679
+      },
+      "geometry_attribution": "One session with fixed configured geometry. Each included window reports the same last source and encoded dimensions, CPU RGB route, and matching hardware stage counts."
+    },
+    "derived_from_observed_current_copy_count": {
+      "explicit_rgb_bytes_per_frame": 6220800,
+      "explicit_rgb_bytes_in_retained_windows": 159743923200,
+      "total_in_same_size_baseline_if_run_for_same_count": 159743923200,
+      "modelled_baseline_same_size_pack_delta": 0,
+      "baseline_total_scope": "Counterfactual from the baseline code, without an old-binary soak."
+    }
+  },
+  "allocation_sites_from_source": {
+    "baseline_hardware_successful_cpu_rgb_frame": {
+      "fresh_packed_rgb_vec_calls_per_frame": 1,
+      "video_empty_avframe_wrapper_calls_per_frame": 3,
+      "hardware_transfers_to_empty_software_frame_per_frame": 1
+    },
+    "reference_hardware_cpu_rgb_frame": {
+      "forced_fresh_packed_rgb_vec_calls_per_frame": 0,
+      "packed_rgb_checkout_calls_per_frame": 1,
+      "new_video_empty_wrapper_calls_in_steady_state_cpu_rgb_decode": 0,
+      "retained_avframe_wrappers_per_decoder": 3,
+      "software_transfer_destination": "Retained while its hardware context matches."
+    },
+    "scope": "Counts are named source-site operations. Context changes, pool misses, reserves, actual storage identity, all allocator calls, conversion writes, compressed-packet copies, hardware download bytes and uploads are separate.",
+    "actual_hardware_checkout_hits_observed": null,
+    "actual_hardware_checkout_fresh_observed": null,
+    "actual_hardware_checkout_growth_observed": null,
+    "actual_hardware_download_backing_reuse_observed": null,
+    "jpeg_vs_baseline": "Whole-JPEG decode calls the existing pool in both references. The network tile implementation has the same blob. Existing unit regressions show storage reuse and isolation; the soak provides no JPEG allocation or copy measurements."
+  },
+  "source": {
+    "scope": "Git baseline versus stable staged-verification source reference. The hardware artifacts separately identify their build as a later working tree and provide binary hashes. The source reference pins the named-site logic; it does not identify the exact archived binaries.",
+    "baseline_hardware_wrappers_and_download": {
+      "commit": "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17",
+      "file": "src/remote/h264.rs",
+      "first_line": 603,
+      "last_line": 626,
+      "sha256_full_git_blob": "8e75da9fa57ddc04b01e513ae85e1d850dac6d26e24323bdf6c2ab9d75f7a2af",
+      "excerpt": "        let mut hardware = Video::empty();\n        self.codec\n            .receive_frame(&mut hardware)\n            .map_err(|error| codec_error(\"waiting for low-delay video decode\", error))?;\n        let expected = self.dimensions();\n        // AV_PIX_FMT_VAAPI has different spelling in the Rust enum across\n        // supported FFmpeg versions, so compare libavutil's raw AVPixelFormat.\n        if unsafe { (*hardware.as_ptr()).format } != self.format.pixel as i32\n            || (hardware.width(), hardware.height()) != expected\n            || (self.first && !hardware.is_key())\n        {\n            return Err(invalid(\n                \"unexpected video hardware frame or missing keyframe\",\n            ));\n        }\n        require_no_queued_output(self.codec.receive_frame(&mut Video::empty()))?;\n\n        // Download into an FFmpeg-owned software AVFrame. JWM's existing\n        // presentation paths accept packed RGB, so no hardware surface can\n        // reach the viewer after it leaves this decoder.\n        let mut downloaded = Video::empty();\n        checked_av(\"downloading video hardware frame\", unsafe {\n            ffi::av_hwframe_transfer_data(downloaded.as_mut_ptr(), hardware.as_ptr(), 0)\n        })?;\n"
+    },
+    "baseline_rgb_destination_and_pack": {
+      "commit": "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17",
+      "file": "src/remote/h264.rs",
+      "first_line": 645,
+      "last_line": 659,
+      "sha256_full_git_blob": "8e75da9fa57ddc04b01e513ae85e1d850dac6d26e24323bdf6c2ab9d75f7a2af",
+      "excerpt": "        let converter = self.converter.as_mut().expect(\"converter initialized\");\n        converter.convert(&downloaded, &mut self.rgb)?;\n        let row_bytes = expected.0 as usize * 3;\n        let mut rgb = Vec::with_capacity(row_bytes * expected.1 as usize);\n        for row in self\n            .rgb\n            .data(0)\n            .chunks_exact(self.rgb.stride(0))\n            .take(expected.1 as usize)\n        {\n            rgb.extend_from_slice(&row[..row_bytes]);\n        }\n        self.first = false;\n        RgbImage::from_raw(expected.0, expected.1, rgb)\n            .ok_or_else(|| invalid(\"invalid video RGB output\"))\n"
+    },
+    "baseline_crop": {
+      "commit": "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17",
+      "file": "src/remote/client.rs",
+      "first_line": 5026,
+      "last_line": 5047,
+      "sha256_full_git_blob": "cd554947c69aa099738bf97298e962378075ef4bef41013cda2e539802081656",
+      "excerpt": "fn crop_h264_padding(\n    rgb: image::RgbImage,\n    (width, height): (u32, u32),\n) -> RemoteResult<image::RgbImage> {\n    if rgb.dimensions() == (width, height) {\n        return Ok(rgb);\n    }\n    let padded_stride = rgb.width() as usize * 3;\n    let stride = width as usize * 3;\n    let rows = height as usize;\n    let mut pixels = rgb.into_raw();\n    if padded_stride != stride {\n        for row in 1..rows {\n            let padded_offset = row * padded_stride;\n            pixels.copy_within(padded_offset..padded_offset + stride, row * stride);\n        }\n    }\n    pixels.truncate(stride * rows);\n    image::RgbImage::from_raw(width, height, pixels).ok_or_else(|| {\n        invalid_data(\"cropped H.264 RGB buffer does not match frame dimensions\").into()\n    })\n}\n"
+    },
+    "reference_decoder_owned_avframes": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/h264.rs",
+      "first_line": 649,
+      "last_line": 659,
+      "sha256_full_git_blob": "b4ab9e9eb556be54b8d0e8bf5af736c9c16a94f6ac9f37d2b9c85c721dd21a9f",
+      "excerpt": "\n        Ok(Self {\n            codec,\n            format,\n            hardware: Video::empty(),\n            extra: Video::empty(),\n            download: DownloadBuffer::default(),\n            rgb,\n            converter: None,\n            first: true,\n        })\n"
+    },
+    "reference_retained_software_download": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/h264.rs",
+      "first_line": 556,
+      "last_line": 581,
+      "sha256_full_git_blob": "b4ab9e9eb556be54b8d0e8bf5af736c9c16a94f6ac9f37d2b9c85c721dd21a9f",
+      "excerpt": "impl DownloadBuffer {\n    fn transfer(&mut self, source: &Video) -> io::Result<&Video> {\n        // The source's live hardware frame owns its frames context. Retain a\n        // reference while caching the download so context identity cannot be\n        // confused by allocator address reuse across decoder reconfiguration.\n        unsafe {\n            let context = (*source.as_ptr()).hw_frames_ctx;\n            if context.is_null() {\n                return Err(invalid(\"video surface has no hardware frames context\"));\n            }\n            if self.context.is_null() || (*context).buffer != (*self.context).buffer {\n                ffi::av_frame_unref(self.frame.as_mut_ptr());\n                ffi::av_buffer_unref(&mut self.context);\n                self.context = ffi::av_buffer_ref(context);\n                if self.context.is_null() {\n                    return Err(io::Error::other(\"retaining hardware frames context failed\"));\n                }\n            }\n            // No other consumer holds this software frame. FFmpeg can reuse\n            // its original allocation, whose dimensions match this context.\n            checked_av(\n                \"downloading video hardware frame\",\n                ffi::av_hwframe_transfer_data(self.frame.as_mut_ptr(), source.as_ptr(), 0),\n            )?;\n        }\n        Ok(&self.frame)\n"
+    },
+    "reference_visible_rgb_pack": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/h264.rs",
+      "first_line": 745,
+      "last_line": 776,
+      "sha256_full_git_blob": "b4ab9e9eb556be54b8d0e8bf5af736c9c16a94f6ac9f37d2b9c85c721dd21a9f",
+      "excerpt": "        let copy_started = measure.then(Instant::now);\n        copy_visible_rgb(self.rgb.data(0), self.rgb.stride(0), visible, output)?;\n        timings.copy = copy_started.map_or(Duration::ZERO, |start| start.elapsed());\n        self.first = false;\n        Ok(timings)\n    }\n}\n\nfn copy_visible_rgb(\n    pixels: &[u8],\n    stride: usize,\n    visible: (u32, u32),\n    output: &mut Vec<u8>,\n) -> io::Result<()> {\n    let row_bytes = visible.0 as usize * 3;\n    let rows = visible.1 as usize;\n    if stride < row_bytes\n        || pixels\n            .len()\n            .checked_div(stride)\n            .is_none_or(|size| size < rows)\n    {\n        return Err(invalid(\"invalid stride or row count in decoded video RGB\"));\n    }\n    output.clear();\n    output\n        .try_reserve_exact(row_bytes * rows)\n        .map_err(|error| io::Error::other(format!(\"reserving video RGB output: {error}\")))?;\n    for row in pixels.chunks_exact(stride).take(rows) {\n        output.extend_from_slice(&row[..row_bytes]);\n    }\n    Ok(())\n"
+    },
+    "reference_hardware_checkout_and_handoff": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/client.rs",
+      "first_line": 5313,
+      "last_line": 5346,
+      "sha256_full_git_blob": "6dc933447d59443ddd5cbaa40ca7b0b62990dcf54154281f68ce6e8239faf9a3",
+      "excerpt": "        // Feed all authenticated access units in arrival order. The viewer\n        // may skip presentation after decoding, so pictures used as future\n        // H.264 references must not be skipped at this boundary.\n        let rgb_bytes = dimensions.0 as usize * dimensions.1 as usize * 3;\n        let mut pixels = super::frame::prepare_decode_buffer(&state.decode_pool, rgb_bytes)?;\n        let timings = decoder\n            .decode_into(annex_b, dimensions, &mut pixels, state.telemetry.detailed)\n            .map_err(hardware_decoder_error)?;\n        let rgb = image::RgbImage::from_raw(dimensions.0, dimensions.1, pixels)\n            .ok_or_else(|| invalid_data(\"decoded hardware frame has invalid RGB dimensions\"))?;\n        state.telemetry.record_hardware_decode(timings);\n        if reset {\n            eprintln!(\n                \"jwm-remote: hardware {} decoding active ({}x{})\",\n                state.frame_codec.name(),\n                dimensions.0,\n                dimensions.1\n            );\n        }\n        let ready_at = Instant::now();\n        state.telemetry.record_decoded_at(decode_started, ready_at);\n        Ok(QueuedFrame {\n            frame: RecyclableDecodedFrame::new(\n                header.sequence,\n                header.source_width,\n                header.source_height,\n                rgb,\n                Arc::clone(&state.decode_pool),\n            )\n            .with_geometry_epoch(header.geometry_epoch),\n            ready_at,\n            purpose: FramePurpose::Video,\n        })\n    }\n"
+    },
+    "reference_hardware_stage_definition": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/client.rs",
+      "first_line": 3782,
+      "last_line": 3791,
+      "sha256_full_git_blob": "6dc933447d59443ddd5cbaa40ca7b0b62990dcf54154281f68ce6e8239faf9a3",
+      "excerpt": "    #[cfg(feature = \"remote-h264\")]\n    fn record_hardware_decode(&self, timings: super::h264::DecodeTimings) {\n        if self.detailed {\n            let mut window = self.lock_window();\n            window.hardware_decode.record(timings.decode);\n            window.hardware_download.record(timings.download);\n            window.hardware_conversion.record(timings.conversion);\n            window.hardware_rgb_copy.record(timings.copy);\n        }\n    }\n"
+    },
+    "reference_hardware_stage_json": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/client.rs",
+      "first_line": 3939,
+      "last_line": 3942,
+      "sha256_full_git_blob": "6dc933447d59443ddd5cbaa40ca7b0b62990dcf54154281f68ce6e8239faf9a3",
+      "excerpt": "                \"hardware_decode_ms\": window.hardware_decode.json(),\n                \"hardware_download_ms\": window.hardware_download.json(),\n                \"hardware_conversion_ms\": window.hardware_conversion.json(),\n                \"hardware_rgb_copy_ms\": window.hardware_rgb_copy.json(),\n"
+    },
+    "reference_pool_return": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/frame.rs",
+      "first_line": 311,
+      "last_line": 317,
+      "sha256_full_git_blob": "e7d730e64e136cc598a4a8fceff4e68c058acb3cbf48a0f88c05246f56a03375",
+      "excerpt": "impl Drop for CpuFrameLease {\n    fn drop(&mut self) {\n        if let Some(image) = self.image.take() {\n            recycle_decode_buffer(&self.pool, image.into_raw());\n        }\n    }\n}\n"
+    },
+    "reference_capacity_branch": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/frame.rs",
+      "first_line": 663,
+      "last_line": 681,
+      "sha256_full_git_blob": "e7d730e64e136cc598a4a8fceff4e68c058acb3cbf48a0f88c05246f56a03375",
+      "excerpt": "pub(super) fn prepare_decode_buffer(\n    pool: &SharedDecodeBufferPool,\n    expected_len: usize,\n) -> RemoteResult<Vec<u8>> {\n    let mut pixels = take_decode_buffer(pool, expected_len);\n    if pixels.capacity() < expected_len\n        // `try_reserve_exact` is relative to Vec::len(), not its capacity. A\n        // retained buffer can have a shorter previous-frame length, so reserve\n        // exactly the additional elements needed from that logical length.\n        && let Err(error) = pixels.try_reserve_exact(expected_len.saturating_sub(pixels.len()))\n    {\n        recycle_decode_buffer(pool, pixels);\n        return Err(invalid_data(format!(\n            \"cannot allocate {expected_len} bytes for a decoded RGB frame: {error}\"\n        ))\n        .into());\n    }\n    Ok(pixels)\n}\n"
+    },
+    "baseline_whole_jpeg_destination": {
+      "commit": "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17",
+      "file": "src/remote/frame.rs",
+      "first_line": 604,
+      "last_line": 622,
+      "sha256_full_git_blob": "5a6a9b164bee6b2f4ecbdc4b9b698bac27e8b0a2ac1a6a25bd8480c8ec42fb15",
+      "excerpt": "        )\n        .into());\n    }\n    let mut pixels = prepare_decode_buffer(pool, expected_len)?;\n    // The tolerant JPEG backend can return success after only a partial scan.\n    // A recycled buffer must never contribute pixels from its previous frame.\n    pixels.clear();\n    pixels.resize(expected_len, 0);\n    if let Err(error) = decode(&mut pixels) {\n        // A decoder can fail after partially filling the destination. The\n        // buffer remains private in the pool; no frame publishes those bytes,\n        // and the next decode attempt initializes the entire slice again.\n        recycle_decode_buffer(pool, pixels);\n        return Err(error.into());\n    }\n    RgbImage::from_raw(width, height, pixels).ok_or_else(|| {\n        invalid_data(\"decoded RGB bytes do not match the authenticated frame dimensions\").into()\n    })\n}\n"
+    },
+    "reference_whole_jpeg_destination": {
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "file": "src/remote/frame.rs",
+      "first_line": 643,
+      "last_line": 661,
+      "sha256_full_git_blob": "e7d730e64e136cc598a4a8fceff4e68c058acb3cbf48a0f88c05246f56a03375",
+      "excerpt": "        )\n        .into());\n    }\n    let mut pixels = prepare_decode_buffer(pool, expected_len)?;\n    // The tolerant JPEG backend can return success after only a partial scan.\n    // A recycled buffer must never contribute pixels from its previous frame.\n    pixels.clear();\n    pixels.resize(expected_len, 0);\n    if let Err(error) = decode(&mut pixels) {\n        // A decoder can fail after partially filling the destination. The\n        // buffer remains private in the pool; no frame publishes those bytes,\n        // and the next decode attempt initializes the entire slice again.\n        recycle_decode_buffer(pool, pixels);\n        return Err(error.into());\n    }\n    RgbImage::from_raw(width, height, pixels).ok_or_else(|| {\n        invalid_data(\"decoded RGB bytes do not match the authenticated frame dimensions\").into()\n    })\n}\n"
+    },
+    "network_tile_source": {
+      "file": "src/remote/tile.rs",
+      "same_blob_sha256_at_both_refs": "339ad38f847fd79d4eb65304704541e9aaae4e0e2ed74443395cbb350ff4c071"
+    }
+  }
+}

@@ -1397,6 +1397,8 @@ pub(crate) struct WaylandCompositor {
 
     // Previous frame scene for dirty tracking
     prev_scene: Vec<(u64, i32, i32, u32, u32)>,
+    // Main surface draw bounds in the current desktop framebuffer.
+    composited_window_bounds: HashMap<u64, crate::backend::api::CompositorRect>,
 
     // KMS external elements (cursor, drag icon, top/overlay layer trees)
     // staged by the backend for the common-linear target this frame, in
@@ -2991,6 +2993,7 @@ impl WaylandCompositor {
                 frame_count: 0,
                 fps: 0.0,
                 prev_scene: Vec::new(),
+                composited_window_bounds: HashMap::new(),
                 external_elements: Vec::new(),
                 external_elements_prev_rects: Vec::new(),
                 external_elements_prev_keys: Vec::new(),

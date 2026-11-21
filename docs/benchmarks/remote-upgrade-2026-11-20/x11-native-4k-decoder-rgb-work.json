@@ -1,0 +1,373 @@
+{
+  "schema_version": 1,
+  "status": "two isolated unscored hardware sessions",
+  "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+  "viewer_binary_sha256": "cc3e71a33f0104342ffed1ad4610a78a610d0d161aff1604988ad6d416b49c0e",
+  "scope": "Native 3840\u00d72160 NVENC H.264 over uncapped SSH from Ubuntu and Intel VA-API download on the local X11 viewer. Two short fixed-geometry runs validate materialization and byte counters. The same viewer build selects each RGB route. Whole-session work includes initialization and the final partial window. Retained observer windows are also reported.",
+  "trials": {
+    "full": {
+      "arm": "treatment",
+      "configured_cap_bytes_per_second": 0,
+      "send_buffer_bytes_requested": 0,
+      "pilot": true,
+      "session_id": "bd73ff440f55470b79e211b27848c8b6",
+      "ffmpeg_encoder": "h264_nvenc",
+      "codec": "H.264",
+      "source_and_encoded_dimensions": [
+        3840,
+        2160
+      ],
+      "requested_fps": 30,
+      "host_window_seconds": 35.020534067,
+      "observer_window_seconds": 30.004623811,
+      "host_h264_frames": 565,
+      "host_drawn_acks": 563,
+      "host_zero_frame_windows": 0,
+      "viewer_zero_drawn_windows": 0,
+      "viewer_drawn_frames": 481,
+      "observer_unique_source_frames": 481,
+      "observer_unique_frames_per_second": 16.030862544047647,
+      "observer_gap_ms": {
+        "median": 54.235084,
+        "p95": 117.489825,
+        "max": 141.357234
+      },
+      "host_payload_mbps": 23.05987768361808,
+      "host_write_mean_ms_max_window": 0.3712586794871795,
+      "host_credit_wait_mean_ms_max_window": 45.69804881333334,
+      "source_observed_submit_fps": 60.03233550937804,
+      "source_summary": {
+        "type": "p09_end",
+        "role": "source",
+        "monotonic_ns": 51823623792603,
+        "run_id": 1,
+        "submitted": 2470,
+        "deadline_skips": 1,
+        "first_submit_ns": 51782495957291,
+        "last_submit_ns": 51823623792466,
+        "max_render_sync_ns": 44819941,
+        "interrupted": true
+      },
+      "viewer_observer_summary": {
+        "type": "p09_end",
+        "role": "observer",
+        "monotonic_ns": 51740898795705,
+        "run_id": 1,
+        "reads": 588,
+        "unique": 584,
+        "duplicates": 2,
+        "invalid": 2,
+        "wrong_run": 0,
+        "reordered": 0,
+        "damage_events": 588,
+        "max_read_ns": 516131,
+        "interrupted": false,
+        "target_lost": false
+      },
+      "host_rate_targets": [],
+      "host_nvenc_applies": [],
+      "host_send_buffer_diagnostics": [],
+      "viewer_observer_start_ns": 51709479037522,
+      "viewer_observer_end_ns": 51739483661333,
+      "uncapped_unique_fps_gate_met": null,
+      "adaptive_bitrate_step_applied": false,
+      "adaptive_fps_step_applied": false,
+      "feature_flag": "JWM_REMOTE_PARALLEL_YUV420",
+      "enabled_at": "host",
+      "host_capture_scaling_policy": "auto",
+      "host_capture_modes": [
+        "root/xrender/shm/no-damage/cursor-events"
+      ],
+      "viewer_scaling_policy": "cpu",
+      "host_candidate_diagnostics": [
+        "jwm-remote: parallel 4:2:0 conversion active (RGB24 -> YUV420P, 3840x2160, 4 bands)"
+      ],
+      "viewer_candidate_diagnostics": [],
+      "expected_candidate_path": {
+        "host": true,
+        "viewer": false
+      },
+      "observed_candidate_path": {
+        "host": true,
+        "viewer": false
+      },
+      "candidate_path_verified": true,
+      "hardware_rgb_work": {
+        "windows": 6,
+        "totals": {
+          "pool": {
+            "fitting_checkouts": 481,
+            "fresh_reserves": 0,
+            "growth_reserves": 0,
+            "requested_bytes": 11968819200,
+            "added_capacity_bytes": 0
+          },
+          "download": {
+            "empty_targets_populated": 0,
+            "retained_targets_reused": 481,
+            "populated_targets_replaced": 0
+          },
+          "copy": {
+            "full_frame_copies": 481,
+            "full_frame_bytes": 11968819200,
+            "banded_copies": 0,
+            "banded_bytes": 0
+          }
+        }
+      },
+      "viewer_binary_sha256": "cc3e71a33f0104342ffed1ad4610a78a610d0d161aff1604988ad6d416b49c0e",
+      "packed_rgb_diagnostic": false,
+      "authenticated_read_observations": {
+        "frame_header_wait_ms": 481,
+        "frame_body_receive_ms": 481,
+        "frame_authentication_ms": 481
+      },
+      "separate_rgb_copy_observations": 481,
+      "host_native_capture_observations": {
+        "shm_readback_ms": 569,
+        "core_readback_ms": 0,
+        "cpu_resize_ms": 0
+      },
+      "first_viewer_window_rgb_work": {
+        "copy": {
+          "banded_bytes": 0,
+          "banded_copies": 0,
+          "full_frame_bytes": 2065305600,
+          "full_frame_copies": 83
+        },
+        "download": {
+          "empty_targets_populated": 1,
+          "populated_targets_replaced": 0,
+          "retained_targets_reused": 82
+        },
+        "pool": {
+          "added_capacity_bytes": 49766400,
+          "fitting_checkouts": 81,
+          "fresh_reserves": 2,
+          "growth_reserves": 0,
+          "requested_bytes": 2065305600
+        }
+      },
+      "whole_session_rgb_work": {
+        "windows": 8,
+        "totals": {
+          "pool": {
+            "fitting_checkouts": 586,
+            "fresh_reserves": 2,
+            "growth_reserves": 0,
+            "requested_bytes": 14631321600,
+            "added_capacity_bytes": 49766400
+          },
+          "download": {
+            "empty_targets_populated": 1,
+            "retained_targets_reused": 587,
+            "populated_targets_replaced": 0
+          },
+          "copy": {
+            "full_frame_copies": 588,
+            "full_frame_bytes": 14631321600,
+            "banded_copies": 0,
+            "banded_bytes": 0
+          }
+        }
+      }
+    },
+    "banded": {
+      "arm": "treatment",
+      "configured_cap_bytes_per_second": 0,
+      "send_buffer_bytes_requested": 0,
+      "pilot": true,
+      "session_id": "83837a8f3fbc7e0c91e0b0d334df2b97",
+      "ffmpeg_encoder": "h264_nvenc",
+      "codec": "H.264",
+      "source_and_encoded_dimensions": [
+        3840,
+        2160
+      ],
+      "requested_fps": 30,
+      "host_window_seconds": 35.072023085,
+      "observer_window_seconds": 30.037239844,
+      "host_h264_frames": 475,
+      "host_drawn_acks": 473,
+      "host_zero_frame_windows": 0,
+      "viewer_zero_drawn_windows": 0,
+      "viewer_drawn_frames": 417,
+      "observer_unique_source_frames": 417,
+      "observer_unique_frames_per_second": 13.882766930840239,
+      "observer_gap_ms": {
+        "median": 68.307771,
+        "p95": 119.713851,
+        "max": 266.997415
+      },
+      "host_payload_mbps": 19.346740002865737,
+      "host_write_mean_ms_max_window": 0.37606647368421053,
+      "host_credit_wait_mean_ms_max_window": 57.145274016393444,
+      "source_observed_submit_fps": 60.034102676372115,
+      "source_summary": {
+        "type": "p09_end",
+        "role": "source",
+        "monotonic_ns": 51863486230189,
+        "run_id": 1,
+        "submitted": 2301,
+        "deadline_skips": 1,
+        "first_submit_ns": 51825172136968,
+        "last_submit_ns": 51863483694857,
+        "max_render_sync_ns": 44586387,
+        "interrupted": true
+      },
+      "viewer_observer_summary": {
+        "type": "p09_end",
+        "role": "observer",
+        "monotonic_ns": 51780773904313,
+        "run_id": 1,
+        "reads": 498,
+        "unique": 496,
+        "duplicates": 1,
+        "invalid": 1,
+        "wrong_run": 0,
+        "reordered": 0,
+        "damage_events": 498,
+        "max_read_ns": 3038410,
+        "interrupted": false,
+        "target_lost": false
+      },
+      "host_rate_targets": [],
+      "host_nvenc_applies": [],
+      "host_send_buffer_diagnostics": [],
+      "viewer_observer_start_ns": 51749363420557,
+      "viewer_observer_end_ns": 51779400660401,
+      "uncapped_unique_fps_gate_met": null,
+      "adaptive_bitrate_step_applied": false,
+      "adaptive_fps_step_applied": false,
+      "feature_flag": "JWM_REMOTE_PARALLEL_YUV420",
+      "enabled_at": "both",
+      "host_capture_scaling_policy": "auto",
+      "host_capture_modes": [
+        "root/xrender/shm/no-damage/cursor-events"
+      ],
+      "viewer_scaling_policy": "cpu",
+      "host_candidate_diagnostics": [
+        "jwm-remote: parallel 4:2:0 conversion active (RGB24 -> YUV420P, 3840x2160, 4 bands)"
+      ],
+      "viewer_candidate_diagnostics": [
+        "jwm-remote: parallel 4:2:0 conversion active (NV12 -> RGB24, 3840x2160, 4 bands)"
+      ],
+      "expected_candidate_path": {
+        "host": true,
+        "viewer": true
+      },
+      "observed_candidate_path": {
+        "host": true,
+        "viewer": true
+      },
+      "candidate_path_verified": true,
+      "hardware_rgb_work": {
+        "windows": 6,
+        "totals": {
+          "pool": {
+            "fitting_checkouts": 417,
+            "fresh_reserves": 0,
+            "growth_reserves": 0,
+            "requested_bytes": 10376294400,
+            "added_capacity_bytes": 0
+          },
+          "download": {
+            "empty_targets_populated": 0,
+            "retained_targets_reused": 417,
+            "populated_targets_replaced": 0
+          },
+          "copy": {
+            "full_frame_copies": 0,
+            "full_frame_bytes": 0,
+            "banded_copies": 417,
+            "banded_bytes": 10376294400
+          }
+        }
+      },
+      "viewer_binary_sha256": "cc3e71a33f0104342ffed1ad4610a78a610d0d161aff1604988ad6d416b49c0e",
+      "packed_rgb_diagnostic": true,
+      "authenticated_read_observations": {
+        "frame_header_wait_ms": 417,
+        "frame_body_receive_ms": 417,
+        "frame_authentication_ms": 417
+      },
+      "separate_rgb_copy_observations": 0,
+      "host_native_capture_observations": {
+        "shm_readback_ms": 487,
+        "core_readback_ms": 0,
+        "cpu_resize_ms": 0
+      },
+      "first_viewer_window_rgb_work": {
+        "copy": {
+          "banded_bytes": 1418342400,
+          "banded_copies": 57,
+          "full_frame_bytes": 0,
+          "full_frame_copies": 0
+        },
+        "download": {
+          "empty_targets_populated": 1,
+          "populated_targets_replaced": 0,
+          "retained_targets_reused": 56
+        },
+        "pool": {
+          "added_capacity_bytes": 49766400,
+          "fitting_checkouts": 55,
+          "fresh_reserves": 2,
+          "growth_reserves": 0,
+          "requested_bytes": 1418342400
+        }
+      },
+      "whole_session_rgb_work": {
+        "windows": 8,
+        "totals": {
+          "pool": {
+            "fitting_checkouts": 497,
+            "fresh_reserves": 2,
+            "growth_reserves": 0,
+            "requested_bytes": 12416716800,
+            "added_capacity_bytes": 49766400
+          },
+          "download": {
+            "empty_targets_populated": 1,
+            "retained_targets_reused": 498,
+            "populated_targets_replaced": 0
+          },
+          "copy": {
+            "full_frame_copies": 0,
+            "full_frame_bytes": 0,
+            "banded_copies": 499,
+            "banded_bytes": 12416716800
+          }
+        }
+      }
+    }
+  },
+  "archive": {
+    "path": "x11-native-4k-decoder-rgb-work-raw.zip",
+    "sha256": "ab507eadbb9b2888a6bbbe2b25487c574e62f0ddc61a1e93d39d5fa8deb1ee45",
+    "entries": {
+      "fixture/benchmark.py": "899461948819a6b021f4a7a5739bb8bac0018d76b2633231efebd768deb35d3c",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/run.sh": "bfdf78f5347f657c75a47f10a3e405bba54589f992ef5d1011d78a8edeac645c",
+      "fixture/publish.py": "8c50689fa369d146bc7e3279e56fde0be29e10a3fea47ae0719a564883d02301",
+      "fixture/remote-workload-report.py": "f2cb44a589856313718b6a21dd03c093cb09eb3cca5f75c96b8ca011ee9f93ac",
+      "build/source-sha256.txt": "7b96a176ad37d5d6082213df8a57dfc0acd3ed10d9bb4c563cf95cb98709d54e",
+      "build/local-verification.log": "df3e10f364de112ea4edba62be72d76bc544f60cd22b3ce6dc5b5222b7f9fecf",
+      "build/ubuntu-verification.log": "4ea9538cc737a505e5e14df92c8df4fc505527c90dafe6aaec47c4d4f85a28d8",
+      "metered-rgb-full-01-treatment/result.json": "6c2086f2d8276f9250f053918a289e8c24344414fed57a06b70f499e0cc5bf4c",
+      "metered-rgb-full-01-treatment/retained-host.jsonl": "4fcf2b396361cb41de6c22adc181c42013a4707383ddd4dc0fcea429483c8882",
+      "metered-rgb-full-01-treatment/retained-viewer.jsonl": "dd1aeae7ec6697fe7b29702b88012ac065036f0a9d129f535bc67b0aa7a8d247",
+      "metered-rgb-full-01-treatment/retained-markers.jsonl": "81d6f9a63be46ff0cd7b2d8745f75de088c597f22e38b7257b57947baf7f5a32",
+      "metered-rgb-full-01-treatment/observed.jsonl": "ba918ea211d828a8336b281f63ed0d2ecbe9493c59675dd24086993bd01821be",
+      "metered-rgb-full-01-treatment/remote/paint.jsonl": "7b4efdcd91344e5f16416c4326c9b3bd4eff45927e6f49890a699c203c309563",
+      "metered-rgb-full-01-treatment/viewer.log": "abe6d946f4b0a944b6844583c1743622fd2c730fb0eea6d7f12dbde7d3bbf602",
+      "metered-rgb-banded-01-treatment/result.json": "bbe3db72b861f7cdf58e49629168bd3f94168f98d107a5b109948dcbfeacfa07",
+      "metered-rgb-banded-01-treatment/retained-host.jsonl": "5bec04f11acbd8ae69bbe3f77a6dcfa24b9d2797c285b8d33d2c645b393a9f48",
+      "metered-rgb-banded-01-treatment/retained-viewer.jsonl": "3fd0de4c995a9237099debe9892e2b110ed64e3fed867251988c68e293c3f7ec",
+      "metered-rgb-banded-01-treatment/retained-markers.jsonl": "2e8bf1231357d8581fc92d788287f9dd4ee0b32ec8ac6cf2b75eb8455bc190b4",
+      "metered-rgb-banded-01-treatment/observed.jsonl": "ea44491a144c3155b28fd59585e9acec2317544df1b9b63f713ef9008f8f2912",
+      "metered-rgb-banded-01-treatment/remote/paint.jsonl": "f2470a061e041de754a7a3ef482db0cbce548a52decb1f5e76c0b5f64ade5ff2",
+      "metered-rgb-banded-01-treatment/viewer.log": "ff4f6cb2f1d1bb1ff913659afa54f0cb1bf2a309e65c6bb0b5489d33a665f380"
+    }
+  }
+}

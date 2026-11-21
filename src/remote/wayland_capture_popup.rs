@@ -384,6 +384,7 @@ impl WaylandCapture {
             index
                 .checked_sub(1)
                 .filter(|i| *i < MAX_TOPLEVELS)
+                .map(|index| vec![index])
                 .ok_or_else(|| invalid("invalid interactive popup selection").into())
         })
     }
@@ -395,7 +396,9 @@ impl WaylandCapture {
         Self::connect_stream_mode(stream, 0, false, false, true, true, |capture| {
             eprint!("jwm-remote: select Wayland window index: ");
             io::stderr().flush()?;
-            capture.read_selection(Instant::now() + SELECTION_TIMEOUT)
+            capture
+                .read_selection(Instant::now() + SELECTION_TIMEOUT)
+                .map(|index| vec![index])
         })
     }
     #[cfg(all(test, feature = "backend-wayland-udev"))]
@@ -407,6 +410,7 @@ impl WaylandCapture {
             index
                 .checked_sub(1)
                 .filter(|i| *i < MAX_TOPLEVELS)
+                .map(|index| vec![index])
                 .ok_or_else(|| invalid("invalid interactive popup selection").into())
         })
     }

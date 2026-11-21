@@ -74,6 +74,7 @@ fn actual_control_lossless_800x600_click_shift_a_repair_then_click() {
             source: (800, 600),
             viewer: (800, 600),
             lossless: (true, true),
+            managed: false,
         },
     );
     let deadline = Instant::now() + Duration::from_secs(24);
@@ -234,6 +235,7 @@ fn actual_control_lossless_requires_explicit_host_permission() {
         &mut gl,
         FixtureLayout {
             lossless: (false, true),
+            managed: false,
             ..FixtureLayout::default()
         },
     );
@@ -326,6 +328,7 @@ fn actual_control_lossless_accepted_key_is_terminal_without_delivery() {
         &mut gl,
         FixtureLayout {
             lossless: (true, true),
+            managed: false,
             ..FixtureLayout::default()
         },
     );
@@ -393,6 +396,7 @@ fn actual_control_lossless_held_shift_release_completes_before_repair() {
         &mut gl,
         FixtureLayout {
             lossless: (true, true),
+            managed: false,
             ..FixtureLayout::default()
         },
     );
@@ -486,6 +490,7 @@ fn actual_control_lossless_lock_and_unmap_aba_terminate_one_resource() {
             &mut gl,
             FixtureLayout {
                 lossless: (true, true),
+                managed: false,
                 ..FixtureLayout::default()
             },
         );
@@ -568,8 +573,10 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
     let mut h = Harness::new_lossless(
         &mut gl,
         FixtureLayout {
+            source: (VW, VH),
+            viewer: (VW, VH),
             lossless: (true, true),
-            ..FixtureLayout::default()
+            managed: false,
         },
     );
     h.activate(&mut gl);
@@ -585,6 +592,9 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
     let deadline = expires + Duration::from_secs(5);
     h.key(140, 30, true);
     h.key(142, 30, false);
+    let expected_keys = [(30, 1), (30, 0)];
+    let expected_pixels = pattern(h.layout.source.0, h.layout.source.1);
+    let mut repainted = false;
     let mut repaired = false;
     let mut host_result = None;
     let client_result = loop {
@@ -603,15 +613,23 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
                 .find(|r| r.0 == seq)
                 .unwrap()
                 .1;
-            if purpose == FramePurpose::VisualRepair {
-                assert!(pixels.chunks_exact(4).all(|p| p == [0, 0, 255, 255]));
-                repaired = true;
+            if repainted && purpose == FramePurpose::VisualRepair {
+                assert_eq!(pixels.len(), expected_pixels.len());
+                repaired |= pixels == expected_pixels && Instant::now() < expires;
             }
         }
         h.unexpected
             .assert_no_input_for("distinct bystander client");
         assert!(h.received.pointer_actions.is_empty());
-        assert!([(30, 1), (30, 0)].starts_with(&h.received.keys));
+        assert!(expected_keys.starts_with(&h.received.keys));
+        if !repainted && h.received.keys == expected_keys {
+            // The fixture does not change its drawing on a key event. Submit
+            // fresh detail so this test requires a repair after the proven
+            // key release, even when the initial solid colour compresses
+            // exactly or has already been repaired.
+            repaint_pixels(&mut h, &expected_pixels);
+            repainted = true;
+        }
         assert_eq!(*h.control_lifetime.lock().unwrap(), Some(client));
         assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
         if let Some(current) = remote_control::lease_timing_for_test(&h.native.state) {
@@ -652,13 +670,14 @@ fn actual_control_lossless_original_lease_expires_without_renewal() {
     );
     assert!(
         repaired,
-        "actual PNG exact presentation must occur before natural expiry"
+        "actual PNG exact presentation must occur before natural expiry: {:?}",
+        h.repair_observation.lock().unwrap()
     );
-    assert_eq!(h.received.keys, [(30, 1), (30, 0)]);
+    assert_eq!(h.received.keys, expected_keys);
     h.shutdown.store(true, Ordering::Release);
     loop {
         h.tick(&mut gl, false);
-        assert_eq!(h.received.keys, [(30, 1), (30, 0)]);
+        assert_eq!(h.received.keys, expected_keys);
         assert!(h.received.pointer_actions.is_empty());
         h.unexpected
             .assert_no_input_for("distinct bystander client");

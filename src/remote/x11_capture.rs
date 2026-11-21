@@ -6,6 +6,8 @@
 //! both transports. Root downscaling snapshots children into a pixmap before
 //! XRender; the root Window itself is never used as a Picture.
 
+#[cfg(feature = "remote-h264")]
+use super::adaptive_video::Resolution;
 use super::messages::FrameLimits;
 use super::{RemoteError, RemoteResult};
 use image::{RgbImage, RgbaImage, imageops::FilterType};
@@ -31,6 +33,9 @@ use x11rb::protocol::{Event, composite, damage, randr, render, shm, xfixes};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::TryParseFd;
+
+#[path = "x11_capture_regions.rs"]
+mod regions;
 
 const COMPOSITE_CLIENT_VERSION: (u32, u32) = (0, 4);
 const COMPOSITE_OVERLAY_VERSION: (u32, u32) = (0, 3);
@@ -79,6 +84,8 @@ bitflags::bitflags! {
         const WINDOW = 1 << 7;
         /// Native Wayland single-surface SHM capture (never an X drawable).
         const WAYLAND = 1 << 8;
+        /// X11 server copy and DRI3 export followed by VA-API scaling.
+        const GPU_EXPORT = 1 << 9;
         /// Downscaling in the X server instead of on the CPU.
         const XRENDER = 1 << 1;
         /// Reading back through MIT-SHM rather than core `GetImage`.
@@ -109,12 +116,20 @@ impl CaptureMode {
         } else {
             "root"
         });
-        parts.push(if self.contains(Self::XRENDER) {
+        parts.push(if self.contains(Self::GPU_EXPORT) {
+            "vaapi-resize"
+        } else if self.contains(Self::XRENDER) {
             "xrender"
         } else {
             "cpu-resize"
         });
-        parts.push(if self.contains(Self::SHM) {
+        parts.push(if self.contains(Self::GPU_EXPORT) {
+            if self.contains(Self::WAYLAND) {
+                "wayland-dmabuf"
+            } else {
+                "dri3-dmabuf"
+            }
+        } else if self.contains(Self::SHM) {
             "shm"
         } else {
             "core-getimage"
@@ -751,16 +766,21 @@ impl DamageTracker {
         }
     }
 
-    fn prepare_capture(&mut self, conn: &RustConnection) -> RemoteResult<()> {
+    fn prepare_capture(
+        &mut self,
+        conn: &RustConnection,
+        parts: Option<xfixes::Region>,
+    ) -> RemoteResult<()> {
         let Some(active) = self.active() else {
             return Ok(());
         };
-        let subtract = match damage::subtract(conn, active.id, x11rb::NONE, x11rb::NONE) {
-            Ok(subtract) => subtract,
-            Err(error) => match damage_subtract_queue_action(&error) {
-                DamageSubtractQueueAction::Fatal => return Err(error.into()),
-            },
-        };
+        let subtract =
+            match damage::subtract(conn, active.id, x11rb::NONE, parts.unwrap_or(x11rb::NONE)) {
+                Ok(subtract) => subtract,
+                Err(error) => match damage_subtract_queue_action(&error) {
+                    DamageSubtractQueueAction::Fatal => return Err(error.into()),
+                },
+            };
         // Ordinary cookie drop keeps request errors in the connection's event
         // stream; never call ignore_error here. The later synchronous image
         // reply is an ordering barrier, and finish_cursor drains any Damage
@@ -984,6 +1004,166 @@ pub struct CursorSample {
     pub visible: bool,
 }
 
+/// The area and geometry of an already captured video frame. The cursor
+/// connection verifies it before and after querying pointer/sprite data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CursorCaptureScope {
+    root: Window,
+    root_size: (u16, u16),
+    area: CaptureArea,
+    region: Option<CaptureRegion>,
+    pub(super) geometry_epoch: u64,
+}
+
+pub(super) struct X11CursorSampler {
+    conn: RustConnection,
+    root: Window,
+    cursor: CursorCapture,
+    scope: Option<(u64, CursorCaptureScope)>,
+    admitted_shape: bool,
+    last: Option<CursorSample>,
+}
+
+impl X11CursorSampler {
+    pub(super) fn open(display: Option<&str>) -> RemoteResult<Self> {
+        let (conn, screen) = open_display(display)?;
+        let root = conn.setup().roots[screen].root;
+        if conn.setup().roots.len() != 1 {
+            return Err(invalid_data("independent cursor requires one X11 root").into());
+        }
+        query_xfixes(&conn)?;
+        let cursor = CursorCapture::new(select_cursor_events(&conn, root));
+        select_geometry_events(&conn, root);
+        Ok(Self {
+            conn,
+            root,
+            cursor,
+            scope: None,
+            admitted_shape: false,
+            last: None,
+        })
+    }
+
+    pub(super) fn connection_fd(&self) -> BorrowedFd<'_> {
+        self.conn.stream().as_fd()
+    }
+
+    fn drain_events(&mut self) -> RemoteResult<bool> {
+        let mut geometry_changed = false;
+        for _ in 0..64 {
+            let Some(event) = self.conn.poll_for_event()? else {
+                return Ok(geometry_changed);
+            };
+            match event {
+                Event::XfixesCursorNotify(event) if event.window == self.root => {
+                    self.cursor.observe_serial(event.cursor_serial);
+                }
+                Event::ConfigureNotify(event) if event.window == self.root => {
+                    geometry_changed = true;
+                }
+                Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => {
+                    geometry_changed = true;
+                }
+                _ => {}
+            }
+        }
+        // Finish draining on the next tick before using a cached sprite.
+        Ok(true)
+    }
+
+    fn matches_scope(&self, scope: &CursorCaptureScope) -> RemoteResult<bool> {
+        if scope.root != self.root {
+            return Ok(false);
+        }
+        let geometry = self.conn.get_geometry(self.root)?.reply()?;
+        if (geometry.width, geometry.height) != scope.root_size {
+            return Ok(false);
+        }
+        // A source may disappear or be temporarily moved. Suppress the
+        // cursor until video has revalidated the exact authorized rectangle.
+        Ok(resolve_capture_area(
+            &self.conn,
+            self.root,
+            &scope.area,
+            geometry.width,
+            geometry.height,
+        )
+        .is_ok_and(|region| region == scope.region))
+    }
+
+    pub(super) fn poll(
+        &mut self,
+        source_epoch: u64,
+        scope: &CursorCaptureScope,
+    ) -> RemoteResult<Option<CursorSample>> {
+        if self
+            .scope
+            .as_ref()
+            .is_none_or(|(epoch, previous)| *epoch != source_epoch || previous != scope)
+        {
+            self.scope = Some((source_epoch, scope.clone()));
+            self.admitted_shape = false;
+            self.last = None;
+            self.cursor.dirty = true;
+        }
+        if self.drain_events()? {
+            self.admitted_shape = false;
+            self.cursor.dirty = true;
+        }
+        let (width, height) = scoped_dimensions(scope.region, scope.root_size);
+        if !self.matches_scope(scope)? {
+            self.admitted_shape = false;
+            self.cursor.dirty = true;
+            let (hidden, _) =
+                scoped_cursor_plane_sample(None, None, scope.geometry_epoch, width, height);
+            return Ok(Self::publish(&mut self.last, hidden, None));
+        }
+        if !self.admitted_shape {
+            self.cursor.dirty = true;
+        }
+        self.cursor.sampled_shape_position = None;
+        let pending = prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)
+            .map_err(|failure| failure.error)?;
+        let pointer = resolve_cursor_for_frame(&self.conn, self.root, &mut self.cursor, pending)
+            .map_err(|failure| failure.error)?;
+        let fresh_position = self.cursor.sampled_shape_position.take();
+        // Drain cursor notifications already ordered before the last geometry
+        // reply before deciding whether the cached sprite is still current.
+        let geometry_current = self.matches_scope(scope)? & !self.drain_events()?;
+        let position = cursor_plane_snapshot_position(pointer, fresh_position, geometry_current);
+        let position = translate_cursor(position, scope.region.map_or((0, 0), |r| (r.x, r.y)));
+        if fresh_position.is_some() || !geometry_current || self.cursor.dirty {
+            self.admitted_shape =
+                geometry_current && !self.cursor.dirty && cursor_in_source(position, width, height);
+        }
+        let sprite = self.cursor.shape.as_ref().filter(|shape| {
+            self.admitted_shape
+                && shape.width > 0
+                && shape.height > 0
+                && shape.width <= super::cursor::MAX_CURSOR_DIMENSION
+                && shape.height <= super::cursor::MAX_CURSOR_DIMENSION
+                && shape.xhot < shape.width
+                && shape.yhot < shape.height
+        });
+        let (sample, sprite) =
+            scoped_cursor_plane_sample(position, sprite, scope.geometry_epoch, width, height);
+        Ok(Self::publish(&mut self.last, sample, sprite))
+    }
+
+    fn publish(
+        last: &mut Option<CursorSample>,
+        mut sample: CursorSample,
+        sprite: Option<&CursorShape>,
+    ) -> Option<CursorSample> {
+        if last.as_ref() == Some(&sample) {
+            return None;
+        }
+        *last = Some(sample.clone());
+        sample.shape = Some(export_cursor_plane_shape(sprite));
+        Some(sample)
+    }
+}
+
 /// Stage timings sum work since the last drain, with no observation for a
 /// stage that did not run. Only the desktop capture path collects these.
 #[derive(Default)]
@@ -995,6 +1175,30 @@ pub(super) struct X11CaptureMetrics {
     pub(super) cpu_resize: Option<Duration>,
     pub(super) damage_notifications: u64,
     pub(super) forced_refreshes: u64,
+    pub(super) regional_readback: RegionReadbackMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(super) struct RegionReadbackMetrics {
+    pub(super) partial_frames: u64,
+    pub(super) full_frames: u64,
+    pub(super) full_after_rejected_parts: u64,
+    pub(super) empty_updates: u64,
+    pub(super) requests: u64,
+    pub(super) pixels: u64,
+}
+
+impl RegionReadbackMetrics {
+    pub(super) fn merge(&mut self, other: Self) {
+        self.partial_frames = self.partial_frames.saturating_add(other.partial_frames);
+        self.full_frames = self.full_frames.saturating_add(other.full_frames);
+        self.full_after_rejected_parts = self
+            .full_after_rejected_parts
+            .saturating_add(other.full_after_rejected_parts);
+        self.empty_updates = self.empty_updates.saturating_add(other.empty_updates);
+        self.requests = self.requests.saturating_add(other.requests);
+        self.pixels = self.pixels.saturating_add(other.pixels);
+    }
 }
 
 fn measure_stage<T>(stage: Option<&mut Option<Duration>>, measure: impl FnOnce() -> T) -> T {
@@ -1017,6 +1221,7 @@ pub struct X11Capture {
     compositor: CompositorTracker,
     composite_ready: bool,
     damage: DamageTracker,
+    damage_regions: Option<regions::Regions>,
     cursor: CursorCapture,
     cursor_plane: bool,
     last_cursor_sample: Option<CursorSample>,
@@ -1031,6 +1236,8 @@ pub struct X11Capture {
     max_height: u16,
     /// Negotiated decoded-frame ceilings, independent of viewport updates.
     frame_limits: FrameLimits,
+    #[cfg(feature = "remote-h264")]
+    adaptive_resolution: Resolution,
     /// What the operator asked to share.
     area: CaptureArea,
     /// The resolved rectangle, or `None` for the whole root.
@@ -1049,6 +1256,68 @@ pub struct X11Capture {
 }
 
 impl X11Capture {
+    #[cfg(feature = "remote-h264")]
+    pub(super) fn probe_gpu_capture(
+        &self,
+        path: &std::path::Path,
+        fps: u16,
+    ) -> RemoteResult<std::path::PathBuf> {
+        if !matches!(
+            self.requested_source,
+            CaptureSource::Root | CaptureSource::Overlay
+        ) || !self.cursor_plane
+        {
+            return Err("GPU capture requires explicit X11 root or overlay capture and a separate cursor plane".into());
+        }
+        let node = super::gpu_present::select_device(&self.conn, self.root, path)?;
+        super::gpu_host_video::probe(&self.conn, self.root, &node, fps)?;
+        Ok(node)
+    }
+
+    #[cfg(feature = "remote-h264")]
+    pub(super) fn frame_gpu(&mut self) -> RemoteResult<Option<super::gpu_host_video::Frame>> {
+        self.drain_dynamic_events()?;
+        if self.sync_overlay_source()? {
+            self.damage.invalidate();
+        }
+        self.refresh_capture_region()?;
+        let root = self.root_geometry.dimensions(&self.conn, self.root)?;
+        let source = scoped_dimensions(self.region, root);
+        let origin = self.origin();
+        let drawable = self.drawable;
+        let geometry_epoch = self.geometry_epoch();
+        let encoded = self.base_encoded_dimensions(source);
+        // NV12 chroma sampling uses an even crop. Round towards the interior
+        // so the requested viewport and negotiated decoded limits still hold.
+        let encoded = (encoded.0 & !1, encoded.1 & !1);
+        super::h264_wire::h264_padded_dimensions(encoded.0, encoded.1)?;
+        let pixels =
+            super::gpu_host_video::copy_x11(&self.conn, self.root, drawable, origin, source)?;
+        self.drain_dynamic_events()?;
+        self.root_geometry
+            .refresh_authoritative(&self.conn, self.root)?;
+        self.refresh_capture_region()?;
+        if self.sync_overlay_source()?
+            || self.drawable != drawable
+            || self.geometry_epoch() != geometry_epoch
+            || self.origin() != origin
+        {
+            self.damage.invalidate();
+            return Ok(None);
+        }
+        Ok(Some(super::gpu_host_video::Frame {
+            pixels,
+            geometry_epoch,
+            source,
+            encoded,
+        }))
+    }
+
+    #[cfg(feature = "remote-h264")]
+    pub(super) fn prepare_cpu_fallback(&mut self) {
+        self.damage.invalidate();
+    }
+
     pub fn connect(
         display: Option<&str>,
         requested_source: CaptureSource,
@@ -1207,6 +1476,7 @@ impl X11Capture {
             compositor,
             composite_ready,
             damage,
+            damage_regions: None,
             cursor,
             cursor_plane: false,
             last_cursor_sample: None,
@@ -1219,6 +1489,8 @@ impl X11Capture {
             max_width,
             max_height: 0,
             frame_limits: FrameLimits::default(),
+            #[cfg(feature = "remote-h264")]
+            adaptive_resolution: Resolution::Full,
             area,
             region: None,
             render_scaler,
@@ -1251,6 +1523,17 @@ impl X11Capture {
         self.capture_metrics.as_mut().map(std::mem::take)
     }
 
+    pub(super) fn enable_region_readback(&mut self) {
+        if !self.cursor_plane {
+            eprintln!("jwm-remote: regional readback requires the independent cursor plane");
+            return;
+        }
+        match regions::Regions::open(&self.conn) {
+            Ok(regions) => self.damage_regions = Some(regions),
+            Err(error) => eprintln!("jwm-remote: full X11 readback selected: {error}"),
+        }
+    }
+
     /// Enable only after the peer negotiates the independent cursor capability.
     /// Without XFixes or on a multi-root X server, keep composited video.
     pub fn enable_cursor_plane(&mut self) -> bool {
@@ -1271,6 +1554,16 @@ impl X11Capture {
     #[must_use]
     pub fn cursor_plane_enabled(&self) -> bool {
         self.cursor_plane
+    }
+
+    pub(super) fn cursor_capture_scope(&self) -> CursorCaptureScope {
+        CursorCaptureScope {
+            root: self.root,
+            root_size: (self.root_geometry.width, self.root_geometry.height),
+            area: self.area.clone(),
+            region: self.region,
+            geometry_epoch: self.geometry_epoch(),
+        }
     }
 
     #[must_use]
@@ -1407,10 +1700,35 @@ impl X11Capture {
         let mut dynamic_retry_available = true;
         let mut root_staging_retry_available = true;
         loop {
+            let regional_scope = self.regional_scope(drawable, (source_width, source_height));
+            if let Some(regions) = &mut self.damage_regions
+                && regional_scope.is_none()
+            {
+                regions.invalidate();
+            }
+            let parts = regional_scope.and_then(|scope| {
+                self.damage_regions
+                    .as_ref()?
+                    .parts_for(scope, Instant::now())
+            });
             // Subtract only after this tick has committed to a fresh readback.
             // A concurrent notify is drained by finish_cursor and re-dirties
             // the gate before the successful baseline is committed.
-            self.damage.prepare_capture(&self.conn)?;
+            self.damage.prepare_capture(&self.conn, parts)?;
+            if let Some(scope) = regional_scope.filter(|_| parts.is_some()) {
+                if let Some(frame) = self.capture_regional_update(scope)? {
+                    return Ok(frame);
+                }
+                // A partial baseline cannot be reused after a failed or
+                // concurrent region read. Start a fresh full capture.
+                if let Some(regions) = &mut self.damage_regions {
+                    regions.invalidate();
+                }
+                if let Some(metrics) = &mut self.capture_metrics {
+                    metrics.regional_readback.full_after_rejected_parts += 1;
+                }
+                self.damage.prepare_capture(&self.conn, None)?;
+            }
             match self.capture_drawable(
                 drawable,
                 source_width,
@@ -1423,6 +1741,24 @@ impl X11Capture {
                     // Do not publish a frame if scoped metadata changed while
                     // readback was in flight. No pixel inspection is needed.
                     self.refresh_capture_region()?;
+                    if let Some(scope) = regional_scope
+                        && scope.geometry_epoch == self.geometry_epoch()
+                        && let Some(regions) = &mut self.damage_regions
+                    {
+                        if let Some(metrics) = &mut self.capture_metrics {
+                            metrics.regional_readback.full_frames += 1;
+                            metrics.regional_readback.requests += 1;
+                            metrics.regional_readback.pixels += scope.bytes() / 3;
+                        }
+                        if let Err(error) =
+                            regions.remember(scope, &captured.frame.image, Instant::now())
+                        {
+                            eprintln!(
+                                "jwm-remote: regional baseline unavailable, using full readback: {error}"
+                            );
+                            self.damage_regions.take().unwrap().release(&self.conn);
+                        }
+                    }
                     self.damage.capture_succeeded(
                         Instant::now(),
                         (source_width, source_height),
@@ -1519,6 +1855,109 @@ impl X11Capture {
         }
     }
 
+    fn regional_scope(&self, drawable: Window, dimensions: (u16, u16)) -> Option<regions::Scope> {
+        if self.damage_regions.is_none()
+            || !self.cursor_plane
+            || self.encoded_dimensions(dimensions) != dimensions
+        {
+            return None;
+        }
+        let active = self
+            .damage
+            .active()
+            .filter(|active| active.drawable == drawable)?;
+        Some(regions::Scope {
+            drawable,
+            damage: active.id,
+            origin: self.origin(),
+            dimensions,
+            geometry_epoch: self.geometry_epoch(),
+        })
+    }
+
+    fn capture_regional_update(
+        &mut self,
+        scope: regions::Scope,
+    ) -> RemoteResult<Option<CaptureOutcome>> {
+        let planned = self
+            .damage_regions
+            .as_ref()
+            .unwrap()
+            .rectangles(&self.conn, scope);
+        let rectangles = match planned {
+            Ok(Some(rectangles)) => rectangles,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.drain_dynamic_events()?;
+                eprintln!("jwm-remote: regional damage query failed, using full readback: {error}");
+                self.damage_regions.take().unwrap().release(&self.conn);
+                return Ok(None);
+            }
+        };
+        let root_depth = self.screen()?.root_depth;
+        let layout = ReadbackLayout::ReplyVisual {
+            screen_num: self.screen_num,
+            expected_depth: root_depth,
+        };
+        for &rect in &rectangles {
+            if let Some(metrics) = &mut self.capture_metrics {
+                metrics.regional_readback.requests += 1;
+                metrics.regional_readback.pixels += u64::from(rect.width) * u64::from(rect.height);
+            }
+            let patch = self.shm_readback.capture_rgb(
+                &self.conn,
+                scope.drawable,
+                (rect.x, rect.y),
+                (rect.width, rect.height),
+                layout,
+                &mut self.rgb_buffers,
+                self.capture_metrics.as_mut(),
+            );
+            let Ok(patch) = patch else {
+                return Ok(None);
+            };
+            self.damage_regions
+                .as_mut()
+                .unwrap()
+                .patch(scope, rect, &patch);
+            self.rgb_buffers.recycle_image(patch);
+        }
+        self.drain_dynamic_events()?;
+        self.refresh_capture_region()?;
+        if self.regional_scope(scope.drawable, scope.dimensions) != Some(scope)
+            || self.compositor.dirty
+        {
+            self.damage_regions.as_mut().unwrap().invalidate();
+            self.damage.invalidate();
+            return Ok(Some(CaptureOutcome::NoChange));
+        }
+        if self.damage.gate.dirty {
+            return Ok(None);
+        }
+        self.damage
+            .capture_succeeded(Instant::now(), scope.dimensions, CursorSnapshot::Disabled);
+        if rectangles.is_empty() {
+            if let Some(metrics) = &mut self.capture_metrics {
+                metrics.regional_readback.empty_updates += 1;
+            }
+            return Ok(Some(CaptureOutcome::NoChange));
+        }
+        let image = self
+            .damage_regions
+            .as_mut()
+            .unwrap()
+            .snapshot(&mut self.rgb_buffers)?;
+        if let Some(metrics) = &mut self.capture_metrics {
+            metrics.regional_readback.partial_frames += 1;
+        }
+        Ok(Some(CaptureOutcome::Frame(CapturedFrame {
+            geometry_epoch: scope.geometry_epoch,
+            image,
+            source_width: scope.dimensions.0,
+            source_height: scope.dimensions.1,
+        })))
+    }
+
     fn capture_drawable(
         &mut self,
         drawable: Window,
@@ -1533,13 +1972,7 @@ impl X11Capture {
         // Resolve every ceiling before either GPU target creation or CPU
         // output allocation. Retries after source geometry changes come through
         // here again, rather than reusing a size computed for an earlier root.
-        let (output_width, output_height) = frame_dimensions(
-            source_width,
-            source_height,
-            self.max_width,
-            self.max_height,
-            self.frame_limits,
-        );
+        let (output_width, output_height) = self.encoded_dimensions((source_width, source_height));
         let render_source = render_capture_source(self.root, drawable);
         let render_allowed_for_source = self
             .render_scaler
@@ -1958,6 +2391,33 @@ impl X11Capture {
         Ok(())
     }
 
+    pub(super) fn base_encoded_dimensions(&self, source: (u16, u16)) -> (u16, u16) {
+        frame_dimensions(
+            source.0,
+            source.1,
+            self.max_width,
+            self.max_height,
+            self.frame_limits,
+        )
+    }
+
+    fn encoded_dimensions(&self, source: (u16, u16)) -> (u16, u16) {
+        let dimensions = self.base_encoded_dimensions(source);
+        #[cfg(feature = "remote-h264")]
+        let dimensions = self.adaptive_resolution.dimensions(dimensions);
+        dimensions
+    }
+
+    #[cfg(feature = "remote-h264")]
+    pub(super) fn set_adaptive_resolution(&mut self, resolution: Resolution) {
+        if self.adaptive_resolution != resolution {
+            self.adaptive_resolution = resolution;
+            self.layout_epoch = self.layout_epoch.saturating_add(1);
+            self.damage.invalidate();
+            self.ensure_render_scaler();
+        }
+    }
+
     /// Narrow the encoded size for the rest of the session.
     ///
     /// The operator's `--max-width` stays the ceiling: a peer can ask for
@@ -1975,6 +2435,10 @@ impl X11Capture {
             &mut self.damage.gate,
         ) {
             return false;
+        }
+        #[cfg(feature = "remote-h264")]
+        {
+            self.adaptive_resolution = Resolution::Full;
         }
         self.layout_epoch = self.layout_epoch.saturating_add(1);
         self.ensure_render_scaler();
@@ -2026,6 +2490,10 @@ impl X11Capture {
         self.area = area;
         self.region = region;
         self.layout_epoch = epoch;
+        #[cfg(feature = "remote-h264")]
+        {
+            self.adaptive_resolution = Resolution::Full;
+        }
         self.last_cursor_sample = None;
         self.cursor_shape_epoch = None;
         self.damage.invalidate();
@@ -4145,7 +4613,7 @@ pub(crate) struct CaptureImageRecycler {
 }
 
 impl CaptureImageRecycler {
-    fn take(&mut self, width: u16, height: u16) -> RemoteResult<Vec<u8>> {
+    pub(super) fn take(&mut self, width: u16, height: u16) -> RemoteResult<Vec<u8>> {
         let bytes = usize::from(width)
             .checked_mul(usize::from(height))
             .and_then(|pixels| pixels.checked_mul(3))
@@ -4282,7 +4750,7 @@ fn native_scanline_stride(
     Ok(padded_bits / 8)
 }
 
-fn decode_bgrx32_rows_reusing(
+pub(super) fn decode_bgrx32_rows_reusing(
     source: &[u8],
     width: u16,
     height: u16,
@@ -4561,6 +5029,9 @@ fn scale_coordinate(value: i32, output: u32, source: u16) -> i32 {
 
 impl Drop for X11Capture {
     fn drop(&mut self) {
+        if let Some(regions) = self.damage_regions.take() {
+            regions.release(&self.conn);
+        }
         self.release_overlay_cleanup();
         self.release_render_scaler();
         self.shm_readback.release(&self.conn);

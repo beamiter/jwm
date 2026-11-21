@@ -1,0 +1,1943 @@
+{
+  "date": "2026-11-21",
+  "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+  "target": "Ubuntu 22.04.5, Linux 6.8.0-149-generic, Intel RPL-S /dev/dri/renderD128",
+  "driver": "iHD 22.3.1+ds1-1ubuntu0.1 from an isolated driver directory",
+  "command": "scripts/test-remote-wayland-cli.sh --gpu-viewer /dev/dri/renderD128",
+  "build": "working tree debug, --no-default-features --features remote-wayland,backend-wayland-udev,remote-h264",
+  "fixture": "two private Wayland compositors with hardware GLES and independent authenticated CLI processes",
+  "pipeline": "XRGB8888 DMA-BUF capture, VA-API VPP and H.264 encode, VA-API decode, EGL GLES and XRGB8888 DMA-BUF to viewer compositor",
+  "readback": "the owned viewer compositor sampled the attached buffer pixels before emitting presentation feedback",
+  "viewport_after_resize": [
+    481,
+    320
+  ],
+  "window_join": "host and viewer report independently; authenticated session ID, codec, source/geometry epoch and dimensions match",
+  "final_capture_fallback_window": "transition window contains both the last H.264 frames and the replacement JPEG frames",
+  "result": "one required test executed successfully, host and viewer exited cleanly",
+  "telemetry": {
+    "capture_fallback": {
+      "acked_frames": 4,
+      "decode_ms": {
+        "mean": 2.5212325,
+        "observations": 4,
+        "quantiles": {
+          "p50_ms": 0.543,
+          "p95_ms": 8.885,
+          "p99_ms": 8.885,
+          "samples": 4
+        }
+      },
+      "final": false,
+      "hardware_download_ms": {
+        "mean": 0.287132,
+        "observations": 2,
+        "quantiles": {
+          "p50_ms": 0.229,
+          "p95_ms": 0.344,
+          "p99_ms": 0.344,
+          "samples": 2
+        }
+      },
+      "last_decoded_frame": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          240,
+          180
+        ],
+        "geometry_epoch": 5,
+        "sequence": 399,
+        "source_dimensions": [
+          240,
+          180
+        ],
+        "source_epoch": 2
+      },
+      "last_presentation_path": "rgb",
+      "native_preparation_and_submit_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "native_presented_frames": 0,
+      "negotiated_codec": "H.264",
+      "presentation_completion_ms": {
+        "mean": 18.29205775,
+        "observations": 4,
+        "quantiles": {
+          "p50_ms": 17.705,
+          "p95_ms": 19.42,
+          "p99_ms": 19.42,
+          "samples": 4
+        }
+      },
+      "presentation_queue_ms": {
+        "mean": 0.11520575,
+        "observations": 4,
+        "quantiles": {
+          "p50_ms": 0.109,
+          "p95_ms": 0.145,
+          "p99_ms": 0.145,
+          "samples": 4
+        }
+      },
+      "presented_frames": 4,
+      "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+      "window_ms": 5000.581322
+    },
+    "capture_fallback_bgrx": [
+      [
+        254,
+        0,
+        0,
+        255
+      ],
+      [
+        254,
+        0,
+        0,
+        255
+      ],
+      [
+        254,
+        0,
+        0,
+        255
+      ]
+    ],
+    "fallback": {
+      "acked_frames": 99,
+      "decode_ms": {
+        "mean": 0.6910721428571429,
+        "observations": 98,
+        "quantiles": {
+          "p50_ms": 0.708,
+          "p95_ms": 0.877,
+          "p99_ms": 1.005,
+          "samples": 98
+        }
+      },
+      "final": false,
+      "hardware_download_ms": {
+        "mean": 0.38651993814432983,
+        "observations": 97,
+        "quantiles": {
+          "p50_ms": 0.394,
+          "p95_ms": 0.568,
+          "p99_ms": 0.614,
+          "samples": 97
+        }
+      },
+      "last_decoded_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          240,
+          180
+        ],
+        "geometry_epoch": 5,
+        "sequence": 395,
+        "source_dimensions": [
+          240,
+          180
+        ],
+        "source_epoch": 2
+      },
+      "last_presentation_path": "rgb",
+      "native_preparation_and_submit_ms": {
+        "mean": 1.817477,
+        "observations": 1,
+        "quantiles": {
+          "p50_ms": 1.817,
+          "p95_ms": 1.817,
+          "p99_ms": 1.817,
+          "samples": 1
+        }
+      },
+      "native_presented_frames": 2,
+      "negotiated_codec": "H.264",
+      "presentation_completion_ms": {
+        "mean": 17.500108414141415,
+        "observations": 99,
+        "quantiles": {
+          "p50_ms": 17.527,
+          "p95_ms": 18.875,
+          "p99_ms": 20.351,
+          "samples": 99
+        }
+      },
+      "presentation_queue_ms": {
+        "mean": 0.13175923232323233,
+        "observations": 99,
+        "quantiles": {
+          "p50_ms": 0.123,
+          "p95_ms": 0.182,
+          "p99_ms": 0.354,
+          "samples": 99
+        }
+      },
+      "presented_frames": 99,
+      "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+      "window_ms": 5000.788388
+    },
+    "fallback_bgrx": [
+      [
+        253,
+        0,
+        0,
+        255
+      ],
+      [
+        253,
+        0,
+        0,
+        255
+      ],
+      [
+        253,
+        0,
+        0,
+        255
+      ]
+    ],
+    "first": {
+      "acked_frames": 100,
+      "decode_ms": {
+        "mean": 0.20780484,
+        "observations": 100,
+        "quantiles": {
+          "p50_ms": 0.15,
+          "p95_ms": 0.266,
+          "p99_ms": 0.329,
+          "samples": 100
+        }
+      },
+      "final": false,
+      "hardware_download_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "last_decoded_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          200,
+          150
+        ],
+        "geometry_epoch": 2,
+        "sequence": 99,
+        "source_dimensions": [
+          200,
+          150
+        ],
+        "source_epoch": 1
+      },
+      "last_presentation_path": "wayland-vaapi-dmabuf",
+      "native_preparation_and_submit_ms": {
+        "mean": 1.88847536,
+        "observations": 100,
+        "quantiles": {
+          "p50_ms": 1.935,
+          "p95_ms": 2.405,
+          "p99_ms": 3.459,
+          "samples": 100
+        }
+      },
+      "native_presented_frames": 100,
+      "negotiated_codec": "H.264",
+      "presentation_completion_ms": {
+        "mean": 13.92820634,
+        "observations": 100,
+        "quantiles": {
+          "p50_ms": 13.615,
+          "p95_ms": 14.931,
+          "p99_ms": 28.171,
+          "samples": 100
+        }
+      },
+      "presentation_queue_ms": {
+        "mean": 0.20433783000000005,
+        "observations": 100,
+        "quantiles": {
+          "p50_ms": 0.108,
+          "p95_ms": 0.306,
+          "p99_ms": 0.317,
+          "samples": 100
+        }
+      },
+      "presented_frames": 100,
+      "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+      "window_ms": 5000.828631
+    },
+    "first_bgrx": [
+      [
+        0,
+        1,
+        255,
+        255
+      ],
+      [
+        0,
+        1,
+        255,
+        255
+      ],
+      [
+        0,
+        1,
+        255,
+        255
+      ]
+    ],
+    "host": {
+      "capture_fallback": {
+        "backpressure_skipped": 0,
+        "bytes": 2116,
+        "captured": 99,
+        "commit": null,
+        "cursor_stages": {
+          "poll_interval_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "poll_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          }
+        },
+        "damage_skipped": 0,
+        "dirty_tiles": 180,
+        "drawn_acks": 4,
+        "encoded_dimensions": [
+          240,
+          180
+        ],
+        "h264_frames": 2,
+        "hardware_encode_stages": {
+          "conversion_ms": {
+            "mean": 1.829171,
+            "observations": 2,
+            "quantiles": {
+              "p50_ms": 1.813,
+              "p95_ms": 1.844,
+              "p99_ms": 1.844,
+              "samples": 2
+            }
+          },
+          "native_dmabuf_import_ms": {
+            "mean": 0.025342,
+            "observations": 2,
+            "quantiles": {
+              "p50_ms": 0.024,
+              "p95_ms": 0.026,
+              "p99_ms": 0.026,
+              "samples": 2
+            }
+          },
+          "output_ms": {
+            "mean": 0.0053505,
+            "observations": 2,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.005,
+              "p99_ms": 0.005,
+              "samples": 2
+            }
+          },
+          "padding_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "rgb_copy_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "submit_ms": {
+            "mean": 0.8120274999999999,
+            "observations": 2,
+            "quantiles": {
+              "p50_ms": 0.776,
+              "p95_ms": 0.847,
+              "p99_ms": 0.847,
+              "samples": 2
+            }
+          }
+        },
+        "hevc444_frames": 0,
+        "jpeg_atlases": 1,
+        "last_sent_frame": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            240,
+            180
+          ],
+          "geometry_epoch": 5,
+          "sequence": 399,
+          "source_dimensions": [
+            240,
+            180
+          ],
+          "source_epoch": 2
+        },
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 1,
+        "mode": "wayland-surface/cpu-resize/shm/no-damage/no-cursor",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 99,
+        "schema_version": 1,
+        "sent": 4,
+        "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+        "source_dimensions": [
+          240,
+          180
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 4.5146635,
+            "quantiles": {
+              "p50_ms": 2.646,
+              "p95_ms": 12.663,
+              "p99_ms": 12.663,
+              "samples": 4
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 4.5146635,
+            "quantiles": {
+              "p50_ms": 2.646,
+              "p95_ms": 12.663,
+              "p99_ms": 12.663,
+              "samples": 4
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.848625,
+            "quantiles": {
+              "p50_ms": 0.848,
+              "p95_ms": 0.848,
+              "p99_ms": 0.848,
+              "samples": 1
+            }
+          },
+          "capture_ms": {
+            "mean": 10.21449206060606,
+            "quantiles": {
+              "p50_ms": 9.798,
+              "p95_ms": 13.213,
+              "p99_ms": 29.822,
+              "samples": 99
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 35.5760145,
+            "quantiles": {
+              "p50_ms": 29.417,
+              "p95_ms": 55.452,
+              "p99_ms": 55.452,
+              "samples": 4
+            }
+          },
+          "codec_ms": {
+            "mean": 5.733453666666667,
+            "quantiles": {
+              "p50_ms": 2.744,
+              "p95_ms": 11.809,
+              "p99_ms": 11.809,
+              "samples": 3
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.0006184545454545455,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.005,
+              "samples": 99
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.11232432989690722,
+            "quantiles": {
+              "p50_ms": 0.086,
+              "p95_ms": 0.102,
+              "p99_ms": 2.474,
+              "samples": 97
+            }
+          },
+          "h264_ms": {
+            "mean": 2.6956335,
+            "quantiles": {
+              "p50_ms": 2.646,
+              "p95_ms": 2.744,
+              "p99_ms": 2.744,
+              "samples": 2
+            }
+          },
+          "hevc444_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "jpeg_ms": {
+            "mean": 11.809094,
+            "quantiles": {
+              "p50_ms": 11.809,
+              "p95_ms": 11.809,
+              "p99_ms": 11.809,
+              "samples": 1
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.06771017171717172,
+            "quantiles": {
+              "p50_ms": 0.085,
+              "p95_ms": 0.103,
+              "p99_ms": 0.106,
+              "samples": 99
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 22.09992425,
+            "quantiles": {
+              "p50_ms": 19.943,
+              "p95_ms": 28.667,
+              "p99_ms": 28.667,
+              "samples": 4
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.33247350000000003,
+            "quantiles": {
+              "p50_ms": 0.169,
+              "p95_ms": 0.82,
+              "p99_ms": 0.82,
+              "samples": 4
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.005002250000000001,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.005,
+              "p99_ms": 0.005,
+              "samples": 4
+            }
+          }
+        },
+        "total_tiles": 360,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 95,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "wayland_capture": {
+          "readback_bytes": 16761600,
+          "stages": {
+            "conversion_ms": {
+              "mean": 2.281850072164948,
+              "observations": 97,
+              "quantiles": {
+                "p50_ms": 2.263,
+                "p95_ms": 2.553,
+                "p99_ms": 3.404,
+                "samples": 97
+              }
+            },
+            "readback_ms": {
+              "mean": 0.022356690721649485,
+              "observations": 97,
+              "quantiles": {
+                "p50_ms": 0.021,
+                "p95_ms": 0.031,
+                "p99_ms": 0.037,
+                "samples": 97
+              }
+            },
+            "resize_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            }
+          },
+          "staging_growths": 1
+        },
+        "window_seconds": 5.013119958
+      },
+      "fallback": {
+        "backpressure_skipped": 0,
+        "bytes": 5493,
+        "captured": 99,
+        "commit": null,
+        "cursor_stages": {
+          "poll_interval_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "poll_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          }
+        },
+        "damage_skipped": 0,
+        "dirty_tiles": 0,
+        "drawn_acks": 99,
+        "encoded_dimensions": [
+          240,
+          180
+        ],
+        "h264_frames": 99,
+        "hardware_encode_stages": {
+          "conversion_ms": {
+            "mean": 1.910881616161616,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 1.895,
+              "p95_ms": 2.145,
+              "p99_ms": 3.085,
+              "samples": 99
+            }
+          },
+          "native_dmabuf_import_ms": {
+            "mean": 0.029511676767676766,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.027,
+              "p95_ms": 0.041,
+              "p99_ms": 0.045,
+              "samples": 99
+            }
+          },
+          "output_ms": {
+            "mean": 0.005864494949494949,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.01,
+              "p99_ms": 0.013,
+              "samples": 99
+            }
+          },
+          "padding_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "rgb_copy_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "submit_ms": {
+            "mean": 0.8859328686868686,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.777,
+              "p95_ms": 0.9,
+              "p99_ms": 9.78,
+              "samples": 99
+            }
+          }
+        },
+        "hevc444_frames": 0,
+        "jpeg_atlases": 0,
+        "last_sent_frame": {
+          "codec": "H.264",
+          "encoded_dimensions": [
+            240,
+            180
+          ],
+          "geometry_epoch": 5,
+          "sequence": 395,
+          "source_dimensions": [
+            240,
+            180
+          ],
+          "source_epoch": 2
+        },
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 1,
+        "mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 99,
+        "schema_version": 1,
+        "sent": 99,
+        "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+        "source_dimensions": [
+          240,
+          180
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 2.8579278888888884,
+            "quantiles": {
+              "p50_ms": 2.743,
+              "p95_ms": 3.208,
+              "p99_ms": 11.766,
+              "samples": 99
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 2.8579278888888884,
+            "quantiles": {
+              "p50_ms": 2.743,
+              "p95_ms": 3.208,
+              "p99_ms": 11.766,
+              "samples": 99
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "capture_ms": {
+            "mean": 6.195526929292929,
+            "quantiles": {
+              "p50_ms": 5.939,
+              "p95_ms": 8.709,
+              "p99_ms": 16.047,
+              "samples": 99
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 28.239973292929292,
+            "quantiles": {
+              "p50_ms": 27.778,
+              "p95_ms": 31.375,
+              "p99_ms": 41.545,
+              "samples": 99
+            }
+          },
+          "codec_ms": {
+            "mean": 2.8579278888888884,
+            "quantiles": {
+              "p50_ms": 2.743,
+              "p95_ms": 3.208,
+              "p99_ms": 11.766,
+              "samples": 99
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.0005917878787878788,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.007,
+              "samples": 99
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "h264_ms": {
+            "mean": 2.8579278888888884,
+            "quantiles": {
+              "p50_ms": 2.743,
+              "p95_ms": 3.208,
+              "p99_ms": 11.766,
+              "samples": 99
+            }
+          },
+          "hevc444_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "jpeg_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.06722779797979798,
+            "quantiles": {
+              "p50_ms": 0.084,
+              "p95_ms": 0.104,
+              "p99_ms": 0.182,
+              "samples": 99
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 19.096488353535353,
+            "quantiles": {
+              "p50_ms": 19.067,
+              "p95_ms": 20.554,
+              "p99_ms": 21.654,
+              "samples": 99
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.15748754545454546,
+            "quantiles": {
+              "p50_ms": 0.151,
+              "p95_ms": 0.204,
+              "p99_ms": 0.23,
+              "samples": 99
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.005895727272727273,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.011,
+              "p99_ms": 0.012,
+              "samples": 99
+            }
+          }
+        },
+        "total_tiles": 0,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 0,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.016699505
+      },
+      "first": {
+        "backpressure_skipped": 0,
+        "bytes": 32888,
+        "captured": 99,
+        "commit": null,
+        "cursor_stages": {
+          "poll_interval_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "poll_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          }
+        },
+        "damage_skipped": 0,
+        "dirty_tiles": 0,
+        "drawn_acks": 99,
+        "encoded_dimensions": [
+          200,
+          150
+        ],
+        "h264_frames": 99,
+        "hardware_encode_stages": {
+          "conversion_ms": {
+            "mean": 2.4260732121212123,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 1.983,
+              "p95_ms": 3.381,
+              "p99_ms": 7.189,
+              "samples": 99
+            }
+          },
+          "native_dmabuf_import_ms": {
+            "mean": 0.02784349494949495,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.027,
+              "p95_ms": 0.038,
+              "p99_ms": 0.046,
+              "samples": 99
+            }
+          },
+          "output_ms": {
+            "mean": 0.005583363636363637,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.008,
+              "p99_ms": 0.016,
+              "samples": 99
+            }
+          },
+          "padding_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "rgb_copy_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "submit_ms": {
+            "mean": 0.8735601111111111,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.759,
+              "p95_ms": 1.01,
+              "p99_ms": 9.385,
+              "samples": 99
+            }
+          }
+        },
+        "hevc444_frames": 0,
+        "jpeg_atlases": 0,
+        "last_sent_frame": {
+          "codec": "H.264",
+          "encoded_dimensions": [
+            200,
+            150
+          ],
+          "geometry_epoch": 2,
+          "sequence": 98,
+          "source_dimensions": [
+            200,
+            150
+          ],
+          "source_epoch": 1
+        },
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 1,
+        "mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 99,
+        "schema_version": 1,
+        "sent": 99,
+        "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+        "source_dimensions": [
+          200,
+          150
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 3.448708141414141,
+            "quantiles": {
+              "p50_ms": 2.898,
+              "p95_ms": 4.278,
+              "p99_ms": 17.397,
+              "samples": 99
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 3.448708141414141,
+            "quantiles": {
+              "p50_ms": 2.898,
+              "p95_ms": 4.278,
+              "p99_ms": 17.397,
+              "samples": 99
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "capture_ms": {
+            "mean": 4.694414585858586,
+            "quantiles": {
+              "p50_ms": 4.343,
+              "p95_ms": 6.778,
+              "p99_ms": 22.346,
+              "samples": 99
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 24.50478977777778,
+            "quantiles": {
+              "p50_ms": 22.69,
+              "p95_ms": 38.133,
+              "p99_ms": 89.134,
+              "samples": 99
+            }
+          },
+          "codec_ms": {
+            "mean": 3.448708141414141,
+            "quantiles": {
+              "p50_ms": 2.898,
+              "p95_ms": 4.278,
+              "p99_ms": 17.397,
+              "samples": 99
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.0005332626262626262,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.002,
+              "samples": 99
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "h264_ms": {
+            "mean": 3.448708141414141,
+            "quantiles": {
+              "p50_ms": 2.898,
+              "p95_ms": 4.278,
+              "p99_ms": 17.397,
+              "samples": 99
+            }
+          },
+          "hevc444_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "jpeg_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.051998898989898984,
+            "quantiles": {
+              "p50_ms": 0.056,
+              "p95_ms": 0.101,
+              "p99_ms": 0.122,
+              "samples": 99
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 15.94038382828283,
+            "quantiles": {
+              "p50_ms": 15.186,
+              "p95_ms": 17.085,
+              "p99_ms": 66.807,
+              "samples": 99
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.3672240909090909,
+            "quantiles": {
+              "p50_ms": 0.369,
+              "p95_ms": 0.393,
+              "p99_ms": 0.44,
+              "samples": 99
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.006171969696969697,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.011,
+              "p99_ms": 0.017,
+              "samples": 99
+            }
+          }
+        },
+        "total_tiles": 0,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 0,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.003767418
+      },
+      "resized": {
+        "backpressure_skipped": 0,
+        "bytes": 32945,
+        "captured": 99,
+        "commit": null,
+        "cursor_stages": {
+          "poll_interval_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "poll_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          }
+        },
+        "damage_skipped": 0,
+        "dirty_tiles": 0,
+        "drawn_acks": 99,
+        "encoded_dimensions": [
+          200,
+          150
+        ],
+        "h264_frames": 99,
+        "hardware_encode_stages": {
+          "conversion_ms": {
+            "mean": 2.400153393939394,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 1.992,
+              "p95_ms": 3.564,
+              "p99_ms": 4.775,
+              "samples": 99
+            }
+          },
+          "native_dmabuf_import_ms": {
+            "mean": 0.028377747474747476,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.027,
+              "p95_ms": 0.039,
+              "p99_ms": 0.041,
+              "samples": 99
+            }
+          },
+          "output_ms": {
+            "mean": 0.0056502626262626265,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.008,
+              "p99_ms": 0.012,
+              "samples": 99
+            }
+          },
+          "padding_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "rgb_copy_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "submit_ms": {
+            "mean": 0.952643595959596,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.771,
+              "p95_ms": 0.91,
+              "p99_ms": 10.339,
+              "samples": 99
+            }
+          }
+        },
+        "hevc444_frames": 0,
+        "jpeg_atlases": 0,
+        "last_sent_frame": {
+          "codec": "H.264",
+          "encoded_dimensions": [
+            200,
+            150
+          ],
+          "geometry_epoch": 3,
+          "sequence": 197,
+          "source_dimensions": [
+            200,
+            150
+          ],
+          "source_epoch": 1
+        },
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 1,
+        "mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 99,
+        "schema_version": 1,
+        "sent": 99,
+        "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+        "source_dimensions": [
+          200,
+          150
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 3.499585868686869,
+            "quantiles": {
+              "p50_ms": 2.836,
+              "p95_ms": 4.494,
+              "p99_ms": 21.238,
+              "samples": 99
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 3.499585868686869,
+            "quantiles": {
+              "p50_ms": 2.836,
+              "p95_ms": 4.494,
+              "p99_ms": 21.238,
+              "samples": 99
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "capture_ms": {
+            "mean": 5.665995494949494,
+            "quantiles": {
+              "p50_ms": 5.316,
+              "p95_ms": 6.738,
+              "p99_ms": 20.995,
+              "samples": 99
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 27.248896989898988,
+            "quantiles": {
+              "p50_ms": 26.625,
+              "p95_ms": 30.349,
+              "p99_ms": 60.442,
+              "samples": 99
+            }
+          },
+          "codec_ms": {
+            "mean": 3.499585868686869,
+            "quantiles": {
+              "p50_ms": 2.836,
+              "p95_ms": 4.494,
+              "p99_ms": 21.238,
+              "samples": 99
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.0005700909090909091,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.002,
+              "samples": 99
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "h264_ms": {
+            "mean": 3.499585868686869,
+            "quantiles": {
+              "p50_ms": 2.836,
+              "p95_ms": 4.494,
+              "p99_ms": 21.238,
+              "samples": 99
+            }
+          },
+          "hevc444_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "jpeg_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.05894912121212121,
+            "quantiles": {
+              "p50_ms": 0.062,
+              "p95_ms": 0.101,
+              "p99_ms": 0.115,
+              "samples": 99
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 18.001829343434345,
+            "quantiles": {
+              "p50_ms": 18.116,
+              "p95_ms": 18.973,
+              "p99_ms": 19.764,
+              "samples": 99
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.3700209494949495,
+            "quantiles": {
+              "p50_ms": 0.372,
+              "p95_ms": 0.419,
+              "p99_ms": 0.489,
+              "samples": 99
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.00589969696969697,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.011,
+              "p99_ms": 0.013,
+              "samples": 99
+            }
+          }
+        },
+        "total_tiles": 0,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 0,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.016740603
+      },
+      "second": {
+        "backpressure_skipped": 0,
+        "bytes": 6178,
+        "captured": 99,
+        "commit": null,
+        "cursor_stages": {
+          "poll_interval_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "poll_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          }
+        },
+        "damage_skipped": 0,
+        "dirty_tiles": 0,
+        "drawn_acks": 99,
+        "encoded_dimensions": [
+          240,
+          180
+        ],
+        "h264_frames": 99,
+        "hardware_encode_stages": {
+          "conversion_ms": {
+            "mean": 2.424590818181818,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 1.983,
+              "p95_ms": 3.524,
+              "p99_ms": 4.824,
+              "samples": 99
+            }
+          },
+          "native_dmabuf_import_ms": {
+            "mean": 0.02822971717171717,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.026,
+              "p95_ms": 0.039,
+              "p99_ms": 0.045,
+              "samples": 99
+            }
+          },
+          "output_ms": {
+            "mean": 0.005749777777777777,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.011,
+              "p99_ms": 0.012,
+              "samples": 99
+            }
+          },
+          "padding_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "rgb_copy_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "submit_ms": {
+            "mean": 0.800621101010101,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 0.763,
+              "p95_ms": 0.949,
+              "p99_ms": 2.277,
+              "samples": 99
+            }
+          }
+        },
+        "hevc444_frames": 0,
+        "jpeg_atlases": 0,
+        "last_sent_frame": {
+          "codec": "H.264",
+          "encoded_dimensions": [
+            240,
+            180
+          ],
+          "geometry_epoch": 5,
+          "sequence": 296,
+          "source_dimensions": [
+            240,
+            180
+          ],
+          "source_epoch": 2
+        },
+        "legacy_stage_aliases": {
+          "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+        },
+        "max_outstanding": 1,
+        "mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "outstanding": 0,
+        "png_atlases": 0,
+        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "replaced": 0,
+        "scheduled": 99,
+        "schema_version": 1,
+        "sent": 99,
+        "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+        "source_dimensions": [
+          240,
+          180
+        ],
+        "stages": {
+          "atlas_pack_and_codec_ms": {
+            "mean": 3.3488466565656565,
+            "quantiles": {
+              "p50_ms": 2.845,
+              "p95_ms": 4.431,
+              "p99_ms": 12.896,
+              "samples": 99
+            }
+          },
+          "atlas_pack_and_jpeg_ms": {
+            "mean": 3.3488466565656565,
+            "quantiles": {
+              "p50_ms": 2.845,
+              "p95_ms": 4.431,
+              "p99_ms": 12.896,
+              "samples": 99
+            }
+          },
+          "atlas_pack_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "capture_ms": {
+            "mean": 5.5182940202020205,
+            "quantiles": {
+              "p50_ms": 4.786,
+              "p95_ms": 6.184,
+              "p99_ms": 30.953,
+              "samples": 99
+            }
+          },
+          "capture_start_to_ack_ms": {
+            "mean": 24.376290545454548,
+            "quantiles": {
+              "p50_ms": 23.621,
+              "p95_ms": 33.276,
+              "p99_ms": 63.676,
+              "samples": 99
+            }
+          },
+          "codec_ms": {
+            "mean": 3.3488466565656565,
+            "quantiles": {
+              "p50_ms": 2.845,
+              "p95_ms": 4.431,
+              "p99_ms": 12.896,
+              "samples": 99
+            }
+          },
+          "credit_wait_ms": {
+            "mean": 0.0005135858585858585,
+            "quantiles": {
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.001,
+              "samples": 99
+            }
+          },
+          "dirty_scan_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "h264_ms": {
+            "mean": 3.3488466565656565,
+            "quantiles": {
+              "p50_ms": 2.845,
+              "p95_ms": 4.431,
+              "p99_ms": 12.896,
+              "samples": 99
+            }
+          },
+          "hevc444_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "jpeg_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "mailbox_age_ms": {
+            "mean": 0.06360435353535354,
+            "quantiles": {
+              "p50_ms": 0.078,
+              "p95_ms": 0.102,
+              "p99_ms": 0.109,
+              "samples": 99
+            }
+          },
+          "png_ms": {
+            "mean": 0.0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "send_to_ack_ms": {
+            "mean": 15.423700727272728,
+            "quantiles": {
+              "p50_ms": 15.234,
+              "p95_ms": 17.128,
+              "p99_ms": 33.407,
+              "samples": 99
+            }
+          },
+          "socket_write_ms": {
+            "mean": 0.16250007070707073,
+            "quantiles": {
+              "p50_ms": 0.152,
+              "p95_ms": 0.22,
+              "p99_ms": 0.387,
+              "samples": 99
+            }
+          },
+          "writer_wait_ms": {
+            "mean": 0.005650353535353535,
+            "quantiles": {
+              "p50_ms": 0.005,
+              "p95_ms": 0.011,
+              "p99_ms": 0.016,
+              "samples": 99
+            }
+          }
+        },
+        "total_tiles": 0,
+        "type": "jwm_remote_host_stats",
+        "unchanged_suppressed": 0,
+        "version": "0.2.0",
+        "viewer_superseded": 0,
+        "window_seconds": 5.01630141
+      }
+    },
+    "resized": {
+      "acked_frames": 99,
+      "decode_ms": {
+        "mean": 0.1625177070707071,
+        "observations": 99,
+        "quantiles": {
+          "p50_ms": 0.141,
+          "p95_ms": 0.194,
+          "p99_ms": 1.295,
+          "samples": 99
+        }
+      },
+      "final": false,
+      "hardware_download_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "last_decoded_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          200,
+          150
+        ],
+        "geometry_epoch": 3,
+        "sequence": 198,
+        "source_dimensions": [
+          200,
+          150
+        ],
+        "source_epoch": 1
+      },
+      "last_presentation_path": "wayland-vaapi-dmabuf",
+      "native_preparation_and_submit_ms": {
+        "mean": 2.408097191919192,
+        "observations": 99,
+        "quantiles": {
+          "p50_ms": 2.469,
+          "p95_ms": 3.238,
+          "p99_ms": 3.868,
+          "samples": 99
+        }
+      },
+      "native_presented_frames": 99,
+      "negotiated_codec": "H.264",
+      "presentation_completion_ms": {
+        "mean": 16.590522222222223,
+        "observations": 99,
+        "quantiles": {
+          "p50_ms": 16.665,
+          "p95_ms": 17.568,
+          "p99_ms": 18.255,
+          "samples": 99
+        }
+      },
+      "presentation_queue_ms": {
+        "mean": 0.10733451515151514,
+        "observations": 99,
+        "quantiles": {
+          "p50_ms": 0.076,
+          "p95_ms": 0.284,
+          "p99_ms": 0.316,
+          "samples": 99
+        }
+      },
+      "presented_frames": 99,
+      "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+      "window_ms": 5000.6834260000005
+    },
+    "resized_bgrx": [
+      [
+        0,
+        0,
+        0,
+        255
+      ],
+      [
+        0,
+        1,
+        255,
+        255
+      ],
+      [
+        0,
+        1,
+        255,
+        255
+      ]
+    ],
+    "second": {
+      "acked_frames": 98,
+      "decode_ms": {
+        "mean": 0.225525101010101,
+        "observations": 99,
+        "quantiles": {
+          "p50_ms": 0.157,
+          "p95_ms": 0.29,
+          "p99_ms": 4.095,
+          "samples": 99
+        }
+      },
+      "final": false,
+      "hardware_download_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "last_decoded_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          240,
+          180
+        ],
+        "geometry_epoch": 5,
+        "sequence": 297,
+        "source_dimensions": [
+          240,
+          180
+        ],
+        "source_epoch": 2
+      },
+      "last_presentation_path": "wayland-vaapi-dmabuf",
+      "native_preparation_and_submit_ms": {
+        "mean": 1.9914604949494947,
+        "observations": 99,
+        "quantiles": {
+          "p50_ms": 2.156,
+          "p95_ms": 2.606,
+          "p99_ms": 3.207,
+          "samples": 99
+        }
+      },
+      "native_presented_frames": 98,
+      "negotiated_codec": "H.264",
+      "presentation_completion_ms": {
+        "mean": 14.22975275510204,
+        "observations": 98,
+        "quantiles": {
+          "p50_ms": 14.141,
+          "p95_ms": 15.081,
+          "p99_ms": 32.138,
+          "samples": 98
+        }
+      },
+      "presentation_queue_ms": {
+        "mean": 0.16232606122448978,
+        "observations": 98,
+        "quantiles": {
+          "p50_ms": 0.16,
+          "p95_ms": 0.3,
+          "p99_ms": 0.319,
+          "samples": 98
+        }
+      },
+      "presented_frames": 98,
+      "session_id": "d721ffac028fe30b3561e1078ece5fbf",
+      "window_ms": 5000.695662
+    },
+    "second_bgrx": [
+      [
+        255,
+        0,
+        1,
+        255
+      ],
+      [
+        255,
+        0,
+        1,
+        255
+      ],
+      [
+        255,
+        0,
+        1,
+        255
+      ]
+    ]
+  }
+}

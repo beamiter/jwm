@@ -1,0 +1,332 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-21",
+  "scope": "Single short unscored 4K native Wayland backing reuse preflight with real P09 drawn markers.",
+  "result": {
+    "source_artifact": "P09 moving markers on an owned Ubuntu Xvfb",
+    "scope": "Isolated actual 4K H.264 native Intel Wayland with uncapped SSH",
+    "diagnostic_only": true,
+    "rgb_backing_reuse_arm": "B",
+    "run_id": 88,
+    "warmup_seconds": 6,
+    "requested_observe_seconds": 18,
+    "unique_markers": 658,
+    "scored_unique_markers": 482,
+    "unique_markers_per_second": 26.77777777777778,
+    "longest_gap_ms": 464.904,
+    "source_submitted_frames_per_second": 59.949213822290645,
+    "source_qualified_for_30_fps_request": true,
+    "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "viewer_binary_sha256": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1",
+    "viewer_test_binary_sha256": "74579fbf4f7f1104814bcd4fb444aa9d225a4c3d05d81a06966409fe00c85b24",
+    "observer_start": {
+      "backend": "private-wayland-dmabuf",
+      "height": 2160,
+      "monotonic_ns": 54676931365928,
+      "render_node_device": 57984,
+      "roi": [
+        16,
+        16,
+        96,
+        96
+      ],
+      "roi_bytes": 36864,
+      "role": "observer",
+      "run_id": 88,
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "5a9b34a6a6c2cbac9a375f9bc2de83a8",
+        "source_epoch": 1
+      },
+      "score_end_ns": 54700931365928,
+      "score_start_ns": 54682931365928,
+      "type": "p09_start",
+      "width": 3840
+    },
+    "observer_end": {
+      "duplicates": 0,
+      "interrupted": false,
+      "invalid": 0,
+      "longest_scored_gap_ns": 464904000,
+      "monotonic_ns": 54700932061102,
+      "reads": 791,
+      "reordered": 0,
+      "role": "observer",
+      "run_id": 88,
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "5a9b34a6a6c2cbac9a375f9bc2de83a8",
+        "source_epoch": 1
+      },
+      "score_end_ns": 54700931365928,
+      "score_start_ns": 54682931365928,
+      "scored_unique": 482,
+      "target_lost": false,
+      "type": "p09_end",
+      "unique": 658,
+      "wrong_run": 0
+    },
+    "host_h264_frames": 793,
+    "host_drawn_acks": 791
+  },
+  "phase_diagnostic": {
+    "diagnostic_only": true,
+    "marker_scope": {
+      "geometry_epoch": 2,
+      "session_id": "5a9b34a6a6c2cbac9a375f9bc2de83a8",
+      "source_epoch": 1
+    },
+    "extent": [
+      3840,
+      2160
+    ],
+    "codec": "H.264",
+    "presentation": "wayland-vaapi-dmabuf",
+    "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "viewer_binary_sha256": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1",
+    "observer_binary_sha256": "74579fbf4f7f1104814bcd4fb444aa9d225a4c3d05d81a06966409fe00c85b24",
+    "matching_scored_roi_markers": 482,
+    "observer_interval_monotonic_ns": [
+      54682931365928,
+      54700931365928
+    ],
+    "raw_windows": 6,
+    "managed_metric_snapshots": 7,
+    "matched_distinct_raw_windows": 6,
+    "matched_whole_observer_windows": 2,
+    "matched_whole_coverage_seconds": 10.015903659,
+    "hardware_rgb_download_observations_all_raw_windows": 0,
+    "native_wayland_stages": {
+      "va_surface_wait_ms": {
+        "windows": 2,
+        "observations": 249,
+        "median_window_p50_ms": 3.24,
+        "window_p95_range_ms": [
+          5.745,
+          5.756
+        ]
+      },
+      "va_frame_export_ms": {
+        "windows": 2,
+        "observations": 249,
+        "median_window_p50_ms": 0.0195,
+        "window_p95_range_ms": [
+          0.03,
+          0.031
+        ]
+      },
+      "egl_prepare_and_submit_ms": {
+        "windows": 2,
+        "observations": 249,
+        "median_window_p50_ms": 0.209,
+        "window_p95_range_ms": [
+          0.256,
+          0.266
+        ]
+      },
+      "egl_fence_wait_ms": {
+        "windows": 2,
+        "observations": 249,
+        "median_window_p50_ms": 13.725000000000001,
+        "window_p95_range_ms": [
+          16.246,
+          16.318
+        ]
+      },
+      "wayland_dmabuf_import_ms": {
+        "windows": 2,
+        "observations": 249,
+        "median_window_p50_ms": 0.9785,
+        "window_p95_range_ms": [
+          1.415,
+          1.606
+        ]
+      }
+    },
+    "scope_note": "Raw viewer and managed clock arrivals belong to the observer machine. Whole-window boundaries are estimated from viewer stderr receipt and the reported duration. No timestamp subtraction across endpoints. Stage quantiles describe the recent samples in each raw viewer window.",
+    "rgb_backing_reuse": {
+      "arm": "B",
+      "successful_reuse_activation_log_lines": 1,
+      "confirmed_activation": true,
+      "whole_session": {
+        "native_preparations": 792,
+        "rgb_target_allocations": 2,
+        "egl_fence_waits": 792,
+        "fresh_wayland_dmabuf_imports": 792
+      },
+      "matched_steady_windows": {
+        "native_preparations": 249,
+        "rgb_target_allocations": 0,
+        "egl_fence_waits": 249,
+        "fresh_wayland_dmabuf_imports": 249
+      },
+      "allocations_outside_matched_steady_windows": 2,
+      "steady_allocations_per_native_preparation": 0.0,
+      "scope": "Counts are actual GBM backing allocations and separate native preparation, fence, and fresh Wayland DMA-BUF import observations. Missing allocation phase in a matched steady window contributes zero only after the same session proves allocations elsewhere."
+    }
+  },
+  "matched_windows": [
+    {
+      "viewer_receive_start_estimate_monotonic_ns": 54686843232526,
+      "viewer_receive_end_monotonic_ns": 54691843526313,
+      "native_session_snapshot_arrival_monotonic_ns": 54691851075075,
+      "session_id": "5a9b34a6a6c2cbac9a375f9bc2de83a8",
+      "window_seconds": 5.000293787,
+      "last_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          3840,
+          2160
+        ],
+        "geometry_epoch": 2,
+        "sequence": 572,
+        "source_dimensions": [
+          3840,
+          2160
+        ],
+        "source_epoch": 1
+      },
+      "native_presented": 148,
+      "acked": 148
+    },
+    {
+      "viewer_receive_start_estimate_monotonic_ns": 54691843567192,
+      "viewer_receive_end_monotonic_ns": 54696859177064,
+      "native_session_snapshot_arrival_monotonic_ns": 54696959242210,
+      "session_id": "5a9b34a6a6c2cbac9a375f9bc2de83a8",
+      "window_seconds": 5.015609872,
+      "last_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          3840,
+          2160
+        ],
+        "geometry_epoch": 2,
+        "sequence": 673,
+        "source_dimensions": [
+          3840,
+          2160
+        ],
+        "source_epoch": 1
+      },
+      "native_presented": 100,
+      "acked": 100
+    }
+  ],
+  "repository_workload_parser": {
+    "scope": "Full raw session. It includes startup and final windows outside the matched ROI slice.",
+    "host_windows": 6,
+    "viewer_windows": 6,
+    "matched_sessions": 1,
+    "native_wayland_stage_names": [
+      "egl_fence_wait_ms",
+      "egl_prepare_and_submit_ms",
+      "rgb_target_allocation_ms",
+      "va_frame_export_ms",
+      "va_surface_wait_ms",
+      "wayland_dmabuf_import_ms"
+    ],
+    "hardware_download_observations": 0,
+    "rgb_target_allocations": 2,
+    "fresh_wayland_dmabuf_imports": 792,
+    "archive_member": "reports/repository-workload-parser-full-session.json"
+  },
+  "provenance": {
+    "trial": {
+      "run_id": 88,
+      "warmup_seconds": 6,
+      "observed_seconds": 18,
+      "extent": [
+        3840,
+        2160
+      ],
+      "render_node": "/dev/dri/renderD128"
+    },
+    "source": {
+      "path": "Ubuntu private Xvfb root with Auto scaling and MIT-SHM readback",
+      "codec": "H.264 NVENC fixed 30 FPS",
+      "painter_target_fps": 60,
+      "parallel_yuv420_host": true,
+      "transport": "uncapped OpenSSH forward"
+    },
+    "build": {
+      "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+      "host_binary_reference": "Previously pinned resolution candidate and scored P09 Wayland host.",
+      "viewer_binary_sha256": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1",
+      "viewer_profile": "Cargo release, locked, no default features",
+      "viewer_features": [
+        "remote-x11",
+        "remote-wayland",
+        "remote-h264"
+      ],
+      "selected_candidate_source_sha256": {
+        "src/remote/gpu_present.rs": "b19dea4d460f97138a0832e702a2d0126283f2a3a0cd776b1e0fc4fe0683e7bb",
+        "src/remote/wayland_viewer_gpu.rs": "b4573452b28764307b02b9d9cdf04d5cb3befaaa8a604e740f6a0110a6fe1292",
+        "src/remote/wayland_viewer.rs": "9076782a242a0af424acc17e73d1b1f493323ce71cdb823c79e975df0a85690b",
+        "src/remote/host_wayland_gpu_4k_integration.rs": "4a2c7e767cd433d055711647dd68b7a86a332ea44808fdbf94ab68fa4ddbf8da",
+        "src/remote/host_wayland_gpu_4k_marker_integration.rs": "27b488d7897bba31635bacdf987592da4f14c4ff3c5fe3481c0d4e4602d47cc2"
+      },
+      "observer_binary_sha256": "74579fbf4f7f1104814bcd4fb444aa9d225a4c3d05d81a06966409fe00c85b24",
+      "observer_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "observer_features": [
+        "backend-wayland-udev",
+        "remote-h264",
+        "remote-wayland",
+        "remote-x11",
+        "wayland-backends"
+      ],
+      "observer_test_selector": "remote::host::wayland_viewer_integration::host_control_integration::cli_process_integration::source_switching::gpu_4k::marker::native_cli_wayland_gpu_viewer_observes_p09_4k_marker"
+    },
+    "runtime_fixture": {
+      "viewer_command": "session --viewer-backend wayland --window-size 3840x2160 --scaling gpu --stats-json",
+      "viewer_environment": {
+        "JWM_REMOTE_WAYLAND_REUSE_RGB": "1"
+      },
+      "activation_log": "jwm-remote: native Wayland XRGB DMA-BUF backing reuse active",
+      "reuse_scope": "Only GBM RGB backing is reused. Each native submission imports a fresh wl_buffer.",
+      "launcher_digest_note": "The release viewer, observer, and wrapper are separate. Source launcher archive copies replace the private workstation checkout and configured SSH peer with explicit environment variables.",
+      "preflight_original_sha256": "4da417fc5ecaf6d8900c2cfc0c30dd3e75dd67cfb7ad95a665d2869cc72b6580",
+      "run_phase_original_sha256": "b79bd94a9fc9a9391acb2eb544b86c16478384f63327ee666e431d7c970bd9ef",
+      "viewer_stderr_wrapper_sha256": "2699b5fd3670f0596c932395801cc9a5b39f6d099bd6c85a4e4675c13da14509",
+      "phase_validator_sha256": "0b3c5e069512672a897639c72f01da2eb1aac171a3aa5a1d61694468b0e88151",
+      "reuse_validator_sha256": "9243ee1cbd543eba032f847ac5ca9a30372cb383163d2e7334112a011f74417d",
+      "workload_parser_sha256": "22b31d176f35e58003890dee55ff18affb24183a8e7e0351368308db07cdc45d"
+    },
+    "offline_revalidation": {
+      "raw_phase_validator": "Regenerated byte-identical phase result and matched-window JSONL from retained files.",
+      "repository_workload_parser": "read_windows and read_viewer_windows accepted mixed stderr, and summarize_viewer paired both endpoints. A P09 diagnostic workload label is kept because it is outside the CLI workload choices."
+    }
+  },
+  "archive": {
+    "path": "native-wayland-4k-reuse-preflight-raw.zip",
+    "sha256": "10077a8ca9747aad7bf49ff2441811301680ace567912ea59df10a62e49fb03a",
+    "entries": {
+      "trace/result.json": "ef6604c676d657cf69a8c539acf418a1a9813cc7f24831085d31c388f4f83f0f",
+      "trace/phase-diagnostic.json": "b31c8294a291ca7950d3e0d3bf54bdf8b06ef40e02598d735f4a1f5b76b4e86c",
+      "trace/matched-native-windows.jsonl": "cb8f28b2267858c0c498ac4647c03834df0717f6a2cedd660b0fa486ff4335f5",
+      "trace/marker-test.log": "5a19cf5eef089234e80cade4603c01533ead527151be1f7234bbb41783d268c6",
+      "trace/source/host.log": "554d54443d6734335df00ae30b31db67f55a943873969e52cc6a43a69e47490b",
+      "trace/source/paint.jsonl": "4b3cbd0ba9439b4d306e8fb2eeeaecf1a1c02cac700b24976f818b00ac343146",
+      "trace/viewer/observed.jsonl": "710ce67d0ac6a008689be746ca6423cc80060cab87838fd416a47e39582df877",
+      "trace/viewer/viewer-clock.jsonl": "cd8c6a43449ec60f6a163d51085c424f1aed6a5f6b2a57b2a856cc512895b66b",
+      "trace/viewer/viewer-events.jsonl": "11bb5eeb09895e5e1434063a0f66f25f32df2b426b6f980f2d2120b0118df9ee",
+      "trace/viewer/viewer-stage-windows.jsonl": "b97382ebe758339302c68004c2497df3fca89ff1a3a0bb5ac25bc483e0bf1a60",
+      "trace/viewer/viewer-complete-stderr.log": "4b935b3266675f1d863465a86d4f2423bee0b431c07befc3ff0b961857938bb5",
+      "trace/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "fixture/validate_phases.py": "0b3c5e069512672a897639c72f01da2eb1aac171a3aa5a1d61694468b0e88151",
+      "fixture/validate_reuse.py": "9243ee1cbd543eba032f847ac5ca9a30372cb383163d2e7334112a011f74417d",
+      "fixture/tee_stderr.py": "a6da4ec18277a78fefcf308a7b87bd04bc66ee4f547a1903b05dc91019547e79",
+      "fixture/viewer-stats-wrapper.sh": "2699b5fd3670f0596c932395801cc9a5b39f6d099bd6c85a4e4675c13da14509",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/preflight.py": "f37d04dab2f12e4f43aabd79688a2a3e6941ccc67c90ca8b6bd682530b3553a4",
+      "fixture/provenance.json": "5594d9f8e67f149727514a24acc28c7b654138a63aabaeedfca88572ec91d8c1",
+      "reports/repository-workload-parser-full-session.json": "dfc55f6430b203cbccb48e96fb3eebbe3c6df8b30ad2789001fe7dbc2881ac03"
+    }
+  }
+}

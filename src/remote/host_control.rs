@@ -1,4 +1,4 @@
-//! One host authority and action order for sequential keyboard/pointer control.
+//! One host authority and action order for scoped keyboard/pointer control.
 use super::*;
 use crate::remote::resumable_control::{
     Binding, HostSession, Kind as ResumableKind, Message as ResumableMessage,
@@ -6,7 +6,7 @@ use crate::remote::resumable_control::{
 };
 use crate::remote::wayland_control_wire::{
     ControlAction, ControlActionKind, ControlRequest, ControlStatus, ControlStatusKind,
-    LEASE_DURATION, MAX_SEQUENCE,
+    LEASE_DURATION, MAX_SEQUENCE, held_keys_permit_pointer, is_gesture_modifier,
 };
 pub(super) enum ControlCommand {
     Request(ControlRequest),
@@ -25,6 +25,7 @@ pub(super) struct HostControl {
     resumable: Option<HostSession>,
     sequence: u64,
     held: std::collections::BTreeSet<u16>,
+    drag_scope: Option<DrawnScope>,
     tokens: f64,
     rate_at: Option<Instant>,
 }
@@ -34,6 +35,9 @@ impl HostControl {
     }
     pub(super) fn held_empty(&self) -> bool {
         self.held.is_empty()
+    }
+    pub(super) fn dragging(&self) -> bool {
+        self.drag_scope.is_some()
     }
     pub(super) fn epoch(&self) -> Option<u64> {
         self.epoch
@@ -83,6 +87,7 @@ pub(super) fn stop(
         session.revoke();
     }
     state.held.clear();
+    state.drag_scope = None;
     sources.control_revoke.store(true, Ordering::Release);
     sources.control_enabled.store(false, Ordering::Release);
     sources
@@ -91,6 +96,9 @@ pub(super) fn stop(
     sources.control_queue.lock().unwrap().clear();
     sources.pointer_frame.lock().unwrap().take();
     capture.revoke_control();
+    if state.epoch.is_some() {
+        capture.confirm_control_released()?;
+    }
     control_repair::stopped(sources);
     {
         let mut s = sources.state.lock().unwrap();
@@ -123,6 +131,7 @@ pub(super) fn process(
         return Ok(());
     }
     let now = Instant::now();
+    let gestures = sources.control_gestures.load(Ordering::Acquire);
     if let Some((_, deadline)) = capture.control_budget_bounds() {
         state.tighten_deadline(deadline);
     }
@@ -195,6 +204,7 @@ pub(super) fn process(
                     }
                     let epoch = capture.arm_control(request.keymap_digest)?;
                     state.epoch = Some(epoch);
+                    sources.control_lease_epoch.store(epoch, Ordering::Release);
                     let armed_at = Instant::now();
                     let (started, deadline) =
                         if sources.resumable_control_enabled.load(Ordering::Acquire) {
@@ -260,10 +270,18 @@ pub(super) fn process(
                         return Err(invalid_data("control action rate exceeded").into());
                     }
                     state.tokens -= 1.0;
+                    if action.kind.is_gesture_edge() && !gestures {
+                        return Err(invalid_data("Wayland gestures not negotiated").into());
+                    }
                     let serial = match action.kind {
                         ControlActionKind::Key { code, pressed } => {
                             if action.scope != request.scope {
                                 return Err(invalid_data("control key arm scope mismatch").into());
+                            }
+                            if state.dragging() && !is_gesture_modifier(code) {
+                                return Err(
+                                    invalid_data("ordinary key during a Wayland drag").into()
+                                );
                             }
                             #[cfg(feature = "remote-wayland")]
                             if !crate::remote_keyboard_protocol::keyboard_key_allowed(u32::from(
@@ -278,12 +296,32 @@ pub(super) fn process(
                             }
                             None
                         }
+                        ControlActionKind::DragMotion { x, y } => {
+                            if state.drag_scope != Some(action.scope) || x >= size.0 || y >= size.1
+                            {
+                                return Err(invalid_data(
+                                    "Wayland drag motion lost its original scope",
+                                )
+                                .into());
+                            }
+                            None
+                        }
+                        ControlActionKind::DragRelease => {
+                            if state.drag_scope != Some(action.scope) {
+                                return Err(invalid_data(
+                                    "Wayland drag release lost its original scope",
+                                )
+                                .into());
+                            }
+                            None
+                        }
                         ControlActionKind::Motion { x, y }
                         | ControlActionKind::ClickLeft { x, y }
                         | ControlActionKind::ScrollUp { x, y }
                         | ControlActionKind::ScrollDown { x, y }
                         | ControlActionKind::ScrollLeft { x, y }
-                        | ControlActionKind::ScrollRight { x, y } => {
+                        | ControlActionKind::ScrollRight { x, y }
+                        | ControlActionKind::DragStart { x, y } => {
                             if matches!(
                                 action.kind,
                                 ControlActionKind::ScrollUp { .. }
@@ -303,7 +341,11 @@ pub(super) fn process(
                                 )
                                 .into());
                             }
-                            if !state.held.is_empty() || x >= size.0 || y >= size.1 {
+                            if state.dragging()
+                                || !held_keys_permit_pointer(&state.held, gestures)
+                                || x >= size.0
+                                || y >= size.1
+                            {
                                 return Err(invalid_data(
                                     "control pointer conflicts with keys or bounds",
                                 )
@@ -327,14 +369,23 @@ pub(super) fn process(
                     };
                     capture.control_action(&action, serial)?;
                     state.sequence = action.sequence;
+                    match action.kind {
+                        ControlActionKind::DragStart { .. } => {
+                            state.drag_scope = Some(action.scope)
+                        }
+                        ControlActionKind::DragRelease => state.drag_scope = None,
+                        _ => {}
+                    }
                     control_repair::after_action(sources, writer, action)?;
                     sources.pointer_frame.lock().unwrap().take();
-                    status(
-                        writer,
-                        action.scope,
-                        action.lease_epoch,
-                        ControlStatusKind::Waiting,
-                    )?;
+                    if !matches!(action.kind, ControlActionKind::DragMotion { .. }) {
+                        status(
+                            writer,
+                            action.scope,
+                            action.lease_epoch,
+                            ControlStatusKind::Waiting,
+                        )?;
+                    }
                 }
                 ControlCommand::Resumable(ResumableMessage::Lifecycle(record)) => {
                     if !sources.resumable_control_enabled.load(Ordering::Acquire) {
@@ -447,7 +498,8 @@ pub(super) fn process(
                 status(writer, scope, epoch, ControlStatusKind::Waiting)?;
             }
         } else if state.epoch.is_some()
-            && state.held.is_empty()
+            && !state.dragging()
+            && held_keys_permit_pointer(&state.held, gestures)
             && !frame.announced
             && frame.scope.is_some()
             && drawn == frame.scope

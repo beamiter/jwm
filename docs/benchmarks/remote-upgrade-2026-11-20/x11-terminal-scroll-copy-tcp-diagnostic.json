@@ -1,0 +1,322 @@
+{
+  "excludes_formal_pair_scoring": true,
+  "interpretation": [
+    "The Ubuntu viewer connection accepted more TCP bytes during the longest observed raster gap.",
+    "The sampled Mint window contains retransmissions and ACK progress with no adjacent flat pending-ACK sample pair.",
+    "The outer SSH stream is multiplexed and the Ubuntu TCP counters identify a byte stream, without a per-frame application receipt time.",
+    "Cross-machine association uses one authenticated session and frame epochs and sequence neighborhoods in aggregate statistics. Each machine retains its own monotonic clock.",
+    "The observations do not locate a stall within the renderer or network, prove behavior between samples, or explain the different gap in the prior formal trial."
+  ],
+  "manifest": {
+    "arm": "B",
+    "attempts": 1,
+    "diagnostic_batch": true,
+    "fixture_sha256": {
+      "diagnostic.py": "1ee3a3e7b8e13d38ae00e06dd5d618579cacc8f23face6785f007859304f5be5",
+      "dual_terminal.py": "5d0291caa83b21ea12a37c8417abd69db11c34f65de351c2ce888ce2c2dd2a25",
+      "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "run_baseline.py": "570efd9e7406ee8e621a8f758dd2c98fae805f394f3fc9755ed09fcfc32fcb20",
+      "score.py": "69cc11fb2c4b49757a7ea8bdf6c37c1f0c6eb607282ff715e6b9a46a033056ca",
+      "ssh_tcp_sampler.py": "49b9e994e9eb4a821f021b0bf1ad4650d684a3d829712e9f9c2f21eb7615c427",
+      "terminal_scroll.py": "96a27c3d69d694e5a2187d0b257551442cea0757c149925c700090d9959c1b47"
+    },
+    "host_options": [
+      "--scroll-copy"
+    ],
+    "host_sha256": "7cbcbb0de69d6143b72be1eea43c27618c849b9f8925f6d77c0a283302964fe0",
+    "marker_tag": 97,
+    "maximum_samples_per_endpoint": 440,
+    "observer": "local proc and numeric exact socket ss only",
+    "sample_period_ms": 250.0,
+    "source_snapshot_sha256": "d3f2143aa3f7e9f771e7bef95429ae36e8d8d7a2b066c09f0f693649b6cd3c6b",
+    "ss_timeout_s": 0.15,
+    "timing_warm_score_tail_seconds": [
+      30,
+      60,
+      8
+    ],
+    "viewer_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+    "xterm_sha256": "5415c1445d44e4c347fe51e30dd8f014de7e489873cfc82fe32af628dc01d4c4"
+  },
+  "mint_sequence_neighborhood": {
+    "aggregate_app_windows": [
+      {
+        "begin": 63714712505019,
+        "counts": {
+          "backpressure_skipped": 0,
+          "captured": 147,
+          "drawn_acks": 147,
+          "outstanding": 0,
+          "scroll_copy_frames": 7,
+          "sent": 147
+        },
+        "end": 63719720494048,
+        "frame": [
+          1,
+          2,
+          1934
+        ]
+      },
+      {
+        "begin": 63719719550876,
+        "counts": {
+          "backpressure_skipped": 16,
+          "captured": 131,
+          "drawn_acks": 128,
+          "outstanding": 0,
+          "scroll_copy_frames": 5,
+          "sent": 128
+        },
+        "end": 63724726949335,
+        "frame": [
+          1,
+          2,
+          2062
+        ]
+      }
+    ],
+    "outer_ssh_tcp": {
+      "counter_deltas": {
+        "bytes_acked": {
+          "delta": 5832928,
+          "observations": 40
+        },
+        "bytes_received": {
+          "delta": 43648,
+          "observations": 40
+        },
+        "bytes_retrans": {
+          "delta": 18896,
+          "observations": 40
+        },
+        "bytes_sent": {
+          "delta": 5852176,
+          "observations": 40
+        },
+        "data_segs_in": {
+          "delta": 369,
+          "observations": 40
+        },
+        "data_segs_out": {
+          "delta": 4169,
+          "observations": 40
+        },
+        "total_retransmissions": {
+          "delta": 14,
+          "observations": 40
+        }
+      },
+      "first_sample_local_monotonic_ns": 63714723863564,
+      "last_sample_local_monotonic_ns": 63724524791968,
+      "max_receive_queue_bytes": 0,
+      "max_sample_read_ms": 55.990766,
+      "max_sample_spacing_ms": 250.526505,
+      "max_send_queue_bytes": 225076,
+      "neighbor_samples_with_pending_tx_and_same_bytes_acked": [],
+      "samples": 40
+    }
+  },
+  "raster_and_route": {
+    "codec": "JPEG",
+    "dimensions": [
+      1920,
+      1080
+    ],
+    "jpeg_quality": 85,
+    "post_write_scroll_copy": {
+      "motion": {
+        "complete_counter_coverage": true,
+        "scroll_copy_frames": 86,
+        "scroll_copy_frames_in_reported_windows": 86,
+        "selected_windows": 13,
+        "windows_with_counter": 13
+      },
+      "static": {
+        "complete_counter_coverage": true,
+        "scroll_copy_frames": 0,
+        "scroll_copy_frames_in_reported_windows": 0,
+        "selected_windows": 12,
+        "windows_with_counter": 12
+      }
+    },
+    "routes": {
+      "motion": {
+        "host": [
+          "root/xrender/shm/no-damage/cursor-events"
+        ],
+        "viewer": [
+          "rgb"
+        ]
+      },
+      "static": {
+        "host": [
+          "root/xrender/shm/no-damage/cursor-events"
+        ],
+        "viewer": [
+          "rgb"
+        ]
+      }
+    },
+    "source_gap_ms": {
+      "max": 24.163083,
+      "p50": 13.810705,
+      "p95": 22.647142
+    },
+    "source_motion_fps": 60.0,
+    "static_unchanged": true,
+    "viewer_gap_ms": {
+      "max": 455.675436,
+      "p50": 33.350895,
+      "p95": 55.323376
+    },
+    "viewer_motion_fps": 28.716666666666665,
+    "viewer_motion_gate_met": true
+  },
+  "raw_archive": {
+    "bytes": 787092,
+    "file": "x11-terminal-scroll-copy-tcp-diagnostic-raw.zip",
+    "member_sha256": {
+      "B.snapshot": "d3f2143aa3f7e9f771e7bef95429ae36e8d8d7a2b066c09f0f693649b6cd3c6b",
+      "README.txt": "9b5b3e6ae42119d2848ea7332a213260bca8165b58046be4ebd2e885e3945cc0",
+      "manifest.json": "47215eb6ba0bb6e382d7c5e8c9c79f3fa03f6216659c1dcbb7cd43138d40c2ef",
+      "observed-analysis.json": "e3fa094b12f05556dc4f233d99cef3463b9b9b98bcb2ebf166bdbb9e60e83b47",
+      "outcome.json": "6603761077c468cefd2f516c19793cc1e36aa1c12424f02c8962d5eed8feb8b7",
+      "raw/host-clocked-telemetry.jsonl": "04880f9d4070b8b4ee9f996df28db4c98a3b98d6381c6ab64208f45e736b14ee",
+      "raw/identity.json": "ae7f8496acdbf531a75abaefd99b62c8c78bb69664e09a2d6c5967802933c6c8",
+      "raw/motion-host.jsonl": "001ebf0132cca5d06049784efac02999bfb692d534e715a709a3a049e7e7b5bc",
+      "raw/motion-pixels.jsonl": "a207f4d2f12b31aa0f04d3d163989857c4fee19f20884794d23e539adff618c6",
+      "raw/motion-scope.json": "4be06f51c1191acbb8541ce60b8fae684d3b010b05783fcb3086c4772f90b6ea",
+      "raw/result.json": "0052c89bda5993313c22c68a1800bc5f3c1f90b3e4a95201d05abc6faff03238",
+      "raw/static-host.jsonl": "1b18ae761e9d3373921a4b71b55a4f8326f92a94d80c615a5f97f8909ce44d6e",
+      "raw/static-pixels.jsonl": "dddf5435e6ab69b446ec4a5a385b72fea2ea968179164606787f36ff6a3a37c9",
+      "raw/static-scope.json": "cb3f3054d744a1ae24007684fd3b9684f5e1d5353eef78069b4ad2ea26f4afc3",
+      "raw/tcp.jsonl": "a0703ef6cd7d2cdfa7bdc67d98122f5f90c0fe13c547db18ee62774f9f54086b",
+      "raw/viewer/identity.json": "f9ee6a3e7f882c10094b87b20dc13a4c860fc07d9fb30abe8810c79243981f50",
+      "raw/viewer/motion-pixels.jsonl": "02a537f0819898468396692049a1b8297507c46ac01daf3c376c798f94f13a5d",
+      "raw/viewer/motion-scope.json": "d54c6de900cbfa97b7f49d27905f4bc74b565c8f76985db8329337b32eefb850",
+      "raw/viewer/static-pixels.jsonl": "0afafd2fca5996b264b4adb1699cb687474a15e97ed8ab1f3494bebe53b61970",
+      "raw/viewer/static-scope.json": "2cd2338367a2c6e5c022f062439bf52d1748d709491f5e0c3e9e22ebb8c4f28f",
+      "raw/viewer/tcp.jsonl": "c17b1e93b6e941a110785d4db106047e99fa40a7770c4419d1dbde6a1f130da1",
+      "raw/viewer/viewer-clocked-telemetry.jsonl": "35ff011fa903912d1a31adb05fc39c87c34b90848ca39344a4664f867d9c1ce6",
+      "replay.py": "808c06b7bd00f4a6c1a0ca2d842edea7b9606c5d879c7bbdd4107689b9349747",
+      "score.py": "69cc11fb2c4b49757a7ea8bdf6c37c1f0c6eb607282ff715e6b9a46a033056ca",
+      "staged-source-sha256.txt": "90f981193be045e68f06eb4ccc85edb9f245d81531c44e43bbc6b31e071b044c"
+    },
+    "sha256": "c6ae8519fc9d046aa3a7ced8be185e5e9b2a3289f0157bc4b399d833d25c44ce"
+  },
+  "replay": {
+    "command_after_extraction": "python3 -B replay.py",
+    "exit_status": 0,
+    "verified": {
+      "longest_viewer_gap_ms": 455.675436,
+      "scored_tcp_samples": {
+        "mint": 240,
+        "ubuntu": 240
+      },
+      "status": "verified offline",
+      "viewer_gap_loopback_received_bytes_delta": 393216,
+      "viewer_gap_tcp_samples": 2
+    }
+  },
+  "sampler_coverage": {
+    "mint": {
+      "clock": "Mint CLOCK_MONOTONIC",
+      "max_scored_sample_read_ms": 57.010119,
+      "max_scored_sample_spacing_ms": 251.400825,
+      "missed_slots": 0,
+      "scored_samples": 240,
+      "stop_reason": "closed",
+      "total": {
+        "tcp_info": 393
+      }
+    },
+    "ubuntu": {
+      "clock": "Ubuntu CLOCK_MONOTONIC",
+      "max_scored_sample_read_ms": 33.881807,
+      "max_scored_sample_spacing_ms": 250.217234,
+      "missed_slots": 0,
+      "scored_samples": 240,
+      "stop_reason": "closed",
+      "total": {
+        "tcp_info": 393
+      }
+    }
+  },
+  "schema_version": 1,
+  "scope": "one separate-machine XTerm scroll-copy arm-B diagnostic",
+  "status": "completed",
+  "ubuntu_viewer_gap": {
+    "from_score_start_ms": [
+      40867.363034,
+      41323.03847
+    ],
+    "loopback_tcp": {
+      "counter_deltas": {
+        "bytes_acked": {
+          "delta": 186,
+          "observations": 2
+        },
+        "bytes_received": {
+          "delta": 393216,
+          "observations": 2
+        },
+        "bytes_retrans": {
+          "delta": null,
+          "observations": 0
+        },
+        "bytes_sent": {
+          "delta": 93,
+          "observations": 2
+        },
+        "data_segs_in": {
+          "delta": 12,
+          "observations": 2
+        },
+        "data_segs_out": {
+          "delta": 1,
+          "observations": 2
+        },
+        "total_retransmissions": {
+          "delta": null,
+          "observations": 0
+        }
+      },
+      "first_sample_local_monotonic_ns": 63806348250863,
+      "last_sample_local_monotonic_ns": 63806622837137,
+      "max_receive_queue_bytes": 0,
+      "max_sample_read_ms": 26.95454,
+      "max_sample_spacing_ms": 249.937912,
+      "max_send_queue_bytes": 93,
+      "neighbor_samples_with_pending_tx_and_same_bytes_acked": [],
+      "samples": 2
+    },
+    "overlapping_aggregate_app_windows": [
+      {
+        "begin": 63801829327568,
+        "counts": {
+          "acked": 130,
+          "decoded": 130,
+          "drawn": 130,
+          "received": 130,
+          "replaced": 0
+        },
+        "end": 63806830192002,
+        "frame": [
+          1,
+          2,
+          2058
+        ]
+      }
+    ],
+    "raster": {
+      "distinct_valid_markers": 1,
+      "distinct_valid_scroll_signatures": 1,
+      "interior_reads": 40,
+      "longest_gap_local_monotonic_ns": [
+        63806339238621,
+        63806794914057
+      ],
+      "valid_marker_reads": 40
+    }
+  }
+}

@@ -1,0 +1,212 @@
+{
+  "date": "2026-11-21",
+  "scope": "X11 video inside the native Linux Aether window",
+  "viewer_build_features": [
+    "remote-wayland",
+    "backend-wayland-udev"
+  ],
+  "local_environment": "GTK 3.24.41, WebKitGTK 2.52.6, private Xvfb, Metacity",
+  "reproduction": "Aether scripts/test-remote-desktop-x11.py PATH_TO_AETHER PATH_TO_JWM_REMOTE",
+  "local_runs": [
+    {
+      "first_source": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          280,
+          210
+        ],
+        "geometry_epoch": 3,
+        "sequence": 1,
+        "source_dimensions": [
+          640,
+          480
+        ],
+        "source_epoch": 1
+      },
+      "second_source": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          300,
+          200
+        ],
+        "geometry_epoch": 4,
+        "sequence": 3,
+        "source_dimensions": [
+          300,
+          200
+        ],
+        "source_epoch": 2
+      },
+      "initial_size": [
+        960,
+        210
+      ],
+      "resized_size": [
+        1180,
+        380
+      ],
+      "initial_visible_rgb": [
+        212,
+        21,
+        39
+      ],
+      "resized_visible_rgb": [
+        25,
+        199,
+        66
+      ],
+      "embedded_xembed_child_not_in_wm_client_list": true,
+      "same_child_after_source_change_and_tab_switch": true,
+      "disconnect_removed_native_pane": true,
+      "host_shift_released_on_app_close": true
+    },
+    {
+      "first_source": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          280,
+          210
+        ],
+        "geometry_epoch": 3,
+        "sequence": 1,
+        "source_dimensions": [
+          640,
+          480
+        ],
+        "source_epoch": 1
+      },
+      "second_source": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          300,
+          200
+        ],
+        "geometry_epoch": 4,
+        "sequence": 3,
+        "source_dimensions": [
+          300,
+          200
+        ],
+        "source_epoch": 2
+      },
+      "initial_size": [
+        960,
+        210
+      ],
+      "resized_size": [
+        1180,
+        380
+      ],
+      "initial_visible_rgb": [
+        212,
+        21,
+        39
+      ],
+      "resized_visible_rgb": [
+        25,
+        199,
+        66
+      ],
+      "embedded_xembed_child_not_in_wm_client_list": true,
+      "same_child_after_source_change_and_tab_switch": true,
+      "disconnect_removed_native_pane": true,
+      "host_shift_released_on_app_close": true
+    },
+    {
+      "first_source": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          280,
+          210
+        ],
+        "geometry_epoch": 3,
+        "sequence": 1,
+        "source_dimensions": [
+          640,
+          480
+        ],
+        "source_epoch": 1
+      },
+      "second_source": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          300,
+          200
+        ],
+        "geometry_epoch": 4,
+        "sequence": 3,
+        "source_dimensions": [
+          300,
+          200
+        ],
+        "source_epoch": 2
+      },
+      "initial_size": [
+        960,
+        210
+      ],
+      "resized_size": [
+        1180,
+        380
+      ],
+      "initial_visible_rgb": [
+        212,
+        21,
+        39
+      ],
+      "resized_visible_rgb": [
+        25,
+        199,
+        66
+      ],
+      "embedded_xembed_child_not_in_wm_client_list": true,
+      "same_child_after_source_change_and_tab_switch": true,
+      "disconnect_removed_native_pane": true,
+      "host_shift_released_on_app_close": true
+    }
+  ],
+  "ubuntu_lan": {
+    "server": "ubuntu@192.168.0.78",
+    "presentation": "Aether XEmbed child",
+    "encoded_source": "640x480 private Xvfb",
+    "pane_dimensions": [
+      960,
+      210
+    ],
+    "visible_rgb": [
+      224,
+      39,
+      55
+    ],
+    "disconnected_cleanly": true,
+    "last_sent_frame": {
+      "codec": "JPEG",
+      "encoded_dimensions": [
+        280,
+        210
+      ],
+      "geometry_epoch": 3,
+      "sequence": 0,
+      "source_dimensions": [
+        640,
+        480
+      ],
+      "source_epoch": 1
+    },
+    "host_drawn_acks": 1
+  },
+  "invalid_container_tests": {
+    "x11_root_rejected_before_connection": true,
+    "stale_window_id_rejected_before_connection": true,
+    "wayland_conflicts_with_x11_parent": true,
+    "window_size_conflicts_with_x11_parent": true
+  },
+  "wayland_regression": {
+    "presentation": "separate native viewer",
+    "compositor": "Weston 13.0.0 headless Pixman",
+    "initial_source_drawn_acks": 3,
+    "selected_source_drawn_acks": 2,
+    "same_helper": true,
+    "disconnected_cleanly": true
+  }
+}

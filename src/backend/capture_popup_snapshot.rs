@@ -35,7 +35,11 @@ fn geometry_origin(surface: &WlSurface) -> (i32, i32) {
             .unwrap_or((0, 0))
     })
 }
-fn validate_tree(root: &WlSurface, origin: (i32, i32), budget: &mut usize) -> Option<usize> {
+pub(crate) fn validate_tree(
+    root: &WlSurface,
+    origin: (i32, i32),
+    budget: &mut usize,
+) -> Option<usize> {
     let owner = root.client()?.id();
     let mut pending = vec![(root.clone(), origin, 0usize)];
     let mut mapped = 0;

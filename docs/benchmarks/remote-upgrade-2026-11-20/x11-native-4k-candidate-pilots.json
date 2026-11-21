@@ -1,0 +1,609 @@
+{
+  "status": "unscored diagnostic pilots",
+  "controller_exit_code": 0,
+  "build": {
+    "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "features": [
+      "remote-x11",
+      "remote-wayland",
+      "remote-h264"
+    ],
+    "profile": "release, locked, no default features",
+    "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "viewer_binary_sha256": "b51bdd70ece747a3f535a261086a873d0ace3388acb067a7a099347f58a5cdd6",
+    "host_linked_ffmpeg_sonames": [
+      "libavcodec.so.58",
+      "libavutil.so.56",
+      "libswscale.so.5"
+    ],
+    "viewer_linked_ffmpeg_sonames": [
+      "libavcodec.so.60",
+      "libavutil.so.58",
+      "libswscale.so.7"
+    ]
+  },
+  "scope": "Controlled 3840x2160 source, encoded canvas and owned X11 viewer, requested 30 FPS, uncapped private SSH forward, fixed RTX 5060 NVENC and local Intel VA-API, no scaling. There is one short run per arm, including warmup. A path marker confirms activation, not the fraction of frames on the path or a reproducible performance change.",
+  "comparisons": {
+    "parallel-420": {
+      "feature_flag": "JWM_REMOTE_PARALLEL_YUV420",
+      "activation_verified_in_both_arms": true,
+      "runs": [
+        {
+          "arm": "control",
+          "configured_cap_bytes_per_second": 0,
+          "send_buffer_bytes_requested": 0,
+          "pilot": true,
+          "session_id": "095afcfdba574ca7d2c05203f0e71443",
+          "ffmpeg_encoder": "h264_nvenc",
+          "codec": "H.264",
+          "source_and_encoded_dimensions": [
+            3840,
+            2160
+          ],
+          "requested_fps": 30,
+          "host_window_seconds": 35.387117783,
+          "observer_window_seconds": 30.012923919,
+          "host_h264_frames": 297,
+          "host_drawn_acks": 295,
+          "host_zero_frame_windows": 0,
+          "viewer_zero_drawn_windows": 0,
+          "viewer_drawn_frames": 257,
+          "observer_unique_source_frames": 257,
+          "observer_unique_frames_per_second": 8.562977758968144,
+          "observer_gap_ms": {
+            "median": 94.516692,
+            "p95": 238.654263,
+            "max": 290.691328
+          },
+          "host_payload_mbps": 11.999219224459887,
+          "host_write_mean_ms_max_window": 0.40578406818181817,
+          "host_credit_wait_mean_ms_max_window": 22.937194348837213,
+          "source_observed_submit_fps": 59.955915214468156,
+          "source_summary": {
+            "type": "p09_end",
+            "role": "source",
+            "monotonic_ns": 49445799809466,
+            "run_id": 1,
+            "submitted": 2464,
+            "deadline_skips": 4,
+            "first_submit_ns": 49404712369583,
+            "last_submit_ns": 49445792553101,
+            "max_render_sync_ns": 55948934,
+            "interrupted": true
+          },
+          "viewer_observer_summary": {
+            "type": "p09_end",
+            "role": "observer",
+            "monotonic_ns": 49362935011942,
+            "run_id": 1,
+            "reads": 310,
+            "unique": 306,
+            "duplicates": 2,
+            "invalid": 2,
+            "wrong_run": 0,
+            "reordered": 0,
+            "damage_events": 310,
+            "max_read_ns": 493037,
+            "interrupted": false,
+            "target_lost": false
+          },
+          "host_rate_targets": [],
+          "host_nvenc_applies": [],
+          "host_send_buffer_diagnostics": [],
+          "viewer_observer_start_ns": 49331385241577,
+          "viewer_observer_end_ns": 49361398165496,
+          "uncapped_unique_fps_gate_met": null,
+          "adaptive_bitrate_step_applied": false,
+          "adaptive_fps_step_applied": false,
+          "feature_flag": "JWM_REMOTE_PARALLEL_YUV420",
+          "enabled_at": null,
+          "host_capture_scaling_policy": "cpu",
+          "host_capture_modes": [
+            "root/cpu-resize/core-getimage/no-damage/cursor-events"
+          ],
+          "viewer_scaling_policy": "cpu",
+          "host_candidate_diagnostics": [],
+          "viewer_candidate_diagnostics": [],
+          "expected_candidate_path": {
+            "host": false,
+            "viewer": false
+          },
+          "observed_candidate_path": {
+            "host": false,
+            "viewer": false
+          },
+          "candidate_path_verified": true,
+          "typed_windows": {
+            "host": {
+              "count": 7,
+              "stages": {
+                "capture_ms": {
+                  "median_window_p50_ms": 86.909,
+                  "windows": 7
+                },
+                "color_conversion_ms": {
+                  "median_window_p50_ms": 24.97,
+                  "windows": 7
+                },
+                "codec_ms": {
+                  "median_window_p50_ms": 36.255,
+                  "windows": 7
+                }
+              }
+            },
+            "viewer": {
+              "count": 6,
+              "stages": {
+                "color_conversion_ms": {
+                  "median_window_p50_ms": 40.7185,
+                  "windows": 6
+                },
+                "hardware_download_ms": {
+                  "median_window_p50_ms": 21.0325,
+                  "windows": 6
+                },
+                "decode_ms": {
+                  "median_window_p50_ms": 65.55799999999999,
+                  "windows": 6
+                },
+                "presentation_completion_ms": {
+                  "median_window_p50_ms": 22.689999999999998,
+                  "windows": 6
+                }
+              }
+            }
+          }
+        },
+        {
+          "arm": "treatment",
+          "configured_cap_bytes_per_second": 0,
+          "send_buffer_bytes_requested": 0,
+          "pilot": true,
+          "session_id": "da49f5ef3ed53af2142c7f4b063ebc34",
+          "ffmpeg_encoder": "h264_nvenc",
+          "codec": "H.264",
+          "source_and_encoded_dimensions": [
+            3840,
+            2160
+          ],
+          "requested_fps": 30,
+          "host_window_seconds": 35.152526376,
+          "observer_window_seconds": 30.027427858,
+          "host_h264_frames": 369,
+          "host_drawn_acks": 368,
+          "host_zero_frame_windows": 1,
+          "viewer_zero_drawn_windows": 1,
+          "viewer_drawn_frames": 313,
+          "observer_unique_source_frames": 311,
+          "observer_unique_frames_per_second": 10.357197475279003,
+          "observer_gap_ms": {
+            "median": 68.812978,
+            "p95": 125.56515,
+            "max": 7411.00723
+          },
+          "host_payload_mbps": 15.00691319757222,
+          "host_write_mean_ms_max_window": 0.3699802222222222,
+          "host_credit_wait_mean_ms_max_window": 169.68069675925926,
+          "source_observed_submit_fps": 56.38876273741522,
+          "source_summary": {
+            "type": "p09_end",
+            "role": "source",
+            "monotonic_ns": 49485936360786,
+            "run_id": 2,
+            "submitted": 2184,
+            "deadline_skips": 142,
+            "first_submit_ns": 49447216622308,
+            "last_submit_ns": 49485930009409,
+            "max_render_sync_ns": 75916758,
+            "interrupted": true
+          },
+          "viewer_observer_summary": {
+            "type": "p09_end",
+            "role": "observer",
+            "monotonic_ns": 49403038538640,
+            "run_id": 2,
+            "reads": 393,
+            "unique": 388,
+            "duplicates": 2,
+            "invalid": 3,
+            "wrong_run": 0,
+            "reordered": 0,
+            "damage_events": 393,
+            "max_read_ns": 955209,
+            "interrupted": false,
+            "target_lost": false
+          },
+          "host_rate_targets": [],
+          "host_nvenc_applies": [],
+          "host_send_buffer_diagnostics": [],
+          "viewer_observer_start_ns": 49371514127046,
+          "viewer_observer_end_ns": 49401541554904,
+          "uncapped_unique_fps_gate_met": null,
+          "adaptive_bitrate_step_applied": false,
+          "adaptive_fps_step_applied": false,
+          "feature_flag": "JWM_REMOTE_PARALLEL_YUV420",
+          "enabled_at": "both",
+          "host_capture_scaling_policy": "cpu",
+          "host_capture_modes": [
+            "root/cpu-resize/core-getimage/no-damage/cursor-events"
+          ],
+          "viewer_scaling_policy": "cpu",
+          "host_candidate_diagnostics": [
+            "jwm-remote: parallel 4:2:0 conversion active (RGB24 -> YUV420P, 3840x2160, 4 bands)"
+          ],
+          "viewer_candidate_diagnostics": [
+            "jwm-remote: parallel 4:2:0 conversion active (NV12 -> RGB24, 3840x2160, 4 bands)"
+          ],
+          "expected_candidate_path": {
+            "host": true,
+            "viewer": true
+          },
+          "observed_candidate_path": {
+            "host": true,
+            "viewer": true
+          },
+          "candidate_path_verified": true,
+          "typed_windows": {
+            "host": {
+              "count": 7,
+              "stages": {
+                "capture_ms": {
+                  "median_window_p50_ms": 31.786,
+                  "windows": 7
+                },
+                "color_conversion_ms": {
+                  "median_window_p50_ms": 7.758,
+                  "windows": 6
+                },
+                "codec_ms": {
+                  "median_window_p50_ms": 19.685499999999998,
+                  "windows": 6
+                }
+              }
+            },
+            "viewer": {
+              "count": 6,
+              "stages": {
+                "color_conversion_ms": {
+                  "median_window_p50_ms": 18.012,
+                  "windows": 5
+                },
+                "hardware_download_ms": {
+                  "median_window_p50_ms": 22.887,
+                  "windows": 5
+                },
+                "decode_ms": {
+                  "median_window_p50_ms": 46.987,
+                  "windows": 5
+                },
+                "presentation_completion_ms": {
+                  "median_window_p50_ms": 42.857,
+                  "windows": 5
+                }
+              }
+            }
+          }
+        }
+      ],
+      "treatment_gap_witness": {
+        "start_source_frame": 586,
+        "end_source_frame": 590,
+        "visible_gap_ms": 7411.00723,
+        "host_zero_send_window": {
+          "captured": 33,
+          "sent": 0,
+          "drawn_acks": 0,
+          "outstanding": 2
+        },
+        "viewer_zero_receive_window": {
+          "received": 0,
+          "drawn": 0,
+          "acked": 0
+        },
+        "viewer_flushed_control_records_in_zero_receive_window": 25,
+        "host_max_window_p99_send_to_ack_ms": 7568.326,
+        "host_max_window_p99_socket_write_ms": 0.693,
+        "viewer_max_window_p99_decode_ms": 75.482,
+        "timing_scope": "Retained endpoint windows have independent boundaries. Viewer control write counters record local completion. TCP arrival, complete record authentication and the cause of this gap remain unresolved."
+      }
+    },
+    "direct-shm": {
+      "feature_flag": "JWM_REMOTE_X11_DIRECT_SHM",
+      "activation_verified_in_both_arms": true,
+      "runs": [
+        {
+          "arm": "control",
+          "configured_cap_bytes_per_second": 0,
+          "send_buffer_bytes_requested": 0,
+          "pilot": true,
+          "session_id": "b420330d8bd5cf22d9805371c57e30bd",
+          "ffmpeg_encoder": "h264_nvenc",
+          "codec": "H.264",
+          "source_and_encoded_dimensions": [
+            3840,
+            2160
+          ],
+          "requested_fps": 30,
+          "host_window_seconds": 35.117359009,
+          "observer_window_seconds": 30.012621663,
+          "host_h264_frames": 449,
+          "host_drawn_acks": 448,
+          "host_zero_frame_windows": 0,
+          "viewer_zero_drawn_windows": 0,
+          "viewer_drawn_frames": 407,
+          "observer_unique_source_frames": 407,
+          "observer_unique_frames_per_second": 13.560961270562897,
+          "observer_gap_ms": {
+            "median": 70.713491,
+            "p95": 141.561491,
+            "max": 168.388645
+          },
+          "host_payload_mbps": 18.272639461172073,
+          "host_write_mean_ms_max_window": 0.35113940983606556,
+          "host_credit_wait_mean_ms_max_window": 59.436700571428574,
+          "source_observed_submit_fps": 55.20337670735049,
+          "source_summary": {
+            "type": "p09_end",
+            "role": "source",
+            "monotonic_ns": 49526165810022,
+            "run_id": 1,
+            "submitted": 2139,
+            "deadline_skips": 188,
+            "first_submit_ns": 49487436295066,
+            "last_submit_ns": 49526165809953,
+            "max_render_sync_ns": 65929725,
+            "interrupted": true
+          },
+          "viewer_observer_summary": {
+            "type": "p09_end",
+            "role": "observer",
+            "monotonic_ns": 49443311057960,
+            "run_id": 1,
+            "reads": 469,
+            "unique": 466,
+            "duplicates": 2,
+            "invalid": 1,
+            "wrong_run": 0,
+            "reordered": 0,
+            "damage_events": 469,
+            "max_read_ns": 433224,
+            "interrupted": false,
+            "target_lost": false
+          },
+          "host_rate_targets": [],
+          "host_nvenc_applies": [],
+          "host_send_buffer_diagnostics": [],
+          "viewer_observer_start_ns": 49411757256496,
+          "viewer_observer_end_ns": 49441769878159,
+          "uncapped_unique_fps_gate_met": null,
+          "adaptive_bitrate_step_applied": false,
+          "adaptive_fps_step_applied": false,
+          "feature_flag": "JWM_REMOTE_X11_DIRECT_SHM",
+          "enabled_at": null,
+          "host_capture_scaling_policy": "cpu",
+          "host_capture_modes": [
+            "root/cpu-resize/core-getimage/no-damage/cursor-events"
+          ],
+          "viewer_scaling_policy": "cpu",
+          "host_candidate_diagnostics": [],
+          "viewer_candidate_diagnostics": [],
+          "expected_candidate_path": {
+            "host": false,
+            "viewer": false
+          },
+          "observed_candidate_path": {
+            "host": false,
+            "viewer": false
+          },
+          "candidate_path_verified": true,
+          "typed_windows": {
+            "host": {
+              "count": 7,
+              "stages": {
+                "capture_ms": {
+                  "median_window_p50_ms": 36.793,
+                  "windows": 7
+                },
+                "color_conversion_ms": {
+                  "median_window_p50_ms": 24.514,
+                  "windows": 7
+                },
+                "codec_ms": {
+                  "median_window_p50_ms": 35.555,
+                  "windows": 7
+                }
+              }
+            },
+            "viewer": {
+              "count": 6,
+              "stages": {
+                "color_conversion_ms": {
+                  "median_window_p50_ms": 27.7785,
+                  "windows": 6
+                },
+                "hardware_download_ms": {
+                  "median_window_p50_ms": 17.122,
+                  "windows": 6
+                },
+                "decode_ms": {
+                  "median_window_p50_ms": 48.4415,
+                  "windows": 6
+                },
+                "presentation_completion_ms": {
+                  "median_window_p50_ms": 20.448500000000003,
+                  "windows": 6
+                }
+              }
+            }
+          }
+        },
+        {
+          "arm": "treatment",
+          "configured_cap_bytes_per_second": 0,
+          "send_buffer_bytes_requested": 0,
+          "pilot": true,
+          "session_id": "4d53bc80489b26da8cf9c218c7a796d4",
+          "ffmpeg_encoder": "h264_nvenc",
+          "codec": "H.264",
+          "source_and_encoded_dimensions": [
+            3840,
+            2160
+          ],
+          "requested_fps": 30,
+          "host_window_seconds": 35.227612681,
+          "observer_window_seconds": 30.012544837,
+          "host_h264_frames": 438,
+          "host_drawn_acks": 436,
+          "host_zero_frame_windows": 0,
+          "viewer_zero_drawn_windows": 0,
+          "viewer_drawn_frames": 377,
+          "observer_unique_source_frames": 377,
+          "observer_unique_frames_per_second": 12.561413970308433,
+          "observer_gap_ms": {
+            "median": 71.950525,
+            "p95": 142.452736,
+            "max": 611.580725
+          },
+          "host_payload_mbps": 17.751950370945437,
+          "host_write_mean_ms_max_window": 0.3336334923076923,
+          "host_credit_wait_mean_ms_max_window": 59.46660599999999,
+          "source_observed_submit_fps": 54.90571628542975,
+          "source_summary": {
+            "type": "p09_end",
+            "role": "source",
+            "monotonic_ns": 49565793278317,
+            "run_id": 2,
+            "submitted": 2099,
+            "deadline_skips": 197,
+            "first_submit_ns": 49527577289014,
+            "last_submit_ns": 49565788246669,
+            "max_render_sync_ns": 72415374,
+            "interrupted": true
+          },
+          "viewer_observer_summary": {
+            "type": "p09_end",
+            "role": "observer",
+            "monotonic_ns": 49483132588315,
+            "run_id": 2,
+            "reads": 455,
+            "unique": 453,
+            "duplicates": 1,
+            "invalid": 1,
+            "wrong_run": 0,
+            "reordered": 0,
+            "damage_events": 455,
+            "max_read_ns": 2955863,
+            "interrupted": false,
+            "target_lost": false
+          },
+          "host_rate_targets": [],
+          "host_nvenc_applies": [],
+          "host_send_buffer_diagnostics": [],
+          "viewer_observer_start_ns": 49451617536190,
+          "viewer_observer_end_ns": 49481630081027,
+          "uncapped_unique_fps_gate_met": null,
+          "adaptive_bitrate_step_applied": false,
+          "adaptive_fps_step_applied": false,
+          "feature_flag": "JWM_REMOTE_X11_DIRECT_SHM",
+          "enabled_at": "viewer",
+          "host_capture_scaling_policy": "cpu",
+          "host_capture_modes": [
+            "root/cpu-resize/core-getimage/no-damage/cursor-events"
+          ],
+          "viewer_scaling_policy": "cpu",
+          "host_candidate_diagnostics": [],
+          "viewer_candidate_diagnostics": [
+            "jwm-remote: direct RGB-to-MIT-SHM upload active"
+          ],
+          "expected_candidate_path": {
+            "host": false,
+            "viewer": true
+          },
+          "observed_candidate_path": {
+            "host": false,
+            "viewer": true
+          },
+          "candidate_path_verified": true,
+          "typed_windows": {
+            "host": {
+              "count": 7,
+              "stages": {
+                "capture_ms": {
+                  "median_window_p50_ms": 39.247,
+                  "windows": 7
+                },
+                "color_conversion_ms": {
+                  "median_window_p50_ms": 24.94,
+                  "windows": 7
+                },
+                "codec_ms": {
+                  "median_window_p50_ms": 35.904,
+                  "windows": 7
+                }
+              }
+            },
+            "viewer": {
+              "count": 6,
+              "stages": {
+                "color_conversion_ms": {
+                  "median_window_p50_ms": 26.570999999999998,
+                  "windows": 6
+                },
+                "hardware_download_ms": {
+                  "median_window_p50_ms": 16.634500000000003,
+                  "windows": 6
+                },
+                "decode_ms": {
+                  "median_window_p50_ms": 46.527,
+                  "windows": 6
+                },
+                "presentation_completion_ms": {
+                  "median_window_p50_ms": 17.2835,
+                  "windows": 6
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "archive": {
+    "path": "x11-native-4k-candidate-pilots-raw.zip",
+    "sha256": "f7f3c6ddc7826bca43a954c95449da4e88900a3e64a88c5a79b237f5049d50c7",
+    "entries": {
+      "build/local-build.log": "1c1b4767203b7142edac40dec9a9916fcedd2395a5c0f8d412b3fabee6e046ca",
+      "build/ubuntu-build.log": "ee6566cc32e590ba4692c496483cf0a641c628ebe59cd8e0da4ab4bcbfe6fad7",
+      "build/candidate-source-sha256.txt": "bb1f7026816d189c70d09887cb237ba610f908da884dc133fafa81df88d03eae",
+      "fixture/benchmark.py": "d8bf552702b634870afa79aa487166e9c74fc441608610a927030295dd99aecd",
+      "fixture/source.py": "8517136f81dafdd22185590d3e7b546276b189389e26671a28b16f0907530b6f",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/owned-xvfb-test.py": "3ef1f72f0419f52f0e0d51d8b89dc84ef261659c6bc89f384503d8f50776b966",
+      "fixture/p09-workload.c": "47f6fd3ad8606673e78680846dad7b749598238153e9abddf328d2cdea89e06e",
+      "pilot-yuv420-4k-01-control/result.json": "f23207a2787184f01a0cf70ff7cc86a82f648090731006ae6410e9d62564f23e",
+      "pilot-yuv420-4k-01-control/retained-host.jsonl": "420a60306904a8575be87d49b8371ad8378a461ff5606a8203f3f2030713ee7e",
+      "pilot-yuv420-4k-01-control/retained-viewer.jsonl": "a27c92ad1f6cd50f2092934da0df41138aba071d6dd09bd1135dc115de2e1c70",
+      "pilot-yuv420-4k-01-control/retained-markers.jsonl": "a29da63ced7a717ce58d09bd385b0c436b5ea1d885c217607f3425b2c41a653e",
+      "pilot-yuv420-4k-01-control/observed.jsonl": "457f9c62789e1bbe9ce14804d6cf4633e2e0dd62f358a9f9bcdb0c5ac089742d",
+      "pilot-yuv420-4k-01-control/remote/paint.jsonl": "2ba67dbbc7b8f296cdd08784edf4b4c8de90d1719e8e750a162b450aceb1749b",
+      "pilot-yuv420-4k-02-treatment/result.json": "b2fbe5f77602c5bd29679677380ca8dae03554f376e386d81b09840b197bf34c",
+      "pilot-yuv420-4k-02-treatment/retained-host.jsonl": "0287dcfe421f68df05cca259bf81ee11d01ab7cb48a91585123c402fab8fb5e6",
+      "pilot-yuv420-4k-02-treatment/retained-viewer.jsonl": "d1587dee4deb01755a32d849dbf397d6377cc5842f00441671b469e8688992a7",
+      "pilot-yuv420-4k-02-treatment/retained-markers.jsonl": "9f2786d5cbdc3254644fdfe09c8c132964b1f2b6b3a8cd1a268788956e965364",
+      "pilot-yuv420-4k-02-treatment/observed.jsonl": "3c5821be2b4f0dbbbc5885b420b1218cd16da392637f27f256c4ec01e0f0c4db",
+      "pilot-yuv420-4k-02-treatment/remote/paint.jsonl": "3f97fa6580fa5765d8b3b6cc7c6c8308dd826673a190837709def1ce86a69a22",
+      "pilot-direct-shm-4k-01-control/result.json": "b384e008a9af7a60573046f4cf42d55d5fcba2f4d0532d7ae125bd137c98530d",
+      "pilot-direct-shm-4k-01-control/retained-host.jsonl": "c005e6ef3296144530f4c0fbe0d5f42ad3486685260034545a2c8aa6c43ff097",
+      "pilot-direct-shm-4k-01-control/retained-viewer.jsonl": "eb9cdd6ca7c071b49afad4546b56182a8a22f2d640c63ba24b3caecf31024543",
+      "pilot-direct-shm-4k-01-control/retained-markers.jsonl": "8575ee1f2a881d791b9ebc5ea9e3798442d2d7ed0e2e96665cc1d48b9700d7fd",
+      "pilot-direct-shm-4k-01-control/observed.jsonl": "195e2576b45f417c6780729c094d944b34e26202a7da59121a684eb3d90ccac1",
+      "pilot-direct-shm-4k-01-control/remote/paint.jsonl": "a81968551f0381693d54c3a36356811dcd835de5d232316f8696a4d06af42e7d",
+      "pilot-direct-shm-4k-02-treatment/result.json": "0c069c5414718334d8ea26bad04af8e3031f6630bed2ee47409bebd3762ec683",
+      "pilot-direct-shm-4k-02-treatment/retained-host.jsonl": "03765d41985977083f985346caa48ecab0daac5514f63ff36d80f01f71707d6a",
+      "pilot-direct-shm-4k-02-treatment/retained-viewer.jsonl": "90e8163a95f82774c8f104f18507a10fe50077bd37ca6ae3333e62381496d807",
+      "pilot-direct-shm-4k-02-treatment/retained-markers.jsonl": "baabca5be49d3f31de6983d9525bcea9dd8332ad8f5fe291e81f8f4b1d31ffc4",
+      "pilot-direct-shm-4k-02-treatment/observed.jsonl": "f6f4693b422649520e654c7f72475bad9c799b7ee4c391b5af939579ed0673c3",
+      "pilot-direct-shm-4k-02-treatment/remote/paint.jsonl": "5b2ca48465edfe70061a6872e4745d2d2fe8f0a18949bc708bf348864125fa9e"
+    }
+  }
+}

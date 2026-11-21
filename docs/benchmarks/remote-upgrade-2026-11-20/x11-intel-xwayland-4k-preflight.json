@@ -1,0 +1,63 @@
+{
+  "status": "ready",
+  "screen_size": [
+    3840,
+    2160
+  ],
+  "screen_depth": 24,
+  "render_node": "/dev/dri/renderD128",
+  "pci_device": "0000:00:02.0",
+  "dri3": {
+    "path": "/dev/dri/renderD128",
+    "major": 226,
+    "minor": 128
+  },
+  "smithay_renderer": "Mesa Intel(R) Graphics (ARL)",
+  "owned_output_first_draw": {
+    "dmabuf_draws": 1,
+    "render_node_device": 57984,
+    "size": [
+      3840,
+      2160
+    ]
+  },
+  "production_doctor_passed": true,
+  "binary_sha256": {
+    "harness": "8f67ceacaedad97a966018e2d224001124c4d1ba11f6e666b7e9fb3497d623e0",
+    "doctor": "653d8f4d4624c4349152416b2685eefe7e5ef29d063bf6a80f3ec186467a655c",
+    "xwayland": "9bbd85d6cb9a763d05ad8d39b3e35baccb7542293de2d5cf03f76fdc875d0ca7"
+  },
+  "owned_output_final": {
+    "dmabuf_draws": 1,
+    "render_node_device": 57984,
+    "size": [
+      3840,
+      2160
+    ]
+  },
+  "compositor_exit": 0,
+  "launcher_exit": 0,
+  "build": {
+    "command": "cargo +stable test --offline --no-default-features --features remote-h264,remote-wayland,backend-wayland-udev --lib --no-run",
+    "exit": 0
+  },
+  "scope": "A rootful Xwayland server nested in an owned 3840x2160 no-KMS Intel Smithay compositor. The doctor checked pixels on a separate 251x247 crop; an actual rootful Xwayland DMA-BUF was GPU-composed at 3840x2160. No motion score.",
+  "archive": {
+    "path": "x11-intel-xwayland-4k-preflight-raw.zip",
+    "sha256": "3583c768b3553e5adf84539acb0b6076e3d9b3faf13c11028ae0f2bee69b05ba",
+    "entries": {
+      "evidence/doctor-selected.log": "c93d04641e3c05199d69aa0f0e0b32d77e7805920accaf20c8d83c369d6ff8ac",
+      "evidence/dri3.json": "13c452987ab6f4b6b10996244500893a0cc43ab14322e1152e03750dc01538d0",
+      "evidence/smithay.log": "83a7e3524f717bc5088d8a8484d8d75bbd4b06d8408287c7640c0ad9fa00f524",
+      "evidence/xdpyinfo-selected.log": "d94370e51498dc5b15efbf96a18f5c97376b7e35583af45730444ae59ac1c76b",
+      "evidence/xwayland.log": "748b4c5cdc578993c1cc87a48b0ea0240ca8a0bbcec853d6a46674cb13a21a15",
+      "fixture/dri3-node.py": "c019f0a6d8020501e6593ef8978361070a30c8bbe408932f5733ccfc4fb0a7c2",
+      "fixture/host_wayland_gpu_4k_integration.rs": "f1073e50306ff1a953afe41472c019c0c21d052c071fba9b346d0b8da5149643",
+      "fixture/host_wayland_gpu_xwayland_integration.rs": "f0b24909ba3cbf322bf93366003d831e39ebd5f05329486a66a8b626926f8669",
+      "fixture/launch.py": "7eb0debbcff83f68d74d97f4c73de51e705d41f513f605c51d4c2065a55f4367",
+      "fixture/previous_probe.py": "67961043a622fa9deaf9e8b63c50725c04102929b8c412ecbb63e64975b77bfd",
+      "preflight.json": "82ea0f5578aa25ea22ee7485f88e0265fef06a7b67e297bc7498b96a8033b98f",
+      "replay.py": "369e49c96350380875a60491b3595d2a4947f0bcc185fe00ef1491b9caff6b48"
+    }
+  }
+}

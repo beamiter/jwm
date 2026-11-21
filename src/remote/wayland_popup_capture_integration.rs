@@ -153,7 +153,7 @@ impl Harness {
                                 "native pointer unavailable or enable too late",
                             ),
                             (
-                                adapter.enable_control(false, false),
+                                adapter.enable_control(false, false, false),
                                 "native control manager unavailable or enable too late",
                             ),
                             (
