@@ -426,6 +426,27 @@ issuance. The button-up observation arrived 398.15 ms after issuance and
 109.74 ms after the slot expired. Teardown retained the actual button-up
 edge. Both timeouts occurred before the viewer issued the release shortcut.
 
+The next repeat pipelined both reacquisition edges and attached the host keymap
+to the held-key press event. All six pilot releases completed. In scored runs,
+session two verified 100 releases with a p95 upper bound of 5.32 ms. Session
+one verified 60 releases before scored slot 61 timed out. Session three timed
+out at warmup slot 28. Both timed out before the shortcut. The matched late
+arm replies took 3.99 and 4.26 seconds round trip. Host read-to-reply time was
+0.29 and 0.36 ms. The three-session qualification remains open.
+[Pipelined setup results](x11-release-all-software-latency-pipelined-setup.json) ·
+[Attempt ledgers and replay](x11-release-all-software-latency-pipelined-setup-raw.zip)
+
+The source-click repeat opened each sample when the owned X11 receiver saw
+the real button press and verified its empty keyboard state. The press and
+release of the held key retained their inline keymap witnesses. Three formal
+sessions returned all 100 release observations each in their exact 60-second
+measured windows after 30 seconds of warmup. The replayed p95 upper bounds
+were 4.21, 4.57 and 4.49 ms. The interval starts at the viewer's release
+shortcut and ends when the viewer receives the independent SSH observation
+of host key-up and cleared state.
+[Qualified software results](x11-release-all-software-latency-source-click-setup.json) ·
+[All 300 scored samples and replay](x11-release-all-software-latency-source-click-setup-raw.zip)
+
 ## X11 regional readback
 
 Two physical machines used the same release build over authenticated TCP
@@ -1056,6 +1077,67 @@ memory, thread and descriptor counts stayed constant. The growth therefore
 reproduced in an encoder-only process. Identifying the allocation site and
 whether the growth reaches a fixed limit still requires separate evidence.
 [Encoder-only memory diagnostic](ffmpeg-nvenc-only-rss.json)
+
+The one-hour encoder-only follow-up used the same pinned FFmpeg, CUDA and
+NVENC libraries. After 60 seconds of warmup, the progress counter advanced
+108,005 frames over 3,600 seconds. All 120 scheduled 30-second resource
+samples and the retained-end sample were present. Anonymous RSS rose from
+45,996 to 46,488 KiB. The final 86 observations held at 46,488 KiB from minute
+17.5 through the retained end. File and shared-memory RSS stayed steady,
+as did the 46 threads and 39 file descriptors.
+
+An existing 5,616 KiB anonymous mapping accounted for 484 of the 492 KiB
+rise. Its resident pages held at 800 KiB at the 30-, 45-, 55- and 60-minute
+checkpoints. FFmpeg exited normally.
+[One-hour encoder results](ffmpeg-nvenc-only-hour-soak.json) ·
+[Resource samples, VMA ledgers and replay](ffmpeg-nvenc-only-hour-soak-raw.zip)
+
+A separate FFmpeg run kept the library versions and traced memory syscalls
+with user-space stacks. Between seconds 30 and 210, it encoded 5,390 frames
+and gained 88 KiB of anonymous RSS. An existing 3,272 KiB mapping accounted
+for 84 KiB of that increase. The trace associated all 818 pages of the
+mapping with `mmap` calls during CUDA context initialization. The call stacks
+include `avcodec_open2`, `cuCtxCreate_v2` and `__libc_calloc`. The trace
+covers virtual mapping creation. The later RSS snapshots measure resident
+pages in this separate process.
+[Encoder mapping trace summary](ffmpeg-nvenc-mmap-origin.json)
+
+The first one-hour 4K endpoint attempt verified the native viewer route and
+finished warmup. The viewer then collected two scheduled retained samples.
+The host reported two consecutive five-second windows with zero drawn
+acknowledgments and exited with `Resource temporarily unavailable (os error
+11)`. The viewer recorded a connection close. The incomplete archive retains
+the endpoint windows, resource schedule and exit evidence.
+[Incomplete 4K attempt](x11-native-4k-prefetch-resource-hour-soak-incomplete.json) ·
+[Endpoint observations and exit evidence](x11-native-4k-prefetch-resource-hour-soak-incomplete-raw.zip)
+
+The retry used the same pinned Ubuntu NVENC host and Intel VA-API/EGL/DRI3
+viewer at 3840×2160 over SSH. After the 60-second burn-in, both endpoints
+retained all 720 scheduled samples and exited normally. The viewer observed
+102,849 distinct markers at 28.57 FPS. Every retained minute reached 27 FPS,
+with a minimum of 27.77 FPS. The median and p95 marker gaps were 33.97 ms and
+42.55 ms, and the longest gap was 924.07 ms. The viewer used preallocated
+buffers for all 102,718 native imports in complete retained telemetry
+windows. It recorded zero CPU downloads, and the host peaked at two
+outstanding frame credits.
+
+| Endpoint | Anonymous RSS at start | Anonymous RSS at end | Final steady interval | Threads | Open file descriptors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ubuntu host | 155,336 KiB | 155,816 KiB | 42 min 5 s | 14 | 46 |
+| Mint viewer | 57,140 KiB | 57,272 KiB | 56 min 45 s | 15 | 40–42 |
+
+The host and viewer mapping rollups at 30, 45 and 60 minutes agreed with
+their respective plateaus. The report retains all available per-client Intel
+DRM counters. The NVIDIA host exported no standard DRM client memory
+counters. The two-second TCP samples advanced between successive readings
+on both observed sockets. Each endpoint used its own monotonic clock.
+
+The initial scorer rejected the viewer's valid zero shared-memory RSS.
+The archive retains that exit and the original capture fixture. Its offline
+replay accepts zero in the three RSS component counters and recomputes the
+result from the same resource, pixel and TCP observations.
+[One-hour native 4K results](x11-native-4k-prefetch-resource-hour-soak.json) ·
+[Original capture and corrected offline replay](x11-native-4k-prefetch-resource-hour-soak-raw.zip)
 
 A matched 1440p pair used the same native viewer build and host path.
 Both arms captured, encoded and drew 2560×1440 at 1:1 inside the private
@@ -1987,6 +2069,65 @@ motion and motion under pressure.
 [Preflight metrics](x11-blender-nvenc-adaptive-pilot.json) ·
 [Drawable observations, PNG pairs and replay](x11-blender-nvenc-adaptive-pilot-raw.zip)
 
+Two scored ABBA blocks completed all eight trials on the same 960×640 scene
+and pinned NVENC build. Each phase retained 60 seconds. Ordinary motion
+reached 27 distinct visible positions per second in zero of four fixed trials
+and one of four adaptive trials.
+
+| Median across the four trials per mode | Fixed | Adaptive with resolution changes |
+| --- | ---: | ---: |
+| Ordinary-motion visible FPS | 26.91 | 26.85 |
+| Ordinary-motion drawable gap p95 | 66.02 ms | 66.15 ms |
+| Pressured-motion visible FPS | 24.67 | 22.10 |
+| Pressured-motion drawable gap p95 | 56.94 ms | 46.99 ms |
+| Pressured-motion longest drawable gap | 156.82 ms | 167.21 ms |
+| Pressured-motion interface edge contrast retained | 72.61% | 28.81% |
+| Stop to sustained full-resolution clarity, observed upper bound | 4.57 s | 24.49 s |
+
+Adaptive pressure p95 improved in two pairs and increased in two. The adaptive
+arm encoded 720×480 under pressure and had lower visible cadence and lower
+interface edge contrast in every pair. The source interface crop was identical
+between arms. The test used one machine, private Xvfb, and injected RGB
+conversion pressure. The resolution policy remains opt-in.
+[Scored comparison](x11-blender-nvenc-adaptive-abba.json) ·
+[Endpoint timing, raster observations and replay](x11-blender-nvenc-adaptive-abba-raw.zip)
+
+A separate matched pilot kept the encoded raster at 960×640 in both modes
+and allowed the adaptive arm to change its frame rate. After 45 seconds of
+pressure warmup, the 30-second sample retained 72.6% of interface edge contrast
+in both arms. Fixed and adaptive observed 24.43 and 21.77 distinct positions
+per second. Their drawable gap p95 values were 46.29 and 56.54 ms. The stop to
+clarity observations were both about 4.47 seconds. The adaptive trial showed
+slower visible updates while retaining the original raster.
+[Rate-only pilot results](x11-blender-nvenc-rate-only-pilot.json) ·
+[Rate-only drawable and telemetry archive](x11-blender-nvenc-rate-only-pilot-raw.zip)
+
+A separate fixed-rate comparison tested the X11 capture wait with the
+same 960×640 Workbench scene, 30 FPS request and NVENC codec. The candidate
+uses a sub-millisecond `ppoll` wait and preserves the deadline across
+interruptions. The regression test checked readiness with a zero timeout
+and a positive wait on a real socket. Five pacing tests also passed.
+
+Two ABBA blocks each used a 30-second warmup and a 60-second score per
+trial. All eight trials qualified. Every candidate trial reached 27
+visible FPS, and the measured interface edge contrast matched in every
+trial.
+
+| Measure | Millisecond wait | Precise wait |
+| --- | ---: | ---: |
+| Median host scheduling rate | 29.26 FPS | 29.76 FPS |
+| Median visible rate | 26.93 FPS | 27.42 FPS |
+| Median of trial p95 visible gaps | 65.01 ms | 52.22 ms |
+| Longest visible gap across trials | 166.87 ms | 178.33 ms |
+
+The candidate reduced the visible-gap p95 in three of four matched pairs.
+The longest gap increased in three pairs by 2.52, 12.00 and 33.26 ms. The
+longest-gap result kept the candidate out of the default capture path. The
+archive contains the candidate patch, both binary hashes, the build options,
+the matched measurements and the replay.
+[Fixed-rate capture cadence comparison](x11-blender-fixed-capture-cadence-abba.json) ·
+[Patch, endpoint observations and replay](x11-blender-fixed-capture-cadence-abba-raw.zip)
+
 Isaac Sim acceptance was skipped at the user's request on November 21,
 2026. The earlier Isaac Sim 4.5 report records local EGL startup and UI
 checks. The Mint and Ubuntu benchmark hosts had no executable or matching
@@ -2036,10 +2177,10 @@ reaped the remote PTY, and the native application exited successfully.
 
 | Plan check | Measured result and scope |
 | --- | --- |
-| Continuous motion at a 30 FPS request | At 1080p, the revised XTerm scroll-copy detector reached 27 FPS in three matched pairs, and both Firefox HEVC arms reached 27 FPS in one matched pair. At 1440p, all eight aligned native trials reached 27 FPS inside a 4K root. At exact 4K, all four native X11 preallocation trials reached 27 FPS. Longest-gap changes varied across pairs at both sizes. [XTerm](#visible-terminal-scrolling) · [Firefox](#firefox-through-managed-wayland-input) · [1440p](x11-native-1440p-viewport-prefetch-target-aligned-abba.json) · [4K](#native-x11-presentation) |
-| Software input release | Three localhost sets of 100 releases had a p95 of 2.46–2.55 ms. The two inline-proof cross-machine batches had four complete sessions with p95 upper bounds of 6.61–7.03 ms and two incomplete sessions. The separate return path contributes to the cross-machine measurement. [Input results](#clipboard-input-during-an-upload) |
-| Sustained resource use | The native 4K preallocation session held 28.59 visible FPS over 900 seconds. Both endpoints provided 180 samples. Viewer RSS was steady. Host RSS rose monotonically by 404 KiB and needs further investigation. [Native 4K soak](x11-native-4k-prefetch-resource-soak.json) |
-| Adaptive hardware video | Opt-in X11 H.264 NVENC reduced FPS and then encoded at 75% and 50%, restored both dimensions and FPS, and passed viewport, input, source and JPEG fallback checks in owned sessions. Matched workload quality and tail latency remain open. [Viewer-feedback diagnostic](x11-nvenc-viewer-feedback-recovery.json) · [Resolution results](x11-nvenc-adaptive-resolution.json) |
+| Continuous motion at a 30 FPS request | At 1080p, the revised XTerm scroll-copy detector reached 27 FPS in three matched pairs, and both Firefox HEVC arms reached 27 FPS in one matched pair. At 1440p, all eight aligned native trials reached 27 FPS inside a 4K root. At exact 4K, all four native X11 preallocation trials reached 27 FPS. In the separate Workbench comparison, the precise wait reached 27 FPS four times and increased the longest gap in three matched pairs. [XTerm](#visible-terminal-scrolling) · [Firefox](#firefox-through-managed-wayland-input) · [1440p](x11-native-1440p-viewport-prefetch-target-aligned-abba.json) · [4K](#native-x11-presentation) · [Workbench](x11-blender-fixed-capture-cadence-abba.json) |
+| Software input release | The source-click dual-machine batch verified all 300 scored releases. Its three p95 upper bounds were 4.21, 4.57 and 4.49 ms. The separate SSH observer return path contributes to the measurement. Three localhost sets had p95 of 2.46–2.55 ms. [Input results](#clipboard-input-during-an-upload) · [Qualified dual-machine batch](x11-release-all-software-latency-source-click-setup.json) |
+| Sustained resource use | The one-hour native 4K retry held 28.57 visible FPS. Host and viewer anonymous RSS leveled off at +480 KiB and +132 KiB, respectively. The separate Ubuntu FFmpeg NVENC run held the same anonymous RSS from minute 17.5 through minute 60. [One-hour native 4K soak](x11-native-4k-prefetch-resource-hour-soak.json) · [One-hour encoder test](ffmpeg-nvenc-only-hour-soak.json) · [Incomplete first 4K attempt](x11-native-4k-prefetch-resource-hour-soak-incomplete.json) |
+| Adaptive hardware video | Opt-in X11 H.264 NVENC reduced dimensions and FPS, recovered both, and passed viewport, input, source and JPEG fallback checks in owned sessions. In eight matched Blender trials, stressed p95 changes varied by pair. The adaptive trials had consistently lower pressured-motion cadence and interface contrast. [Resolution results](x11-nvenc-adaptive-resolution.json) · [Scored Blender comparison](x11-blender-nvenc-adaptive-abba.json) |
 | Source change, resize and recovery | Owned X11 and Wayland runs checked pixels and input recipients across scope changes. The managed X11 fixture retained top-level and embedded windows, refreshed the session catalog and cancelled a stalled handshake. Native Aether repeated the embedded workflow. KMS power and connector changes passed on two guest virtio outputs. Physical hotplug and GPU device loss await hardware runs. [Direct recovery](#follow-up-checks) · [Managed recovery](#managed-x11-window-recovery) · [KMS](#kms-power-and-connector-recovery) |
 | Terminal integration | Forge, Anvil, Ember, Frost and Aether opened real native sessions. The Aether PTY relay recovered the same shell after the SSH connection was cut. [Adapters](#managed-remote-desktop-in-native-terminals) · [PTY recovery](#aether-terminal-semantics) |
 | Application scenes | The 1080p HEVC lossless arms met the cadence and selected glyph-mask checks for XTerm and Firefox. XTerm also retained exact glyph matches in all 900 post-scroll reads. Blender Workbench has independent motion results. Isaac Sim acceptance was skipped at the user's request. [XTerm](x11-terminal-scroll-hevc444-lossless-option-pair.json) · [Firefox](#firefox-through-managed-wayland-input) · [3D workloads](#blender-viewport-through-managed-wayland-input) |

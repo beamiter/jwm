@@ -1,0 +1,579 @@
+{
+  "manifest": {
+    "order": [
+      "baseline",
+      "precise",
+      "precise",
+      "baseline",
+      "baseline",
+      "precise",
+      "precise",
+      "baseline"
+    ],
+    "binary_sha256": {
+      "baseline": "b1a21b01f937331ede0df7a42eee0e923de21d8e3333fc9b040e8da8757b987b",
+      "precise": "811c38e6298d278ea94551cf103602bcd4e0ebe92cc5cd9232c8277f8af50549"
+    },
+    "provenance": {
+      "baseline_source_commit": "3059f9fe0b14ea5de7bf218b068998fd67483ca9",
+      "precise_patch_sha256": "9c66d3c8a12f30a4d6aa6b3da0303323cf8d9d814782fb65c4016c34c5395ee9",
+      "candidate_build": "validated working-tree release",
+      "build_arguments": [
+        "--locked",
+        "--offline",
+        "--release",
+        "--no-default-features",
+        "--features remote-x11,remote-wayland,remote-h264"
+      ],
+      "binary_sha256": {
+        "baseline": "b1a21b01f937331ede0df7a42eee0e923de21d8e3333fc9b040e8da8757b987b",
+        "precise": "811c38e6298d278ea94551cf103602bcd4e0ebe92cc5cd9232c8277f8af50549"
+      }
+    },
+    "source_and_viewer_raster": [
+      960,
+      640
+    ],
+    "requested_fps": 30,
+    "scene_sha256": "cd74213ed7321ed973b14b67016793a0333370fe0c9142d6ae9dd49743d55c12",
+    "blender_sha256": "c752cdc50bc29b5968e23b6e5588936bb05046e29dbc119e26aab79a9de2b55b",
+    "fixture_sha256": {
+      "cadence.py": "66e905448fb1b3fcd07b9ecd0dc9436bf5cb024357333228269957dcb987a57a",
+      "run_workbench.py": "16aa12519542429a5798ec0127c1d0b4bcd1315f1a97a9197989b05e324c1c42",
+      "replay_workbench.py": "80fc20565d38c791d358128805d7fe7a8c80e4367c7183456f9e5381651b6f72",
+      "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "x11_session.py": "9ee4cb960400f5bbc17dcc1387d77c827929bd47c8ff40eefc74df6ef8a521f0",
+      "capture_quality.py": "2e3f9d3ec685317b61b8a4df6b4af0deb07bbd39e3851c6d1d151c4536886f39",
+      "workbench_scene.py": "cd74213ed7321ed973b14b67016793a0333370fe0c9142d6ae9dd49743d55c12",
+      "candidate.patch": "9c66d3c8a12f30a4d6aa6b3da0303323cf8d9d814782fb65c4016c34c5395ee9"
+    },
+    "ffmpeg_lib_sha256": {
+      "libavcodec.so": "5086c1058b497732273c3f71519d54b80a5e16b4e831c35246da87ddd93a6e56",
+      "libavutil.so": "11b0836441b899e1b2183fc10eda5a5f637c03547fdfe5b97774e2cbd5aeb72c",
+      "libswscale.so": "a2122c6342e9457a9b7faab2d3f7018f3634fdac4d0b25b8ea974eae0277d78c"
+    },
+    "phase": "ordinary Blender Workbench motion with fixed-rate NVENC, local authenticated X11 loopback",
+    "warmup_seconds": 30,
+    "retained_seconds": 60
+  },
+  "trials": [
+    {
+      "slot": 1,
+      "variant": "baseline",
+      "status": "completed",
+      "source_distinct_fps": 43.06666666666667,
+      "viewer_distinct_fps": 26.983333333333334,
+      "viewer_distinct_gap_p95_ms": 65.56487,
+      "viewer_longest_gap_ms": 144.419747,
+      "capture_to_drawn_ack_median_window_p95_ms": 11.781,
+      "ui_edge_contrast_preserved": 0.7260765630335942,
+      "host_rates_fps": {
+        "scheduled": 29.250988855456715,
+        "captured": 29.250988855456715,
+        "sent": 29.250988855456715,
+        "backpressure_skipped": 0.0
+      },
+      "viewer_rates_fps": {
+        "received": 29.250648902212653,
+        "decoded": 29.250648902212653,
+        "drawn": 29.250648902212653,
+        "replaced": 0.0
+      },
+      "handoff_windows_seconds": {
+        "host": 55.075061153,
+        "viewer": 55.007326688
+      },
+      "ordinary_motion_target_met": false
+    },
+    {
+      "slot": 2,
+      "variant": "precise",
+      "status": "completed",
+      "source_distinct_fps": 43.016666666666666,
+      "viewer_distinct_fps": 27.383333333333333,
+      "viewer_distinct_gap_p95_ms": 46.084202,
+      "viewer_longest_gap_ms": 177.682629,
+      "capture_to_drawn_ack_median_window_p95_ms": 12.257,
+      "ui_edge_contrast_preserved": 0.7260765630335942,
+      "host_rates_fps": {
+        "scheduled": 29.763592405327966,
+        "captured": 29.763592405327966,
+        "sent": 29.763592405327966,
+        "backpressure_skipped": 0.0
+      },
+      "viewer_rates_fps": {
+        "received": 29.760197743231902,
+        "decoded": 29.760197743231902,
+        "drawn": 29.760197743231902,
+        "replaced": 0.0
+      },
+      "handoff_windows_seconds": {
+        "host": 55.067277419999996,
+        "viewer": 55.006354935
+      },
+      "ordinary_motion_target_met": true
+    },
+    {
+      "slot": 3,
+      "variant": "precise",
+      "status": "completed",
+      "source_distinct_fps": 43.06666666666667,
+      "viewer_distinct_fps": 27.316666666666666,
+      "viewer_distinct_gap_p95_ms": 65.233409,
+      "viewer_longest_gap_ms": 167.304625,
+      "capture_to_drawn_ack_median_window_p95_ms": 11.881,
+      "ui_edge_contrast_preserved": 0.7260765630335942,
+      "host_rates_fps": {
+        "scheduled": 29.75851488073899,
+        "captured": 29.75851488073899,
+        "sent": 29.75851488073899,
+        "backpressure_skipped": 0.0
+      },
+      "viewer_rates_fps": {
+        "received": 29.760050416621763,
+        "decoded": 29.741870789000124,
+        "drawn": 29.741870789000124,
+        "replaced": 0.0
+      },
+      "handoff_windows_seconds": {
+        "host": 55.043069406,
+        "viewer": 55.006627243
+      },
+      "ordinary_motion_target_met": true
+    },
+    {
+      "slot": 4,
+      "variant": "baseline",
+      "status": "completed",
+      "source_distinct_fps": 43.083333333333336,
+      "viewer_distinct_fps": 26.933333333333334,
+      "viewer_distinct_gap_p95_ms": 46.137046,
+      "viewer_longest_gap_ms": 164.787694,
+      "capture_to_drawn_ack_median_window_p95_ms": 11.962,
+      "ui_edge_contrast_preserved": 0.7260765630335942,
+      "host_rates_fps": {
+        "scheduled": 29.273966924695912,
+        "captured": 29.273966924695912,
+        "sent": 29.273966924695912,
+        "backpressure_skipped": 0.0
+      },
+      "viewer_rates_fps": {
+        "received": 29.269675350819412,
+        "decoded": 29.269675350819412,
+        "drawn": 29.269675350819412,
+        "replaced": 0.0
+      },
+      "handoff_windows_seconds": {
+        "host": 55.065991027,
+        "viewer": 55.005734799
+      },
+      "ordinary_motion_target_met": false
+    },
+    {
+      "slot": 5,
+      "variant": "baseline",
+      "status": "completed",
+      "source_distinct_fps": 43.333333333333336,
+      "viewer_distinct_fps": 26.883333333333333,
+      "viewer_distinct_gap_p95_ms": 64.773935,
+      "viewer_longest_gap_ms": 166.872861,
+      "capture_to_drawn_ack_median_window_p95_ms": 11.907,
+      "ui_edge_contrast_preserved": 0.7260765630335942,
+      "host_rates_fps": {
+        "scheduled": 29.273454205904308,
+        "captured": 29.273454205904308,
+        "sent": 29.273454205904308,
+        "backpressure_skipped": 0.0
+      },
+      "viewer_rates_fps": {
+        "received": 29.267144277606178,
+        "decoded": 29.267144277606178,
+        "drawn": 29.267144277606178,
+        "replaced": 0.0
+      },
+      "handoff_windows_seconds": {
+        "host": 55.066955497,
+        "viewer": 55.010491789999996
+      },
+      "ordinary_motion_target_met": false
+    },
+    {
+      "slot": 6,
+      "variant": "precise",
+      "status": "completed",
+      "source_distinct_fps": 42.75,
+      "viewer_distinct_fps": 27.516666666666666,
+      "viewer_distinct_gap_p95_ms": 46.804352,
+      "viewer_longest_gap_ms": 166.11241,
+      "capture_to_drawn_ack_median_window_p95_ms": 11.965,
+      "ui_edge_contrast_preserved": 0.7260765630335942,
+      "host_rates_fps": {
+        "scheduled": 29.785547666843428,
+        "captured": 29.785547666843428,
+        "sent": 29.785547666843428,
+        "backpressure_skipped": 0.0
+      },
+      "viewer_rates_fps": {
+        "received": 29.77726681266924,
+        "decoded": 29.77726681266924,
+        "drawn": 29.77726681266924,
+        "replaced": 0.0
+      },
+      "handoff_windows_seconds": {
+        "host": 55.060260041,
+        "viewer": 55.008406590999996
+      },
+      "ordinary_motion_target_met": true
+    },
+    {
+      "slot": 7,
+      "variant": "precise",
+      "status": "completed",
+      "source_distinct_fps": 42.93333333333333,
+      "viewer_distinct_fps": 27.45,
+      "viewer_distinct_gap_p95_ms": 57.637226,
+      "viewer_longest_gap_ms": 178.328205,
+      "capture_to_drawn_ack_median_window_p95_ms": 11.769,
+      "ui_edge_contrast_preserved": 0.7260765630335942,
+      "host_rates_fps": {
+        "scheduled": 29.759875206656993,
+        "captured": 29.759875206656993,
+        "sent": 29.759875206656993,
+        "backpressure_skipped": 0.0
+      },
+      "viewer_rates_fps": {
+        "received": 29.759275128339365,
+        "decoded": 29.759275128339365,
+        "drawn": 29.759275128339365,
+        "replaced": 0.0
+      },
+      "handoff_windows_seconds": {
+        "host": 55.074155675,
+        "viewer": 55.008060275
+      },
+      "ordinary_motion_target_met": true
+    },
+    {
+      "slot": 8,
+      "variant": "baseline",
+      "status": "completed",
+      "source_distinct_fps": 42.95,
+      "viewer_distinct_fps": 26.916666666666668,
+      "viewer_distinct_gap_p95_ms": 65.253387,
+      "viewer_longest_gap_ms": 166.327643,
+      "capture_to_drawn_ack_median_window_p95_ms": 11.906,
+      "ui_edge_contrast_preserved": 0.7260765630335942,
+      "host_rates_fps": {
+        "scheduled": 29.22064780517613,
+        "captured": 29.22064780517613,
+        "sent": 29.22064780517613,
+        "backpressure_skipped": 0.0
+      },
+      "viewer_rates_fps": {
+        "received": 29.233387136469723,
+        "decoded": 29.233387136469723,
+        "drawn": 29.233387136469723,
+        "replaced": 0.0
+      },
+      "handoff_windows_seconds": {
+        "host": 55.098025572,
+        "viewer": 55.005600018
+      },
+      "ordinary_motion_target_met": false
+    }
+  ],
+  "matched_pairs": [
+    {
+      "baseline_slot": 1,
+      "precise_slot": 2,
+      "complete": true,
+      "precise_minus_baseline": {
+        "source_distinct_fps": -0.05000000000000426,
+        "viewer_distinct_fps": 0.3999999999999986,
+        "viewer_distinct_gap_p95_ms": -19.480668,
+        "viewer_longest_gap_ms": 33.26288199999999,
+        "capture_to_drawn_ack_median_window_p95_ms": 0.4759999999999991,
+        "ui_edge_contrast_preserved": 0.0
+      },
+      "scheduled_fps_delta": 0.5126035498712511
+    },
+    {
+      "baseline_slot": 4,
+      "precise_slot": 3,
+      "complete": true,
+      "precise_minus_baseline": {
+        "source_distinct_fps": -0.01666666666666572,
+        "viewer_distinct_fps": 0.38333333333333286,
+        "viewer_distinct_gap_p95_ms": 19.096362999999997,
+        "viewer_longest_gap_ms": 2.5169309999999996,
+        "capture_to_drawn_ack_median_window_p95_ms": -0.08099999999999952,
+        "ui_edge_contrast_preserved": 0.0
+      },
+      "scheduled_fps_delta": 0.48454795604307677
+    },
+    {
+      "baseline_slot": 5,
+      "precise_slot": 6,
+      "complete": true,
+      "precise_minus_baseline": {
+        "source_distinct_fps": -0.5833333333333357,
+        "viewer_distinct_fps": 0.6333333333333329,
+        "viewer_distinct_gap_p95_ms": -17.969582999999993,
+        "viewer_longest_gap_ms": -0.7604509999999891,
+        "capture_to_drawn_ack_median_window_p95_ms": 0.05799999999999983,
+        "ui_edge_contrast_preserved": 0.0
+      },
+      "scheduled_fps_delta": 0.5120934609391199
+    },
+    {
+      "baseline_slot": 8,
+      "precise_slot": 7,
+      "complete": true,
+      "precise_minus_baseline": {
+        "source_distinct_fps": -0.016666666666672825,
+        "viewer_distinct_fps": 0.5333333333333314,
+        "viewer_distinct_gap_p95_ms": -7.616161000000005,
+        "viewer_longest_gap_ms": 12.000562000000002,
+        "capture_to_drawn_ack_median_window_p95_ms": -0.13700000000000045,
+        "ui_edge_contrast_preserved": 0.0
+      },
+      "scheduled_fps_delta": 0.5392274014808613
+    }
+  ],
+  "overview": {
+    "baseline": {
+      "completed": 4,
+      "ordinary_motion_target_met": 0,
+      "medians": {
+        "source_distinct_fps": 43.075,
+        "viewer_distinct_fps": 26.925,
+        "viewer_distinct_gap_p95_ms": 65.013661,
+        "viewer_longest_gap_ms": 165.55766849999998,
+        "capture_to_drawn_ack_median_window_p95_ms": 11.906500000000001,
+        "ui_edge_contrast_preserved": 0.7260765630335942
+      },
+      "scheduled_fps_median": 29.262221530680513
+    },
+    "precise": {
+      "completed": 4,
+      "ordinary_motion_target_met": 4,
+      "medians": {
+        "source_distinct_fps": 42.974999999999994,
+        "viewer_distinct_fps": 27.416666666666664,
+        "viewer_distinct_gap_p95_ms": 52.220788999999996,
+        "viewer_longest_gap_ms": 172.493627,
+        "capture_to_drawn_ack_median_window_p95_ms": 11.923,
+        "ui_edge_contrast_preserved": 0.7260765630335942
+      },
+      "scheduled_fps_median": 29.761733805992478
+    }
+  },
+  "archive": {
+    "name": "x11-blender-fixed-capture-cadence-abba-raw.zip",
+    "sha256": "dd27c036fc134f142e09202dbb3c6034fde4f2675daf55a8c241acce12e4b1e3",
+    "members": {
+      "outcomes.json": "317808c08931e72d10baccd877524260a44578f0d2dfc20fcf8de7c9b7861555",
+      "manifest.json": "30c85bc4d210c56ffb0b707d64adf0d1edd973168e93f775af3271adb2ada179",
+      "trial-07-precise/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-07-precise/workbench-view.json": "56b9539d2f77391dce323764b2e9d87e28240c545f6f170491493b9069bd40e9",
+      "trial-07-precise/viewer.log": "b687e566e8cb1b9c21f49b86663e90c70de967bac870c85169954922df61a9ba",
+      "trial-07-precise/ordinary-motion-ui-1-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-07-precise/ordinary-motion-ui-2-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-07-precise/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-07-precise/host.log": "fd00503b66608f886c3112ae0642e65eb0b90dab4f28397298e09ab6a3fd1903",
+      "trial-07-precise/viewer-clocked-telemetry.jsonl": "902a15d10d13e6a21019d082e942a2f9e8b5ddebb94519121e8191a202537a3c",
+      "trial-07-precise/blender-positioned.log": "e1d71e5826e2e54a5c7c3734f139800b48ab2c3b871f7ddc9711ddc6b8603643",
+      "trial-07-precise/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-07-precise/viewer-window.log": "9f1dce484c11570af4fb537b941402b337f872a1a171ef64af7bb5f8a8c2d8e0",
+      "trial-07-precise/workbench-initial-oracle.json": "28437ceca653a0221750f882ba6d38fd1f380fd87cb520a0c71519e165194934",
+      "trial-07-precise/ordinary-motion-ui-2-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-07-precise/ordinary-motion-ui-3-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-07-precise/workbench-static-state.json": "4afc4cb36326677e04a7c815257d97a75fdcf9fbc2cfbddcad39b6bbc37166d1",
+      "trial-07-precise/result.json": "423d038535e4ad58e8d303051207e9d005e07c7a4ce248938dc5e48f1794b532",
+      "trial-07-precise/ordinary-motion-pixels.jsonl": "98990a432f77c33686667fbb28a6bdc756c03fcae7892afc9bcf5154d1412797",
+      "trial-07-precise/ordinary-motion-ui-1-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-07-precise/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-07-precise/ordinary-motion-ui-3-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-07-precise/ordinary-motion-scope.json": "c1256e5777816208d2abb7bcbc8b138faee8081604bb59d75fbf5784e7a1e806",
+      "trial-07-precise/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-07-precise/blender-window.log": "e1d71e5826e2e54a5c7c3734f139800b48ab2c3b871f7ddc9711ddc6b8603643",
+      "trial-07-precise/host-clocked-telemetry.jsonl": "cda42c23733a61bb2dd8c2417396bf69dec8a9273a32525c7b8421731cff3a0f",
+      "trial-02-precise/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-02-precise/workbench-view.json": "56b9539d2f77391dce323764b2e9d87e28240c545f6f170491493b9069bd40e9",
+      "trial-02-precise/viewer.log": "740a298d5fb8cfacb9f3a15632e2518a48402f7ca6af0ec33e94996839af16a5",
+      "trial-02-precise/ordinary-motion-ui-1-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-02-precise/ordinary-motion-ui-2-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-02-precise/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-02-precise/host.log": "63ed5ca712e26a93dbc21099b2f9740ec8b5a9886e0294069bedacc0cab934a8",
+      "trial-02-precise/viewer-clocked-telemetry.jsonl": "9ee0d3669dcb5af2ec267c72147420120d78f2b01701623085ef67a3693aa276",
+      "trial-02-precise/blender-positioned.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-02-precise/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-02-precise/viewer-window.log": "7762d5d1bac58e54dca081865287e873eb2b266cec7671306281bad6e2911264",
+      "trial-02-precise/workbench-initial-oracle.json": "28437ceca653a0221750f882ba6d38fd1f380fd87cb520a0c71519e165194934",
+      "trial-02-precise/ordinary-motion-ui-2-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-02-precise/ordinary-motion-ui-3-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-02-precise/workbench-static-state.json": "4afc4cb36326677e04a7c815257d97a75fdcf9fbc2cfbddcad39b6bbc37166d1",
+      "trial-02-precise/result.json": "18eb5f92efb205ea7c58905df4fa9d55169802be5eff53ba85628278090f43c7",
+      "trial-02-precise/ordinary-motion-pixels.jsonl": "9d448c9204b65ba58755edfb3d03c3504d749d378dfdf7310dc185e552c6d1de",
+      "trial-02-precise/ordinary-motion-ui-1-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-02-precise/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-02-precise/ordinary-motion-ui-3-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-02-precise/ordinary-motion-scope.json": "28ed625dd3a3e98a1d745e76412bc2e6254bf06bebee205396df96083f4d2f3f",
+      "trial-02-precise/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-02-precise/blender-window.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-02-precise/host-clocked-telemetry.jsonl": "41faf314526b7f8acd0754e8e8836015992fe6bd137b40149f1b6197cc7f89ce",
+      "trial-06-precise/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-06-precise/workbench-view.json": "56b9539d2f77391dce323764b2e9d87e28240c545f6f170491493b9069bd40e9",
+      "trial-06-precise/viewer.log": "89433b22d4817854a4cf3f247e44e960d7d0f5c7ccf02cf6f58117a1c7048eda",
+      "trial-06-precise/ordinary-motion-ui-1-viewer.png": "c5e0835a367906fb3bf68b5807bef327d23c2b0365de687a830f8930c726bc67",
+      "trial-06-precise/ordinary-motion-ui-2-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-06-precise/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-06-precise/host.log": "7b467a931563fc9b4f8e3fdf773170d9f55711f3c4a3eab6f3577032191079b4",
+      "trial-06-precise/viewer-clocked-telemetry.jsonl": "bebc275ca9164dbf63456099452bbe2bd93535ca00d98094dcde45ab4bd41a8f",
+      "trial-06-precise/blender-positioned.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-06-precise/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-06-precise/viewer-window.log": "59a6fe0a7b0fd96f4a059a0edcc20a12ec4313edb24a2128d69ee5d748664cbe",
+      "trial-06-precise/workbench-initial-oracle.json": "28437ceca653a0221750f882ba6d38fd1f380fd87cb520a0c71519e165194934",
+      "trial-06-precise/ordinary-motion-ui-2-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-06-precise/ordinary-motion-ui-3-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-06-precise/workbench-static-state.json": "4afc4cb36326677e04a7c815257d97a75fdcf9fbc2cfbddcad39b6bbc37166d1",
+      "trial-06-precise/result.json": "88edbfbf2112e58d88b9636dffe169e8168e247d3debdf96533471d235d3e8a3",
+      "trial-06-precise/ordinary-motion-pixels.jsonl": "620a99077d8b59c3fbd71cbfe05757374e71faf24a01d74b477148c88e76b7c2",
+      "trial-06-precise/ordinary-motion-ui-1-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-06-precise/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-06-precise/ordinary-motion-ui-3-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-06-precise/ordinary-motion-scope.json": "613bc58e367f8234bb3a3c28775de6cdefbce5cb3a3f597ed12368703952218a",
+      "trial-06-precise/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-06-precise/blender-window.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-06-precise/host-clocked-telemetry.jsonl": "50192adf7872489d6df129e9da13b4d18a008c1f12182de374d1d50f425c1736",
+      "fixture/replay_workbench.py": "80fc20565d38c791d358128805d7fe7a8c80e4367c7183456f9e5381651b6f72",
+      "fixture/candidate.patch": "9c66d3c8a12f30a4d6aa6b3da0303323cf8d9d814782fb65c4016c34c5395ee9",
+      "fixture/cadence.py": "66e905448fb1b3fcd07b9ecd0dc9436bf5cb024357333228269957dcb987a57a",
+      "fixture/workbench_scene.py": "cd74213ed7321ed973b14b67016793a0333370fe0c9142d6ae9dd49743d55c12",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/x11_session.py": "9ee4cb960400f5bbc17dcc1387d77c827929bd47c8ff40eefc74df6ef8a521f0",
+      "fixture/capture_quality.py": "2e3f9d3ec685317b61b8a4df6b4af0deb07bbd39e3851c6d1d151c4536886f39",
+      "fixture/run_workbench.py": "16aa12519542429a5798ec0127c1d0b4bcd1315f1a97a9197989b05e324c1c42",
+      "trial-04-baseline/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-04-baseline/workbench-view.json": "56b9539d2f77391dce323764b2e9d87e28240c545f6f170491493b9069bd40e9",
+      "trial-04-baseline/viewer.log": "7be35e4f81ad3c90c8fe954292e8d8958b5e3dc6e297c9d3ff4ffa8e3b26d3ef",
+      "trial-04-baseline/ordinary-motion-ui-1-viewer.png": "f6e8110e516853ae0557a78b27ba221f4b40638c7d020769b793652ec1a6364b",
+      "trial-04-baseline/ordinary-motion-ui-2-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-04-baseline/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-04-baseline/host.log": "4619db5cd8be4191b57d2d2b9ab0955ce49bac4977a45663a2497df885820fa1",
+      "trial-04-baseline/viewer-clocked-telemetry.jsonl": "1ab7622512cb29d142650e345ed4978b1b14923adbb74b098d87c789524632ba",
+      "trial-04-baseline/blender-positioned.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-04-baseline/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-04-baseline/viewer-window.log": "6084c17d6199d26905c339cd4ee1529e1edb4e8268f3e1a0dde902a49cb6b797",
+      "trial-04-baseline/workbench-initial-oracle.json": "28437ceca653a0221750f882ba6d38fd1f380fd87cb520a0c71519e165194934",
+      "trial-04-baseline/ordinary-motion-ui-2-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-04-baseline/ordinary-motion-ui-3-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-04-baseline/workbench-static-state.json": "4afc4cb36326677e04a7c815257d97a75fdcf9fbc2cfbddcad39b6bbc37166d1",
+      "trial-04-baseline/result.json": "baa3c4b4040788d9c94577cb2a967d4c25230898aaf6cac1171b41cc6c195dab",
+      "trial-04-baseline/ordinary-motion-pixels.jsonl": "0495e47324f5f96d537070e6748047ada5580de078c6cc25e14020dc27826e71",
+      "trial-04-baseline/ordinary-motion-ui-1-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-04-baseline/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-04-baseline/ordinary-motion-ui-3-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-04-baseline/ordinary-motion-scope.json": "b09b25c3b431499cf188be9d67ee9efc0d1d8746119a12c7f052458c788fa15b",
+      "trial-04-baseline/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-04-baseline/blender-window.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-04-baseline/host-clocked-telemetry.jsonl": "71e220ed27f8fbb0914b6d05ca0a33c70aaeb30277df8c7400c93f4b673ea0d6",
+      "trial-08-baseline/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-08-baseline/workbench-view.json": "56b9539d2f77391dce323764b2e9d87e28240c545f6f170491493b9069bd40e9",
+      "trial-08-baseline/viewer.log": "c86946faef4c0707129689bd9c6bb7876ee60ea72769fec9e5df53cfb1fccd0e",
+      "trial-08-baseline/ordinary-motion-ui-1-viewer.png": "aa226741f187ae170b88d9e3f4914bdb4bf75c29479c01cf4ff9a0261073e9df",
+      "trial-08-baseline/ordinary-motion-ui-2-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-08-baseline/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-08-baseline/host.log": "627a57a9e54441e973534442f2567c5fd2cd55465f12c5d8498a45d70dda7dd8",
+      "trial-08-baseline/viewer-clocked-telemetry.jsonl": "f9e8af8dd63ee7c8b4f0a9ebd351ff6d6894d38a7d23a18cd39db44485d5333b",
+      "trial-08-baseline/blender-positioned.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-08-baseline/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-08-baseline/viewer-window.log": "e3628605af09ef306d2c4e14b3bc0a9f26394d3a7e9a0555ec243b31e256ebeb",
+      "trial-08-baseline/workbench-initial-oracle.json": "28437ceca653a0221750f882ba6d38fd1f380fd87cb520a0c71519e165194934",
+      "trial-08-baseline/ordinary-motion-ui-2-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-08-baseline/ordinary-motion-ui-3-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-08-baseline/workbench-static-state.json": "4afc4cb36326677e04a7c815257d97a75fdcf9fbc2cfbddcad39b6bbc37166d1",
+      "trial-08-baseline/result.json": "09fe607698e2a16bcd66e72394ac080b2fda681869de5985df2d02db3681fbe1",
+      "trial-08-baseline/ordinary-motion-pixels.jsonl": "d834a75ba3a767baf0d6f4ff2070d7532f0bfa1ba87b54ac9bc280466ad401d1",
+      "trial-08-baseline/ordinary-motion-ui-1-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-08-baseline/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-08-baseline/ordinary-motion-ui-3-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-08-baseline/ordinary-motion-scope.json": "272d4494463d9734b365d89e07aebc430e416975a7ca77dcdaf7392bc939a726",
+      "trial-08-baseline/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-08-baseline/blender-window.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-08-baseline/host-clocked-telemetry.jsonl": "7d907da8911ad2f50ea24c32c60b4c2bdb3adfd892299cd97d394c1d9ebab087",
+      "trial-01-baseline/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-01-baseline/workbench-view.json": "56b9539d2f77391dce323764b2e9d87e28240c545f6f170491493b9069bd40e9",
+      "trial-01-baseline/viewer.log": "bd13f4019c45bd295f55356dc32d1353abd7af3a2173804e439c9261d04ec583",
+      "trial-01-baseline/ordinary-motion-ui-1-viewer.png": "f6e8110e516853ae0557a78b27ba221f4b40638c7d020769b793652ec1a6364b",
+      "trial-01-baseline/ordinary-motion-ui-2-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-01-baseline/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-01-baseline/host.log": "01f0d17f210ce908a09da50f273bb5d089c4e496cb46c3eb0298703065e8ed1e",
+      "trial-01-baseline/viewer-clocked-telemetry.jsonl": "6c60d4c1aa1146df6a449dc3bb58f55b9e3a2b8ef6843dab97b15617e91447ce",
+      "trial-01-baseline/blender-positioned.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-01-baseline/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-01-baseline/viewer-window.log": "8fc4349341dd6b21320e3ae44548cbce05bcdd4e6190f4d9aa2f5625e58f34bb",
+      "trial-01-baseline/workbench-initial-oracle.json": "28437ceca653a0221750f882ba6d38fd1f380fd87cb520a0c71519e165194934",
+      "trial-01-baseline/ordinary-motion-ui-2-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-01-baseline/ordinary-motion-ui-3-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-01-baseline/workbench-static-state.json": "4afc4cb36326677e04a7c815257d97a75fdcf9fbc2cfbddcad39b6bbc37166d1",
+      "trial-01-baseline/result.json": "5988e0294fea2a1aa7be3f25dcc9dfade44aa1700d9e4003154f81665429b54e",
+      "trial-01-baseline/ordinary-motion-pixels.jsonl": "9a445da31287bdcd12fe1bee2c4bb5e74e02727f3ca3eead9e965614747f233c",
+      "trial-01-baseline/ordinary-motion-ui-1-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-01-baseline/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-01-baseline/ordinary-motion-ui-3-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-01-baseline/ordinary-motion-scope.json": "300c81029ae52242c8125e87c4e88af4df9176d725ebba705748a22bef53c4e3",
+      "trial-01-baseline/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-01-baseline/blender-window.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-01-baseline/host-clocked-telemetry.jsonl": "70d79860b8f3dfb971d4aed1211acf88a1f3610a212e6fb271ba3245096ba4be",
+      "trial-03-precise/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-03-precise/workbench-view.json": "56b9539d2f77391dce323764b2e9d87e28240c545f6f170491493b9069bd40e9",
+      "trial-03-precise/viewer.log": "3b78c020146f5759e14879cab92c1fdf568e867612ca6fdea54761743bea1992",
+      "trial-03-precise/ordinary-motion-ui-1-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-03-precise/ordinary-motion-ui-2-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-03-precise/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-03-precise/host.log": "f9baf2de2efe962f48a11d3e1f783216c4d8033f345fbf34fde26cdb21b72b49",
+      "trial-03-precise/viewer-clocked-telemetry.jsonl": "c38ac1da6a3c4f36ae6fe8169d7ed720590e5f77559793f601847fe52a69e741",
+      "trial-03-precise/blender-positioned.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-03-precise/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-03-precise/viewer-window.log": "a6a703cfe669a64c0ce8deddc56590dcd41ad27c4398ac7ac5518cbab0ea5ce1",
+      "trial-03-precise/workbench-initial-oracle.json": "28437ceca653a0221750f882ba6d38fd1f380fd87cb520a0c71519e165194934",
+      "trial-03-precise/ordinary-motion-ui-2-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-03-precise/ordinary-motion-ui-3-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-03-precise/workbench-static-state.json": "4afc4cb36326677e04a7c815257d97a75fdcf9fbc2cfbddcad39b6bbc37166d1",
+      "trial-03-precise/result.json": "32137bac3261d2fe1e6efdf9362ad53a193315e67d44ac21107f0f42a6666e6c",
+      "trial-03-precise/ordinary-motion-pixels.jsonl": "6368ad98306b38970e6ecde406b1ba13459fec41f4ee2c2cc3886c8f963798cd",
+      "trial-03-precise/ordinary-motion-ui-1-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-03-precise/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-03-precise/ordinary-motion-ui-3-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-03-precise/ordinary-motion-scope.json": "382ee68211042256b225435c3de96d9858ccaff1a85f516b5712dcdef69c9b8c",
+      "trial-03-precise/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-03-precise/blender-window.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-03-precise/host-clocked-telemetry.jsonl": "8b8eb001665b021ca43e5a987e35847edb7254d3fbaed50134b298194c5de0ae",
+      "trial-05-baseline/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-05-baseline/workbench-view.json": "56b9539d2f77391dce323764b2e9d87e28240c545f6f170491493b9069bd40e9",
+      "trial-05-baseline/viewer.log": "db4a090ce38d1fa72328181a32d6fbf7f3166442d03970631ba3da650329f442",
+      "trial-05-baseline/ordinary-motion-ui-1-viewer.png": "4c9a32a4225027c936b0decfd7d10897f08c2c747131d10288c58a26739b13d1",
+      "trial-05-baseline/ordinary-motion-ui-2-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-05-baseline/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-05-baseline/host.log": "fe5ef350070b24a4d9231a3c931a1ebe428ef0d802c199d550be18f4ff5d1947",
+      "trial-05-baseline/viewer-clocked-telemetry.jsonl": "c7fe14b0e761ec3592de00de32335eee066c546e29816bc9a53be03050b83cb9",
+      "trial-05-baseline/blender-positioned.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-05-baseline/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-05-baseline/viewer-window.log": "dcf40ce2d5a034db810df80eb1b3a7dffaa67690583c4f0ae9505d431be48af4",
+      "trial-05-baseline/workbench-initial-oracle.json": "28437ceca653a0221750f882ba6d38fd1f380fd87cb520a0c71519e165194934",
+      "trial-05-baseline/ordinary-motion-ui-2-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-05-baseline/ordinary-motion-ui-3-viewer.png": "97ca24e195a8aecb46adf65062d8e7354e52e1104695118bcfaf35d41ebb133d",
+      "trial-05-baseline/workbench-static-state.json": "4afc4cb36326677e04a7c815257d97a75fdcf9fbc2cfbddcad39b6bbc37166d1",
+      "trial-05-baseline/result.json": "0f41b030b235c06470fef5c43bfdd14f436da43a4a210f6151208df9c8e8009c",
+      "trial-05-baseline/ordinary-motion-pixels.jsonl": "881bd2397ee7cfc3bbc96246e27a8996798558910130218d6093656982c31dba",
+      "trial-05-baseline/ordinary-motion-ui-1-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-05-baseline/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-05-baseline/ordinary-motion-ui-3-source.png": "7ce1b8d91d74dd10df78500844a28097499124cf127108c02e773d7faf96b0c0",
+      "trial-05-baseline/ordinary-motion-scope.json": "a9d87018cdda5fb98cb3cb3be83091679881d184935ea469d1b048f280cfc64b",
+      "trial-05-baseline/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-05-baseline/blender-window.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-05-baseline/host-clocked-telemetry.jsonl": "fb354e2a723a94598229552097d29ceeec773cc1e2318e08e408420ee2f6096c"
+    }
+  }
+}
