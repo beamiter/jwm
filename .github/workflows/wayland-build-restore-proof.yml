@@ -1,0 +1,61 @@
+name: Validate Wayland build restoration (do not merge)
+
+on:
+  pull_request:
+    branches: [dot/wayland-build-after-remote-upgrade]
+    paths: [.github/workflows/wayland-build-restore-proof.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-native-and-nested:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      EGL_PLATFORM: surfaceless
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      JWM_REQUIRE_HEADLESS_GL: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: 3fc84f032ae4be5ca3d6c936d02b3e5a19aa15fa
+      - name: Verify exact product source
+        run: |
+          test "$(git rev-parse HEAD)" = "3fc84f032ae4be5ca3d6c936d02b3e5a19aa15fa"
+          test "$(git rev-parse HEAD^{tree})" = "c73a37a6e56124105bb31363e20d320433e8e037"
+      - name: Install native build and software renderer dependencies
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config \
+            libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libegl-mesa0 libgl1-mesa-dri xvfb xauth libx11-dev libx11-xcb-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-screensaver0-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: Format and lint native source plus compositor
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --no-default-features --features remote-wayland,backend-wayland-udev --lib --bin jwm-remote --tests --no-deps -- -D warnings
+      - name: Independent CLI host and viewer native handoff acceptance
+        timeout-minutes: 8
+        run: bash scripts/test-remote-wayland-cli.sh
+      - name: Explicit nested and real native regressions
+        run: |
+          set -euo pipefail
+          cargo check --locked --no-default-features --features remote-wayland,backend-wayland-nested --lib
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          for filter in 'power_snapshot_preserves_output_identity_and_last_mode' 'power_control_never_targets_a_same_name_replacement' 'native_window_gesture_clicks_only_the_subsurface_proven_by_the_frame'; do
+            args=(--locked --no-default-features --features remote-wayland,backend-wayland-udev --lib "$filter")
+            listed="$(cargo test "${args[@]}" -- --list)"
+            test "$(printf '%s\n' "$listed" | grep -c ': test$')" -eq 1
+            output="$(cargo test "${args[@]}" -- --test-threads=1 --nocapture)"
+            printf '%s\n' "$output"
+            grep -q 'test result: ok. 1 passed; 0 failed; 0 ignored;' <<<"$output"
+          done
