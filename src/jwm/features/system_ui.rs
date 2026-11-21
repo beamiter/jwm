@@ -69,6 +69,9 @@ pub struct LaunchEntry {
     /// never during the scan, so a theme walk cannot slow the catalog worker
     /// down by a directory read per entry.
     pub icon: Option<String>,
+    /// Exact desktop app ID (without .desktop) and optional explicit X11 class.
+    pub(crate) desktop_id: Option<String>,
+    pub(crate) startup_wm_class: Option<String>,
     search: String,
     /// Localized names and desktop keywords are search-only, never persisted as IDs.
     aliases: Vec<String>,
@@ -79,7 +82,7 @@ pub struct LaunchEntry {
 }
 
 impl LaunchEntry {
-    fn new(
+    pub(super) fn new(
         name: String,
         command: Vec<String>,
         terminal: bool,
@@ -92,6 +95,8 @@ impl LaunchEntry {
             command,
             terminal,
             icon,
+            desktop_id: None,
+            startup_wm_class: None,
             search,
             aliases: Vec::new(),
             sort_key,
@@ -1485,6 +1490,15 @@ impl SystemUiState {
         windows: Vec<crate::jwm::features::launcher::WindowEntry>,
         indexing: bool,
     ) -> Self {
+        Self::open_launcher_with_scenes(entries, windows, indexing, Vec::new())
+    }
+
+    pub(crate) fn open_launcher_with_scenes(
+        entries: Arc<[LaunchEntry]>,
+        windows: Vec<crate::jwm::features::launcher::WindowEntry>,
+        indexing: bool,
+        scenes: Vec<super::workscenes::Workscene>,
+    ) -> Self {
         let usage = crate::jwm::features::launcher::UsageStore::load();
         let mut state = Self::Launcher {
             list_scroll: None,
@@ -1492,7 +1506,7 @@ impl SystemUiState {
             entries,
             windows,
             sessions: Vec::new(),
-            scenes: Vec::new(),
+            scenes,
             matches: Vec::new(),
             selected: 0,
             usage,
@@ -6187,6 +6201,7 @@ fn scan_desktop_dir(
             let mut name = None;
             let mut exec = None;
             let mut aliases = Vec::new();
+            let mut startup_wm_class = None;
             let mut icon = None;
             let mut hidden = false;
             let mut terminal = false;
@@ -6212,6 +6227,9 @@ fn scan_desktop_dir(
                     "Icon" if !value.trim().is_empty() => {
                         icon.get_or_insert_with(|| value.trim().to_string());
                     }
+                    "StartupWMClass" if !value.trim().is_empty() && value.trim().len() <= 255 => {
+                        startup_wm_class.get_or_insert_with(|| value.trim().to_owned());
+                    }
                     "Hidden" | "NoDisplay" if value == "true" => hidden = true,
                     "Terminal" if value == "true" => terminal = true,
                     key if aliases.len() < MAX_DESKTOP_SEARCH_ALIASES => {
@@ -6232,12 +6250,17 @@ fn scan_desktop_dir(
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
-            let id = relative
+            let id: Vec<u8> = relative
                 .as_os_str()
                 .as_encoded_bytes()
                 .iter()
                 .map(|&byte| if byte == b'/' { b'-' } else { byte })
                 .collect();
+            let desktop_id = std::str::from_utf8(&id)
+                .ok()
+                .and_then(|value| value.strip_suffix(".desktop"))
+                .filter(|value| !value.is_empty() && value.len() <= 255)
+                .map(str::to_owned);
             if !has_entry || !budget.desktop_ids.insert(id) {
                 continue;
             }
@@ -6257,6 +6280,8 @@ fn scan_desktop_dir(
             let search = format!("{} {}", name.to_lowercase(), exec.to_lowercase());
             let mut entry = LaunchEntry::new(name, command, terminal, icon, search);
             entry.aliases = aliases;
+            entry.desktop_id = desktop_id;
+            entry.startup_wm_class = startup_wm_class;
             entries.push(entry);
         }
     }
@@ -10028,6 +10053,47 @@ Keywords=action-only;
             roots.last().unwrap(),
             &PathBuf::from(format!("/data/{}/applications", MAX_APPLICATION_ROOTS - 2)),
         );
+    }
+
+    #[test]
+    fn desktop_catalog_preserves_exact_notes_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-desktop-identity-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("org.jwm.Notes.desktop"),
+            include_str!("../../../crates/jwm_apps/dist/org.jwm.Notes.desktop"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("org.example.Second.desktop"),
+            "[Desktop Entry]\nName=Another Notes\nExec=other-notes\n[Desktop Action Test]\nStartupWMClass=org.jwm.Notes\n",
+        ).unwrap();
+        let mut entries = Vec::new();
+        scan_desktop_dir(
+            &root,
+            &mut entries,
+            &mut HashSet::new(),
+            &mut ApplicationScanBudget::default(),
+        );
+        assert_eq!(entries.len(), 2);
+        let notes = entries
+            .iter()
+            .find(|entry| entry.name == "JWM Notes")
+            .unwrap();
+        assert_eq!(notes.desktop_id.as_deref(), Some("org.jwm.Notes"));
+        assert_eq!(notes.startup_wm_class.as_deref(), Some("org.jwm.Notes"));
+        assert_eq!(notes.command.first().map(String::as_str), Some("jwm-notes"));
+        let decoy = entries
+            .iter()
+            .find(|entry| entry.name == "Another Notes")
+            .unwrap();
+        assert_eq!(decoy.desktop_id.as_deref(), Some("org.example.Second"));
+        assert_eq!(decoy.startup_wm_class, None);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Named, previewed desktop scenes. Layout restoration and application/session
 //! restoration are separate explicit actions. No scene stores or matches a PID.
-use super::system_ui::{ListKind, ListRow, RowData, SystemUiState};
+use super::system_ui::{LaunchEntry, ListKind, ListRow, RowData, SystemUiState};
 use crate::backend::api::Backend;
 use crate::config::{CONFIG, Config};
 use crate::core::layout::LayoutEnum;
@@ -61,6 +61,41 @@ fn app_identity_matches(class: &str, instance: &str, name: &str, program: &str) 
                         .next()
                         .is_some_and(|tail| tail.eq_ignore_ascii_case(program))))
     })
+}
+
+fn declared_identity_matches(
+    class: &str,
+    instance: &str,
+    desktop_id: Option<&str>,
+    startup_wm_class: Option<&str>,
+) -> bool {
+    // JWM's X11 property layer normalizes WM_CLASS to lowercase. Compare
+    // the whole declared identity, not a case-sensitive form or a suffix.
+    [class, instance].iter().any(|identity| {
+        [desktop_id, startup_wm_class]
+            .into_iter()
+            .flatten()
+            .any(|declared| identity.eq_ignore_ascii_case(declared))
+    })
+}
+
+fn catalog_identity_matches(class: &str, instance: &str, entry: &LaunchEntry) -> bool {
+    declared_identity_matches(
+        class,
+        instance,
+        entry.desktop_id.as_deref(),
+        entry.startup_wm_class.as_deref(),
+    ) || app_identity_matches(
+        class,
+        instance,
+        &entry.name,
+        entry
+            .command
+            .first()
+            .and_then(|program| std::path::Path::new(program).file_name())
+            .and_then(|program| program.to_str())
+            .unwrap_or(""),
+    )
 }
 
 pub(crate) struct WorkscenePlan {
@@ -174,21 +209,17 @@ impl Jwm {
             }
         }
         for name in &scene.applications {
-            let program = self
+            let entry = self
                 .features
                 .launcher_catalog
                 .iter()
-                .find(|entry| &entry.name == name)
-                .and_then(|entry| entry.command.first())
-                .and_then(|program| std::path::Path::new(program).file_name())
-                .and_then(|program| program.to_str())
-                .unwrap_or("");
-            if self
-                .state
-                .clients
-                .values()
-                .any(|client| app_identity_matches(&client.class, &client.instance, name, program))
-            {
+                .find(|entry| &entry.name == name);
+            if self.state.clients.values().any(|client| {
+                entry.map_or_else(
+                    || app_identity_matches(&client.class, &client.instance, name, ""),
+                    |entry| catalog_identity_matches(&client.class, &client.instance, entry),
+                )
+            }) {
                 rows.push(ListRow {
                     key: "present".into(),
                     text: format!("Already open: {name} · process preserved"),
@@ -196,12 +227,7 @@ impl Jwm {
                 });
                 continue;
             }
-            if let Some(entry) = self
-                .features
-                .launcher_catalog
-                .iter()
-                .find(|entry| &entry.name == name)
-            {
+            if let Some(entry) = entry {
                 let index = applications.len();
                 rows.push(ListRow {
                     key: format!("application:{index}"),
@@ -318,15 +344,12 @@ impl Jwm {
                 if entry.command.is_empty() {
                     return Err("Application already requested; awaiting its window".into());
                 }
-                let program = entry
-                    .command
-                    .first()
-                    .and_then(|program| std::path::Path::new(program).file_name())
-                    .and_then(|program| program.to_str())
-                    .unwrap_or("");
-                if self.state.clients.values().any(|client| {
-                    app_identity_matches(&client.class, &client.instance, &entry.name, program)
-                }) {
+                if self
+                    .state
+                    .clients
+                    .values()
+                    .any(|client| catalog_identity_matches(&client.class, &client.instance, entry))
+                {
                     return Err(
                         "Application opened since preview; use window search to return to it"
                             .into(),
@@ -382,6 +405,97 @@ mod tests {
                 .unwrap_err()
                 .contains("disconnected")
         );
+    }
+
+    #[test]
+    fn scene_rechecks_the_exact_application_id_at_activation() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mut catalog = LaunchEntry::new(
+            "JWM Notes".into(),
+            vec!["jwm-notes".into()],
+            false,
+            None,
+            "jwm notes".into(),
+        );
+        catalog.desktop_id = Some("org.jwm.Notes".into());
+        jwm.features.launcher_catalog = Arc::from([catalog]);
+        let scene = Workscene {
+            name: "Notebook test scene".into(),
+            outputs: vec![SceneOutput {
+                output: String::new(),
+                tag: 1,
+                layout: String::new(),
+            }],
+            sessions: Vec::new(),
+            applications: vec!["JWM Notes".into()],
+        };
+
+        let mut lookalike = WMClient::new(WindowId::from_raw(11));
+        lookalike.class = "org.unrelated.Notes".into();
+        jwm.state.clients.insert(lookalike);
+        jwm.open_workscene_preview(&mut backend, scene.clone())
+            .unwrap();
+        let SystemUiState::ListPanel { rows, selected, .. } = &mut jwm.features.system_ui else {
+            panic!("expected workscene preview");
+        };
+        *selected = rows
+            .iter()
+            .position(|row| row.key == "application:0")
+            .unwrap();
+
+        let mut notes = WMClient::new(WindowId::from_raw(12));
+        notes.class = "org.jwm.notes".into();
+        jwm.state.clients.insert(notes);
+        assert!(
+            jwm.activate_workscene_action(&mut backend)
+                .unwrap_err()
+                .contains("Application opened since preview")
+        );
+
+        jwm.open_workscene_preview(&mut backend, scene).unwrap();
+        let SystemUiState::ListPanel { rows, .. } = &jwm.features.system_ui else {
+            panic!("expected workscene preview");
+        };
+        assert!(
+            rows.iter()
+                .any(|row| row.key == "present" && row.text.contains("JWM Notes"))
+        );
+        assert!(!rows.iter().any(|row| row.key.starts_with("application:")));
+    }
+
+    #[test]
+    fn exact_desktop_identity_matches_notes_without_a_fuzzy_dotted_suffix() {
+        let notes_id = Some("org.jwm.Notes");
+        assert!(!app_identity_matches(
+            "org.jwm.Notes",
+            "",
+            "JWM Notes",
+            "jwm-notes"
+        ));
+        assert!(declared_identity_matches(
+            "org.jwm.notes",
+            "",
+            notes_id,
+            None
+        ));
+        assert!(declared_identity_matches(
+            "LegacyClass",
+            "org.jwm.notes",
+            None,
+            notes_id
+        ));
+        assert!(!declared_identity_matches(
+            "org.unrelated.Notes",
+            "Notes",
+            notes_id,
+            notes_id
+        ));
+        assert!(!declared_identity_matches("", "", None, None));
     }
 
     #[test]
