@@ -302,13 +302,24 @@ impl Jwm {
             _ => return self.lastlayout(backend, arg),
         };
 
+        self.set_layout_on_monitor(backend, sel_mon_key, layout)
+    }
+
+    /// Apply the ordinary layout transition to an explicit output without
+    /// selecting it. Workscene layout restoration is not a focus action.
+    pub(crate) fn set_layout_on_monitor(
+        &mut self,
+        backend: &mut dyn Backend,
+        monitor: MonitorKey,
+        layout: Rc<LayoutEnum>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // A layout key is idempotent: re-pressing it is a no-op, not a flip
         // to whatever invisible state the other slot happened to hold.
-        if *self.current_selected_layout(sel_mon_key)? == *layout {
+        if *layout == LayoutEnum::ANY || *self.current_selected_layout(monitor)? == *layout {
             return Ok(());
         }
 
-        self.apply_layout_change(backend, sel_mon_key, |this, mon_key| {
+        self.apply_layout_change(backend, monitor, |this, mon_key| {
             let cur_tag = this.pertag_current_tag(mon_key)?;
             this.set_new_layout(mon_key, &layout, cur_tag);
             Ok(layout.clone())
