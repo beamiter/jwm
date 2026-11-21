@@ -226,6 +226,8 @@ pub(crate) struct Notes {
     pub rows: NotesRows,
     query_text: String,
     query_generation: u64,
+    // A save can refresh a settled filter without blanking its visible list.
+    painted_save_refresh: bool,
     search_wake: Option<SearchWake>,
     search_active: Option<ActiveSearch>,
     pending_search: Option<String>,
@@ -250,6 +252,7 @@ impl Notes {
             rows: vec![],
             query_text: String::new(),
             query_generation: 0,
+            painted_save_refresh: false,
             search_wake: None,
             search_active: None,
             pending_search: None,
@@ -360,6 +363,17 @@ impl Notes {
         }
         Ok(())
     }
+    /// Complete the write before acknowledging it, but rebuild the notebook
+    /// results off the input loop. The existing worker cancels older scans.
+    pub fn autosave(&mut self) -> Result<(), String> {
+        if self.persist()? && self.managed {
+            let keep_painted = !self.rows.is_empty()
+                && (self.current_rows().is_some() || self.painted_save_refresh());
+            self.update_query();
+            self.painted_save_refresh = keep_painted && self.search_pending();
+        }
+        Ok(())
+    }
     pub fn open_result(&mut self, path: PathBuf) -> Result<(), String> {
         // Save before loading another note, but scan the result list only
         // once. If the save succeeded and the load failed, still refresh to
@@ -416,6 +430,10 @@ impl Notes {
         self.publish_rows(rows);
     }
 
+    pub fn painted_save_refresh(&self) -> bool {
+        self.painted_save_refresh && self.query_text == self.search.text && self.search_pending()
+    }
+
     fn advance_query(&mut self) {
         if self.query_text != self.search.text {
             self.query_text.clone_from(&self.search.text);
@@ -450,6 +468,7 @@ impl Notes {
     }
 
     pub fn update_query(&mut self) {
+        self.painted_save_refresh = false;
         if self.search_wake.is_none() {
             self.refresh();
             return;
@@ -517,6 +536,7 @@ impl Notes {
     }
 
     fn publish_rows(&mut self, rows: NotesRows) {
+        self.painted_save_refresh = false;
         self.rows = rows;
         self.list_scroll = self
             .list_scroll
@@ -596,6 +616,101 @@ mod tests {
             std::fs::read_to_string(&current).unwrap(),
             "needle source text"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn autosave_persists_before_return_and_publishes_only_the_latest_search() {
+        let dir = std::env::temp_dir().join(format!("jwm-autosave-worker-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let current = dir.join("current.txt");
+        let other = dir.join("other.txt");
+        std::fs::write(&current, "old title").unwrap();
+        std::fs::write(&other, "another old title").unwrap();
+        let mut notes = Notes::new(Some(current.clone())).unwrap();
+        notes.managed = true;
+        notes.directory = dir.clone();
+        notes.refresh();
+        let sync_refreshes = notes.refreshes;
+        let (send, ready) = mpsc::channel();
+        notes.set_search_wake(Arc::new(move || {
+            let _ = send.send(());
+        }));
+        let wait = || {
+            ready
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+        };
+
+        notes.search.text = "old".into();
+        notes.update_query();
+        wait(); // Result is queued but not polled yet.
+
+        notes.editor = Editor::new("intermediate title".into());
+        notes.edited();
+        notes.autosave().unwrap();
+        assert!(!notes.dirty && notes.due.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&current).unwrap(),
+            "intermediate title"
+        );
+        assert_eq!(notes.status, "已保存");
+        assert!(notes.current_rows().is_none());
+
+        notes.search.text = "latest".into();
+        notes.update_query();
+        notes.editor = Editor::new("latest title".into());
+        notes.edited();
+        notes.autosave().unwrap();
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), "latest title");
+        assert!(notes.current_rows().is_none());
+        assert!(!notes.poll_search()); // Discard the old result and start the newest.
+        assert!(notes.current_rows().is_none());
+        wait();
+        assert!(notes.poll_search());
+        assert!(notes.current_rows().is_some());
+        assert_eq!(notes.rows, vec![(current, "latest title".into())]);
+        assert_eq!(notes.refreshes, sync_refreshes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_autosave_keeps_settled_rows_painted_but_never_actions_an_outdated_filter() {
+        let dir = std::env::temp_dir().join(format!("jwm-autosave-paint-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let current = dir.join("current.txt");
+        std::fs::write(&current, "old title").unwrap();
+        let mut notes = Notes::new(Some(current.clone())).unwrap();
+        notes.managed = true;
+        notes.directory = dir.clone();
+        notes.search.text = "old".into();
+        notes.refresh();
+        let (send, ready) = mpsc::channel();
+        notes.set_search_wake(Arc::new(move || {
+            let _ = send.send(());
+        }));
+        let wait = || {
+            ready
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+        };
+
+        notes.editor = Editor::new("new title".into());
+        notes.edited();
+        notes.autosave().unwrap();
+        assert!(notes.painted_save_refresh());
+        assert_eq!(notes.rows, vec![(current.clone(), "old title".into())]);
+        assert!(notes.current_rows().is_none());
+        wait();
+
+        notes.search.text = "new".into();
+        notes.update_query();
+        assert!(!notes.painted_save_refresh());
+        assert!(!notes.poll_search());
+        wait();
+        assert!(notes.poll_search());
+        assert!(!notes.painted_save_refresh() && notes.current_rows().is_some());
+        assert_eq!(notes.rows, vec![(current, "new title".into())]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
