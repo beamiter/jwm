@@ -6,6 +6,7 @@ pub const REQUEST_LEN: usize = 56;
 pub const STATUS_LEN: usize = 33;
 pub const ACTION_LEN: usize = 48;
 pub const LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
+pub(super) const MANAGED_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub const MAX_SEQUENCE: u64 = 60_000;
 pub(super) const GESTURE_CONSENT_REQUIRED: &str =
     "Wayland gestures require explicit host permission";

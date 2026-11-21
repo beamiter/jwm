@@ -1099,9 +1099,27 @@ fn native_cli_wayland_gestures_hold_through_video_release_on_resize_and_switch()
     let (pointer, keyboard) = bind_inputs(&mut session.fixture.native, app, 7);
     focus(&mut session.fixture.native, app);
     app.client.events();
+    session.fixture.hold_feedback = true;
+    session.fixture.configure_viewer((360, 270));
+    session
+        .fixture
+        .wait(&mut gl, "host resized before the new input request", |f| {
+            f.host.text().contains("encoding to fit 360x270")
+        });
     session.request_input(&second, 2);
     session.accepted(&mut gl, 2, true);
     session.focus_viewer(&mut gl);
+    session.fixture.wait(
+        &mut gl,
+        "input request is queued before replacement presentation",
+        |f| {
+            f.host
+                .text()
+                .contains("queued managed input preparation for Wayland source epoch 2")
+        },
+    );
+    assert!(!remote_control::active(&session.fixture.native.state));
+    session.fixture.hold_feedback = false;
     wait_gesture_proof(&mut session, &mut gl, None);
     session.fixture.left_button(true);
     let mut blue_input = Recipient::default();
