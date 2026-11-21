@@ -9175,8 +9175,7 @@ mod udev_backend_selection_tests {
             "built-in lock and VT pause must purge queued repeat presses"
         );
 
-        let state = include_str!("state.rs");
-        let state_production = state.split_once("#[cfg(test)]").unwrap().0;
+        let state_production = crate::backend::wayland::state::production_state_source();
         assert!(state_production.contains("session_lock_epoch = self.session_lock_epoch"));
         assert!(state_production.contains("BackendEvent::KeyPress { .. }"));
     }
