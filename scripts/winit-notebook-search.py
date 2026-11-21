@@ -247,6 +247,27 @@ def stop_xvfb(child):
         return "SIGKILL-fallback", child.wait(timeout=2)
 
 
+def search_target_receipt(trace):
+    """A fresh real control target reset and live sidebar caret geometry."""
+    reset = None
+    enabled = False
+    for line in trace.splitlines():
+        event = re.search(r"-> zwp_text_input_v3@(\d+)\.(disable|enable|set_cursor_rectangle)\((.*)\)", line)
+        if not event:
+            continue
+        obj, call, params = event.groups()
+        if call == "disable":
+            reset = (obj, line)
+            enabled = False
+        elif reset and obj == reset[0] and call == "enable":
+            enabled = line
+        elif reset and enabled and obj == reset[0] and call == "set_cursor_rectangle":
+            values = tuple(int(v) for v in re.findall(r"-?\d+", params))
+            if values == (20, 148, 2, 20):
+                return {"disable": reset[1], "enable": enabled, "caret": line}
+    return None
+
+
 def seed(private_root: Path, count: int) -> dict:
     if count not in (40, 1000):
         raise ValueError("unsupported fixture lane")
@@ -452,7 +473,10 @@ def run(args, out, report):
             wait(lambda: title() == initial, "initial synthetic active note did not open")
             # Explicitly turn the engine off while sending the ordinary search shortcut.
             cmd("fcitx5-remote", "-c", e=native)
+            focus_mark = len(read(notes_log))
             cmd("xdotool", "key", "--delay", "0", "ctrl+f")
+            report["search_target"] = wait(lambda: search_target_receipt(read(notes_log)[focus_mark:]),
+                                           "Notes did not acknowledge focus in the sidebar search field", 5)
             cmd("fcitx5-remote", "-s", "pinyin", e=native)
             cmd("fcitx5-remote", "-o", e=native)
             require(cmd("fcitx5-remote", "-n", e=native) == "pinyin", "Pinyin not active")
@@ -505,14 +529,21 @@ def run(args, out, report):
                 require(len(pixels) == 180 * 300 * 3, "unexpected lower-list crop")
                 return hashlib.sha256(pixels).hexdigest()
 
-            cmd("xdotool", "mousemove", "--sync", 90, 400, "click", "--repeat", "8", "5")
+            # Put the wheel hover and cursor outside the lower-list control ROI.
+            # In the first large run the product retained scroll, but our first
+            # scrolled screenshot still contained the departing pointer/hover.
+            cmd("xdotool", "mousemove", "--sync", 90, 250, "click", "--repeat", "8", "5")
             cmd("xdotool", "mousemove", "--window", xid, int(dims["WIDTH"]) - 8,
                 int(dims["HEIGHT"]) - 8)
             lower_idle = row_pixels("idle.png")
+            previous_rows = None
             def scrolled():
+                nonlocal previous_rows
                 image = capture("search-scrolled.png")
                 digest = row_pixels(image["image"])
-                return (image, digest) if digest != lower_idle else None
+                stable = digest != lower_idle and digest == previous_rows
+                previous_rows = digest
+                return (image, digest) if stable else None
             scrolled_frame, scrolled_rows = wait(scrolled, "owned scroll did not change lower result list")
             report["scroll"] = {"image": scrolled_frame, "lower_rows_sha256": scrolled_rows}
             save()
@@ -689,8 +720,10 @@ def main():
         run(a, a.out, report)
         report["status"] = "search-protocol-and-navigation-verified-pixel-review-pending"
         return 0
-    except Exception:
+    except Exception as error:
         (a.out / "error.log").write_text(traceback.format_exc())
+        print(json.dumps({"notes": a.note_count, "phase": report["phase"], "failure_type": type(error).__name__}),
+              flush=True)
         return 1
     finally:
         (a.out / "result.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
