@@ -118,19 +118,27 @@ def main():
                     if exc.returncode == 1:
                         return None
                     raise
-                return next((row for row in context()["windows"]
-                             if int(row["id"]) == xid), None)
+                # JWM's handle is a backend-local ID, not the native XID.
+                # Join both views by a unique title in this private display.
+                rows = [r for r in context()["windows"] if r["title"] == name]
+                if len(rows) != 1:
+                    return None
+                assert name in run("xprop", "-id", xid, "WM_NAME")
+                return dict(rows[0], xid=xid)
             windows.append(wait(window, "inert window not managed"))
         original, replacement = windows
+        assert original["xid"] != replacement["xid"]
+        assert original["target_token"] != replacement["target_token"]
+        report["managed_windows"] = windows
         old = dict(session_id=session_id, project_id="fixture-project", provider="forge",
                    host_id="synthetic-host", host_incarnation="boot:old", pane_id="pane:old",
                    window_token=original["target_token"], title="Original inert pane",
                    status="running", can_reveal=True, revision=1)
         new = dict(old, host_incarnation="boot:new", pane_id="pane:new",
                    window_token=replacement["target_token"], title="Replacement inert pane")
-        run("xdotool", "windowactivate", "--sync", original["id"])
+        run("xdotool", "windowactivate", "--sync", original["xid"])
         wait(lambda: focused() == original["target_token"] and
-                     active_xid() == int(original["id"]), "original window not focused")
+                     active_xid() == original["xid"], "original window not focused")
         register(old)
         show()
         shot("old-preview")
@@ -147,15 +155,18 @@ def main():
         assert not requests(old)
         if args.candidate:
             assert not requests(new) and focused() == original["target_token"]
-            assert active_xid() == int(original["id"])
+            assert active_xid() == original["xid"]
         else:
             queued, = requests(new)
             assert queued["status"] == "queued" and queued["pane_id"] == new["pane_id"]
-            assert focused() == new["window_token"] and active_xid() == int(replacement["id"])
+            assert focused() == new["window_token"] and active_xid() == replacement["xid"]
             report["baseline_receipt"] = complete(queued)
 
         dismiss()
-        run("xdotool", "windowactivate", "--sync", original["id"])
+        expected = original["xid"] if args.candidate else replacement["xid"]
+        wait(lambda: active_xid() == expected, "modal dismissal did not preserve expected focus")
+        report["stale_xid_after_dismiss"] = active_xid()
+        run("xdotool", "windowactivate", "--sync", original["xid"])
         wait(lambda: focused() == original["target_token"], "original window not refocused")
         show()
         shot("fresh-preview")
@@ -163,7 +174,7 @@ def main():
         key("Down", "Return")
         queued, = [r for r in requests(new) if r["operation_id"] not in before]
         assert queued["status"] == "queued" and queued["pane_id"] == new["pane_id"]
-        assert focused() == new["window_token"] and active_xid() == int(replacement["id"])
+        assert focused() == new["window_token"] and active_xid() == replacement["xid"]
         report["fresh_receipt"] = complete(queued)
         report["fresh_focus"] = focused()
         shot("fresh-action")
