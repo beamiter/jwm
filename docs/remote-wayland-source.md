@@ -14,19 +14,33 @@ jwm-remote host --wayland-select --once --key-file /path/to/session.key
 ```
 
 The trusted local host enumerates current foreign-toplevel handles on one
-Wayland connection and asks for a one-based index on its own stdin. Titles and
-application IDs are bounded, escaped labels only, not lookup keys. The selected
-live protocol resource is retained while creating its capture source and session
-on that same connection. There is no identifier re-resolution, title matching,
-automatic replacement, reconnect or source switch. An invalid choice, closed
-handle or timeout ends the attempt. The host creates this session before it
-announces a network listener.
+Wayland connection and asks for one-based indices on its own stdin. Enter one
+index to share a single window. For plain view-only sharing or managed one-shot
+combined control, enter up to 32 distinct comma-separated indices, such as
+`3,1`. The first window is shared initially. The host retains an original
+native capture source for each chosen window before announcing a network
+listener. Titles and application IDs are bounded local labels. The network
+catalog contains only session-local source
+IDs and labels such as **Authorized Wayland window 2**.
+
+A managed view-only viewer can switch to another granted window. The host
+destroys the previous capture session and waits for the compositor to drain
+its callbacks before opening a session on the retained target. The viewer
+rebuilds its `xdg_toplevel` and publishes the new catalog after the first
+matching presentation. A closed or revoked target ends the session. The
+host never resolves a replacement by title, reconnects or falls back to an
+output. Multiple controlled windows require managed `session --viewer-backend
+wayland --control` with `--allow-wayland-control` on the host. Each window
+has its own one-shot lease. A switch waits for the host to release the old
+lease. The next window starts view-only and requires an explicit input request
+after presentation. Use a single window for other scoped input modes,
+resumable control, popup capture, resize-follow or lossless sessions.
 
 `--key-stdin` cannot be combined with local selection: they would compete for
 stdin. Use a key file without putting key contents in logs or command history.
 The default network listener remains loopback; the normal transport key and
-trusted-LAN restrictions continue to apply. The network viewer cannot choose
-which native window to share.
+trusted-LAN restrictions continue to apply. The local selection determines
+which windows the network viewer can display.
 
 This authorization boundary is the user explicitly launching a trusted local
 host and selecting its current resource. Existing compositor capture globals
@@ -36,16 +50,21 @@ therefore does not use an X11 nonce or cross-connection native window lookup.
 
 ## Narrow capture contract
 
-Only the selected native surface tree at logical-resolution scale 1 may be rendered. There is no desktop,
-output, root-rectangle or overlay fallback. Global cursors, keyboard, pointer,
-clipboard and remote resize remain disabled. Extra source grants, X11 selection
-options and input permissions are rejected rather than ignored.
+Only the current native surface tree at logical-resolution scale 1 may be
+rendered. Global cursors, legacy input, clipboard and remote resize are
+disabled. X11 selection and source flags are rejected.
 
-The client uses one in-flight SHM capture at a time and accepts only bounded
-XRGB8888 buffers with a normal transform. Size, stride and allocation arithmetic
-must be checked before allocation/readback. The existing frame limits also bound
-the encoded canvas. Changing a viewer viewport changes only encoding, never the
-application's native geometry.
+The client uses one in-flight capture at a time and accepts bounded XRGB8888
+buffers with a normal transform. SHM is the default. A fixed, view-only session
+can opt into linear XRGB8888 DMA-BUF capture on the compositor's DRM device
+with `remote-h264`, `JWM_REMOTE_GPU_CAPTURE` and `--allow-h264`. VA-API reads the
+authorized extent and sends H.264. If GPU capture fails during a session, the
+host captures the same window again through SHM and sends JPEG.
+[GPU setup and diagnostics](remote-control.md#experimental-scheduling-controls)
+
+Size, stride and allocation arithmetic bound capture and readback. The existing
+frame limits also bound the encoded canvas. Changing a viewer viewport changes
+only encoding, never the application's native geometry.
 
 A closed/unmapped source, lock transition, native source size change, or committed
 buffer scale/transform change ends this
@@ -365,9 +384,10 @@ a new explicitly authorized session to regain control.
 This is a separate, default-off authorization, not a combination of the old
 keyboard and pointer flags. The host explicitly selects one surface with
 `host --wayland-select --once --allow-wayland-control`. The viewer explicitly
-uses `connect HOST --viewer-backend wayland --wayland-control`. Both peers must
-use application protocol **v35** (36-byte capabilities). Older peers are rejected;
-there is no protocol downgrade. Transport encryption independently requires v3.
+uses `connect HOST --viewer-backend wayland --wayland-control`. Managed sessions
+can select several individually authorized windows as described above. Both
+peers must use application protocol **v35** (36-byte capabilities). Transport
+encryption independently requires v3.
 
 The bundle has one native resource, source owner/instance, epoch, cross-type
 sequence and creation-time **30-second nonrenewable deadline**. It atomically
@@ -405,6 +425,63 @@ The viewer preserves actual event dispatch order in a bounded queue; it does not
 concatenate separately polled keyboard and pointer batches. A new video mapping
 can cancel an old pending click without treating that cancellation as a real
 pointer action while a key is held.
+
+### Compound gestures in managed sessions
+
+Both endpoints must opt in. On the JWM host, select the intended window or
+windows locally. Use the managed viewer to request a gesture lease.
+
+```sh
+jwm-remote host --wayland-select --once --allow-wayland-control --allow-wayland-gestures
+jwm-remote session HOST --viewer-backend wayland --control --wayland-gestures
+```
+
+Forge, Anvil, Ember, Frost and Aether offer **Modifier clicks and dragging**
+when the Wayland viewer and keyboard and pointer control are selected.
+The managed viewer reports when a frame is ready for starting a gesture.
+The authenticated peer must confirm input selector 3 in the v35 capability
+record. Gestures require source control manager v6 or newer on the host. An older
+helper, unavailable native capability or missing host consent fails startup.
+
+The compositor's private source control manager v6 adds an explicit
+`create_gesture_lease` request with a nonrenewable 30-second lifetime. It
+permits Shift, Control and left Alt with authorized pointer actions. A
+left-button drag starts from a fresh captured frame. Motion and release keep
+the same ordered lease, focus, capture geometry and original pointer
+receivers. The compositor balances the button on cancellation while the
+original pointer enter is still current. If the pointer leaves, the old focus
+ends and a later enter cannot receive the old release. Gesture button serials
+carry no desktop grab or drag-and-drop authority.
+
+During a held gesture, the original root may request whole-window pointer
+confinement. The compositor defers activation on the host seat and keeps
+delivering bounded absolute motion to the original receiver. Pointer locks,
+regional confinement and a confinement request outside the authorized drag
+end the lease and balance its held input.
+
+The v6 gesture mapping supports integer HiDPI and an xdg window geometry
+cropped within a root surface. The capture may include drawing subsurfaces
+whose committed input regions are explicitly empty. Coordinates and input
+receivers still belong to the focused root. A change in crop, root transform,
+subsurface topology, subsurface input eligibility, seat or source revokes the
+active lease. While a drag is held, video continues on
+the same source. The viewer coalesces motion and keeps the latest in-bounds
+point before button release. Leaving the displayed image or resizing the
+viewer ends that drag. Switching to another authorized window waits for native
+input cleanup and offers a new input request after its first presentation.
+
+With source control manager v7, the host helper requests
+`create_window_gesture_lease`. This permits menu clicks on subsurfaces inside
+the shared window, including GTK3 popovers. The compositor records the
+rendered tree's stacking order, bounds and input regions with the captured
+frame. A click must still hit the same tree when the viewer releases the
+button. Motion beyond the click tolerance or an expired click reservation
+cancels the click. Dragging and wheel input remain scoped to the root.
+Subsurface clicks use the original client's pointer receivers and restore
+its original client-side focus. The physical seat and compositor grab
+authority stay unchanged. Separate dialogs and xdg popups need their own
+authorization. Hosts with v6 continue using the v6 gesture request.
+Each window retains its own one-shot authorization.
 
 Validation for this slice includes pure wire/state/CLI checks and dedicated CI
 fixtures for actual wl_keyboard/wl_pointer recipients, shared lease revocation,

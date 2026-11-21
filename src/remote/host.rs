@@ -1,6 +1,9 @@
 //! Trusted-LAN remote desktop host.
 
+#[cfg(feature = "remote-h264")]
+use super::adaptive_video::{Decision, Resolution};
 use super::source_wire::FramePurpose;
+use super::telemetry::{QUANTILE_POLICY, StageSamples, StageStats};
 #[path = "host_control.rs"]
 mod control;
 #[path = "host_control_repair.rs"]
@@ -62,11 +65,13 @@ use signal_hook::flag;
 use std::collections::{BTreeSet, VecDeque};
 use std::io;
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
-use std::os::fd::AsFd;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use super::messages::{ApplicationProfile, ViewerFrameFeedback};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -84,6 +89,7 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const HELD_INPUT_SILENCE_TIMEOUT: Duration = Duration::from_millis(600);
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OUTSTANDING_FRAMES: u64 = 2;
+const CURSOR_SAMPLE_INTERVAL: Duration = Duration::from_millis(16);
 /// Largest record the host ever legitimately receives.
 ///
 /// The client sends only a hello, empty heartbeats, eight-byte frame
@@ -411,7 +417,7 @@ struct PendingFrame {
     native_proof_serial: Option<u64>,
     pointer_serial: Option<u64>,
     source_version: SourceVersion,
-    frame: CapturedFrame,
+    frame: CapturedPixels,
     captured_at: Instant,
     capture_completed_at: Instant,
     recycler: Option<CaptureImageRecycler>,
@@ -419,11 +425,60 @@ struct PendingFrame {
 
 impl Drop for PendingFrame {
     fn drop(&mut self) {
-        if let Some(recycler) = &self.recycler {
+        if let (Some(recycler), CapturedPixels::Rgb(frame)) = (&self.recycler, &mut self.frame) {
             // The encoder borrows frames and copies committed dirty tiles to
             // its own reference. No sender or mailbox reader can retain this
             // image when PendingFrame is dropped, including early-error paths.
-            recycler.recycle_image(std::mem::take(&mut self.frame.image));
+            recycler.recycle_image(std::mem::take(&mut frame.image));
+        }
+    }
+}
+
+enum CapturedPixels {
+    Rgb(CapturedFrame),
+    #[cfg(feature = "remote-h264")]
+    DmaBuf(super::gpu_host_video::Frame),
+}
+
+impl CapturedPixels {
+    fn rgb(&self) -> Option<&CapturedFrame> {
+        match self {
+            Self::Rgb(frame) => Some(frame),
+            #[cfg(feature = "remote-h264")]
+            Self::DmaBuf(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn test_rgb_mut(&mut self) -> &mut CapturedFrame {
+        match self {
+            Self::Rgb(frame) => frame,
+            #[cfg(feature = "remote-h264")]
+            _ => panic!("expected a CPU test frame"),
+        }
+    }
+
+    fn geometry_epoch(&self) -> u64 {
+        match self {
+            Self::Rgb(frame) => frame.geometry_epoch,
+            #[cfg(feature = "remote-h264")]
+            Self::DmaBuf(frame) => frame.geometry_epoch,
+        }
+    }
+
+    fn source_size(&self) -> (u16, u16) {
+        match self {
+            Self::Rgb(frame) => (frame.source_width, frame.source_height),
+            #[cfg(feature = "remote-h264")]
+            Self::DmaBuf(frame) => frame.source,
+        }
+    }
+
+    fn encoded_size(&self) -> (u32, u32) {
+        match self {
+            Self::Rgb(frame) => frame.image.dimensions(),
+            #[cfg(feature = "remote-h264")]
+            Self::DmaBuf(frame) => (frame.encoded.0.into(), frame.encoded.1.into()),
         }
     }
 }
@@ -657,7 +712,10 @@ fn newer_frame_supersedes_repair(
     newer: &PendingFrame,
 ) -> bool {
     current.source_version != newer.source_version
-        || !encoder.pending_lossless_matches(&newer.frame)
+        || newer
+            .frame
+            .rgb()
+            .is_none_or(|frame| !encoder.pending_lossless_matches(frame))
 }
 struct FrameSender {
     lossless_schedule: LosslessSchedule,
@@ -854,45 +912,6 @@ fn static_refinement_due(changed: Option<Instant>, refined: Option<Instant>, now
     now.saturating_duration_since(last) >= STATIC_REFINEMENT_INTERVAL
 }
 
-/// Exact quantiles of the most recent 128 observations in each reporting window.
-/// Fixed storage bounds memory even when a peer runs for a long time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StageSamples {
-    micros: [u64; 128],
-    count: usize,
-    next: usize,
-}
-
-impl Default for StageSamples {
-    fn default() -> Self {
-        Self {
-            micros: [0; 128],
-            count: 0,
-            next: 0,
-        }
-    }
-}
-
-impl StageSamples {
-    fn record(&mut self, elapsed: Duration) {
-        self.micros[self.next] = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
-        self.next = (self.next + 1) % self.micros.len();
-        self.count = (self.count + 1).min(self.micros.len());
-    }
-
-    fn json(self) -> serde_json::Value {
-        if self.count == 0 {
-            return serde_json::json!({"samples": 0, "p50_ms": null, "p95_ms": null, "p99_ms": null});
-        }
-        let mut values = self.micros;
-        values[..self.count].sort_unstable();
-        let percentile =
-            |percent: usize| values[(self.count * percent).div_ceil(100) - 1] as f64 / 1000.0;
-        serde_json::json!({"samples": self.count, "p50_ms": percentile(50),
-            "p95_ms": percentile(95), "p99_ms": percentile(99)})
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CaptureStageStats {
     elapsed: Duration,
@@ -927,6 +946,7 @@ struct X11CaptureStats {
     cpu_resize: CaptureStageStats,
     damage_notifications: u64,
     forced_refreshes: u64,
+    regional_readback: super::x11_capture::RegionReadbackMetrics,
 }
 
 impl X11CaptureStats {
@@ -942,12 +962,14 @@ impl X11CaptureStats {
         self.forced_refreshes = self
             .forced_refreshes
             .saturating_add(metrics.forced_refreshes);
+        self.regional_readback.merge(metrics.regional_readback);
     }
 
     fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "damage_notifications": self.damage_notifications,
             "forced_refreshes": self.forced_refreshes,
+            "regional_readback": self.regional_readback,
             "stages": {
                 "monitor_geometry_ms": self.monitor_geometry.json(),
                 "core_readback_ms": self.core_readback.json(),
@@ -975,6 +997,7 @@ struct HostTelemetryWindow {
     dirty_tiles: u64,
     total_tiles: u64,
     sent: u64,
+    scroll_copy_frames: u64,
     bytes: u64,
     drawn_acks: u64,
     drawn_bytes: u64,
@@ -982,6 +1005,12 @@ struct HostTelemetryWindow {
     viewer_superseded: u64,
     capture_mode: CaptureMode,
     x11_capture: Option<X11CaptureStats>,
+    #[cfg(feature = "remote-wayland")]
+    wayland_capture: Option<WaylandCaptureStats>,
+    last_sent_frame: Option<SentFrameScope>,
+    hardware_encode: HardwareEncodeStats,
+    cursor_poll: StageStats,
+    cursor_poll_interval: StageStats,
     capture_elapsed: Duration,
     dirty_scan_elapsed: Duration,
     dirty_scans: u64,
@@ -1025,6 +1054,38 @@ struct HostTelemetryWindow {
     max_queue_age: Duration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct SentFrameScope {
+    source_epoch: u64,
+    geometry_epoch: u64,
+    sequence: u64,
+    codec: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scroll_copy_dy: Option<i16>,
+    source_dimensions: (u16, u16),
+    encoded_dimensions: (u32, u32),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HardwareEncodeStats {
+    padding: StageStats,
+    copy: StageStats,
+    conversion: StageStats,
+    submit: StageStats,
+    output: StageStats,
+    native_import: StageStats,
+}
+
+#[cfg(feature = "remote-wayland")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WaylandCaptureStats {
+    readback: StageStats,
+    conversion: StageStats,
+    resize: StageStats,
+    readback_bytes: u64,
+    staging_growths: u64,
+}
+
 impl HostTelemetryWindow {
     fn has_activity(self) -> bool {
         self.scheduled != 0
@@ -1055,6 +1116,7 @@ struct HostTelemetryState {
 
 struct HostTelemetry {
     stats_json: bool,
+    correlation_id: Option<u128>,
     state: Mutex<HostTelemetryState>,
 }
 
@@ -1062,6 +1124,7 @@ struct HostTelemetry {
 struct HostTelemetrySnapshot {
     elapsed: Duration,
     window: HostTelemetryWindow,
+    correlation_id: Option<u128>,
 }
 
 impl HostTelemetry {
@@ -1072,6 +1135,7 @@ impl HostTelemetry {
     fn new_at(now: Instant) -> Self {
         Self {
             stats_json: false,
+            correlation_id: None,
             state: Mutex::new(HostTelemetryState {
                 window_started: now,
                 window: HostTelemetryWindow::default(),
@@ -1113,9 +1177,39 @@ impl HostTelemetry {
         });
     }
 
-    fn collect_x11_capture_metrics(&self, capture: &mut HostCapture) {
+    fn collect_capture_metrics(&self, capture: &mut HostCapture) {
         if let Some(metrics) = capture.take_x11_capture_metrics() {
             self.update(|window| window.x11_capture.get_or_insert_default().record(metrics));
+        }
+        #[cfg(feature = "remote-wayland")]
+        if let Some(observation) = capture.take_wayland_capture_observation() {
+            self.update(|window| {
+                let stats = window.wayland_capture.get_or_insert_default();
+                stats.readback.record(observation.readback);
+                stats.conversion.record(observation.conversion);
+                if let Some(resize) = observation.resize {
+                    stats.resize.record(resize);
+                }
+                stats.readback_bytes = stats
+                    .readback_bytes
+                    .saturating_add(observation.bytes_read as u64);
+                stats.staging_growths = stats
+                    .staging_growths
+                    .saturating_add(u64::from(observation.staging_grew));
+            });
+        }
+    }
+
+    fn record_cursor_poll(&self, previous: &mut Option<Instant>, now: Instant) {
+        if self.stats_json {
+            self.update(|window| {
+                window.cursor_poll.record(now.elapsed());
+                if let Some(previous) = previous.replace(now) {
+                    window
+                        .cursor_poll_interval
+                        .record(now.saturating_duration_since(previous));
+                }
+            });
         }
     }
 
@@ -1220,10 +1314,10 @@ impl HostTelemetry {
         });
     }
 
-    fn record_dimensions(&self, frame: &CapturedFrame) {
+    fn record_dimensions(&self, frame: &CapturedPixels) {
         self.update(|window| {
-            window.source_dimensions = (frame.source_width, frame.source_height);
-            window.encoded_dimensions = frame.image.dimensions();
+            window.source_dimensions = frame.source_size();
+            window.encoded_dimensions = frame.encoded_size();
         });
     }
 
@@ -1236,9 +1330,19 @@ impl HostTelemetry {
     /// counts, durations and samples must never be published separately.
     /// Total write time ends at successful flush (wait + socket), excluding
     /// this accounting update and the subsequent writer-lock release.
-    fn record_sent(&self, bytes: usize, wait: Duration, socket: Duration) {
+    fn record_sent(
+        &self,
+        bytes: usize,
+        wait: Duration,
+        socket: Duration,
+        scope: Option<SentFrameScope>,
+    ) {
         self.update(|window| {
+            window.last_sent_frame = scope;
             window.sent = window.sent.saturating_add(1);
+            if scope.is_some_and(|frame| frame.scroll_copy_dy.is_some()) {
+                window.scroll_copy_frames = window.scroll_copy_frames.saturating_add(1);
+            }
             window.bytes = window
                 .bytes
                 .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
@@ -1249,6 +1353,35 @@ impl HostTelemetry {
             window.socket_write_elapsed = window.socket_write_elapsed.saturating_add(socket);
             window.writer_wait_samples.record(wait);
             window.socket_write_samples.record(socket);
+        });
+    }
+
+    #[cfg(feature = "remote-h264")]
+    fn record_hardware_stages(
+        &self,
+        padding: Option<Duration>,
+        stages: super::h264::EncodeTimings,
+    ) {
+        self.update(|window| {
+            let measured = &mut window.hardware_encode;
+            if let Some(padding) = padding {
+                measured.padding.record(padding);
+            }
+            measured.copy.record(stages.rgb_copy);
+            measured.conversion.record(stages.conversion);
+            measured.submit.record(stages.submit);
+            measured.output.record(stages.output);
+        });
+    }
+
+    #[cfg(feature = "remote-h264")]
+    fn record_native_hardware_stages(&self, stages: super::gpu_host_video::Timings) {
+        self.update(|window| {
+            let measured = &mut window.hardware_encode;
+            measured.native_import.record(stages.import);
+            measured.conversion.record(stages.conversion);
+            measured.submit.record(stages.submit);
+            measured.output.record(stages.output);
         });
     }
 
@@ -1289,7 +1422,11 @@ impl HostTelemetry {
         }
         let window = std::mem::take(&mut state.window);
         state.window_started = now;
-        Some(HostTelemetrySnapshot { elapsed, window })
+        Some(HostTelemetrySnapshot {
+            elapsed,
+            window,
+            correlation_id: self.correlation_id,
+        })
     }
 }
 
@@ -2179,6 +2316,7 @@ pub struct HostOptions {
     pub allow_wayland_keyboard: bool,
     pub allow_wayland_pointer: bool,
     pub allow_wayland_control: bool,
+    pub allow_wayland_gestures: bool,
     pub allow_resumable_control: bool,
     pub allow_wayland_text: bool,
     pub allow_wayland_popup_pointer: bool,
@@ -2230,9 +2368,21 @@ fn source_label(area: &CaptureArea) -> String {
     }
 }
 
+#[derive(Clone)]
+enum SourceGrant {
+    X11(CaptureArea),
+    Wayland,
+}
+
+impl From<CaptureArea> for SourceGrant {
+    fn from(area: CaptureArea) -> Self {
+        Self::X11(area)
+    }
+}
+
 struct HostSourceState {
-    policy: SourceSession,
-    pending: Option<(SourceVersion, CaptureArea)>,
+    policy: SourceSession<SourceGrant>,
+    pending: Option<(SourceVersion, SourceGrant)>,
     input_area: InputArea,
     geometry_epoch: u64,
     presented_geometry: Option<u64>,
@@ -2472,14 +2622,18 @@ struct SourceControl {
     proof_delta: Option<(bool, Arc<ProofDeltaProbe>)>,
     input_wake: std::sync::OnceLock<input_wake::InputWake>,
     #[cfg(feature = "remote-h264")]
-    hardware_video: std::sync::OnceLock<(FrameCodec, super::messages::FrameLimits, u16)>,
+    hardware_video: std::sync::OnceLock<HardwareVideoConfig>,
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
     input_wake_probe: Option<Arc<InputWakeProbe>>,
-    follow_geometry: AtomicBool,
+    strict_frame_geometry: AtomicBool,
     text_enabled: AtomicBool,
     text_attempted: AtomicBool,
     text_request: Mutex<Option<super::wayland_text_wire::TextCommit>>,
     control_enabled: AtomicBool,
+    managed_source_control: AtomicBool,
+    control_prepare: Mutex<Option<DrawnScope>>,
+    control_lease_epoch: AtomicU64,
+    control_gestures: AtomicBool,
     resumable_control_enabled: AtomicBool,
     control_revoke: AtomicBool,
     control_queue: Mutex<VecDeque<ControlCommand>>,
@@ -2542,7 +2696,7 @@ impl SourceControl {
     }
 
     fn new(
-        grants: Vec<(SourceId, CaptureArea)>,
+        grants: Vec<(SourceId, impl Into<SourceGrant>)>,
         area: InputArea,
         geometry_epoch: u64,
     ) -> RemoteResult<Self> {
@@ -2562,11 +2716,15 @@ impl SourceControl {
             hardware_video: std::sync::OnceLock::new(),
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             input_wake_probe: input_wake::test_probe(),
-            follow_geometry: AtomicBool::new(false),
+            strict_frame_geometry: AtomicBool::new(false),
             text_enabled: AtomicBool::new(false),
             text_attempted: AtomicBool::new(false),
             text_request: Mutex::new(None),
             control_enabled: AtomicBool::new(false),
+            managed_source_control: AtomicBool::new(false),
+            control_prepare: Mutex::new(None),
+            control_lease_epoch: AtomicU64::new(0),
+            control_gestures: AtomicBool::new(false),
             resumable_control_enabled: AtomicBool::new(false),
             control_revoke: AtomicBool::new(false),
             control_queue: Mutex::new(VecDeque::new()),
@@ -2581,7 +2739,10 @@ impl SourceControl {
             control_repair: Mutex::new(control_repair::Control::default()),
             pointer_frame: Mutex::new(None),
             state: Mutex::new(HostSourceState {
-                policy: SourceSession::new(grants, SourceId(1))?,
+                policy: SourceSession::from_validated_grants(
+                    grants.into_iter().map(|(id, grant)| (id, grant.into())),
+                    SourceId(1),
+                )?,
                 pending: None,
                 input_area: area,
                 geometry_epoch,
@@ -2665,6 +2826,16 @@ fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
 }
 
 fn validate_window_policy(options: &HostOptions) -> RemoteResult<()> {
+    if options.allow_wayland_gestures
+        && (!options.wayland_select
+            || !options.allow_wayland_control
+            || options.allow_resumable_control
+            || options.allow_static_lossless)
+    {
+        return Err(
+            invalid_data("Wayland gestures require one-shot combined native control").into(),
+        );
+    }
     if options.max_control_duration.is_extended() && !options.allow_resumable_control {
         return Err(
             invalid_data("extended control limit requires explicit resumable permission").into(),
@@ -2891,11 +3062,41 @@ pub fn run_host_with_hardware(options: HostOptions, allow_h264: bool) -> RemoteR
     run_host_with_video_codecs(options, allow_h264, false)
 }
 
+fn parse_hevc444_lossless(value: Option<&std::ffi::OsStr>) -> io::Result<bool> {
+    match value {
+        None => Ok(false),
+        Some(value) if value == "0" => Ok(false),
+        Some(value) if value == "1" => Ok(true),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "JWM_REMOTE_HEVC444_LOSSLESS must be 0 or 1",
+        )),
+    }
+}
+
 pub fn run_host_with_video_codecs(
     options: HostOptions,
     allow_h264: bool,
     allow_hevc444: bool,
 ) -> RemoteResult<()> {
+    let hevc444_lossless =
+        parse_hevc444_lossless(std::env::var_os("JWM_REMOTE_HEVC444_LOSSLESS").as_deref())?;
+    if hevc444_lossless {
+        if !super::capabilities::HARDWARE_VIDEO {
+            return Err("HEVC 4:4:4 lossless requires the remote-h264 build feature".into());
+        }
+        if !allow_hevc444
+            || options.wayland_select
+            || matches!(options.capture_area, CaptureArea::Window(_))
+        {
+            return Err("HEVC 4:4:4 lossless requires an HEVC-enabled X11 desktop host".into());
+        }
+        for name in ["JWM_REMOTE_ADAPT_VIDEO", "JWM_REMOTE_GPU_CAPTURE"] {
+            if std::env::var_os(name).is_some() {
+                return Err(format!("HEVC 4:4:4 lossless cannot be combined with {name}").into());
+            }
+        }
+    }
     options.frame_limits.validate()?;
     JpegQualityController::new_at(
         options.jpeg_quality,
@@ -2917,11 +3118,20 @@ pub fn run_host_with_video_codecs(
                     options.wayland_display.as_deref(),
                 )?
             } else {
+                let multiple = !(options.wayland_resize_follow
+                    || options.wayland_popups
+                    || options.allow_wayland_keyboard
+                    || options.allow_wayland_pointer
+                    || options.allow_resumable_control
+                    || options.allow_wayland_text
+                    || options.allow_static_lossless
+                    || options.scroll_copy);
                 super::wayland_capture::WaylandCapture::connect(
                     options.wayland_display.as_deref(),
                     options.max_width,
                     options.wayland_resize_follow,
                     options.wayland_popups,
+                    multiple,
                 )?
             };
             Some(GrantedCapture::Wayland(Box::new(capture)))
@@ -2974,13 +3184,14 @@ pub fn run_host_with_video_codecs(
     let once = options.once;
     let session_shutdown = Arc::clone(&shutdown);
     accept_connections(&listener, key, &shutdown, once, move |peer| {
-        serve_authenticated(
+        serve_authenticated_with_video_policy(
             peer,
             &options,
             &session_shutdown,
             &window_capture,
             allow_h264,
             allow_hevc444,
+            hevc444_lossless,
         )
     })
 }
@@ -3283,9 +3494,11 @@ fn accept_error_needs_backoff(error: &io::Error) -> bool {
 /// A peer that proved it holds the key and sent a well-formed `Hello`.
 struct AuthenticatedPeer {
     accepted_at: Instant,
+    correlation_id: u128,
     reader: SessionReader<TcpStream>,
     writer: SessionWriter<DeadlineWriter<TcpStream>>,
     hello: ClientHello,
+    application_offer: ApplicationProfile,
 }
 
 /// Run the handshake and read the peer's `Hello`, all under one absolute
@@ -3296,6 +3509,7 @@ fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<Authenti
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let mut handshake_deadline = TcpStreamDeadline::arm(&stream, HANDSHAKE_TIMEOUT)?;
     let session_keys = server_handshake(&mut stream, key, rand::random())?;
+    let correlation_id = session_keys.correlation_id;
     let reader_stream = stream.try_clone()?;
     reader_stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let (receive_key, send_key) = session_keys.into_server();
@@ -3309,8 +3523,8 @@ fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<Authenti
             invalid_data("first authenticated client message must negotiate the session").into(),
         );
     }
-    let hello = match ClientHello::decode(&hello_payload) {
-        Ok(hello) => hello,
+    let (hello, application_offer) = match ClientHello::decode_offer(&hello_payload) {
+        Ok(offer) => offer,
         Err(error) => {
             // Usually a viewer from another release. It holds the key, and
             // every release prints a refusal reason, so say which version
@@ -3325,28 +3539,42 @@ fn authenticate_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<Authenti
     handshake_deadline.cancel();
     Ok(AuthenticatedPeer {
         accepted_at: Instant::now(),
+        correlation_id,
         reader,
         writer,
         hello,
+        application_offer,
     })
 }
 
-fn hardware_encoder_available(codec: FrameCodec) -> bool {
+fn hardware_encoder_available(codec: FrameCodec, hevc444_lossless: bool) -> bool {
     #[cfg(feature = "remote-h264")]
-    match super::h264::probe_encode(codec) {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("jwm-remote: {} NVENC probe failed: {error}", codec.name());
-            false
+    {
+        let result = if hevc444_lossless {
+            super::h264::probe_hevc444_lossless()
+        } else {
+            super::capabilities::probe_encoder(codec).map(|_| ())
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                let mode = if hevc444_lossless { " lossless" } else { "" };
+                eprintln!(
+                    "jwm-remote: {}{mode} NVENC probe failed: {error}",
+                    codec.name()
+                );
+                false
+            }
         }
     }
     #[cfg(not(feature = "remote-h264"))]
     {
-        let _ = codec;
+        let _ = (codec, hevc444_lossless);
         false
     }
 }
 
+#[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 fn serve_authenticated(
     peer: AuthenticatedPeer,
     options: &HostOptions,
@@ -3355,11 +3583,33 @@ fn serve_authenticated(
     allow_h264: bool,
     allow_hevc444: bool,
 ) -> RemoteResult<()> {
+    serve_authenticated_with_video_policy(
+        peer,
+        options,
+        shutdown,
+        window_capture,
+        allow_h264,
+        allow_hevc444,
+        false,
+    )
+}
+
+fn serve_authenticated_with_video_policy(
+    peer: AuthenticatedPeer,
+    options: &HostOptions,
+    shutdown: &Arc<AtomicBool>,
+    window_capture: &Mutex<Option<GrantedCapture>>,
+    allow_h264: bool,
+    allow_hevc444: bool,
+    hevc444_lossless: bool,
+) -> RemoteResult<()> {
     let AuthenticatedPeer {
         accepted_at,
+        correlation_id,
         mut reader,
         mut writer,
         hello,
+        application_offer: _application_offer,
     } = peer;
     if options.allow_wayland_popup_pointer || hello.stream.wayland_popup_pointer {
         if !options.allow_wayland_popup_pointer || !hello.stream.wayland_popup_pointer {
@@ -3442,16 +3692,6 @@ fn serve_authenticated(
     let mut negotiated_stream = hello.stream;
     let desktop = matches!(&capture, HostCapture::Desktop(_));
     let offered = hello.stream.codec;
-    let can_use_hevc444 = desktop
-        && allow_hevc444
-        && offered == FrameCodec::Hevc444
-        && hardware_encoder_available(FrameCodec::Hevc444);
-    let can_use_h264 = desktop
-        && allow_h264
-        && offered.is_hardware()
-        && !can_use_hevc444
-        && hardware_encoder_available(FrameCodec::H264);
-    negotiated_stream.codec = offered.negotiate(can_use_h264, can_use_hevc444);
     negotiated_stream.frame_limits = frame_limits;
     negotiated_stream.scroll_copy = hello.stream.negotiate_scroll_copy(options.scroll_copy);
     negotiated_stream.static_lossless =
@@ -3491,6 +3731,26 @@ fn serve_authenticated(
     }
     negotiated_stream.wayland_control =
         hello.stream.wayland_control && options.allow_wayland_control;
+    let managed_source_control = negotiated_stream.wayland_control
+        && capture.wayland_grant_count().is_some_and(|count| count > 1);
+    let managed_wayland = hello.stream.input.managed_wayland();
+    let control_gestures =
+        hello.stream.input == super::messages::InputMode::WaylandControlWithGestures;
+    if managed_source_control && !managed_wayland {
+        let reason = "Wayland control with multiple windows requires a managed viewer";
+        decline_session(&mut writer, capture_refusal(reason));
+        return Err(permission_denied(reason).into());
+    }
+    if managed_wayland && !negotiated_stream.wayland_control {
+        let reason = "managed Wayland control requires explicit host permission";
+        decline_session(&mut writer, capture_refusal(reason));
+        return Err(permission_denied(reason).into());
+    }
+    if control_gestures && !options.allow_wayland_gestures {
+        let reason = super::wayland_control_wire::GESTURE_CONSENT_REQUIRED;
+        decline_session(&mut writer, capture_refusal(reason));
+        return Err(permission_denied(reason).into());
+    }
     negotiated_stream.resumable_control = hello.stream.negotiate_resumable_control(
         options.allow_resumable_control && negotiated_stream.wayland_control,
     )?;
@@ -3513,10 +3773,14 @@ fn serve_authenticated(
         {
             return Err(invalid_data("control cannot combine other input capabilities").into());
         }
-        capture.enable_control(
+        if let Err(error) = capture.enable_control(
             negotiated_stream.wayland_scroll,
             negotiated_stream.wayland_horizontal_scroll,
-        )?;
+            control_gestures,
+        ) {
+            decline_session(&mut writer, capture_refusal(&error.to_string()));
+            return Err(error);
+        }
         if negotiated_stream.resumable_control {
             use super::resumable_control::{LocalOptIn, Negotiated, VERSION};
             let permission = Negotiated::with_duration(
@@ -3560,6 +3824,59 @@ fn serve_authenticated(
     let can_separate = hello.stream.cursor == super::messages::CursorMode::Independent
         && capture.enable_cursor_plane();
     negotiated_stream.cursor = hello.stream.cursor.negotiate(can_separate);
+    #[cfg(feature = "remote-h264")]
+    let native_node = if allow_h264
+        && offered.is_hardware()
+        && !negotiated_stream.static_lossless
+        && let Some(path) = std::env::var_os("JWM_REMOTE_GPU_CAPTURE")
+    {
+        if options.scaling == ScalingPolicy::Cpu {
+            eprintln!(
+                "jwm-remote: skipping GPU capture because CPU scaling was explicitly selected"
+            );
+            None
+        } else {
+            match capture.probe_gpu_capture(std::path::Path::new(&path), options.fps.max(1)) {
+                Ok(node) => Some(node),
+                Err(error) => {
+                    eprintln!(
+                        "jwm-remote: GPU capture unavailable, using ordinary capture: {error}"
+                    );
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(feature = "remote-h264")]
+    let native = native_node.is_some();
+    #[cfg(not(feature = "remote-h264"))]
+    let native = false;
+    let lossless_session = hevc444_lossless && offered == FrameCodec::Hevc444;
+    let can_use_hevc444 = !native
+        && desktop
+        && allow_hevc444
+        && offered == FrameCodec::Hevc444
+        && hardware_encoder_available(FrameCodec::Hevc444, lossless_session);
+    let can_use_h264 = native
+        || (desktop
+            && allow_h264
+            && offered.is_hardware()
+            && !can_use_hevc444
+            && !lossless_session
+            && hardware_encoder_available(FrameCodec::H264, false));
+    negotiated_stream.codec = offered.negotiate(can_use_h264, can_use_hevc444);
+    if lossless_session && negotiated_stream.codec != FrameCodec::Hevc444 {
+        eprintln!("jwm-remote: HEVC 4:4:4 lossless unavailable, using ordinary JPEG capture");
+    } else if hevc444_lossless && !lossless_session {
+        eprintln!("jwm-remote: viewer did not offer HEVC 4:4:4, lossless encoding not selected");
+    }
+    if negotiated_stream.codec == FrameCodec::JpegTiles
+        && std::env::var_os("JWM_REMOTE_X11_REGIONS").as_deref() == Some("1".as_ref())
+    {
+        capture.enable_region_readback();
+    }
     // Injected pointer coordinates arrive in shared-area space; XTEST wants
     // root coordinates. Resolved once here rather than per event.
     let input_area = capture.input_area();
@@ -3653,7 +3970,15 @@ fn serve_authenticated(
         } else if negotiated_stream.wayland_text {
             reader.set_max_payload_len(super::wayland_text_wire::MAX_TEXT_BYTES + 26);
         }
-        let grants = host_source_grants(options)?;
+        let grants = match capture.wayland_grant_count() {
+            Some(count) => (1..=count as u32)
+                .map(|index| (SourceId(index), SourceGrant::Wayland))
+                .collect(),
+            None => host_source_grants(options)?
+                .into_iter()
+                .map(|(id, area)| (id, SourceGrant::X11(area)))
+                .collect::<Vec<_>>(),
+        };
         let catalog = SourceCatalog {
             current: SourceVersion {
                 source: SourceId(1),
@@ -3661,12 +3986,14 @@ fn serve_authenticated(
             },
             entries: grants
                 .iter()
-                .map(|(id, area)| SourceEntry {
+                .map(|(id, grant)| SourceEntry {
                     id: *id,
-                    label: if options.wayland_select {
-                        "Authorized Wayland surface".into()
-                    } else {
-                        source_label(area)
+                    label: match grant {
+                        SourceGrant::Wayland if grants.len() == 1 => {
+                            "Authorized Wayland surface".into()
+                        }
+                        SourceGrant::Wayland => format!("Authorized Wayland window {}", id.0),
+                        SourceGrant::X11(area) => source_label(area),
                     },
                 })
                 .collect(),
@@ -3676,16 +4003,52 @@ fn serve_authenticated(
             input_area,
             capture.geometry_epoch(),
         )?);
+        let strict_frame_geometry = options.wayland_resize_follow;
+        #[cfg(feature = "remote-h264")]
+        let mut strict_frame_geometry = strict_frame_geometry;
         #[cfg(feature = "remote-h264")]
         if negotiated_stream.codec.is_hardware() {
+            let fps = options.fps.max(1);
+            let policy = if native || lossless_session {
+                None
+            } else {
+                super::adaptive_video::Policy::from_environment()?
+            };
+            let adapt_resolution = policy
+                .map(|policy| policy.resolution_from_environment())
+                .transpose()?
+                .unwrap_or(false);
+            strict_frame_geometry |= adapt_resolution;
+            let encoder_name = if native { "VA-API DMA-BUF" } else { "NVENC" };
             sources
                 .hardware_video
-                .set((negotiated_stream.codec, frame_limits, options.fps.max(1)))
+                .set(HardwareVideoConfig {
+                    codec: negotiated_stream.codec,
+                    limits: frame_limits,
+                    fps,
+                    native_node,
+                    hevc444_lossless: lossless_session,
+                    policy,
+                    adapt_resolution,
+                    viewer_feedback: (_application_offer == ApplicationProfile::VideoFeedback
+                        && policy.is_some())
+                    .then(Mutex::default),
+                    target: super::adaptive_video::RateTarget::new(
+                        super::adaptive_video::Rate::fixed(fps),
+                    ),
+                    active: AtomicBool::new(true),
+                })
                 .map_err(|_| io::Error::other("hardware video codec already selected"))?;
             eprintln!(
-                "jwm-remote: {} NVENC negotiated",
-                negotiated_stream.codec.name()
+                "jwm-remote: {} {encoder_name} negotiated",
+                negotiated_stream.codec.name(),
             );
+            if let Some(policy) = policy {
+                eprintln!("jwm-remote: experimental hardware video adaptation active ({policy:?})");
+            }
+            if adapt_resolution {
+                eprintln!("jwm-remote: experimental NVENC resolution adaptation active");
+            }
         }
         if input_wake::enabled()
             && (negotiated_stream.wayland_text
@@ -3699,14 +4062,20 @@ fn serve_authenticated(
                 .map_err(|_| io::Error::other("native input wake initialized twice"))?;
         }
         sources
-            .follow_geometry
-            .store(options.wayland_resize_follow, Ordering::Release);
+            .strict_frame_geometry
+            .store(strict_frame_geometry, Ordering::Release);
         sources
             .text_enabled
             .store(negotiated_stream.wayland_text, Ordering::Release);
         sources
             .control_enabled
             .store(negotiated_stream.wayland_control, Ordering::Release);
+        sources
+            .managed_source_control
+            .store(managed_source_control, Ordering::Release);
+        sources
+            .control_gestures
+            .store(control_gestures, Ordering::Release);
         sources
             .resumable_control_enabled
             .store(negotiated_stream.resumable_control, Ordering::Release);
@@ -3732,6 +4101,20 @@ fn serve_authenticated(
         sources
             .scroll_copy
             .store(negotiated_stream.scroll_copy, Ordering::Release);
+        let application_profile = ApplicationProfile::Standard;
+        #[cfg(feature = "remote-h264")]
+        let application_profile = if sources
+            .hardware_video
+            .get()
+            .is_some_and(|config| config.viewer_feedback.is_some())
+        {
+            ApplicationProfile::VideoFeedback
+        } else {
+            application_profile
+        };
+        if application_profile == ApplicationProfile::VideoFeedback {
+            eprintln!("jwm-remote: viewer rate feedback negotiated (application v36)");
+        }
         writer.write_message(
             MessageKind::HelloAck,
             &ServerHello {
@@ -3741,13 +4124,15 @@ fn serve_authenticated(
                 clipboard_enabled,
                 clipboard_files_enabled: files_enabled,
             }
-            .encode(),
+            .encode_with_profile(application_profile),
         )?;
         writer.write_message(MessageKind::SourceCatalog, &catalog.encode()?)?;
         writer.flush()?;
         eprintln!(
             "jwm-remote: authenticated session started ({})",
-            if keyboard_enabled {
+            if negotiated_stream.wayland_control {
+                "screen + pending scoped Wayland control"
+            } else if keyboard_enabled {
                 "screen + pointer + keyboard"
             } else if pointer_enabled {
                 "screen + pointer"
@@ -3762,6 +4147,7 @@ fn serve_authenticated(
         let credits = Arc::new(FrameCredits::new());
         let mut telemetry = HostTelemetry::new();
         telemetry.stats_json = options.stats_json;
+        telemetry.correlation_id = Some(correlation_id);
         if options.stats_json {
             capture.enable_capture_metrics();
         }
@@ -4528,6 +4914,28 @@ fn keyboard_allowlist() -> BTreeSet<u16> {
     }
 }
 
+fn synchronize_capture_geometry(
+    sources: &SourceControl,
+    capture: &HostCapture,
+    writer: &SharedWriter,
+    mailbox: &LatestMailbox<PendingFrame>,
+) {
+    let geometry_epoch = capture.geometry_epoch();
+    if sources.state.lock().unwrap().geometry_epoch == geometry_epoch {
+        return;
+    }
+    // A sender may already be encoding retired pixels outside this lock.
+    // Publish the epoch under the same barrier it uses before writing.
+    let _publication = lock_writer(writer);
+    let mut state = sources.state.lock().unwrap();
+    state.geometry_epoch = geometry_epoch;
+    state.input_area = capture.input_area();
+    state.presented_geometry = None;
+    state.presented_frame = None;
+    state.presented_native_proof = None;
+    mailbox.clear();
+}
+
 fn stream_frames(
     sources: &Arc<SourceControl>,
     viewport: &ViewportRequest,
@@ -4629,8 +5037,19 @@ fn stream_frames(
             });
         });
 
-    let interval = target_frame_interval(options.fps);
-    let backpressure_refresh = backpressure_refresh_interval(interval);
+    #[cfg(feature = "remote-h264")]
+    let profile = sources.hardware_video.get();
+    #[cfg(feature = "remote-h264")]
+    let mut using_gpu_capture = profile.is_some_and(|profile| profile.native_node.is_some());
+    #[cfg(feature = "remote-h264")]
+    let mut adaptive = profile.and_then(|profile| {
+        profile
+            .policy
+            .map(|policy| super::adaptive_video::Governor::new(policy, profile.fps))
+    });
+    #[cfg(feature = "remote-h264")]
+    let mut adaptive_geometry = None;
+    let strict_frame_geometry = sources.strict_frame_geometry.load(Ordering::Acquire);
     // One absolute deadline bounds capture starts. X11 activity is consumed
     // during the remaining wait; once due, poll capture/cursor state without
     // tacking on a second idle interval. The Damage gate still skips readback
@@ -4639,9 +5058,38 @@ fn stream_frames(
     let mut reported_mode: Option<CaptureMode> = None;
     let mut cursor_sender = CursorSender::default();
     let mut next_cursor_poll = Instant::now();
-    let cursor_interval = Duration::from_millis(16);
+    let mut previous_cursor_poll = None;
+    let cursor_worker = if capture.cursor_plane_enabled()
+        && std::env::var_os("JWM_REMOTE_CURSOR_WORKER").as_deref() == Some("1".as_ref())
+    {
+        match IndependentCursor::start(
+            options.display.as_deref(),
+            Arc::clone(sources),
+            Arc::clone(&writer),
+            Arc::clone(running),
+            Arc::clone(first_stop),
+            Arc::clone(telemetry),
+            control,
+        ) {
+            Ok(worker) => {
+                eprintln!("jwm-remote: independent X11 cursor sampler active");
+                Some(worker)
+            }
+            Err(error) => {
+                eprintln!("jwm-remote: using capture-loop cursor sampler: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut keyboard = HostKeyboardState::new();
     let mut bundle_control = HostControl::default();
+    let managed_source_control = sources.managed_source_control.load(Ordering::Acquire);
+    let mut used_control_sources = BTreeSet::new();
+    if managed_source_control {
+        used_control_sources.insert(SourceId(1));
+    }
     let mut pointer = HostPointerState::default();
     let mut resize = HostResizeState::new(sources.resize_enabled.load(Ordering::Acquire));
     let mut source_size = (0u16, 0u16);
@@ -4651,6 +5099,21 @@ fn stream_frames(
                 wake.drain()?;
             }
             let now = Instant::now();
+            #[cfg(feature = "remote-h264")]
+            if adaptive.is_some() && profile.is_some_and(|p| !p.active.load(Ordering::Acquire)) {
+                adaptive = None;
+                if let HostCapture::Desktop(capture) = capture {
+                    capture.set_adaptive_resolution(Resolution::Full);
+                }
+            }
+            #[cfg(feature = "remote-h264")]
+            let fps = profile
+                .filter(|profile| profile.active.load(Ordering::Acquire))
+                .map_or(options.fps, |profile| profile.target.load().fps);
+            #[cfg(not(feature = "remote-h264"))]
+            let fps = options.fps;
+            let interval = target_frame_interval(fps);
+            let backpressure_refresh = backpressure_refresh_interval(interval);
             if let Some(result) = resize.expire(now) {
                 capture.disable_native_resize();
                 sources.resize_enabled.store(false, Ordering::Release);
@@ -4686,12 +5149,24 @@ fn stream_frames(
             // of these degradations is large and was previously visible only
             // as a single line that had long since scrolled away.
             let switch = sources.state.lock().unwrap().pending.take();
-            if let Some((version, area)) = switch {
+            if let Some((version, grant)) = switch {
+                #[cfg(feature = "remote-h264")]
+                if let Some(adaptive) = &mut adaptive {
+                    adaptive.reset_resolution();
+                }
+                if let Some(cursor) = &cursor_worker {
+                    cursor.update_scope(None);
+                }
                 // Input was released before this request became visible.
                 // A failed install closes the session, never restores old pixels.
-                capture
-                    .switch_area(area)
-                    .map_err(LocalRuntimeFailure::capture)?;
+                match grant {
+                    SourceGrant::X11(area) => capture.switch_area(area),
+                    SourceGrant::Wayland => capture.switch_wayland_source(version.source),
+                }
+                .map_err(LocalRuntimeFailure::capture)?;
+                if managed_source_control {
+                    bundle_control = HostControl::default();
+                }
                 let mut writer = lock_writer(&writer);
                 mailbox.clear();
                 credits.abandon_source();
@@ -4718,25 +5193,65 @@ fn stream_frames(
             if let Some(requested) = viewport.take() {
                 let (width, height) = effective_encoded_bounds(options.max_width, requested);
                 if capture.set_encoded_bounds(width, height) {
+                    #[cfg(feature = "remote-h264")]
+                    if let Some(adaptive) = &mut adaptive {
+                        adaptive.reset_resolution();
+                    }
                     eprintln!("jwm-remote: encoding to fit {width}x{height} for this viewer");
                 }
             }
-            if options.wayland_resize_follow {
-                let _publication = lock_writer(&writer);
-                let mut state = sources.state.lock().unwrap();
-                if state.geometry_epoch != capture.geometry_epoch() {
-                    state.geometry_epoch = capture.geometry_epoch();
-                    state.presented_geometry = None;
-                    state.presented_frame = None;
-                    state.presented_native_proof = None;
-                    mailbox.clear();
-                }
+            if strict_frame_geometry {
+                synchronize_capture_geometry(sources, capture, &writer, &mailbox);
+            }
+            let prepare = sources.control_prepare.lock().unwrap().take();
+            if let Some(prepare) = prepare {
+                let source = {
+                    let state = sources.state.lock().unwrap();
+                    let source = state.policy.current();
+                    if !state.policy.accepts_input(source)
+                        || source.epoch != prepare.source_epoch
+                        || state.geometry_epoch != prepare.geometry_epoch
+                        || !used_control_sources.insert(source.source)
+                    {
+                        return Err(invalid_data(
+                            "managed control preparation lost its presented grant",
+                        )
+                        .into());
+                    }
+                    source
+                };
+                capture.enable_control(
+                    sources.scroll_enabled.load(Ordering::Acquire),
+                    sources.horizontal_scroll_enabled.load(Ordering::Acquire),
+                    sources.control_gestures.load(Ordering::Acquire),
+                )?;
+                sources.control_lease_epoch.store(0, Ordering::Release);
+                sources.control_revoke.store(false, Ordering::Release);
+                sources.control_enabled.store(true, Ordering::Release);
+                eprintln!(
+                    "jwm-remote: preparing managed control for presented Wayland source epoch {}",
+                    source.epoch
+                );
             }
             process_keyboard(sources, capture, &writer, &mut keyboard)?;
             text::process(sources, capture, &writer)?;
             control::process(sources, capture, &writer, &mut bundle_control, source_size)?;
             process_pointer(sources, capture, &writer, &mut pointer, source_size)?;
+            #[cfg(feature = "remote-h264")]
+            if using_gpu_capture
+                && profile.is_some_and(|profile| !profile.active.load(Ordering::Acquire))
+            {
+                using_gpu_capture = false;
+                capture.prepare_cpu_fallback();
+            }
             let mode = capture.mode();
+            #[cfg(feature = "remote-h264")]
+            let mode = if using_gpu_capture {
+                (mode - (CaptureMode::SHM | CaptureMode::DAMAGE | CaptureMode::XRENDER))
+                    | CaptureMode::GPU_EXPORT
+            } else {
+                mode
+            };
             // Record every tick: the telemetry window resets on each report, so
             // recording only on change left later windows claiming a fully
             // degraded path that nothing had actually degraded.
@@ -4747,15 +5262,69 @@ fn stream_frames(
                 }
                 reported_mode = Some(mode);
             }
-            telemetry.collect_x11_capture_metrics(capture);
-            report_host_if_due(telemetry, credits, now);
+            telemetry.collect_capture_metrics(capture);
+            let _telemetry_window = report_host_if_due(telemetry, credits, now);
+            #[cfg(feature = "remote-h264")]
+            if let Some(profile) = profile
+                && profile.active.load(Ordering::Acquire)
+                && let (Some(adaptive), Some(window)) = (&mut adaptive, _telemetry_window)
+            {
+                let viewer = profile.viewer_feedback.as_ref().and_then(|feedback| {
+                    let scope = {
+                        let state = sources.state.lock().unwrap();
+                        (state.policy.current().epoch, state.geometry_epoch)
+                    };
+                    feedback.lock().unwrap().take(scope)
+                });
+                if let Some(viewer) = viewer.filter(|_| options.stats_json) {
+                    eprintln!(
+                        "jwm-remote: viewer rate feedback ({} drawn frames, mean decode {:.2} ms, queue {:.2} ms, presentation {:.2} ms)",
+                        viewer.samples, viewer.decode_ms, viewer.queue_ms, viewer.presentation_ms,
+                    );
+                }
+                let resolution_base = match capture {
+                    HostCapture::Desktop(capture) if profile.adapt_resolution => {
+                        Some(capture.base_encoded_dimensions(source_size))
+                    }
+                    _ => None,
+                };
+                if let Some((pressure, decision)) = adaptive.observe(
+                    video_observation(&window, profile.viewer_feedback.is_some(), viewer),
+                    resolution_base,
+                ) {
+                    match decision {
+                        Decision::Rate(rate) => {
+                            profile.target.store(rate);
+                            eprintln!(
+                                "jwm-remote: hardware rate target {} fps, {}% nominal bitrate ({pressure:?})",
+                                rate.fps, rate.bitrate_percent
+                            );
+                        }
+                        Decision::Resolution(resolution) => {
+                            if let HostCapture::Desktop(capture) = capture {
+                                capture.set_adaptive_resolution(resolution);
+                            }
+                            synchronize_capture_geometry(sources, capture, &writer, &mailbox);
+                            eprintln!(
+                                "jwm-remote: hardware resolution target {}% ({pressure:?})",
+                                resolution.percent()
+                            );
+                        }
+                    }
+                }
+            }
             // Cursor movement has its own bounded cadence, independent of the
             // configured video FPS and video-credit backpressure.
-            if capture.cursor_plane_enabled() && Instant::now() >= next_cursor_poll {
-                if let Some(sample) = capture
+            if cursor_worker.is_none()
+                && capture.cursor_plane_enabled()
+                && Instant::now() >= next_cursor_poll
+            {
+                let poll_started = Instant::now();
+                let sample = capture
                     .poll_cursor_plane()
-                    .map_err(LocalRuntimeFailure::capture)?
-                {
+                    .map_err(LocalRuntimeFailure::capture)?;
+                telemetry.record_cursor_poll(&mut previous_cursor_poll, poll_started);
+                if let Some(sample) = sample {
                     let mut writer = writer.lock().unwrap();
                     let state = sources.state.lock().unwrap();
                     let version = state.policy.current();
@@ -4764,7 +5333,7 @@ fn stream_frames(
                         cursor_sender.send_scoped(&mut writer, sample, Some(version.epoch))?;
                     }
                 }
-                next_cursor_poll = Instant::now() + cursor_interval;
+                next_cursor_poll = Instant::now() + CURSOR_SAMPLE_INTERVAL;
             }
 
             if matches!(pointer_repair::capture_stamp(sources), Some(Err(())))
@@ -4792,7 +5361,7 @@ fn stream_frames(
                 // X11 events may wake early, but cannot bypass the rate limit.
                 // Recheck the absolute deadline rather than adding another
                 // full wait after it. Cursor motion need not signal XDamage.
-                let wait = if capture.cursor_plane_enabled() {
+                let wait = if cursor_worker.is_none() && capture.cursor_plane_enabled() {
                     wait.min(next_cursor_poll.saturating_duration_since(Instant::now()))
                 } else {
                     wait
@@ -4843,23 +5412,55 @@ fn stream_frames(
                 None => None,
             };
             let capture_started = Instant::now();
-            let outcome = if repair_stamp
-                .is_some_and(|stamp| matches!(stamp.intent, pointer_repair::Intent::Visual(_)))
-            {
-                capture.frame_with_pointer_visual()
-            } else if control_repair_stamp
-                .is_some_and(|s| matches!(s.intent, control_repair::Intent::Visual(_)))
-            {
-                capture.frame_with_control_visual()
+            #[cfg(feature = "remote-h264")]
+            let gpu_frame = if using_gpu_capture {
+                match capture.frame_gpu() {
+                    Ok(Some(frame)) => Some(CapturedPixels::DmaBuf(frame)),
+                    Ok(None) => {
+                        telemetry.record_damage_skipped();
+                        continue;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "jwm-remote: GPU capture failed, switching to JPEG on the same source: {error}"
+                        );
+                        profile.unwrap().active.store(false, Ordering::Release);
+                        using_gpu_capture = false;
+                        capture.prepare_cpu_fallback();
+                        None
+                    }
+                }
             } else {
-                capture.frame()
-            }
-            .map_err(LocalRuntimeFailure::capture)?;
+                None
+            };
+            #[cfg(not(feature = "remote-h264"))]
+            let gpu_frame: Option<CapturedPixels> = None;
+            let (frame, retained_blocked) = if let Some(frame) = gpu_frame {
+                (Some(frame), false)
+            } else {
+                let outcome = if repair_stamp
+                    .is_some_and(|stamp| matches!(stamp.intent, pointer_repair::Intent::Visual(_)))
+                {
+                    capture.frame_with_pointer_visual()
+                } else if bundle_control.dragging()
+                    || control_repair_stamp
+                        .is_some_and(|s| matches!(s.intent, control_repair::Intent::Visual(_)))
+                {
+                    capture.frame_with_control_visual()
+                } else {
+                    capture.frame()
+                }
+                .map_err(LocalRuntimeFailure::capture)?;
+                let retained_blocked = matches!(outcome, CaptureOutcome::RetainedProofBlocked);
+                (
+                    captured_frame_from_outcome(outcome).map(CapturedPixels::Rgb),
+                    retained_blocked,
+                )
+            };
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             let legacy_retained_slots = sources.legacy_retained_proof_slots;
             #[cfg(not(all(test, feature = "remote-wayland", feature = "backend-wayland-udev")))]
             let legacy_retained_slots = false;
-            let retained_blocked = matches!(outcome, CaptureOutcome::RetainedProofBlocked);
             next_capture_allowed = retained_proof_deadline(
                 previous_capture_deadline,
                 next_capture_allowed,
@@ -4884,26 +5485,27 @@ fn stream_frames(
                     .map_err(LocalRuntimeFailure::capture)?;
                 continue;
             }
-            if options.wayland_resize_follow {
-                let _publication = lock_writer(&writer);
-                let mut state = sources.state.lock().unwrap();
-                if state.geometry_epoch != capture.geometry_epoch() {
-                    state.geometry_epoch = capture.geometry_epoch();
-                    state.presented_geometry = None;
-                    state.presented_frame = None;
-                    state.presented_native_proof = None;
-                    mailbox.clear();
-                }
+            if strict_frame_geometry {
+                synchronize_capture_geometry(sources, capture, &writer, &mailbox);
             }
-            let Some(frame) = captured_frame_from_outcome(outcome) else {
+            let Some(frame) = frame else {
                 telemetry.record_damage_skipped();
                 continue;
             };
+            if strict_frame_geometry && frame.geometry_epoch() != capture.geometry_epoch() {
+                continue;
+            }
+            #[cfg(feature = "remote-h264")]
+            if let Some(adaptive) = &mut adaptive
+                && adaptive_geometry.replace(frame.geometry_epoch()) != Some(frame.geometry_epoch())
+            {
+                adaptive.freeze();
+            }
             let capture_completed_at = Instant::now();
-            source_size = (frame.source_width, frame.source_height);
+            source_size = frame.source_size();
             if let Some(result) = resize.observe_frame(
                 source_version.epoch,
-                frame.geometry_epoch,
+                frame.geometry_epoch(),
                 source_size,
                 capture_completed_at,
             ) {
@@ -4920,8 +5522,15 @@ fn stream_frames(
                 if !state.policy.accepts_capture(source_version) {
                     continue;
                 }
-                state.geometry_epoch = frame.geometry_epoch;
+                state.geometry_epoch = frame.geometry_epoch();
                 state.input_area = capture.input_area();
+            }
+            if let Some(cursor) = &cursor_worker {
+                cursor.update_scope(
+                    capture
+                        .cursor_capture_scope()
+                        .map(|scope| (source_version, scope)),
+                );
             }
             let pointer_serial = capture
                 .control_frame()
@@ -4956,12 +5565,13 @@ fn stream_frames(
             #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
             let successful_capture = sources.pending_lossless_probe.as_ref().map(|_| {
                 use sha2::{Digest, Sha256};
+                let frame = pending.frame.rgb().unwrap();
                 SuccessfulLosslessCapture {
                     source_epoch: pending.source_version.epoch,
-                    geometry_epoch: pending.frame.geometry_epoch,
-                    source_size: (pending.frame.source_width, pending.frame.source_height),
-                    encoded_size: pending.frame.image.dimensions(),
-                    rgb_sha256: Sha256::digest(pending.frame.image.as_raw()).into(),
+                    geometry_epoch: frame.geometry_epoch,
+                    source_size: (frame.source_width, frame.source_height),
+                    encoded_size: frame.image.dimensions(),
+                    rgb_sha256: Sha256::digest(frame.image.as_raw()).into(),
                 }
             });
             let Some(replaced) = mailbox.publish(pending) else {
@@ -4980,7 +5590,7 @@ fn stream_frames(
         }
         Ok(())
     })();
-    telemetry.collect_x11_capture_metrics(capture);
+    telemetry.collect_capture_metrics(capture);
 
     let close = capture_stop_notice(
         &capture_result,
@@ -4988,6 +5598,9 @@ fn stream_frames(
         first_stop,
     );
     running.store(false, Ordering::Release);
+    if let Some(cursor) = &cursor_worker {
+        cursor.cancel();
+    }
     mailbox.close();
     credits.close();
     // Input release starts before the bounded close, then interrupt any send
@@ -5002,6 +5615,16 @@ fn stream_frames(
             Err(io::Error::other("remote video sender thread panicked").into())
         }
     };
+    let cursor_result = match cursor_worker {
+        Some(worker) => match worker.thread.join() {
+            Ok(result) => result,
+            Err(_) => {
+                first_stop.record_thread_panic();
+                Err(io::Error::other("remote cursor sampler panicked").into())
+            }
+        },
+        None => Ok(()),
+    };
     // The forwarder holds a reference to the shared writer, so it must not
     // outlive the session. It notices `running` within one poll interval.
     let clipboard_result = finish_clipboard_worker(
@@ -5013,7 +5636,7 @@ fn stream_frames(
     stream_result_for_stop(
         first_stop.cause(),
         capture_result,
-        sender_result,
+        cursor_result.and(sender_result),
         clipboard_result,
     )
 }
@@ -5123,26 +5746,55 @@ fn send_frames_scoped<W: std::io::Write + SetWriteTimeout>(
 }
 
 #[cfg(feature = "remote-h264")]
-type EncoderScope = (SourceVersion, u64, (u16, u16), (u16, u16));
+type EncoderScope = (
+    SourceVersion,
+    u64,
+    (u16, u16),
+    (u16, u16),
+    super::adaptive_video::Rate,
+);
+
+#[cfg(feature = "remote-h264")]
+struct HardwareVideoConfig {
+    codec: FrameCodec,
+    limits: super::messages::FrameLimits,
+    fps: u16,
+    native_node: Option<std::path::PathBuf>,
+    hevc444_lossless: bool,
+    policy: Option<super::adaptive_video::Policy>,
+    adapt_resolution: bool,
+    viewer_feedback: Option<Mutex<super::adaptive_video::FeedbackWindow>>,
+    target: super::adaptive_video::RateTarget,
+    active: AtomicBool,
+}
 
 #[cfg(feature = "remote-h264")]
 struct HardwareVideoSender {
     codec: FrameCodec,
     limits: super::messages::FrameLimits,
     fps: u16,
+    hevc444_lossless: bool,
     encoder: Option<(EncoderScope, super::h264::Encoder)>,
+    native: Option<(EncoderScope, super::gpu_host_video::Encoder)>,
     annex_b: Vec<u8>,
     padded: image::RgbImage,
 }
 
 #[cfg(feature = "remote-h264")]
 impl HardwareVideoSender {
-    fn new(codec: FrameCodec, limits: super::messages::FrameLimits, fps: u16) -> Self {
+    fn new(
+        codec: FrameCodec,
+        limits: super::messages::FrameLimits,
+        fps: u16,
+        hevc444_lossless: bool,
+    ) -> Self {
         Self {
             codec,
             limits,
             fps,
+            hevc444_lossless,
             encoder: None,
+            native: None,
             annex_b: Vec::new(),
             padded: image::RgbImage::new(0, 0),
         }
@@ -5154,48 +5806,68 @@ impl HardwareVideoSender {
         sequence: u64,
         pending: &PendingFrame,
         may_defer_duplicate: bool,
+        telemetry: Option<&HostTelemetry>,
+        target: Option<super::adaptive_video::Rate>,
     ) -> RemoteResult<Option<bool>> {
         use super::h264_wire::{
             HardwareFrameHeader, encode_hardware_frame, h264_padded_dimensions, hardware_has_idr,
         };
-        let frame = &pending.frame;
+        let frame = pending
+            .frame
+            .rgb()
+            .ok_or("NVENC needs CPU capture pixels")?;
         let width = u16::try_from(frame.image.width())?;
         let height = u16::try_from(frame.image.height())?;
         self.limits.validate_dimensions(width, height)?;
         let (padded_width, padded_height) = h264_padded_dimensions(width, height)?;
         let (padded_width, padded_height) = (u32::from(padded_width), u32::from(padded_height));
+        let rate = target.unwrap_or_else(|| super::adaptive_video::Rate::fixed(self.fps));
         let scope = (
             pending.source_version,
             frame.geometry_epoch,
             (frame.source_width, frame.source_height),
             (width, height),
+            rate,
         );
         let fresh = self
             .encoder
             .as_ref()
             .is_none_or(|(previous, _)| *previous != scope);
-        if self
-            .encoder
-            .as_ref()
-            .is_none_or(|(_, encoder)| encoder.dimensions() != (padded_width, padded_height))
-        {
+        if self.encoder.as_ref().is_none_or(|(previous, encoder)| {
+            previous.4 != rate || encoder.dimensions() != (padded_width, padded_height)
+        }) {
             // Release the old hardware session before asking for a new one.
             self.encoder = None;
+            let rate_control = if self.hevc444_lossless {
+                super::h264::NvencRateControl::Hevc444Lossless
+            } else {
+                super::h264::NvencRateControl::Cbr(rate.bitrate_percent)
+            };
             self.encoder = Some((
                 scope,
-                super::h264::Encoder::new(
+                super::h264::Encoder::with_rate(
                     self.codec,
                     padded_width,
                     padded_height,
-                    u32::from(self.fps),
+                    u32::from(rate.fps),
+                    rate_control,
                 )?,
             ));
+            if target.is_some() {
+                eprintln!(
+                    "jwm-remote: NVENC opened {} fps at {}% nominal bitrate",
+                    rate.fps, rate.bitrate_percent
+                );
+            }
         }
 
+        let mut padding = None;
         let rgb = if frame.image.dimensions() == (padded_width, padded_height) {
             &frame.image
         } else {
+            let started = telemetry.map(|_| Instant::now());
             pad_hardware_rgb(&frame.image, &mut self.padded, padded_width, padded_height);
+            padding = started.map(|start| start.elapsed());
             &self.padded
         };
         let (previous, encoder) = self.encoder.as_mut().expect("hardware encoder has a scope");
@@ -5208,7 +5880,7 @@ impl HardwareVideoSender {
         self.annex_b.clear();
         // The viewer starts a new canvas at each scope boundary. An IDR
         // cuts all temporal references even when NVENC stays open.
-        encoder.encode_into(rgb, &mut self.annex_b, fresh)?;
+        let stages = encoder.encode_into(rgb, &mut self.annex_b, fresh, telemetry.is_some())?;
         let keyframe = hardware_has_idr(self.codec, &self.annex_b);
         if fresh && !keyframe {
             return Err(
@@ -5230,6 +5902,68 @@ impl HardwareVideoSender {
             self.limits,
         )?;
         *previous = scope;
+        if let Some(telemetry) = telemetry {
+            telemetry.record_hardware_stages(padding, stages);
+        }
+        Ok(Some(keyframe))
+    }
+
+    fn encode_native(
+        &mut self,
+        payload: &mut Vec<u8>,
+        sequence: u64,
+        source_version: SourceVersion,
+        frame: &super::gpu_host_video::Frame,
+        node: &std::path::Path,
+        telemetry: Option<&HostTelemetry>,
+    ) -> RemoteResult<Option<bool>> {
+        use super::h264_wire::{HardwareFrameHeader, encode_hardware_frame, hardware_has_idr};
+        let (width, height) = frame.encoded;
+        self.limits.validate_dimensions(width, height)?;
+        let scope = (
+            source_version,
+            frame.geometry_epoch,
+            frame.source,
+            frame.encoded,
+            super::adaptive_video::Rate::fixed(self.fps),
+        );
+        let fresh = self
+            .native
+            .as_ref()
+            .is_none_or(|(previous, _)| *previous != scope);
+        if fresh {
+            self.native = None;
+            self.native = Some((
+                scope,
+                super::gpu_host_video::Encoder::new(node, frame.encoded, self.fps)?,
+            ));
+        }
+        let (_, encoder) = self.native.as_mut().unwrap();
+        let timings = encoder.encode(&frame.pixels, sequence, fresh, &mut self.annex_b)?;
+        let keyframe = hardware_has_idr(FrameCodec::H264, &self.annex_b);
+        if fresh && !keyframe {
+            return Err(invalid_data(
+                "VA-API encoder did not start the source geometry with an IDR",
+            )
+            .into());
+        }
+        encode_hardware_frame(
+            payload,
+            FrameCodec::H264,
+            HardwareFrameHeader {
+                sequence,
+                source_width: frame.source.0,
+                source_height: frame.source.1,
+                encoded_width: width,
+                encoded_height: height,
+                geometry_epoch: frame.geometry_epoch,
+            },
+            &self.annex_b,
+            self.limits,
+        )?;
+        if let Some(telemetry) = telemetry {
+            telemetry.record_native_hardware_stages(timings);
+        }
         Ok(Some(keyframe))
     }
 }
@@ -5274,12 +6008,16 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
     let mut payload = Vec::new();
     let mut payload_retention = PayloadBufferRetention::default();
     #[cfg(feature = "remote-h264")]
-    let profile = sources
-        .and_then(|source| source.hardware_video.get())
-        .copied();
+    let profile = sources.and_then(|source| source.hardware_video.get());
     #[cfg(feature = "remote-h264")]
-    let mut hardware =
-        profile.map(|(codec, limits, fps)| HardwareVideoSender::new(codec, limits, fps));
+    let mut hardware = profile.map(|config| {
+        HardwareVideoSender::new(
+            config.codec,
+            config.limits,
+            config.fps,
+            config.hevc444_lossless,
+        )
+    });
     #[cfg(feature = "remote-h264")]
     let tagged_video = profile.is_some();
     #[cfg(feature = "remote-h264")]
@@ -5300,6 +6038,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             // A prior access unit was never published. Retire references
             // without holding the writer or source lock.
             codec.encoder = None;
+            codec.native = None;
         }
         let Some(ack_wait) = credits.wait_for_credit(running, FRAME_ACK_TIMEOUT)? else {
             break;
@@ -5366,19 +6105,51 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         }
         let planned_at = Instant::now();
         #[cfg(feature = "remote-h264")]
+        let native_node = profile.and_then(|config| config.native_node.as_deref());
+        #[cfg(feature = "remote-h264")]
+        if native_node.is_some()
+            && profile.is_some_and(|config| !config.active.load(Ordering::Acquire))
+        {
+            hardware = None;
+        }
+        #[cfg(feature = "remote-h264")]
         let hardware_frame = if let Some(codec) = hardware.as_mut() {
             let started = Instant::now();
-            match codec.encode_frame(
-                &mut payload,
-                sequence,
-                &pending,
-                credits.can_defer_duplicate(started),
-            ) {
+            let stats = telemetry.stats_json.then_some(telemetry);
+            let encoded = match (&pending.frame, native_node) {
+                (CapturedPixels::DmaBuf(frame), Some(node)) => codec.encode_native(
+                    &mut payload,
+                    sequence,
+                    pending.source_version,
+                    frame,
+                    node,
+                    stats,
+                ),
+                (CapturedPixels::Rgb(_), None) => codec.encode_frame(
+                    &mut payload,
+                    sequence,
+                    &pending,
+                    credits.can_defer_duplicate(started),
+                    stats,
+                    profile
+                        .filter(|config| config.policy.is_some())
+                        .map(|config| config.target.load()),
+                ),
+                _ => Err("hardware encoder and capture storage disagree".into()),
+            };
+            match encoded {
                 Ok(Some(keyframe)) => {
                     if !hardware_active {
                         eprintln!(
-                            "jwm-remote: hardware {} encoding active",
-                            codec.codec.name()
+                            "jwm-remote: hardware {} encoding active ({})",
+                            codec.codec.name(),
+                            if native_node.is_some() {
+                                "VA-API DMA-BUF"
+                            } else if codec.hevc444_lossless {
+                                "NVENC, lossless constant QP 0"
+                            } else {
+                                "NVENC"
+                            }
                         );
                         hardware_active = true;
                     }
@@ -5389,8 +6160,22 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                     continue;
                 }
                 Err(error) => {
-                    eprintln!("jwm-remote: hardware encoding failed, switching to JPEG: {error}");
+                    if codec.hevc444_lossless {
+                        eprintln!(
+                            "jwm-remote: HEVC 4:4:4 lossless encoding failed, switching to JPEG: {error}"
+                        );
+                    } else {
+                        eprintln!(
+                            "jwm-remote: hardware encoding failed, switching to JPEG: {error}"
+                        );
+                    }
                     hardware = None;
+                    if let Some(config) = profile {
+                        config.active.store(false, Ordering::Release);
+                        config
+                            .target
+                            .store(super::adaptive_video::Rate::fixed(config.fps));
+                    }
                     None
                 }
             }
@@ -5424,11 +6209,16 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             // JPEG adapts only from frames sent by its own encoder.
             (plan, 0, 0, false, FramePurpose::Video)
         } else {
+            // A DMA-BUF has no host RGB copy to hand to JPEG. If the GPU
+            // path has failed, wait for a fresh CPU capture of the same grant.
+            let Some(frame) = pending.frame.rgb() else {
+                continue;
+            };
             #[cfg(test)]
             let region_plan = if is_region_followup {
                 Some(
                     sender
-                        .plan_region_repair_at(&pending.frame, planned_at)
+                        .plan_region_repair_at(frame, planned_at)
                         .map_err(LocalRuntimeFailure::encoding)?,
                 )
             } else {
@@ -5441,7 +6231,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             } else {
                 sender
                     .plan_record_at(
-                        &pending.frame,
+                        frame,
                         planned_at,
                         pending.pointer_serial.is_some(),
                         legacy_keyframe,
@@ -5466,11 +6256,9 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                     .is_some_and(|s| matches!(s.intent, control_repair::Intent::Visual(_))))
                 && !plan.emit
             {
-                plan = sender.encoder.plan_at(
-                    &pending.frame,
-                    TileEncodeRequest::Keepalive,
-                    planned_at,
-                )?;
+                plan = sender
+                    .encoder
+                    .plan_at(frame, TileEncodeRequest::Keepalive, planned_at)?;
             }
             if !sender.static_lossless && !plan.keyframe && sender.refinement_due(planned_at) {
                 let current = jpeg_quality.current_quality();
@@ -5520,7 +6308,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             if let Err(error) =
                 sender
                     .encoder
-                    .encode_into(&mut payload, sequence, &pending.frame, quality.quality)
+                    .encode_into(&mut payload, sequence, frame, quality.quality)
             {
                 if sender.static_lossless && sender.encoder.lossless_encode_rejected() {
                     sender.discard();
@@ -5598,7 +6386,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             probe.pause(
                 sequence,
                 pending.source_version.epoch,
-                pending.frame.geometry_epoch,
+                pending.frame.geometry_epoch(),
             )?;
         }
         if sender.lossless_schedule.guards_supersession()
@@ -5661,9 +6449,9 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 !state.policy.accepts_capture(pending.source_version)
                     || ((is_hardware_frame
                         || sources.is_some_and(|sources| {
-                            sources.follow_geometry.load(Ordering::Acquire)
+                            sources.strict_frame_geometry.load(Ordering::Acquire)
                         }))
-                        && state.geometry_epoch != pending.frame.geometry_epoch)
+                        && state.geometry_epoch != pending.frame.geometry_epoch())
             }) {
                 discard_pending();
                 continue;
@@ -5678,7 +6466,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 };
                 frame.scope = Some(DrawnScope {
                     source_epoch: pending.source_version.epoch,
-                    geometry_epoch: pending.frame.geometry_epoch,
+                    geometry_epoch: pending.frame.geometry_epoch(),
                     frame_sequence: sequence,
                 });
             }
@@ -5691,7 +6479,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 quality,
                 quality_epoch,
                 pending.source_version.epoch,
-                pending.frame.geometry_epoch,
+                pending.frame.geometry_epoch(),
                 frame_purpose,
             )?;
             if let Some(state) = source_state.as_mut() {
@@ -5713,6 +6501,21 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                     wire_payload.len(),
                     socket_started.duration_since(write_started),
                     socket_started.elapsed(),
+                    telemetry.stats_json.then(|| SentFrameScope {
+                        source_epoch: pending.source_version.epoch,
+                        geometry_epoch: pending.frame.geometry_epoch(),
+                        sequence,
+                        codec: hardware_frame
+                            .map_or(FrameCodec::JpegTiles, |(codec, ..)| codec)
+                            .name(),
+                        scroll_copy_dy: if is_hardware_frame {
+                            None
+                        } else {
+                            sender.encoder.pending_scroll_dy()
+                        },
+                        source_dimensions: pending.frame.source_size(),
+                        encoded_dimensions: pending.frame.encoded_size(),
+                    }),
                 );
             }
             result
@@ -5730,8 +6533,8 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
         // flush succeeded. A partial/failed write therefore cannot suppress a
         // future frame in a replacement session or test harness.
         let flushed_at = Instant::now();
-        if !is_hardware_frame {
-            sender.commit_at(&pending.frame, flushed_at);
+        if !is_hardware_frame && let Some(frame) = pending.frame.rgb() {
+            sender.commit_at(frame, flushed_at);
         }
         if let (Some(sources), Some(stamp)) = (sources, pending.pointer_repair) {
             pointer_repair::flushed(
@@ -5739,7 +6542,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 stamp,
                 DrawnScope {
                     source_epoch: pending.source_version.epoch,
-                    geometry_epoch: pending.frame.geometry_epoch,
+                    geometry_epoch: pending.frame.geometry_epoch(),
                     frame_sequence: sequence,
                 },
                 frame_purpose,
@@ -5754,7 +6557,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 stamp,
                 DrawnScope {
                     source_epoch: pending.source_version.epoch,
-                    geometry_epoch: pending.frame.geometry_epoch,
+                    geometry_epoch: pending.frame.geometry_epoch(),
                     frame_sequence: sequence,
                 },
                 frame_purpose,
@@ -5775,7 +6578,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             records.push(LosslessScheduleRecord {
                 sequence,
                 source_epoch: pending.source_version.epoch,
-                geometry_epoch: pending.frame.geometry_epoch,
+                geometry_epoch: pending.frame.geometry_epoch(),
                 png: stages.is_some_and(|t| t.png.is_some()),
                 bytes: wire_payload.len(),
                 encode_ns: schedule_encode_ns,
@@ -5794,7 +6597,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
             written.push((
                 sequence,
                 pending.source_version.epoch,
-                pending.frame.geometry_epoch,
+                pending.frame.geometry_epoch(),
                 sender
                     .encoder
                     .encode_timings()
@@ -5816,7 +6619,7 @@ fn send_frames_with_encoder_scoped<W: std::io::Write + SetWriteTimeout>(
                 flushed_at,
                 native_serial: serial,
                 source_epoch: pending.source_version.epoch,
-                geometry_epoch: pending.frame.geometry_epoch,
+                geometry_epoch: pending.frame.geometry_epoch(),
                 sequence,
                 keyframe: plan.keyframe,
                 dirty_tiles: plan.dirty_tiles,
@@ -6039,6 +6842,115 @@ fn lock_writer<W>(
     }
 }
 
+type CursorScope = (SourceVersion, super::x11_capture::CursorCaptureScope);
+
+struct IndependentCursor {
+    scope: Arc<Mutex<Option<CursorScope>>>,
+    socket: OwnedFd,
+    thread: thread::JoinHandle<RemoteResult<()>>,
+}
+
+impl IndependentCursor {
+    fn start(
+        display: Option<&str>,
+        sources: Arc<SourceControl>,
+        writer: SharedWriter,
+        running: Arc<AtomicBool>,
+        first_stop: Arc<FirstStop>,
+        telemetry: Arc<HostTelemetry>,
+        control: &TcpStream,
+    ) -> RemoteResult<Self> {
+        let mut sampler = super::x11_capture::X11CursorSampler::open(display)?;
+        let socket = sampler.connection_fd().try_clone_to_owned()?;
+        let control = control.try_clone()?;
+        let scope = Arc::new(Mutex::new(None::<CursorScope>));
+        let worker_scope = Arc::clone(&scope);
+        let thread = thread::Builder::new()
+            .name("jwm-remote-cursor".into())
+            .spawn(move || {
+                let _stop_on_panic = StopSessionOnDrop(Arc::clone(&running));
+                let task: RemoteResult<()> = (|| {
+                    let mut sender = CursorSender::default();
+                    let mut source = None;
+                    let mut pending: Option<(CursorScope, super::x11_capture::CursorSample)> = None;
+                    let mut previous_poll = None;
+                    while running.load(Ordering::Acquire) {
+                        let started = Instant::now();
+                        let current = worker_scope.lock().unwrap().clone();
+                        if current.as_ref() != pending.as_ref().map(|(scope, _)| scope) {
+                            pending = None;
+                        }
+                        if let Some((version, geometry)) = current {
+                            let sample = sampler.poll(version.epoch, &geometry)?;
+                            telemetry.record_cursor_poll(&mut previous_poll, started);
+                            if let Some(sample) = sample {
+                                pending = Some(((version, geometry), sample));
+                            }
+                        }
+                        // A video record already on the socket must finish first.
+                        // While it writes, leave only the newest cursor sample.
+                        if pending.is_some()
+                            && let Ok(mut writer) = writer.try_lock()
+                        {
+                            let ((version, geometry), sample) = pending.take().unwrap();
+                            let admitted = {
+                                let state = sources.state.lock().unwrap();
+                                running.load(Ordering::Acquire)
+                                    && state.policy.accepts_capture(version)
+                                    && state.geometry_epoch == geometry.geometry_epoch
+                            };
+                            if admitted {
+                                if source != Some(version) {
+                                    sender = CursorSender::default();
+                                    source = Some(version);
+                                }
+                                sender.send_with_deadline(
+                                    &mut writer,
+                                    sample,
+                                    Some(version.epoch),
+                                    Duration::from_millis(500),
+                                )?;
+                            }
+                        }
+                        thread::park_timeout(
+                            CURSOR_SAMPLE_INTERVAL.saturating_sub(started.elapsed()),
+                        );
+                    }
+                    Ok(())
+                })();
+                if running.load(Ordering::Acquire) && task.is_err() {
+                    first_stop.record(StopCause::Sender);
+                    running.store(false, Ordering::Release);
+                    let _ = control.shutdown(Shutdown::Both);
+                    task
+                } else {
+                    // Session teardown shuts down the X11 connection to wake an
+                    // otherwise blocked reply. Any resulting error is expected.
+                    Ok(())
+                }
+            })?;
+        Ok(Self {
+            scope,
+            socket,
+            thread,
+        })
+    }
+
+    fn update_scope(&self, current: Option<CursorScope>) {
+        let mut scope = self.scope.lock().unwrap();
+        if *scope != current {
+            *scope = current;
+            self.thread.thread().unpark();
+        }
+    }
+
+    fn cancel(&self) {
+        // SAFETY: this fd is a duplicate of the cursor worker's own X11 socket.
+        unsafe { libc::shutdown(self.socket.as_raw_fd(), libc::SHUT_RDWR) };
+        self.thread.thread().unpark();
+    }
+}
+
 #[derive(Default)]
 struct CursorSender {
     sequence: u64,
@@ -6060,6 +6972,16 @@ impl CursorSender {
         writer: &mut SessionWriter<DeadlineWriter<W>>,
         sample: super::x11_capture::CursorSample,
         source_epoch: Option<u64>,
+    ) -> RemoteResult<()> {
+        self.send_with_deadline(writer, sample, source_epoch, FRAME_WRITE_DEADLINE)
+    }
+
+    fn send_with_deadline<W: std::io::Write + SetWriteTimeout>(
+        &mut self,
+        writer: &mut SessionWriter<DeadlineWriter<W>>,
+        sample: super::x11_capture::CursorSample,
+        source_epoch: Option<u64>,
+        deadline: Duration,
     ) -> RemoteResult<()> {
         let shape = sample
             .shape
@@ -6092,19 +7014,9 @@ impl CursorSender {
                 Some(epoch) => encode_source_payload(epoch, &encoded)?,
                 None => encoded,
             };
-            write_session_record(
-                writer,
-                MessageKind::CursorShape,
-                &encoded,
-                FRAME_WRITE_DEADLINE,
-            )?;
+            write_session_record(writer, MessageKind::CursorShape, &encoded, deadline)?;
         }
-        write_session_record(
-            writer,
-            MessageKind::CursorPosition,
-            &position,
-            FRAME_WRITE_DEADLINE,
-        )?;
+        write_session_record(writer, MessageKind::CursorPosition, &position, deadline)?;
         self.shape_id = Some(shape.id);
         self.sequence = next;
         Ok(())
@@ -6150,12 +7062,34 @@ fn average_millis(duration: Duration, count: u64) -> f64 {
     }
 }
 
-fn report_host_if_due(telemetry: &HostTelemetry, credits: &FrameCredits, now: Instant) {
-    let Some(snapshot) = telemetry.take_due_at(now) else {
-        return;
-    };
+fn report_host_if_due(
+    telemetry: &HostTelemetry,
+    credits: &FrameCredits,
+    now: Instant,
+) -> Option<HostTelemetryWindow> {
+    let snapshot = telemetry.take_due_at(now)?;
     let outstanding = credits.outstanding();
     print_host_telemetry(snapshot, outstanding, telemetry.stats_json);
+    Some(snapshot.window)
+}
+
+#[cfg(feature = "remote-h264")]
+fn video_observation(
+    window: &HostTelemetryWindow,
+    feedback_expected: bool,
+    viewer: Option<super::adaptive_video::ViewerLoad>,
+) -> super::adaptive_video::Observation {
+    super::adaptive_video::Observation {
+        captured: window.captured,
+        sent: window.sent,
+        backpressure_skips: window.skipped,
+        capture_ms: average_millis(window.capture_elapsed, window.captured),
+        encode_ms: average_millis(window.encode_elapsed, window.encoded),
+        socket_write_ms: average_millis(window.socket_write_elapsed, window.sent),
+        credit_wait_ms: average_millis(window.credit_wait_elapsed, window.dequeued),
+        feedback_expected,
+        viewer,
+    }
 }
 
 fn report_host_final(telemetry: &HostTelemetry, credits: &FrameCredits, now: Instant) {
@@ -6172,17 +7106,20 @@ fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> ser
         "type": "jwm_remote_host_stats", "schema_version": 1,
         "version": env!("CARGO_PKG_VERSION"),
         "commit": option_env!("JWM_BUILD_COMMIT"),
+        "session_id": snapshot.correlation_id.map(|id| format!("{id:032x}")),
+        "last_sent_frame": w.last_sent_frame,
         "window_seconds": snapshot.elapsed.as_secs_f64(), "mode": w.capture_mode.describe(),
         "source_dimensions": w.source_dimensions, "encoded_dimensions": w.encoded_dimensions,
         "scheduled": w.scheduled, "captured": w.captured, "sent": w.sent, "bytes": w.bytes,
         "backpressure_skipped": w.skipped, "damage_skipped": w.damage_skipped,
         "replaced": w.replaced, "unchanged_suppressed": w.unchanged_suppressed,
         "dirty_tiles": w.dirty_tiles, "total_tiles": w.total_tiles,
+        "scroll_copy_frames": w.scroll_copy_frames,
         "jpeg_atlases": w.jpeg_encoded, "png_atlases": w.png_encoded, "h264_frames": w.h264_encoded, "hevc444_frames": w.hevc444_encoded,
         "legacy_stage_aliases": {"atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"},
         "drawn_acks": w.drawn_acks, "viewer_superseded": w.viewer_superseded,
         "outstanding": outstanding, "max_outstanding": w.max_outstanding,
-        "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+        "quantile_policy": QUANTILE_POLICY,
         "stages": {
             "capture_ms": {"mean": average_millis(w.capture_elapsed, w.captured), "quantiles": w.capture_samples.json()},
             "mailbox_age_ms": {"mean": average_millis(w.queue_elapsed, w.dequeued), "quantiles": w.queue_samples.json()},
@@ -6205,6 +7142,29 @@ fn host_telemetry_json(snapshot: HostTelemetrySnapshot, outstanding: u64) -> ser
     if let Some(x11_capture) = &w.x11_capture {
         report["x11_capture"] = x11_capture.json();
     }
+    #[cfg(feature = "remote-wayland")]
+    if let Some(capture) = &w.wayland_capture {
+        report["wayland_capture"] = serde_json::json!({
+            "readback_bytes": capture.readback_bytes,
+            "staging_growths": capture.staging_growths,
+            "stages": {
+                "readback_ms": capture.readback.json(),
+                "conversion_ms": capture.conversion.json(),
+                "resize_ms": capture.resize.json(),
+            },
+        });
+    }
+    report["cursor_stages"] = serde_json::json!({
+        "poll_ms": w.cursor_poll.json(), "poll_interval_ms": w.cursor_poll_interval.json(),
+    });
+    report["hardware_encode_stages"] = serde_json::json!({
+        "padding_ms": w.hardware_encode.padding.json(),
+        "rgb_copy_ms": w.hardware_encode.copy.json(),
+        "conversion_ms": w.hardware_encode.conversion.json(),
+        "submit_ms": w.hardware_encode.submit.json(),
+        "output_ms": w.hardware_encode.output.json(),
+        "native_dmabuf_import_ms": w.hardware_encode.native_import.json(),
+    });
     report
 }
 
@@ -6466,6 +7426,29 @@ fn receive_input_scoped(
                     drop(queue);
                     sources.notify_input()?;
                 }
+                MessageKind::WaylandControlPrepare => {
+                    let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
+                    let scope = super::wayland_control_wire::decode_prepare(&payload)?;
+                    let mut prepare = sources.control_prepare.lock().unwrap();
+                    let state = sources.state.lock().unwrap();
+                    if !sources.managed_source_control.load(Ordering::Acquire)
+                        || sources.control_enabled.load(Ordering::Acquire)
+                        || prepare.is_some()
+                        || !state.policy.accepts_input(state.policy.current())
+                        || state.policy.current().epoch != scope.source_epoch
+                        || state.geometry_epoch != scope.geometry_epoch
+                        || state.presented_frame != Some(scope)
+                    {
+                        return Err(invalid_data(
+                            "managed control needs the current presented source",
+                        )
+                        .into());
+                    }
+                    *prepare = Some(scope);
+                    drop(state);
+                    drop(prepare);
+                    sources.notify_input()?;
+                }
                 MessageKind::WaylandTextCommit => {
                     let sources = sources.ok_or_else(|| invalid_data("text source unavailable"))?;
                     if !sources.text_enabled.load(Ordering::Acquire)
@@ -6506,8 +7489,19 @@ fn receive_input_scoped(
                     sources.notify_input()?;
                 }
                 MessageKind::WaylandControlRevoke => {
-                    let _ = super::wayland_control_wire::ControlRevoke::decode(&payload)?;
+                    let revoke = super::wayland_control_wire::ControlRevoke::decode(&payload)?;
                     let sources = sources.ok_or_else(|| invalid_data("control unavailable"))?;
+                    if sources.managed_source_control.load(Ordering::Acquire) {
+                        if !sources.control_enabled.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        if sources.control_lease_epoch.load(Ordering::Acquire) != revoke.lease_epoch
+                        {
+                            return Err(
+                                invalid_data("control revoke belongs to an earlier grant").into()
+                            );
+                        }
+                    }
                     sources.control_revoke.store(true, Ordering::Release);
                     sources.control_queue.lock().unwrap().clear();
                     sources.notify_input()?;
@@ -6650,7 +7644,16 @@ fn receive_input_scoped(
                     let request = SourceRequest::decode(&payload)?;
                     let sources =
                         sources.ok_or_else(|| invalid_data("source switching unavailable"))?;
-                    let (version, area) = {
+                    if sources.managed_source_control.load(Ordering::Acquire)
+                        && (sources.control_enabled.load(Ordering::Acquire)
+                            || sources.control_prepare.lock().unwrap().is_some())
+                    {
+                        return Err(invalid_data(
+                            "release native control before switching sources",
+                        )
+                        .into());
+                    }
+                    let (version, grant) = {
                         let mut state = sources.state.lock().unwrap();
                         let version = state
                             .policy
@@ -6666,11 +7669,26 @@ fn receive_input_scoped(
                     state.presented_geometry = None;
                     state.presented_frame = None;
                     state.presented_native_proof = None;
-                    state.pending = Some((version, area));
+                    state.pending = Some((version, grant));
                     sources.changed.notify_all();
                 }
                 MessageKind::FrameAck => {
-                    let (epoch, sequence) = decode_source_frame_ack(&payload)?;
+                    #[cfg(feature = "remote-h264")]
+                    let feedback_window = sources
+                        .and_then(|sources| sources.hardware_video.get())
+                        .and_then(|config| config.viewer_feedback.as_ref());
+                    #[cfg(feature = "remote-h264")]
+                    let feedback_negotiated = feedback_window.is_some();
+                    #[cfg(not(feature = "remote-h264"))]
+                    let feedback_negotiated = false;
+                    let (epoch, sequence, _feedback) = if feedback_negotiated {
+                        let (epoch, sequence, feedback) =
+                            ViewerFrameFeedback::decode_ack(&payload)?;
+                        (epoch, sequence, Some(feedback))
+                    } else {
+                        let (epoch, sequence) = decode_source_frame_ack(&payload)?;
+                        (epoch, sequence, None)
+                    };
                     if let Some(sources) = sources {
                         let state = sources.state.lock().unwrap();
                         let current = state.policy.current();
@@ -6702,7 +7720,21 @@ fn receive_input_scoped(
                                 geometry_epoch: ack.geometry_epoch,
                                 frame_sequence: sequence,
                             };
-                            state.observe_presentation(scope, ack.purpose);
+                            if !sources.strict_frame_geometry.load(Ordering::Acquire)
+                                || ack.geometry_epoch == state.geometry_epoch
+                            {
+                                state.observe_presentation(scope, ack.purpose);
+                            }
+                            #[cfg(feature = "remote-h264")]
+                            if let (Some(window), Some(feedback)) = (feedback_window, _feedback)
+                                && ack.purpose == FramePurpose::Video
+                                && ack.geometry_epoch == state.geometry_epoch
+                            {
+                                window
+                                    .lock()
+                                    .unwrap()
+                                    .record((epoch, ack.geometry_epoch), feedback);
+                            }
                             sources.changed.notify_all();
                             drop(state);
                             #[cfg(all(
@@ -6932,6 +7964,16 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 fn permission_denied(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message.into())
 }
+
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
+pub(super) use tests::send_replaced_x11_capture;
 
 #[cfg(test)]
 mod tests {
@@ -7291,12 +8333,21 @@ mod tests {
                 let geometry_aba = mutation == 2;
                 let make_frame = |red, selected_change| {
                     let mut pending = test_pending_frame(red);
-                    pending.frame.source_width = 272;
-                    pending.frame.source_height = 256;
-                    pending.frame.image = RgbImage::from_pixel(272, 256, Rgb([90, 110, 130]));
-                    pending.frame.image.put_pixel(0, 0, Rgb([red, 110, 130]));
+                    pending.frame.test_rgb_mut().source_width = 272;
+                    pending.frame.test_rgb_mut().source_height = 256;
+                    pending.frame.test_rgb_mut().image =
+                        RgbImage::from_pixel(272, 256, Rgb([90, 110, 130]));
+                    pending
+                        .frame
+                        .test_rgb_mut()
+                        .image
+                        .put_pixel(0, 0, Rgb([red, 110, 130]));
                     if selected_change {
-                        pending.frame.image.put_pixel(271, 255, Rgb([91, 110, 130]));
+                        pending
+                            .frame
+                            .test_rgb_mut()
+                            .image
+                            .put_pixel(271, 255, Rgb([91, 110, 130]));
                     }
                     pending
                 };
@@ -7304,12 +8355,14 @@ mod tests {
                 frame_sender.lossless_schedule = policy;
                 let base = Instant::now() - Duration::from_secs(3);
                 let seed = make_frame(90, false);
-                frame_sender.plan_at(&seed.frame, base).unwrap();
+                frame_sender
+                    .plan_at(seed.frame.rgb().unwrap(), base)
+                    .unwrap();
                 frame_sender
                     .encoder
-                    .encode_into(&mut Vec::new(), 0, &seed.frame, 70)
+                    .encode_into(&mut Vec::new(), 0, seed.frame.rgb().unwrap(), 70)
                     .unwrap();
-                frame_sender.commit_at(&seed.frame, base);
+                frame_sender.commit_at(seed.frame.rgb().unwrap(), base);
                 let mailbox = Arc::new(LatestMailbox::new());
                 mailbox.publish(make_frame(200, false)).unwrap();
                 let gate = Arc::new((
@@ -7367,7 +8420,7 @@ mod tests {
                 assert_eq!(credits.outstanding(), 2);
                 let mut latest = make_frame(220, selected_change);
                 if geometry_aba {
-                    latest.frame.geometry_epoch += 2;
+                    latest.frame.test_rgb_mut().geometry_epoch += 2;
                 }
                 mailbox.publish(latest).unwrap();
                 let (lock, ready) = &*gate;
@@ -7423,64 +8476,76 @@ mod tests {
     fn region_deadline_pending_repair_preserves_selected_pixel_and_scope_fences() {
         let base = Instant::now();
         let mut current = test_pending_frame(90);
-        current.frame.source_width = 32;
-        current.frame.source_height = 16;
-        current.frame.image = RgbImage::from_pixel(32, 16, Rgb([90, 110, 130]));
+        current.frame.test_rgb_mut().source_width = 32;
+        current.frame.test_rgb_mut().source_height = 16;
+        current.frame.test_rgb_mut().image = RgbImage::from_pixel(32, 16, Rgb([90, 110, 130]));
         let mut sender = FrameSender::with_codecs(false, true);
         sender.lossless_schedule = LosslessSchedule::RegionDeadline;
         let mut payload = Vec::new();
-        sender.plan_at(&current.frame, base).unwrap();
+        sender.plan_at(current.frame.rgb().unwrap(), base).unwrap();
         sender
             .encoder
-            .encode_into(&mut payload, 0, &current.frame, 70)
+            .encode_into(&mut payload, 0, current.frame.rgb().unwrap(), 70)
             .unwrap();
-        sender.commit_at(&current.frame, base);
+        sender.commit_at(current.frame.rgb().unwrap(), base);
         let now = base + Duration::from_secs(2);
-        current.frame.image.put_pixel(0, 0, Rgb([200, 110, 130]));
-        sender.plan_at(&current.frame, now).unwrap();
+        current
+            .frame
+            .test_rgb_mut()
+            .image
+            .put_pixel(0, 0, Rgb([200, 110, 130]));
+        sender.plan_at(current.frame.rgb().unwrap(), now).unwrap();
         sender
             .encoder
-            .encode_into(&mut payload, 1, &current.frame, 70)
+            .encode_into(&mut payload, 1, current.frame.rgb().unwrap(), 70)
             .unwrap();
-        sender.commit_at(&current.frame, now);
+        sender.commit_at(current.frame.rgb().unwrap(), now);
         assert!(sender.region_repair_due(now));
         assert_eq!(
             sender
-                .plan_region_repair_at(&current.frame, now)
+                .plan_region_repair_at(current.frame.rgb().unwrap(), now)
                 .unwrap()
                 .dirty_tiles,
             1
         );
         sender
             .encoder
-            .encode_into(&mut payload, 2, &current.frame, 70)
+            .encode_into(&mut payload, 2, current.frame.rgb().unwrap(), 70)
             .unwrap();
         let mut newer = test_pending_frame(90);
-        newer.frame = CapturedFrame {
-            geometry_epoch: current.frame.geometry_epoch,
+        *newer.frame.test_rgb_mut() = CapturedFrame {
+            geometry_epoch: current.frame.test_rgb_mut().geometry_epoch,
             source_width: 32,
             source_height: 16,
-            image: current.frame.image.clone(),
+            image: current.frame.test_rgb_mut().image.clone(),
         };
-        newer.frame.image.put_pixel(0, 0, Rgb([201, 110, 130]));
+        newer
+            .frame
+            .test_rgb_mut()
+            .image
+            .put_pixel(0, 0, Rgb([201, 110, 130]));
         assert!(!newer_frame_supersedes_repair(
             &sender.encoder,
             &current,
             &newer
         ));
         for value in [89, 91] {
-            newer.frame.image.put_pixel(16, 0, Rgb([value, 110, 130]));
+            newer
+                .frame
+                .test_rgb_mut()
+                .image
+                .put_pixel(16, 0, Rgb([value, 110, 130]));
             assert!(newer_frame_supersedes_repair(
                 &sender.encoder,
                 &current,
                 &newer
             ));
         }
-        newer.frame = CapturedFrame {
-            geometry_epoch: current.frame.geometry_epoch,
+        *newer.frame.test_rgb_mut() = CapturedFrame {
+            geometry_epoch: current.frame.test_rgb_mut().geometry_epoch,
             source_width: 32,
             source_height: 16,
-            image: current.frame.image.clone(),
+            image: current.frame.test_rgb_mut().image.clone(),
         };
         newer.source_version.source = SourceId(2);
         assert!(newer_frame_supersedes_repair(
@@ -7497,7 +8562,7 @@ mod tests {
             &newer
         ));
         newer.source_version = current.source_version;
-        newer.frame.geometry_epoch += 2;
+        newer.frame.test_rgb_mut().geometry_epoch += 2;
         assert!(newer_frame_supersedes_repair(
             &sender.encoder,
             &current,
@@ -7729,21 +8794,25 @@ mod tests {
         let now = Instant::now();
         let mut payload = Vec::new();
         encoder
-            .plan_at(&current.frame, TileEncodeRequest::Keyframe, now)
+            .plan_at(
+                current.frame.rgb().unwrap(),
+                TileEncodeRequest::Keyframe,
+                now,
+            )
             .unwrap();
         encoder
-            .encode_into(&mut payload, 0, &current.frame, 70)
+            .encode_into(&mut payload, 0, current.frame.rgb().unwrap(), 70)
             .unwrap();
-        encoder.commit(&current.frame);
+        encoder.commit(current.frame.rgb().unwrap());
         encoder
             .plan_at(
-                &current.frame,
+                current.frame.rgb().unwrap(),
                 TileEncodeRequest::LosslessRepair,
                 now + Duration::from_secs(2),
             )
             .unwrap();
         encoder
-            .encode_into(&mut payload, 1, &current.frame, 70)
+            .encode_into(&mut payload, 1, current.frame.rgb().unwrap(), 70)
             .unwrap();
         let mailbox = LatestMailbox::new();
         mailbox.publish(test_pending_frame(90)).unwrap();
@@ -7762,13 +8831,13 @@ mod tests {
         newer.source_version.epoch += 1;
         assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         let mut newer = test_pending_frame(90);
-        newer.frame.geometry_epoch += 1;
+        newer.frame.test_rgb_mut().geometry_epoch += 1;
         assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         let mut newer = test_pending_frame(90);
-        newer.frame.source_width += 1;
+        newer.frame.test_rgb_mut().source_width += 1;
         assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         let mut newer = test_pending_frame(90);
-        newer.frame.image = RgbImage::from_pixel(3, 2, Rgb([90, 0, 0]));
+        newer.frame.test_rgb_mut().image = RgbImage::from_pixel(3, 2, Rgb([90, 0, 0]));
         assert!(newer_frame_supersedes_repair(&encoder, &current, &newer));
         mailbox.publish(test_pending_frame(91)).unwrap();
         assert!(
@@ -7783,6 +8852,8 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .frame
+                .rgb()
+                .unwrap()
                 .image
                 .get_pixel(0, 0)[0],
             91
@@ -8508,6 +9579,139 @@ mod tests {
         }
     }
 
+    #[cfg(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    ))]
+    pub(in crate::remote) fn send_replaced_x11_capture(
+        recycler: CaptureImageRecycler,
+        mut captures: impl Iterator<Item = CapturedFrame>,
+    ) -> [RgbImage; 2] {
+        let mailbox = Arc::new(LatestMailbox::new());
+        let running = AtomicBool::new(true);
+        let credits = FrameCredits::new();
+        let telemetry = HostTelemetry::new();
+        let quality = JpegQualityController::new_at(
+            100,
+            100,
+            false,
+            Duration::from_millis(100),
+            Instant::now(),
+        )
+        .unwrap();
+        let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
+        let key = [0x5a; 32];
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+            key,
+        )));
+        let pending = |frame| PendingFrame {
+            pointer_repair: None,
+            control_repair: None,
+            native_proof_serial: None,
+            pointer_serial: None,
+            source_version: SourceVersion {
+                source: SourceId(1),
+                epoch: 1,
+            },
+            frame: CapturedPixels::Rgb(frame),
+            captured_at: Instant::now(),
+            capture_completed_at: Instant::now(),
+            recycler: Some(recycler.clone()),
+        };
+
+        struct StopSender<'a> {
+            running: &'a AtomicBool,
+            mailbox: &'a LatestMailbox<PendingFrame>,
+            credits: &'a FrameCredits,
+            gate: &'a (Mutex<GateState>, Condvar),
+        }
+        impl Drop for StopSender<'_> {
+            fn drop(&mut self) {
+                self.running.store(false, Ordering::Release);
+                self.mailbox.close();
+                self.credits.close();
+                self.gate.0.lock().unwrap().open = true;
+                self.gate.1.notify_all();
+            }
+        }
+
+        let wire = thread::scope(|scope| {
+            assert_eq!(
+                mailbox.publish(pending(captures.next().unwrap())),
+                Some(false)
+            );
+            let sender = scope.spawn(|| {
+                send_frames(
+                    Arc::clone(&mailbox),
+                    writer,
+                    &running,
+                    &credits,
+                    &telemetry,
+                    &quality,
+                )
+            });
+            let stop = StopSender {
+                running: &running,
+                mailbox: &mailbox,
+                credits: &credits,
+                gate: &gate,
+            };
+            let (lock, ready) = &*gate;
+            let wait_for = |condition: fn(&GateState) -> bool| {
+                let (state, _) = ready
+                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |state| {
+                        !condition(state)
+                    })
+                    .unwrap();
+                condition(&state)
+            };
+            assert!(
+                wait_for(|state| state.write_calls > 0),
+                "baseline did not reach writer"
+            );
+
+            // While the baseline is held in its first write, each sparse
+            // change is captured in its own XDamage batch and published.
+            let first_change = captures.next().unwrap();
+            let first_reference = first_change.image.clone();
+            assert_eq!(mailbox.publish(pending(first_change)), Some(false));
+            let second_change = captures.next().unwrap();
+            assert!(
+                mailbox
+                    .inspect_latest(|queued| queued.is_some_and(|queued| {
+                        queued.frame.rgb().unwrap().image == first_reference
+                    }))
+                    .unwrap(),
+                "second readback mutated the queued snapshot"
+            );
+            assert_eq!(mailbox.publish(pending(second_change)), Some(true));
+
+            lock.lock().unwrap().open = true;
+            ready.notify_all();
+            assert!(
+                wait_for(|state| state.flushes == 2),
+                "replacement did not reach writer"
+            );
+            drop(stop);
+            sender.join().unwrap().unwrap();
+            std::mem::take(&mut lock.lock().unwrap().bytes)
+        });
+
+        let mut reader = SessionReader::new(Cursor::new(wire.as_slice()), key);
+        let mut decoder = TileDecoder::new();
+        let images = [0, 1].map(|expected_sequence| {
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Frame);
+            let (sequence, image) = decode_wire(&mut decoder, &payload);
+            assert_eq!(sequence, expected_sequence);
+            image
+        });
+        assert_eq!(reader.into_inner().position(), wire.len() as u64);
+        images
+    }
+
     struct DripWriter {
         bytes: Vec<u8>,
         max_chunk: usize,
@@ -9187,6 +10391,7 @@ mod tests {
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
             allow_wayland_control: false,
+            allow_wayland_gestures: false,
             allow_resumable_control: false,
             allow_wayland_text: false,
             allow_wayland_popup_pointer: false,
@@ -10094,7 +11299,7 @@ mod tests {
             let mut pending = test_pending_frame(if stage == 3 { 20 } else { 10 });
             let expected = match stage {
                 0 => {
-                    pending.frame.source_width = 0;
+                    pending.frame.test_rgb_mut().source_width = 0;
                     "remote frame has an empty dimension"
                 }
                 1 | 2 => {
@@ -11264,7 +12469,7 @@ mod tests {
         // hello must narrow the scaler synchronously, not race the input thread.
         let source = include_str!("host.rs");
         let body = source
-            .split("fn serve_authenticated(")
+            .split("fn serve_authenticated_with_video_policy(")
             .nth(1)
             .unwrap()
             .split("fn stream_frames(")
@@ -11416,6 +12621,23 @@ mod tests {
         assert!(!accept_error_is_transient(&fatal));
     }
 
+    #[test]
+    fn hevc444_lossless_requires_an_explicit_valid_value() {
+        use std::ffi::OsStr;
+
+        assert!(!parse_hevc444_lossless(None).unwrap());
+        assert!(!parse_hevc444_lossless(Some(OsStr::new("0"))).unwrap());
+        assert!(parse_hevc444_lossless(Some(OsStr::new("1"))).unwrap());
+        for bad in ["", "true", "01", " 1"] {
+            assert_eq!(
+                parse_hevc444_lossless(Some(OsStr::new(bad)))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
     fn test_tile_plan(dirty_tiles: u32, total_tiles: u32) -> TilePlan {
         TilePlan {
             keyframe: dirty_tiles == total_tiles,
@@ -11444,7 +12666,7 @@ mod tests {
                 source: SourceId(1),
                 epoch: 1,
             },
-            frame: test_captured_frame(red),
+            frame: CapturedPixels::Rgb(test_captured_frame(red)),
             captured_at: Instant::now(),
             capture_completed_at: Instant::now(),
             recycler: None,
@@ -11474,22 +12696,22 @@ mod tests {
 
         let limits = super::super::messages::FrameLimits::default();
         for (width, height) in [(256u16, 256u16), (257, 255)] {
-            let mut sender = HardwareVideoSender::new(FrameCodec::Hevc444, limits, 30);
+            let mut sender = HardwareVideoSender::new(FrameCodec::Hevc444, limits, 30, false);
             let mut pending = test_pending_frame(0);
-            pending.frame.image = RgbImage::new(width.into(), height.into());
-            pending.frame.source_width = width;
-            pending.frame.source_height = height;
+            pending.frame.test_rgb_mut().image = RgbImage::new(width.into(), height.into());
+            pending.frame.test_rgb_mut().source_width = width;
+            pending.frame.test_rgb_mut().source_height = height;
             let mut payload = Vec::new();
             assert_eq!(
                 sender
-                    .encode_frame(&mut payload, 0, &pending, true)
+                    .encode_frame(&mut payload, 0, &pending, true, None, None)
                     .unwrap(),
                 Some(true)
             );
             let previous = payload.clone();
             assert_eq!(
                 sender
-                    .encode_frame(&mut payload, 1, &pending, true)
+                    .encode_frame(&mut payload, 1, &pending, true, None, None)
                     .unwrap(),
                 None
             );
@@ -11497,11 +12719,12 @@ mod tests {
 
             pending
                 .frame
+                .test_rgb_mut()
                 .image
                 .get_pixel_mut(u32::from(width - 1), u32::from(height - 1))[2] = 1;
             assert!(
                 sender
-                    .encode_frame(&mut payload, 1, &pending, true)
+                    .encode_frame(&mut payload, 1, &pending, true, None, None)
                     .unwrap()
                     .is_some()
             );
@@ -11513,24 +12736,44 @@ mod tests {
             assert_eq!(header.sequence, 1);
             assert!(
                 sender
-                    .encode_frame(&mut payload, 2, &pending, false)
+                    .encode_frame(&mut payload, 2, &pending, false, None, None)
                     .unwrap()
                     .is_some()
             );
-            pending.frame.source_width += 1;
+            pending.frame.test_rgb_mut().source_width += 1;
             assert_eq!(
                 sender
-                    .encode_frame(&mut payload, 3, &pending, true)
+                    .encode_frame(&mut payload, 3, &pending, true, None, None)
                     .unwrap(),
                 Some(true)
             );
             pending.source_version.epoch += 1;
             assert_eq!(
                 sender
-                    .encode_frame(&mut payload, 4, &pending, true)
+                    .encode_frame(&mut payload, 4, &pending, true, None, None)
                     .unwrap(),
                 Some(true)
             );
+            let rate = super::super::adaptive_video::Rate {
+                fps: 24,
+                bitrate_percent: 85,
+            };
+            assert_eq!(
+                sender
+                    .encode_frame(&mut payload, 5, &pending, true, None, Some(rate))
+                    .unwrap(),
+                Some(true)
+            );
+            let VideoPayload::Hardware {
+                header,
+                codec,
+                annex_b,
+            } = decode_video_payload(&payload, limits).unwrap()
+            else {
+                panic!("expected hardware frame after rate change");
+            };
+            assert_eq!(header.sequence, 5);
+            assert!(super::super::h264_wire::hardware_has_idr(codec, annex_b));
         }
     }
 
@@ -12018,6 +13261,7 @@ mod tests {
             allow_wayland_keyboard: false,
             allow_wayland_pointer: false,
             allow_wayland_control: false,
+            allow_wayland_gestures: false,
             allow_resumable_control: false,
             allow_wayland_text: false,
             allow_wayland_popup_pointer: false,
@@ -12826,10 +14070,15 @@ mod tests {
             if reset_first {
                 let empty = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
                 assert_eq!(empty.window.sent, 0);
-                assert_eq!(empty.window.writer_wait_samples.count, 0);
-                assert_eq!(empty.window.socket_write_samples.count, 0);
+                assert_eq!(empty.window.writer_wait_samples.count(), 0);
+                assert_eq!(empty.window.socket_write_samples.count(), 0);
             }
-            telemetry.record_sent(100, Duration::from_millis(2), Duration::from_millis(3));
+            telemetry.record_sent(
+                100,
+                Duration::from_millis(2),
+                Duration::from_millis(3),
+                None,
+            );
             let snapshot = telemetry
                 .take_due_at(base + TELEMETRY_INTERVAL * 2)
                 .unwrap();
@@ -12837,8 +14086,8 @@ mod tests {
             assert_eq!(window.sent, 1);
             assert_eq!(window.bytes, 100);
             assert_eq!(window.write_elapsed, Duration::from_millis(5));
-            assert_eq!(window.writer_wait_samples.count, 1);
-            assert_eq!(window.socket_write_samples.count, 1);
+            assert_eq!(window.writer_wait_samples.count(), 1);
+            assert_eq!(window.socket_write_samples.count(), 1);
             let json = host_telemetry_json(snapshot, 0);
             assert_eq!(json["stages"]["writer_wait_ms"]["mean"], 2.0);
             assert_eq!(json["stages"]["socket_write_ms"]["mean"], 3.0);
@@ -12865,14 +14114,25 @@ mod tests {
                 window.socket_write_elapsed,
                 Duration::from_millis(3) * count
             );
-            assert_eq!(window.writer_wait_samples.count, (count as usize).min(128));
-            assert_eq!(window.socket_write_samples.count, (count as usize).min(128));
+            assert_eq!(
+                window.writer_wait_samples.count(),
+                (count as usize).min(128)
+            );
+            assert_eq!(
+                window.socket_write_samples.count(),
+                (count as usize).min(128)
+            );
         };
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 start.wait();
                 for _ in 0..4096 {
-                    telemetry.record_sent(100, Duration::from_millis(2), Duration::from_millis(3));
+                    telemetry.record_sent(
+                        100,
+                        Duration::from_millis(2),
+                        Duration::from_millis(3),
+                        None,
+                    );
                     std::thread::yield_now();
                 }
                 done.store(true, Ordering::Release);
@@ -12956,7 +14216,7 @@ mod tests {
     fn telemetry_json_reports_distinct_pipeline_stages_and_resets_samples() {
         let base = Instant::now();
         let telemetry = HostTelemetry::new_at(base);
-        telemetry.record_dimensions(&test_captured_frame(0));
+        telemetry.record_dimensions(&CapturedPixels::Rgb(test_captured_frame(0)));
         telemetry.record_captured(Duration::from_millis(30));
         telemetry.record_skipped();
         telemetry.record_damage_skipped();
@@ -12968,13 +14228,28 @@ mod tests {
             jpeg: Duration::from_millis(4),
             png: None,
         });
-        telemetry.record_sent(100, Duration::from_millis(2), Duration::from_millis(3));
+        telemetry.record_sent(
+            100,
+            Duration::from_millis(2),
+            Duration::from_millis(3),
+            Some(SentFrameScope {
+                source_epoch: 1,
+                geometry_epoch: 1,
+                sequence: 2,
+                codec: FrameCodec::JpegTiles.name(),
+                scroll_copy_dy: Some(20),
+                source_dimensions: (2, 2),
+                encoded_dimensions: (2, 2),
+            }),
+        );
         let snapshot = telemetry.take_due_at(base + TELEMETRY_INTERVAL).unwrap();
         let json = host_telemetry_json(snapshot, 1);
         let parsed: serde_json::Value = serde_json::from_str(&json.to_string()).unwrap();
         assert_eq!(parsed["type"], "jwm_remote_host_stats");
         assert_eq!(parsed["backpressure_skipped"], 1);
         assert_eq!(parsed["damage_skipped"], 1);
+        assert_eq!(parsed["scroll_copy_frames"], 1);
+        assert_eq!(parsed["last_sent_frame"]["scroll_copy_dy"], 20);
         assert!(parsed.get("x11_capture").is_none());
         assert_eq!(parsed["source_dimensions"], serde_json::json!([2, 2]));
         assert_eq!(parsed["stages"]["capture_ms"]["mean"], 30.0);
@@ -12987,10 +14262,11 @@ mod tests {
         let reset = telemetry
             .take_due_at(base + TELEMETRY_INTERVAL * 2)
             .unwrap();
-        assert_eq!(reset.window.capture_samples.count, 0);
+        assert_eq!(reset.window.capture_samples.count(), 0);
+        assert_eq!(reset.window.scroll_copy_frames, 0);
         assert_eq!(reset.window.dirty_scans, 0);
         assert_eq!(reset.window.atlas_encoded, 0);
-        assert_eq!(reset.window.jpeg_samples.count, 0);
+        assert_eq!(reset.window.jpeg_samples.count(), 0);
     }
 
     #[test]
@@ -13090,7 +14366,7 @@ mod tests {
                 source: SourceId(1),
                 epoch: 1,
             },
-            frame: test_captured_frame(0),
+            frame: CapturedPixels::Rgb(test_captured_frame(0)),
             captured_at: base,
             capture_completed_at: base + Duration::from_millis(30),
             recycler: None,
@@ -13154,7 +14430,7 @@ mod tests {
             )
             .unwrap();
         telemetry.record_outstanding(outstanding);
-        telemetry.record_sent(100, Duration::ZERO, Duration::from_millis(8));
+        telemetry.record_sent(100, Duration::ZERO, Duration::from_millis(8), None);
         let outstanding = credits
             .mark_sent(
                 1,
@@ -13166,7 +14442,7 @@ mod tests {
             )
             .unwrap();
         telemetry.record_outstanding(outstanding);
-        telemetry.record_sent(200, Duration::ZERO, Duration::from_millis(9));
+        telemetry.record_sent(200, Duration::ZERO, Duration::from_millis(9), None);
 
         let sent_window = telemetry
             .take_due_at(base + TELEMETRY_INTERVAL)
@@ -13572,8 +14848,8 @@ mod tests {
         assert_eq!(window.write_elapsed, Duration::ZERO);
         assert_eq!(window.writer_wait_elapsed, Duration::ZERO);
         assert_eq!(window.socket_write_elapsed, Duration::ZERO);
-        assert_eq!(window.writer_wait_samples.count, 0);
-        assert_eq!(window.socket_write_samples.count, 0);
+        assert_eq!(window.writer_wait_samples.count(), 0);
+        assert_eq!(window.socket_write_samples.count(), 0);
         assert_eq!(window.unchanged_keepalive, 0);
         assert_eq!(window.unchanged_suppressed, 0);
         assert_eq!(credits.outstanding(), 1);
@@ -13630,8 +14906,8 @@ mod tests {
         assert_eq!(window.write_elapsed, Duration::ZERO);
         assert_eq!(window.writer_wait_elapsed, Duration::ZERO);
         assert_eq!(window.socket_write_elapsed, Duration::ZERO);
-        assert_eq!(window.writer_wait_samples.count, 0);
-        assert_eq!(window.socket_write_samples.count, 0);
+        assert_eq!(window.writer_wait_samples.count(), 0);
+        assert_eq!(window.socket_write_samples.count(), 0);
         assert_eq!(window.unchanged_keepalive, 0);
         assert_eq!(window.unchanged_suppressed, 0);
     }

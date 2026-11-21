@@ -1,0 +1,415 @@
+{
+  "compositor_completions": 51,
+  "host": {
+    "backpressure_skipped": 0,
+    "bytes": 21601,
+    "captured": 50,
+    "commit": null,
+    "cursor_stages": {
+      "poll_interval_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "poll_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      }
+    },
+    "damage_skipped": 0,
+    "dirty_tiles": 0,
+    "drawn_acks": 49,
+    "encoded_dimensions": [
+      3840,
+      2160
+    ],
+    "h264_frames": 50,
+    "hardware_encode_stages": {
+      "conversion_ms": {
+        "mean": 10.40408668,
+        "observations": 50,
+        "quantiles": {
+          "p50_ms": 10.171,
+          "p95_ms": 11.188,
+          "p99_ms": 19.481,
+          "samples": 50
+        }
+      },
+      "native_dmabuf_import_ms": {
+        "mean": 0.046696079999999994,
+        "observations": 50,
+        "quantiles": {
+          "p50_ms": 0.044,
+          "p95_ms": 0.063,
+          "p99_ms": 0.071,
+          "samples": 50
+        }
+      },
+      "output_ms": {
+        "mean": 0.01069288,
+        "observations": 50,
+        "quantiles": {
+          "p50_ms": 0.01,
+          "p95_ms": 0.014,
+          "p99_ms": 0.016,
+          "samples": 50
+        }
+      },
+      "padding_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "rgb_copy_ms": {
+        "mean": null,
+        "observations": 0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "submit_ms": {
+        "mean": 8.7910824,
+        "observations": 50,
+        "quantiles": {
+          "p50_ms": 7.79,
+          "p95_ms": 16.596,
+          "p99_ms": 35.594,
+          "samples": 50
+        }
+      }
+    },
+    "hevc444_frames": 0,
+    "jpeg_atlases": 0,
+    "last_sent_frame": {
+      "codec": "H.264",
+      "encoded_dimensions": [
+        3840,
+        2160
+      ],
+      "geometry_epoch": 2,
+      "sequence": 49,
+      "source_dimensions": [
+        3840,
+        2160
+      ],
+      "source_epoch": 1
+    },
+    "legacy_stage_aliases": {
+      "atlas_pack_and_jpeg_ms": "atlas_pack_and_codec_ms; historical name includes all codecs and empty-frame encode work"
+    },
+    "max_outstanding": 1,
+    "mode": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+    "outstanding": 1,
+    "png_atlases": 0,
+    "quantile_policy": "nearest-rank, most recent 128 observations per stage per window",
+    "replaced": 0,
+    "scheduled": 50,
+    "schema_version": 1,
+    "sent": 50,
+    "session_id": "5d2044237fffd7e865295b592b685679",
+    "source_dimensions": [
+      3840,
+      2160
+    ],
+    "stages": {
+      "atlas_pack_and_codec_ms": {
+        "mean": 19.71407534,
+        "quantiles": {
+          "p50_ms": 17.841,
+          "p95_ms": 27.777,
+          "p99_ms": 75.031,
+          "samples": 50
+        }
+      },
+      "atlas_pack_and_jpeg_ms": {
+        "mean": 19.71407534,
+        "quantiles": {
+          "p50_ms": 17.841,
+          "p95_ms": 27.777,
+          "p99_ms": 75.031,
+          "samples": 50
+        }
+      },
+      "atlas_pack_ms": {
+        "mean": 0.0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "capture_ms": {
+        "mean": 42.48922298,
+        "quantiles": {
+          "p50_ms": 41.757,
+          "p95_ms": 52.175,
+          "p99_ms": 52.383,
+          "samples": 50
+        }
+      },
+      "capture_start_to_ack_ms": {
+        "mean": 107.54972106122447,
+        "quantiles": {
+          "p50_ms": 103.263,
+          "p95_ms": 147.881,
+          "p99_ms": 175.323,
+          "samples": 49
+        }
+      },
+      "codec_ms": {
+        "mean": 19.71407534,
+        "quantiles": {
+          "p50_ms": 17.841,
+          "p95_ms": 27.777,
+          "p99_ms": 75.031,
+          "samples": 50
+        }
+      },
+      "credit_wait_ms": {
+        "mean": 0.00149898,
+        "quantiles": {
+          "p50_ms": 0.001,
+          "p95_ms": 0.001,
+          "p99_ms": 0.003,
+          "samples": 50
+        }
+      },
+      "dirty_scan_ms": {
+        "mean": 0.0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "h264_ms": {
+        "mean": 19.71407534,
+        "quantiles": {
+          "p50_ms": 17.841,
+          "p95_ms": 27.777,
+          "p99_ms": 75.031,
+          "samples": 50
+        }
+      },
+      "hevc444_ms": {
+        "mean": 0.0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "jpeg_ms": {
+        "mean": 0.0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "mailbox_age_ms": {
+        "mean": 0.14507641999999998,
+        "quantiles": {
+          "p50_ms": 0.149,
+          "p95_ms": 0.211,
+          "p99_ms": 0.243,
+          "samples": 50
+        }
+      },
+      "png_ms": {
+        "mean": 0.0,
+        "quantiles": {
+          "p50_ms": null,
+          "p95_ms": null,
+          "p99_ms": null,
+          "samples": 0
+        }
+      },
+      "send_to_ack_ms": {
+        "mean": 44.58608402040816,
+        "quantiles": {
+          "p50_ms": 43.254,
+          "p95_ms": 54.483,
+          "p99_ms": 77.53,
+          "samples": 49
+        }
+      },
+      "socket_write_ms": {
+        "mean": 0.7989918399999999,
+        "quantiles": {
+          "p50_ms": 0.738,
+          "p95_ms": 1.35,
+          "p99_ms": 1.398,
+          "samples": 50
+        }
+      },
+      "writer_wait_ms": {
+        "mean": 0.012343339999999998,
+        "quantiles": {
+          "p50_ms": 0.011,
+          "p95_ms": 0.016,
+          "p99_ms": 0.016,
+          "samples": 50
+        }
+      }
+    },
+    "total_tiles": 0,
+    "type": "jwm_remote_host_stats",
+    "unchanged_suppressed": 0,
+    "version": "0.2.0",
+    "viewer_superseded": 0,
+    "window_seconds": 5.019187644
+  },
+  "last_completion_monotonic_us": 51920625225,
+  "render_node_device": 57984,
+  "roi": [
+    16,
+    16,
+    96,
+    96
+  ],
+  "roi_bytes": 36864,
+  "samples": [
+    [
+      240,
+      17,
+      15,
+      255
+    ],
+    [
+      16,
+      239,
+      15,
+      255
+    ],
+    [
+      16,
+      16,
+      240,
+      255
+    ],
+    [
+      240,
+      240,
+      17,
+      255
+    ]
+  ],
+  "viewer": {
+    "acked_frames": 50,
+    "decode_ms": {
+      "mean": 1.0741626078431372,
+      "observations": 51,
+      "quantiles": {
+        "p50_ms": 0.637,
+        "p95_ms": 1.209,
+        "p99_ms": 12.998,
+        "samples": 51
+      }
+    },
+    "final": false,
+    "hardware_download_ms": {
+      "mean": null,
+      "observations": 0,
+      "quantiles": {
+        "p50_ms": null,
+        "p95_ms": null,
+        "p99_ms": null,
+        "samples": 0
+      }
+    },
+    "last_decoded_frame": {
+      "codec": "H.264",
+      "encoded_dimensions": [
+        3840,
+        2160
+      ],
+      "geometry_epoch": 2,
+      "sequence": 50,
+      "source_dimensions": [
+        3840,
+        2160
+      ],
+      "source_epoch": 1
+    },
+    "last_presentation_path": "wayland-vaapi-dmabuf",
+    "native_preparation_and_submit_ms": {
+      "mean": 35.09530133333334,
+      "observations": 51,
+      "quantiles": {
+        "p50_ms": 34.486,
+        "p95_ms": 38.407,
+        "p99_ms": 68.423,
+        "samples": 51
+      }
+    },
+    "native_presented_frames": 50,
+    "negotiated_codec": "H.264",
+    "presentation_completion_ms": {
+      "mean": 40.6010409,
+      "observations": 50,
+      "quantiles": {
+        "p50_ms": 39.784,
+        "p95_ms": 44.205,
+        "p99_ms": 74.24,
+        "samples": 50
+      }
+    },
+    "presentation_queue_ms": {
+      "mean": 0.4268257999999999,
+      "observations": 50,
+      "quantiles": {
+        "p50_ms": 0.299,
+        "p95_ms": 0.366,
+        "p99_ms": 7.689,
+        "samples": 50
+      }
+    },
+    "presented_frames": 50,
+    "session_id": "5d2044237fffd7e865295b592b685679",
+    "window_ms": 5009.356914
+  },
+  "renderer": "Mesa Intel(R) Graphics (ARL)",
+  "render_node": "/dev/dri/renderD128",
+  "date": "2026-11-21",
+  "binary_features": [
+    "remote-wayland",
+    "backend-wayland-udev",
+    "remote-h264"
+  ],
+  "command": "scripts/test-remote-wayland-cli.sh --gpu-viewer-4k /dev/dri/renderD128",
+  "scope": "Two owned private Wayland compositors on the development machine. The authenticated session captured, encoded, presented and acknowledged the same exact-size 4K static synthetic source with Intel GPU paths on both ends. The application-side ROI verifies sampled pixels and orientation. This is a static import and completion smoke.",
+  "remote_cli_sha256": "95dc86334ce1c31e761b092295548476a67c0c9cadea20f4a9c217242875a8bd",
+  "archive": {
+    "path": "native-wayland-4k-intel-smoke-raw.zip",
+    "sha256": "424b6758c2104e39b75b378d563f9ff410a95404070af4e1103d629dee2d0d57",
+    "entries": {
+      "trace/wayland-4k.log": "ec4a9f09a28d152df97fc3c9daa63a03db0ee8122f5faffc7711aacda6877113",
+      "fixture/host_wayland_gpu_4k_integration.rs": "fa664e193ff148c286f57ed121b66b9531695b2b9e25e22e7928a961f199c3d0",
+      "fixture/test-remote-wayland-cli.sh": "6187937f071c8e4c60879d68bc67644f237c5208cfc39feab979b80fe1823efa"
+    }
+  }
+}

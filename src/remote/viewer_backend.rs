@@ -106,6 +106,7 @@ impl Viewer {
                     height,
                     options.window_size,
                     options.window_position,
+                    options.x11_parent_window,
                     options.scaling,
                     pointer,
                     keyboard,
@@ -123,25 +124,29 @@ impl Viewer {
                     #[cfg(test)]
                     if let Some(stream) = TEST_WAYLAND_STREAM.with(|slot| slot.borrow_mut().take())
                     {
-                        return Ok(Self::Wayland(Box::new(
-                            super::wayland_viewer::WaylandViewer::connect_test_stream(
-                                stream,
-                                width,
-                                height,
-                                Some(wayland_initial_size(options.window_size)),
-                                &options.peer_label,
-                            )?,
-                        )));
-                    }
-                    Ok(Self::Wayland(Box::new(
-                        super::wayland_viewer::WaylandViewer::connect(
-                            options.viewer_wayland_display.as_deref(),
+                        let mut viewer = super::wayland_viewer::WaylandViewer::connect_test_stream(
+                            stream,
                             width,
                             height,
                             Some(wayland_initial_size(options.window_size)),
                             &options.peer_label,
-                        )?,
-                    )))
+                        )?;
+                        if options.view_only {
+                            viewer.enable_view_only_session();
+                        }
+                        return Ok(Self::Wayland(Box::new(viewer)));
+                    }
+                    let mut viewer = super::wayland_viewer::WaylandViewer::connect(
+                        options.viewer_wayland_display.as_deref(),
+                        width,
+                        height,
+                        Some(wayland_initial_size(options.window_size)),
+                        &options.peer_label,
+                    )?;
+                    if options.view_only {
+                        viewer.enable_view_only_session();
+                    }
+                    Ok(Self::Wayland(Box::new(viewer)))
                 }
                 #[cfg(not(feature = "remote-wayland"))]
                 {
@@ -168,7 +173,7 @@ impl Viewer {
         match self {
             Self::X11(v) => v.request_close(),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(_) => unreachable!("the connection toggle requires X11"),
+            Self::Wayland(v) => v.request_close(),
         }
     }
     pub(super) fn viewport(&self) -> (u16, u16) {
@@ -234,6 +239,51 @@ impl Viewer {
             Self::Wayland(v) => v.user_close_requested(),
         }
     }
+    pub(super) fn managed_input_grab(&self) -> Option<bool> {
+        match self {
+            Self::X11(v) => v.managed_input_grab(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => None,
+        }
+    }
+    pub(super) fn release_managed_input(
+        &mut self,
+        events: &mut Vec<ViewerEvent>,
+    ) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.release_managed_input(events),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => Err("managed input release requires an X11 grab".into()),
+        }
+    }
+    pub(super) fn release_managed_wayland_control(&mut self) -> RemoteResult<()> {
+        match self {
+            Self::X11(_) => Err("managed Wayland release requires a native viewer".into()),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(viewer) => viewer.release_managed_control(),
+        }
+    }
+    pub(super) fn managed_wayland_focus_left(&self) -> bool {
+        match self {
+            Self::X11(_) => false,
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(viewer) => viewer.managed_control_focus_left(),
+        }
+    }
+    pub(super) fn managed_wayland_layout_generation(&self) -> Option<u64> {
+        match self {
+            Self::X11(_) => None,
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(viewer) => viewer.managed_layout_generation(),
+        }
+    }
+    pub(super) fn managed_wayland_focus_ready(&self) -> bool {
+        match self {
+            Self::X11(_) => false,
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(viewer) => viewer.managed_control_focus_ready(),
+        }
+    }
     pub(super) fn prepare_frame_geometry(&mut self, epoch: u64) -> RemoteResult<bool> {
         match self {
             Self::X11(v) => v.prepare_frame_geometry(epoch),
@@ -248,11 +298,22 @@ impl Viewer {
             Self::Wayland(v) => v.refresh_pending_redraw(),
         }
     }
-    pub(super) fn invalidate_source(&mut self, label: String) -> RemoteResult<()> {
+    pub(super) fn begin_source_change(&mut self, label: String) -> RemoteResult<()> {
         match self {
             Self::X11(v) => v.invalidate_source(label),
             #[cfg(feature = "remote-wayland")]
-            Self::Wayland(v) => v.invalidate_source(label),
+            Self::Wayland(v) => v.begin_source_change(),
+        }
+    }
+    pub(super) fn confirm_source_change(
+        &mut self,
+        label: String,
+        _explicitly_selected: bool,
+    ) -> RemoteResult<()> {
+        match self {
+            Self::X11(v) => v.invalidate_source(label),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.invalidate_source(label, _explicitly_selected),
         }
     }
     pub(super) fn set_source_label(&mut self, label: String) {
@@ -294,6 +355,38 @@ impl Viewer {
     pub(super) fn reconnect_allowed_after_cleanup(&mut self) -> RemoteResult<bool> {
         match self {
             Self::X11(v) => v.reconnect_allowed_after_cleanup(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => Ok(false),
+        }
+    }
+
+    pub(super) fn keep_window_on_retry(&mut self) {
+        match self {
+            Self::X11(viewer) => viewer.keep_window_on_retry(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => {}
+        }
+    }
+
+    pub(super) fn freeze_disconnected_window(&mut self) -> RemoteResult<()> {
+        match self {
+            Self::X11(viewer) => viewer.freeze_disconnected_window(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => Err("retaining a disconnected window requires X11".into()),
+        }
+    }
+
+    pub(super) fn poll_disconnected_window(&mut self) -> RemoteResult<bool> {
+        match self {
+            Self::X11(viewer) => viewer.poll_disconnected_window(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(_) => Ok(false),
+        }
+    }
+
+    pub(super) fn resume_disconnected_window(&mut self, source: String) -> RemoteResult<bool> {
+        match self {
+            Self::X11(viewer) => viewer.resume_disconnected_window(source),
             #[cfg(feature = "remote-wayland")]
             Self::Wayland(_) => Ok(false),
         }
@@ -438,15 +531,29 @@ impl Viewer {
             }
         });
     }
-    #[cfg(feature = "remote-wayland")]
     pub(super) fn enable_wayland_control(
         &mut self,
         scroll_enabled: bool,
         horizontal_enabled: bool,
+        managed_viewport: bool,
+        gestures: bool,
     ) -> RemoteResult<[u8; 32]> {
+        #[cfg(not(feature = "remote-wayland"))]
+        let _ = (
+            scroll_enabled,
+            horizontal_enabled,
+            managed_viewport,
+            gestures,
+        );
         match self {
             Self::X11(_) => Err("combined control requires native Wayland viewer".into()),
-            Self::Wayland(v) => v.enable_wayland_control(scroll_enabled, horizontal_enabled),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(v) => v.enable_wayland_control(
+                scroll_enabled,
+                horizontal_enabled,
+                managed_viewport,
+                gestures,
+            ),
         }
     }
     #[cfg(feature = "remote-wayland")]

@@ -1,0 +1,49 @@
+{
+  "session_id": "27a3d6216dc1c2bfd496429e90e02a63",
+  "codec": "H.264",
+  "gate_entered_ns": 50366082088913,
+  "gate_released_ns": 50366100270978,
+  "local_grabs_reacquired_ns": 50366099962241,
+  "viewer_exited_ns": 50366132151320,
+  "edges": [
+    {
+      "edge": "tap_down",
+      "issue_ns": 50366082114380,
+      "host_seen_ns": 50366083457387,
+      "elapsed_ms": 1.343007
+    },
+    {
+      "edge": "tap_up",
+      "issue_ns": 50366083509565,
+      "host_seen_ns": 50366093521424,
+      "elapsed_ms": 10.011859
+    },
+    {
+      "edge": "held_down",
+      "issue_ns": 50366093568429,
+      "host_seen_ns": 50366095166177,
+      "elapsed_ms": 1.597748
+    },
+    {
+      "edge": "held_release_on_close",
+      "issue_ns": 50366095207812,
+      "host_seen_ns": 50366098373496,
+      "elapsed_ms": 3.165684
+    }
+  ],
+  "binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+  "scope": "Authenticated loopback TCP, private Xvfb at both endpoints, real NVENC and hardware decode. A viewer-only gate held one swscale invocation while XTEST tap and close-release observations completed.",
+  "physical_timing": null,
+  "archive": {
+    "path": "x11-read-ahead-slow-decode-raw.zip",
+    "sha256": "77f358880b86045e893403b549a7a1c6a6c6d30f7957893abeef7ed51749bbb8",
+    "entries": {
+      "trace/result.json": "a15b9a0a73fdf756e8a939a2b8ed13f43d314ad4b2e78f05917e47240f803cd4",
+      "trace/viewer.log": "203e989e190b4681a6872e13cbf8444b68d64a1cc61e48907b87468dc56986fe",
+      "trace/host.log": "4f81ac0663e9f0c06b699cf742f065d3f9504c02ea97e3a07168d4be1942249c",
+      "fixture/PLAN.md": "fc4c65a30662a5849bf1758138e2954adfdd4857da70208d6496c5256374e7ae",
+      "fixture/run.py": "b2db75967c424cecf353910122d6a1305aff1ec4e0dd56288a80f0b8cfb43a01",
+      "fixture/sws-decode-gate.c": "4d702d25ca5888b4f332dccd1a9239313221afd8824f46638ec9353becd70dc2"
+    }
+  }
+}

@@ -20,6 +20,7 @@ use crate::utils::{
     alive_tracker::{AliveTracker, IsAlive},
 };
 
+use crate::wayland::presentation::PresentationFeedbackCachedState;
 use crate::wayland::{Dispatch2, GlobalData, GlobalDispatch2};
 
 use super::{
@@ -275,6 +276,15 @@ where
 
                 PrivateSurfaceData::invoke_pre_commit_hooks(state, handle, surface);
 
+                PrivateSurfaceData::with_states(surface, |states| {
+                    if states.cached_state.has::<PresentationFeedbackCachedState>() {
+                        states
+                            .cached_state
+                            .get::<PresentationFeedbackCachedState>()
+                            .pending()
+                            .mark_surface_commit();
+                    }
+                });
                 PrivateSurfaceData::commit(surface, handle, state);
             }
             wl_surface::Request::SetBufferTransform { transform } => {

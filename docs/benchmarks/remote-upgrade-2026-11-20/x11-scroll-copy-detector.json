@@ -1,0 +1,88 @@
+{
+  "archive": {
+    "entries_sha256": {
+      "replay/model.json": "05ec011fb5749a66aa45b17852ad89f83070c6e17e0f65c9b081003662db8834",
+      "replay/scroll_replay.py": "84ca9721fa45e4745b684b35bde9e59700b44196f5f64f285fa1c18da13bd447",
+      "rust/arm-A-source.txt": "f82f779dd30b263c771ae993d5c82cd2f7149e0a27a382f8ea776e0869922f13",
+      "rust/arm-B-source.txt": "d3f2143aa3f7e9f771e7bef95429ae36e8d8d7a2b066c09f0f693649b6cd3c6b",
+      "rust/baseline-case.exit": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c",
+      "rust/baseline-case.log": "8a6801079410ee2757820d717e1cbc7af4175cd44be23b2258d1d232f19ec187",
+      "rust/candidate-scroll.log": "139302ab42991c360e6cb64592af9bc551c97cb88b1ed9950e5b4bba31997a1e",
+      "rust/candidate-telemetry.log": "37ca50db953bd5212c4898a35e5c7f0931bde55c5769e8a1383c6d9e34045138",
+      "rust/fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "rust/old-source.txt": "ebe62b9d387a1437de8da01f4f85b581d2a70e645dbcf7ce18a411edc6a63fc1"
+    },
+    "path": "x11-scroll-copy-detector-raw.zip",
+    "sha256": "30699dd099128e1745b4798f3b72c6192a2e24106821de0bc5c86e3219582371"
+  },
+  "capture_archive": {
+    "entries_sha256": {
+      "trace/pilot-B/source-motion-end.ppm": "800525406c51210ad55d0323ed872ac77008b709ce2d477c7cfaeaba8f6c561e",
+      "trace/pilot-B/source-static-end.ppm": "38e4425cb7eee4225a702bd412c2eaad1c8583fc06b0cb3ab6cf166bf34e62f5",
+      "trace/pilot-B/source-static.ppm": "38e4425cb7eee4225a702bd412c2eaad1c8583fc06b0cb3ab6cf166bf34e62f5"
+    },
+    "path": "x11-terminal-scroll-fast-jpeg-raw.zip"
+  },
+  "limits": [
+    "The modeled transitions do not measure transport cadence or active copy counts.",
+    "Only the fixed 1920 by 1080 XTerm workload and the signed 64-pixel protocol range are modeled."
+  ],
+  "modeled_displacements": [
+    {
+      "baseline_dirty_tiles_min_max": [
+        5090,
+        5097
+      ],
+      "dirty_gate_eligible_count": 34,
+      "full_row_proof_repair_tiles_min_max": [
+        363,
+        370
+      ],
+      "full_row_sample_correct_unique_count": 34,
+      "full_row_sample_scroll_copy_count": 34,
+      "modeled_upward_displacement_px": 20,
+      "stock_scroll_copy_count": 0,
+      "transition_count": 34
+    },
+    {
+      "baseline_dirty_tiles_min_max": [
+        90,
+        108
+      ],
+      "dirty_gate_eligible_count": 0,
+      "full_row_proof_repair_tiles_min_max": [
+        485,
+        490
+      ],
+      "full_row_sample_correct_unique_count": 34,
+      "full_row_sample_scroll_copy_count": 0,
+      "modeled_upward_displacement_px": 40,
+      "stock_scroll_copy_count": 0,
+      "transition_count": 34
+    },
+    {
+      "baseline_dirty_tiles_min_max": [
+        5103,
+        5118
+      ],
+      "dirty_gate_eligible_count": 34,
+      "full_row_proof_repair_tiles_min_max": [
+        725,
+        730
+      ],
+      "full_row_sample_correct_unique_count": 34,
+      "full_row_sample_scroll_copy_count": 34,
+      "modeled_upward_displacement_px": 60,
+      "stock_scroll_copy_count": 0,
+      "transition_count": 34
+    }
+  ],
+  "rust_checks": {
+    "candidate_scroll_tests_ignored": 2,
+    "candidate_scroll_tests_passed": 154,
+    "candidate_telemetry_tests_passed": 1,
+    "old_detector_reproduced_failure": true
+  },
+  "schema_version": 1,
+  "scope": "Copy-detector model on reconstructed XTerm rasters with byte-exact archived anchors and focused Rust regressions."
+}

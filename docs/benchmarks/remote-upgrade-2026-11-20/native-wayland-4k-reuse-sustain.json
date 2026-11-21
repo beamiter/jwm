@@ -1,0 +1,448 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-21",
+  "run_id": 104,
+  "scope": "Single owned Intel native Wayland viewer, 4K H.264 with opt-in XRGB DMA-BUF backing reuse, Ubuntu NVENC source.",
+  "diagnostic_only": true,
+  "pins": {
+    "viewer": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1",
+    "observer": "74579fbf4f7f1104814bcd4fb444aa9d225a4c3d05d81a06966409fe00c85b24",
+    "host": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b"
+  },
+  "complete": true,
+  "warmup_seconds": 30,
+  "observation_seconds": 120,
+  "runtime_identity": {
+    "type": "identity",
+    "monotonic_ns": 56409597877941,
+    "pid": 907211,
+    "start_ticks": 5640954,
+    "exe_device": 2050,
+    "exe_inode": 9048351,
+    "viewer_binary_sha256": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1"
+  },
+  "controller": {
+    "controller_pid": 895957,
+    "controller_pid_ended": true,
+    "exact_viewer_pid_ended": true,
+    "terminal_viewer_state": "closed",
+    "observer_test_passed": true,
+    "observer_test_duration_seconds": 159.28,
+    "temporary_key_absent": true,
+    "viewer_stderr_relay_drained": true,
+    "completion_evidence": "Owned controller and viewer PIDs absent from procfs with completed sampler, observer test and terminal managed viewer state."
+  },
+  "warmup": {
+    "samples": 30,
+    "one_second_bins_with_a_sample": 30,
+    "maximum_sample_gap_seconds_including_boundaries": 1.000463758,
+    "coverage_sufficient": true,
+    "drm_clients_reported": {
+      "drm-client-1": {
+        "drm-total-system0": {
+          "samples": 30,
+          "first": 54382592,
+          "last": 54448128,
+          "minimum": 54382592,
+          "median": 54448128.0,
+          "maximum": 54513664,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": 124929.8362
+        },
+        "drm-shared-system0": {
+          "samples": 30,
+          "first": 46137344,
+          "last": 46137344,
+          "minimum": 46137344,
+          "median": 46137344.0,
+          "maximum": 46137344,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-resident-system0": {
+          "samples": 30,
+          "first": 54382592,
+          "last": 54448128,
+          "minimum": 54382592,
+          "median": 54448128.0,
+          "maximum": 54513664,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": 124929.8362
+        },
+        "drm-purgeable-system0": {
+          "samples": 30,
+          "first": 921600,
+          "last": 921600,
+          "minimum": 790528,
+          "median": 921600.0,
+          "maximum": 987136,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 115307.89973
+        },
+        "drm-active-system0": {
+          "samples": 24,
+          "first": 52768768,
+          "last": 33554432,
+          "minimum": 4268032,
+          "median": 52834304.0,
+          "maximum": 52834304,
+          "last_minus_first": -19214336,
+          "least_squares_units_per_minute": -26392591.11503
+        }
+      },
+      "drm-client-3": {
+        "drm-total-system0": {
+          "samples": 30,
+          "first": 282664960,
+          "last": 282664960,
+          "minimum": 282664960,
+          "median": 282664960.0,
+          "maximum": 282664960,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-shared-system0": {
+          "samples": 30,
+          "first": 50331648,
+          "last": 50331648,
+          "minimum": 50331648,
+          "median": 50331648.0,
+          "maximum": 50331648,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-resident-system0": {
+          "samples": 30,
+          "first": 77049856,
+          "last": 77049856,
+          "minimum": 77049856,
+          "median": 77049856.0,
+          "maximum": 77049856,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-purgeable-system0": {
+          "samples": 30,
+          "first": 233472,
+          "last": 233472,
+          "minimum": 233472,
+          "median": 233472.0,
+          "maximum": 233472,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-active-system0": {
+          "samples": 17,
+          "first": 12582912,
+          "last": 64086016,
+          "minimum": 12582912,
+          "median": 12582912,
+          "maximum": 64086016,
+          "last_minus_first": 51503104,
+          "least_squares_units_per_minute": -12787079.37496
+        }
+      }
+    },
+    "fdinfo_observable_samples": 30,
+    "rss_kib": {
+      "samples": 30,
+      "first": 187404,
+      "last": 187536,
+      "minimum": 187404,
+      "median": 187532.0,
+      "maximum": 187536,
+      "last_minus_first": 132,
+      "least_squares_units_per_minute": 353.24497
+    },
+    "threads": {
+      "samples": 30,
+      "first": 13,
+      "last": 13,
+      "minimum": 13,
+      "median": 13.0,
+      "maximum": 13,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "fds": {
+      "samples": 30,
+      "first": 43,
+      "last": 42,
+      "minimum": 42,
+      "median": 43.0,
+      "maximum": 43,
+      "last_minus_first": -1,
+      "least_squares_units_per_minute": -1.05449
+    },
+    "acquisition_ns": {
+      "samples": 30,
+      "first": 3362354,
+      "last": 3329228,
+      "minimum": 3213545,
+      "median": 3361987.5,
+      "maximum": 4010601,
+      "last_minus_first": -33126,
+      "least_squares_units_per_minute": 4431.69301
+    },
+    "drm_fds": {
+      "samples": 30,
+      "first": 9,
+      "last": 9,
+      "minimum": 9,
+      "median": 9.0,
+      "maximum": 9,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "fdinfo_readable": {
+      "samples": 30,
+      "first": 9,
+      "last": 9,
+      "minimum": 9,
+      "median": 9.0,
+      "maximum": 9,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    }
+  },
+  "observation": {
+    "samples": 120,
+    "one_second_bins_with_a_sample": 120,
+    "maximum_sample_gap_seconds_including_boundaries": 1.000678184,
+    "coverage_sufficient": true,
+    "drm_clients_reported": {
+      "drm-client-1": {
+        "drm-total-system0": {
+          "samples": 120,
+          "first": 54448128,
+          "last": 54513664,
+          "minimum": 54448128,
+          "median": 54448128.0,
+          "maximum": 54513664,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": -573.49693
+        },
+        "drm-shared-system0": {
+          "samples": 120,
+          "first": 46137344,
+          "last": 46137344,
+          "minimum": 46137344,
+          "median": 46137344.0,
+          "maximum": 46137344,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-active-system0": {
+          "samples": 78,
+          "first": 52834304,
+          "last": 52834304,
+          "minimum": 12582912,
+          "median": 52834304.0,
+          "maximum": 52834304,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": -2652891.33566
+        },
+        "drm-resident-system0": {
+          "samples": 120,
+          "first": 54448128,
+          "last": 54513664,
+          "minimum": 54448128,
+          "median": 54448128.0,
+          "maximum": 54513664,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": -573.49693
+        },
+        "drm-purgeable-system0": {
+          "samples": 120,
+          "first": 790528,
+          "last": 856064,
+          "minimum": 790528,
+          "median": 921600.0,
+          "maximum": 987136,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": 1228.85661
+        }
+      },
+      "drm-client-3": {
+        "drm-total-system0": {
+          "samples": 120,
+          "first": 282664960,
+          "last": 282664960,
+          "minimum": 282664960,
+          "median": 282664960.0,
+          "maximum": 282664960,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-shared-system0": {
+          "samples": 120,
+          "first": 50331648,
+          "last": 50331648,
+          "minimum": 50331648,
+          "median": 50331648.0,
+          "maximum": 50331648,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-active-system0": {
+          "samples": 60,
+          "first": 12582912,
+          "last": 12582912,
+          "minimum": 12582912,
+          "median": 12582912.0,
+          "maximum": 64086016,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": -4870687.45963
+        },
+        "drm-resident-system0": {
+          "samples": 120,
+          "first": 77049856,
+          "last": 77049856,
+          "minimum": 77049856,
+          "median": 77049856.0,
+          "maximum": 77049856,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-purgeable-system0": {
+          "samples": 120,
+          "first": 233472,
+          "last": 233472,
+          "minimum": 233472,
+          "median": 233472.0,
+          "maximum": 233472,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        }
+      }
+    },
+    "fdinfo_observable_samples": 120,
+    "rss_kib": {
+      "samples": 120,
+      "first": 187536,
+      "last": 187536,
+      "minimum": 187536,
+      "median": 187536.0,
+      "maximum": 187536,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "threads": {
+      "samples": 120,
+      "first": 13,
+      "last": 13,
+      "minimum": 13,
+      "median": 13.0,
+      "maximum": 13,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "fds": {
+      "samples": 120,
+      "first": 43,
+      "last": 43,
+      "minimum": 42,
+      "median": 42.0,
+      "maximum": 43,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": -0.00729
+    },
+    "acquisition_ns": {
+      "samples": 120,
+      "first": 3282383,
+      "last": 3390202,
+      "minimum": 3252522,
+      "median": 3359692.0,
+      "maximum": 3956693,
+      "last_minus_first": 107819,
+      "least_squares_units_per_minute": 1111.55033
+    },
+    "drm_fds": {
+      "samples": 120,
+      "first": 9,
+      "last": 9,
+      "minimum": 9,
+      "median": 9.0,
+      "maximum": 9,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "fdinfo_readable": {
+      "samples": 120,
+      "first": 9,
+      "last": 9,
+      "minimum": 9,
+      "median": 9.0,
+      "maximum": 9,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    }
+  },
+  "native_evidence": {
+    "codec": "H.264",
+    "presentation": "wayland-vaapi-dmabuf",
+    "extent": [
+      3840,
+      2160
+    ],
+    "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "viewer_binary_sha256": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1",
+    "observer_binary_sha256": "74579fbf4f7f1104814bcd4fb444aa9d225a4c3d05d81a06966409fe00c85b24",
+    "matching_roi_markers_in_observation": 3440,
+    "matched_whole_observer_windows": 23,
+    "hardware_rgb_download_observations": 0,
+    "reuse": {
+      "arm": "B",
+      "successful_reuse_activation_log_lines": 1,
+      "confirmed_activation": true,
+      "whole_session": {
+        "native_preparations": 4410,
+        "rgb_target_allocations": 2,
+        "egl_fence_waits": 4410,
+        "fresh_wayland_dmabuf_imports": 4410
+      },
+      "matched_steady_windows": {
+        "native_preparations": 3304,
+        "rgb_target_allocations": 0,
+        "egl_fence_waits": 3304,
+        "fresh_wayland_dmabuf_imports": 3304
+      },
+      "allocations_outside_matched_steady_windows": 2,
+      "steady_allocations_per_native_preparation": 0.0,
+      "scope": "Counts are actual GBM backing allocations and separate native preparation, fence, and fresh Wayland DMA-BUF import observations. Missing allocation phase in a matched steady window contributes zero only after the same session proves allocations elsewhere."
+    }
+  },
+  "measurement_limits": "Approximately 1 Hz viewer process snapshots during one 120 s observation. DRM memory counters are optional sampled per-client kernel quantities and may overlap. The run gives neither a long-duration memory guarantee nor a scored FPS or physical latency claim.",
+  "archive": {
+    "path": "native-wayland-4k-reuse-sustain-raw.zip",
+    "sha256": "db5691891b8ce93633bd57f9d969c8a2344875cbb36bdb6fb534a3f2d25d8db1",
+    "entries": {
+      "README.md": "4c69241810f93f6c471504a65ad4b6eb4524c8f59f049f89d5234f6513d4c19a",
+      "evidence/binary-pins.json": "dbaa1fdf66c56d43d3ac0287230eb18f40b97abdc9ae2b20601522f31a272cdc",
+      "evidence/live-process-witness.json": "22de2b4b75459ee3577c40ccaf28d46b49b9c01cf8755d65322ae54f2863e2e3",
+      "evidence/marker-test.log": "f409f9a98559e48e44799fafc9496f675ae759706939ceb3122ad5406385299b",
+      "evidence/matched-native-windows.jsonl": "bbe52a27e79fd7aa5d05a8073d31aa6f05c0804f7b4d18f1e5fcd90d39f33079",
+      "evidence/phase-diagnostic.json": "f58705240a76c579d63802e8d43ebdcd30d5f8e1b7f0b56b7490a9df46c1bcf3",
+      "evidence/resource-diagnostic.json": "36e5e0770f3628636a42e75c99deb6b2cc57750bbc19e2a839f59095626529a5",
+      "evidence/result.json": "e284d56e7716457587ceb48f8d347fb52d77cc2d95c65705eaadf7ab93fc8f34",
+      "evidence/source-pins.json": "8b2203917ee23377b8d58cece683665833f51733d3f49f155ce93b6e9b3bc58f",
+      "evidence/source/host.log": "90547c256bcdf44034c2332e4925e094c6f7a221233c967132ebadf6f3e29fd2",
+      "evidence/source/paint.jsonl": "0b95d084c171c300a3bc65c184f5c6a41885040c67b845af35675736bc56464f",
+      "evidence/terminal-proof.json": "f5b16752b9c0a88432a99eaa3051dc112e48e7db6d325170362dd6ef686718bb",
+      "evidence/viewer/observed.jsonl": "9b0cc909bbb7163b74acb1e66dca7d36fff315213b3e6fb16c4ac46b6ef98d2b",
+      "evidence/viewer/viewer-clock.jsonl": "ec43c364896c64210cf970cefcf773db06067bec29695dbfad9f8e53808c22d7",
+      "evidence/viewer/viewer-complete-stderr.log": "b74e48667d9bc38fcb355e1d5edcb807051014ae032a54adf9605530943f13a8",
+      "evidence/viewer/viewer-events.jsonl": "29bd8ed75e9e3303861b051de3da971242fbc7c1f8341aa793143b7d5b2631f6",
+      "evidence/viewer/viewer-resources.jsonl": "86a15b27d33370384655f06d09b6767ccd969934337d0f4ea7e1a8aa1ac973f3",
+      "evidence/viewer/viewer-stage-windows.jsonl": "d03c85f6bf83237da4415cb8bb1fa72bcde3f0d88c473e2434575f146d999ab3",
+      "evidence/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "fixture/tee_stderr.py": "13cd1287b5153116f3d62fa49464f77bdb5d50f76fc7fe41d555b9b63c425c2c",
+      "fixture/validate_phases.py": "0b3c5e069512672a897639c72f01da2eb1aac171a3aa5a1d61694468b0e88151",
+      "fixture/validate_reuse.py": "9243ee1cbd543eba032f847ac5ca9a30372cb383163d2e7334112a011f74417d",
+      "fixture/viewer-stats-wrapper.sh": "833c5b457b72df7fedab461ee7a3431364b4a8c928b2968be3fe3526f58f59e1",
+      "fixture/viewer_resources.py": "933f39fa4d9b3f14dd4c59b9fbedb0f5b0c63334cabda6b624f9abfedd3a0c56",
+      "replay.py": "24eb1dfc287a1801627713631f540b13c519263b7eda57126701bf3cdc540659"
+    },
+    "normalization": "Session aliases only for included typed observations. Raw stderr is scoped to the actual reuse message; no secrets or session runtime are included."
+  }
+}

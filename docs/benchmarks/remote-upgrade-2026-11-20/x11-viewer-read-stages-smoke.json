@@ -1,0 +1,44 @@
+{
+  "binary_sha256": "7f4444d985f4d5b124b518a446baceb74eebbfa3d8e71e335a75366d9d9fbfda",
+  "tests": [
+    {
+      "mode": "synchronous",
+      "session_id": "cb302ded055673b73b7a0197e52463ef",
+      "codec": "JPEG",
+      "drawn": 7,
+      "read_observations": {
+        "frame_header_wait_ms": 6,
+        "frame_body_receive_ms": 6,
+        "frame_authentication_ms": 6
+      },
+      "decode_queue_observations": 0,
+      "clean_exit": true
+    },
+    {
+      "mode": "read-ahead",
+      "session_id": "fae2b96aba4edcef4b74322762d12ac7",
+      "codec": "JPEG",
+      "drawn": 7,
+      "read_observations": {
+        "frame_header_wait_ms": 6,
+        "frame_body_receive_ms": 6,
+        "frame_authentication_ms": 6
+      },
+      "decode_queue_observations": 6,
+      "clean_exit": true
+    }
+  ],
+  "archive": {
+    "path": "x11-viewer-read-stages-smoke-raw.zip",
+    "sha256": "f6e30afa585f05f342762c8879bcda8bf0946ac88852aa6d7ac898ae1182750a",
+    "entries": {
+      "fixture/viewer-read-smoke.py": "2da97b5bbd4e7ef6ab9be847216c8fd1a0e55e959d4bcc3e19e5c0d949842157",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "trace/synchronous/host.log": "2ea478934b772a635c85a8f9070d361cccc9d9abb927fe9e966233cf10ada884",
+      "trace/synchronous/viewer.log": "877c64f36c20f48961c002cc9f231cc7f2f7e12d4e2594f266cc7091862ecb7c",
+      "trace/read-ahead/host.log": "399c8db19f058699855b4a449111c589accba9ea0a0e532ec99fa0a404777606",
+      "trace/read-ahead/viewer.log": "901af87a0ba2d9e3a4fe31e44f6d7a69782c711237b2754d31170474a9a2ef3d"
+    }
+  },
+  "scope": "Two authenticated loopback JPEG sessions with owned Xvfb displays, synthetic root colors, and viewer --stats-json. Read stage observations start after the first frame. The result validates emission and read-ahead separation."
+}

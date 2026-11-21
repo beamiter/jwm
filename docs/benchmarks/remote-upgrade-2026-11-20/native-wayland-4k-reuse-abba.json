@@ -1,0 +1,1520 @@
+{
+  "schema_version": 1,
+  "scope": "Owned Ubuntu Xvfb P09 motion over the uncapped IPv4 SSH route. Local Intel private Wayland output uses actual software compositor completion and a 96x96 marker crop. GPU and driver results are specific to the pinned hardware, source and binaries. The timing is not physical scanout.",
+  "pins": {
+    "sha256": {
+      "host": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+      "source_controller": "8517136f81dafdd22185590d3e7b546276b189389e26671a28b16f0907530b6f",
+      "source_process_helpers": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "painter": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136",
+      "viewer": "3c728cbb8d5ef245ec219f2b7d448597b3193d0f775113934dac5f384bb7bcb1",
+      "observer": "74579fbf4f7f1104814bcd4fb444aa9d225a4c3d05d81a06966409fe00c85b24",
+      "fixture": {
+        "preflight.py": "d4f7c690e34a8bc1aa0a82705df7a0b001941357ad032fb4c597873ec17654c3",
+        "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+        "viewer-stats-wrapper.sh": "ac2854e16165615a12eb485947492b73bc240250539aaf3be0ad92c71283744c",
+        "tee_stderr.py": "a6da4ec18277a78fefcf308a7b87bd04bc66ee4f547a1903b05dc91019547e79",
+        "historical.py": "ad0986624ef562490cce7a5a048df8b16bc5bce86eaa7bf2d9dcb942227c9977",
+        "validate_phases.py": "03e991464140c037855dbd61acbc6c62c12448b4fb07b060cf700cc3a7ff7a3b",
+        "test-remote-wayland-4k-marker.sh": "8ae5881373f36ab54120083af037e0672d0142487a387d07574b6afdf319d71a",
+        "run_abba.py": "73ebb04d517dc85849e2149aa0e4325bc1d4c05aa44e6d0e3cce4c6697310af3"
+      }
+    },
+    "render_node": "/dev/dri/renderD128",
+    "render_node_device": 57984,
+    "render_pci_device": "0000:00:02.0",
+    "route": {
+      "mint_interface": "eno1",
+      "ubuntu_interface": "wlp3s0",
+      "address_family": "IPv4",
+      "tunnel": "SSH compression disabled, no rate cap"
+    }
+  },
+  "trials": [
+    {
+      "run_id": 92,
+      "block": 1,
+      "arm": "A",
+      "warmup": 30,
+      "seconds": 60,
+      "mode": "scored",
+      "viewer_reuse_env": null,
+      "execution": {
+        "status": "completed",
+        "pins_verified_before_and_after": true
+      },
+      "measurement": {
+        "scope": {
+          "geometry_epoch": 2,
+          "session_id": "1e0ab3d8c15f9bd46e45b2584afaf5a5",
+          "source_epoch": 1
+        },
+        "renderer": "Mesa Intel(R) Graphics (ARL)",
+        "render_device": "0000:00:02.0",
+        "marker_seconds": 60,
+        "distinct_visible_markers": 1399,
+        "fps": 23.316666666666666,
+        "p95_gap_ms": 53.245,
+        "max_gap_ms": 406.398,
+        "viewer_27_fps_gate_met": false,
+        "source_fps": 60.01620282561792,
+        "host_h264_frames": 2248,
+        "host_drawn_acks": 2246,
+        "viewer_download_observations": 0,
+        "raw_window_count": 19,
+        "managed_snapshots": 20,
+        "matched_windows": 19,
+        "whole_scored_window_count": 11,
+        "whole_scored_window_seconds": 55.137449695,
+        "fresh_rgb_allocations": 1283,
+        "wayland_imports": 1283,
+        "fresh_allocations_per_import": 1.0,
+        "observed_phase_summaries": {
+          "va_surface_wait_ms": {
+            "windows": 11,
+            "observations": 1283,
+            "weighted_mean_ms": 3.2958503764614187,
+            "max_recent_window_p95_ms": 5.898
+          },
+          "va_frame_export_ms": {
+            "windows": 11,
+            "observations": 1283,
+            "weighted_mean_ms": 0.023430969602494155,
+            "max_recent_window_p95_ms": 0.033
+          },
+          "rgb_target_allocation_ms": {
+            "windows": 11,
+            "observations": 1283,
+            "weighted_mean_ms": 12.880311167575995,
+            "max_recent_window_p95_ms": 14.29
+          },
+          "egl_prepare_and_submit_ms": {
+            "windows": 11,
+            "observations": 1283,
+            "weighted_mean_ms": 0.22663755027279814,
+            "max_recent_window_p95_ms": 0.289
+          },
+          "egl_fence_wait_ms": {
+            "windows": 11,
+            "observations": 1283,
+            "weighted_mean_ms": 16.429178006235386,
+            "max_recent_window_p95_ms": 16.665
+          },
+          "wayland_dmabuf_import_ms": {
+            "windows": 11,
+            "observations": 1283,
+            "weighted_mean_ms": 0.9633035767731878,
+            "max_recent_window_p95_ms": 1.61
+          }
+        }
+      },
+      "status": "valid"
+    },
+    {
+      "run_id": 93,
+      "block": 1,
+      "arm": "B",
+      "warmup": 30,
+      "seconds": 60,
+      "mode": "scored",
+      "viewer_reuse_env": "1",
+      "execution": {
+        "status": "completed",
+        "pins_verified_before_and_after": true
+      },
+      "measurement": {
+        "scope": {
+          "geometry_epoch": 2,
+          "session_id": "12b0113ec584252b98baaae368ed833d",
+          "source_epoch": 1
+        },
+        "renderer": "Mesa Intel(R) Graphics (ARL)",
+        "render_device": "0000:00:02.0",
+        "marker_seconds": 60,
+        "distinct_visible_markers": 1725,
+        "fps": 28.75,
+        "p95_gap_ms": 40.913,
+        "max_gap_ms": 151.632,
+        "viewer_27_fps_gate_met": true,
+        "source_fps": 60.0126706373425,
+        "host_h264_frames": 2682,
+        "host_drawn_acks": 2680,
+        "viewer_download_observations": 0,
+        "raw_window_count": 19,
+        "managed_snapshots": 20,
+        "matched_windows": 19,
+        "whole_scored_window_count": 11,
+        "whole_scored_window_seconds": 55.102357722,
+        "fresh_rgb_allocations": 0,
+        "wayland_imports": 1582,
+        "fresh_allocations_per_import": 0.0,
+        "observed_phase_summaries": {
+          "va_surface_wait_ms": {
+            "windows": 11,
+            "observations": 1582,
+            "weighted_mean_ms": 3.267037001896334,
+            "max_recent_window_p95_ms": 5.87
+          },
+          "va_frame_export_ms": {
+            "windows": 11,
+            "observations": 1582,
+            "weighted_mean_ms": 0.01980194816687737,
+            "max_recent_window_p95_ms": 0.031
+          },
+          "egl_prepare_and_submit_ms": {
+            "windows": 11,
+            "observations": 1582,
+            "weighted_mean_ms": 0.20068358786346396,
+            "max_recent_window_p95_ms": 0.263
+          },
+          "egl_fence_wait_ms": {
+            "windows": 11,
+            "observations": 1582,
+            "weighted_mean_ms": 15.666058511378003,
+            "max_recent_window_p95_ms": 16.448
+          },
+          "wayland_dmabuf_import_ms": {
+            "windows": 11,
+            "observations": 1582,
+            "weighted_mean_ms": 0.9234744892541088,
+            "max_recent_window_p95_ms": 1.574
+          }
+        }
+      },
+      "status": "valid"
+    },
+    {
+      "run_id": 94,
+      "block": 1,
+      "arm": "B",
+      "warmup": 30,
+      "seconds": 60,
+      "mode": "scored",
+      "viewer_reuse_env": "1",
+      "execution": {
+        "status": "completed",
+        "pins_verified_before_and_after": true
+      },
+      "measurement": {
+        "scope": {
+          "geometry_epoch": 2,
+          "session_id": "08f3c56de378679c43974155dc156fac",
+          "source_epoch": 1
+        },
+        "renderer": "Mesa Intel(R) Graphics (ARL)",
+        "render_device": "0000:00:02.0",
+        "marker_seconds": 60,
+        "distinct_visible_markers": 1721,
+        "fps": 28.683333333333334,
+        "p95_gap_ms": 42.868,
+        "max_gap_ms": 273.943,
+        "viewer_27_fps_gate_met": true,
+        "source_fps": 60.013604752062115,
+        "host_h264_frames": 2691,
+        "host_drawn_acks": 2689,
+        "viewer_download_observations": 0,
+        "raw_window_count": 19,
+        "managed_snapshots": 20,
+        "matched_windows": 19,
+        "whole_scored_window_count": 10,
+        "whole_scored_window_seconds": 50.089945566,
+        "fresh_rgb_allocations": 0,
+        "wayland_imports": 1473,
+        "fresh_allocations_per_import": 0.0,
+        "observed_phase_summaries": {
+          "va_surface_wait_ms": {
+            "windows": 10,
+            "observations": 1473,
+            "weighted_mean_ms": 3.628514787508486,
+            "max_recent_window_p95_ms": 5.88
+          },
+          "va_frame_export_ms": {
+            "windows": 10,
+            "observations": 1473,
+            "weighted_mean_ms": 0.02162278750848608,
+            "max_recent_window_p95_ms": 0.031
+          },
+          "egl_prepare_and_submit_ms": {
+            "windows": 10,
+            "observations": 1473,
+            "weighted_mean_ms": 0.20734146367956552,
+            "max_recent_window_p95_ms": 0.255
+          },
+          "egl_fence_wait_ms": {
+            "windows": 10,
+            "observations": 1473,
+            "weighted_mean_ms": 15.156803957230142,
+            "max_recent_window_p95_ms": 16.272
+          },
+          "wayland_dmabuf_import_ms": {
+            "windows": 10,
+            "observations": 1473,
+            "weighted_mean_ms": 0.9228180488798371,
+            "max_recent_window_p95_ms": 1.594
+          }
+        }
+      },
+      "status": "valid"
+    },
+    {
+      "run_id": 95,
+      "block": 1,
+      "arm": "A",
+      "warmup": 30,
+      "seconds": 60,
+      "mode": "scored",
+      "viewer_reuse_env": null,
+      "execution": {
+        "status": "completed",
+        "pins_verified_before_and_after": true
+      },
+      "measurement": {
+        "scope": {
+          "geometry_epoch": 2,
+          "session_id": "eec2fcf2d301c18cb6bcdd2682026021",
+          "source_epoch": 1
+        },
+        "renderer": "Mesa Intel(R) Graphics (ARL)",
+        "render_device": "0000:00:02.0",
+        "marker_seconds": 60,
+        "distinct_visible_markers": 1457,
+        "fps": 24.283333333333335,
+        "p95_gap_ms": 48.086,
+        "max_gap_ms": 234.174,
+        "viewer_27_fps_gate_met": false,
+        "source_fps": 60.01256826782641,
+        "host_h264_frames": 2325,
+        "host_drawn_acks": 2323,
+        "viewer_download_observations": 0,
+        "raw_window_count": 19,
+        "managed_snapshots": 20,
+        "matched_windows": 19,
+        "whole_scored_window_count": 11,
+        "whole_scored_window_seconds": 55.102671223,
+        "fresh_rgb_allocations": 1335,
+        "wayland_imports": 1335,
+        "fresh_allocations_per_import": 1.0,
+        "observed_phase_summaries": {
+          "va_surface_wait_ms": {
+            "windows": 11,
+            "observations": 1335,
+            "weighted_mean_ms": 3.533890454681648,
+            "max_recent_window_p95_ms": 5.825
+          },
+          "va_frame_export_ms": {
+            "windows": 11,
+            "observations": 1335,
+            "weighted_mean_ms": 0.020885886891385767,
+            "max_recent_window_p95_ms": 0.031
+          },
+          "rgb_target_allocation_ms": {
+            "windows": 11,
+            "observations": 1335,
+            "weighted_mean_ms": 12.325579274157302,
+            "max_recent_window_p95_ms": 14.27
+          },
+          "egl_prepare_and_submit_ms": {
+            "windows": 11,
+            "observations": 1335,
+            "weighted_mean_ms": 0.22909515505617978,
+            "max_recent_window_p95_ms": 0.283
+          },
+          "egl_fence_wait_ms": {
+            "windows": 11,
+            "observations": 1335,
+            "weighted_mean_ms": 16.07954409213483,
+            "max_recent_window_p95_ms": 16.663
+          },
+          "wayland_dmabuf_import_ms": {
+            "windows": 11,
+            "observations": 1335,
+            "weighted_mean_ms": 0.9623463558052434,
+            "max_recent_window_p95_ms": 1.569
+          }
+        }
+      },
+      "status": "valid"
+    },
+    {
+      "run_id": 96,
+      "block": 2,
+      "arm": "A",
+      "warmup": 30,
+      "seconds": 60,
+      "mode": "scored",
+      "viewer_reuse_env": null,
+      "execution": {
+        "status": "completed",
+        "pins_verified_before_and_after": true
+      },
+      "measurement": {
+        "scope": {
+          "geometry_epoch": 2,
+          "session_id": "b6f73c9084c1ffbd9f1babcd678b51ae",
+          "source_epoch": 1
+        },
+        "renderer": "Mesa Intel(R) Graphics (ARL)",
+        "render_device": "0000:00:02.0",
+        "marker_seconds": 60,
+        "distinct_visible_markers": 1434,
+        "fps": 23.9,
+        "p95_gap_ms": 48.923,
+        "max_gap_ms": 371.034,
+        "viewer_27_fps_gate_met": false,
+        "source_fps": 60.01494782650308,
+        "host_h264_frames": 2257,
+        "host_drawn_acks": 2255,
+        "viewer_download_observations": 0,
+        "raw_window_count": 19,
+        "managed_snapshots": 20,
+        "matched_windows": 19,
+        "whole_scored_window_count": 11,
+        "whole_scored_window_seconds": 55.148213871,
+        "fresh_rgb_allocations": 1314,
+        "wayland_imports": 1314,
+        "fresh_allocations_per_import": 1.0,
+        "observed_phase_summaries": {
+          "va_surface_wait_ms": {
+            "windows": 11,
+            "observations": 1314,
+            "weighted_mean_ms": 3.597505221461187,
+            "max_recent_window_p95_ms": 5.827
+          },
+          "va_frame_export_ms": {
+            "windows": 11,
+            "observations": 1314,
+            "weighted_mean_ms": 0.02235621917808219,
+            "max_recent_window_p95_ms": 0.043
+          },
+          "rgb_target_allocation_ms": {
+            "windows": 11,
+            "observations": 1314,
+            "weighted_mean_ms": 12.497804349315068,
+            "max_recent_window_p95_ms": 14.223
+          },
+          "egl_prepare_and_submit_ms": {
+            "windows": 11,
+            "observations": 1314,
+            "weighted_mean_ms": 0.2250372305936073,
+            "max_recent_window_p95_ms": 0.287
+          },
+          "egl_fence_wait_ms": {
+            "windows": 11,
+            "observations": 1314,
+            "weighted_mean_ms": 16.097646417047184,
+            "max_recent_window_p95_ms": 16.651
+          },
+          "wayland_dmabuf_import_ms": {
+            "windows": 11,
+            "observations": 1314,
+            "weighted_mean_ms": 0.9794874056316589,
+            "max_recent_window_p95_ms": 1.744
+          }
+        }
+      },
+      "status": "valid"
+    },
+    {
+      "run_id": 97,
+      "block": 2,
+      "arm": "B",
+      "warmup": 30,
+      "seconds": 60,
+      "mode": "scored",
+      "viewer_reuse_env": "1",
+      "execution": {
+        "status": "completed",
+        "pins_verified_before_and_after": true
+      },
+      "measurement": {
+        "scope": {
+          "geometry_epoch": 2,
+          "session_id": "75b996a10d4333aeb46fa8e2ab585c8d",
+          "source_epoch": 1
+        },
+        "renderer": "Mesa Intel(R) Graphics (ARL)",
+        "render_device": "0000:00:02.0",
+        "marker_seconds": 60,
+        "distinct_visible_markers": 1723,
+        "fps": 28.716666666666665,
+        "p95_gap_ms": 41.124,
+        "max_gap_ms": 266.508,
+        "viewer_27_fps_gate_met": true,
+        "source_fps": 60.01423469980023,
+        "host_h264_frames": 2737,
+        "host_drawn_acks": 2735,
+        "viewer_download_observations": 0,
+        "raw_window_count": 19,
+        "managed_snapshots": 20,
+        "matched_windows": 19,
+        "whole_scored_window_count": 11,
+        "whole_scored_window_seconds": 55.090547774,
+        "fresh_rgb_allocations": 0,
+        "wayland_imports": 1579,
+        "fresh_allocations_per_import": 0.0,
+        "observed_phase_summaries": {
+          "va_surface_wait_ms": {
+            "windows": 11,
+            "observations": 1579,
+            "weighted_mean_ms": 3.6768145528815706,
+            "max_recent_window_p95_ms": 5.845
+          },
+          "va_frame_export_ms": {
+            "windows": 11,
+            "observations": 1579,
+            "weighted_mean_ms": 0.017003528815706142,
+            "max_recent_window_p95_ms": 0.03
+          },
+          "egl_prepare_and_submit_ms": {
+            "windows": 11,
+            "observations": 1579,
+            "weighted_mean_ms": 0.199938519949335,
+            "max_recent_window_p95_ms": 0.259
+          },
+          "egl_fence_wait_ms": {
+            "windows": 11,
+            "observations": 1579,
+            "weighted_mean_ms": 15.09001513426219,
+            "max_recent_window_p95_ms": 16.282
+          },
+          "wayland_dmabuf_import_ms": {
+            "windows": 11,
+            "observations": 1579,
+            "weighted_mean_ms": 0.9667310063331221,
+            "max_recent_window_p95_ms": 1.631
+          }
+        }
+      },
+      "status": "valid"
+    },
+    {
+      "run_id": 98,
+      "block": 2,
+      "arm": "B",
+      "warmup": 30,
+      "seconds": 60,
+      "mode": "scored",
+      "viewer_reuse_env": "1",
+      "execution": {
+        "status": "completed",
+        "pins_verified_before_and_after": true
+      },
+      "measurement": {
+        "scope": {
+          "geometry_epoch": 2,
+          "session_id": "2d9e83ab1e58e6aff0ef1d84a9fafd7d",
+          "source_epoch": 1
+        },
+        "renderer": "Mesa Intel(R) Graphics (ARL)",
+        "render_device": "0000:00:02.0",
+        "marker_seconds": 60,
+        "distinct_visible_markers": 1723,
+        "fps": 28.716666666666665,
+        "p95_gap_ms": 41.264,
+        "max_gap_ms": 256.414,
+        "viewer_27_fps_gate_met": true,
+        "source_fps": 60.01405239889539,
+        "host_h264_frames": 2747,
+        "host_drawn_acks": 2745,
+        "viewer_download_observations": 0,
+        "raw_window_count": 19,
+        "managed_snapshots": 20,
+        "matched_windows": 19,
+        "whole_scored_window_count": 11,
+        "whole_scored_window_seconds": 55.118173483,
+        "fresh_rgb_allocations": 0,
+        "wayland_imports": 1581,
+        "fresh_allocations_per_import": 0.0,
+        "observed_phase_summaries": {
+          "va_surface_wait_ms": {
+            "windows": 11,
+            "observations": 1581,
+            "weighted_mean_ms": 3.456742741302973,
+            "max_recent_window_p95_ms": 5.853
+          },
+          "va_frame_export_ms": {
+            "windows": 11,
+            "observations": 1581,
+            "weighted_mean_ms": 0.02115639531941809,
+            "max_recent_window_p95_ms": 0.036
+          },
+          "egl_prepare_and_submit_ms": {
+            "windows": 11,
+            "observations": 1581,
+            "weighted_mean_ms": 0.2027790240354206,
+            "max_recent_window_p95_ms": 0.251
+          },
+          "egl_fence_wait_ms": {
+            "windows": 11,
+            "observations": 1581,
+            "weighted_mean_ms": 15.383144576217584,
+            "max_recent_window_p95_ms": 16.497
+          },
+          "wayland_dmabuf_import_ms": {
+            "windows": 11,
+            "observations": 1581,
+            "weighted_mean_ms": 0.9548868058191018,
+            "max_recent_window_p95_ms": 1.622
+          }
+        }
+      },
+      "status": "valid"
+    },
+    {
+      "run_id": 99,
+      "block": 2,
+      "arm": "A",
+      "warmup": 30,
+      "seconds": 60,
+      "mode": "scored",
+      "viewer_reuse_env": null,
+      "execution": {
+        "status": "completed",
+        "pins_verified_before_and_after": true
+      },
+      "measurement": {
+        "scope": {
+          "geometry_epoch": 2,
+          "session_id": "b25563ca82a6de8a031380795240d1a9",
+          "source_epoch": 1
+        },
+        "renderer": "Mesa Intel(R) Graphics (ARL)",
+        "render_device": "0000:00:02.0",
+        "marker_seconds": 60,
+        "distinct_visible_markers": 1452,
+        "fps": 24.2,
+        "p95_gap_ms": 47.789,
+        "max_gap_ms": 275.737,
+        "viewer_27_fps_gate_met": false,
+        "source_fps": 60.01546624847112,
+        "host_h264_frames": 2253,
+        "host_drawn_acks": 2251,
+        "viewer_download_observations": 0,
+        "raw_window_count": 19,
+        "managed_snapshots": 20,
+        "matched_windows": 19,
+        "whole_scored_window_count": 11,
+        "whole_scored_window_seconds": 55.228165421,
+        "fresh_rgb_allocations": 1331,
+        "wayland_imports": 1331,
+        "fresh_allocations_per_import": 1.0,
+        "observed_phase_summaries": {
+          "va_surface_wait_ms": {
+            "windows": 11,
+            "observations": 1331,
+            "weighted_mean_ms": 3.509244988730278,
+            "max_recent_window_p95_ms": 5.831
+          },
+          "va_frame_export_ms": {
+            "windows": 11,
+            "observations": 1331,
+            "weighted_mean_ms": 0.021664839218632607,
+            "max_recent_window_p95_ms": 0.032
+          },
+          "rgb_target_allocation_ms": {
+            "windows": 11,
+            "observations": 1331,
+            "weighted_mean_ms": 12.017436290758829,
+            "max_recent_window_p95_ms": 14.187
+          },
+          "egl_prepare_and_submit_ms": {
+            "windows": 11,
+            "observations": 1331,
+            "weighted_mean_ms": 0.2238109338842975,
+            "max_recent_window_p95_ms": 0.264
+          },
+          "egl_fence_wait_ms": {
+            "windows": 11,
+            "observations": 1331,
+            "weighted_mean_ms": 16.38811718482344,
+            "max_recent_window_p95_ms": 16.645
+          },
+          "wayland_dmabuf_import_ms": {
+            "windows": 11,
+            "observations": 1331,
+            "weighted_mean_ms": 0.9831412374154771,
+            "max_recent_window_p95_ms": 1.662
+          }
+        }
+      },
+      "status": "valid"
+    }
+  ],
+  "summary": {
+    "balanced_scored_comparison": true,
+    "completed_blocks": [
+      {
+        "block": 1,
+        "B_minus_A_median_fps": 4.916666666666668,
+        "B_minus_A_median_p95_gap_ms": -8.774999999999991,
+        "B_minus_A_median_max_gap_ms": -107.4985
+      },
+      {
+        "block": 2,
+        "B_minus_A_median_fps": 4.666666666666668,
+        "B_minus_A_median_p95_gap_ms": -7.161999999999999,
+        "B_minus_A_median_max_gap_ms": -61.924499999999966
+      }
+    ],
+    "valid_trials": {
+      "A": 4,
+      "B": 4
+    },
+    "fps": {
+      "A": [
+        23.316666666666666,
+        24.283333333333335,
+        23.9,
+        24.2
+      ],
+      "B": [
+        28.75,
+        28.683333333333334,
+        28.716666666666665,
+        28.716666666666665
+      ]
+    },
+    "trials_meeting_27_fps": {
+      "A": 0,
+      "B": 4
+    },
+    "all_treatment_trials_meet_27_fps": true,
+    "B_minus_A_median_fps": 4.666666666666668
+  },
+  "date": "2026-11-21",
+  "publication_scope": "All eight registered terminal attempts retained. Rebuilt from the controller evidence and replayed after archive extraction. Host and viewer monotonic timestamps stay in distinct clock scopes.",
+  "selected_candidate_source_sha256": {
+    "src/remote/gpu_present.rs": "b19dea4d460f97138a0832e702a2d0126283f2a3a0cd776b1e0fc4fe0683e7bb",
+    "src/remote/wayland_viewer_gpu.rs": "b4573452b28764307b02b9d9cdf04d5cb3befaaa8a604e740f6a0110a6fe1292",
+    "src/remote/wayland_viewer.rs": "9076782a242a0af424acc17e73d1b1f493323ce71cdb823c79e975df0a85690b",
+    "src/remote/host_wayland_gpu_4k_integration.rs": "4a2c7e767cd433d055711647dd68b7a86a332ea44808fdbf94ab68fa4ddbf8da",
+    "src/remote/host_wayland_gpu_4k_marker_integration.rs": "27b488d7897bba31635bacdf987592da4f14c4ff3c5fe3481c0d4e4602d47cc2"
+  },
+  "trial_phase_and_clock_scopes": [
+    {
+      "run_id": 92,
+      "arm": "A",
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "1e0ab3d8c15f9bd46e45b2584afaf5a5",
+        "source_epoch": 1
+      },
+      "clock_scopes": {
+        "viewer_observer_monotonic_ns": [
+          54711874760310,
+          54801875220549
+        ],
+        "viewer_measured_markers_monotonic_ns": [
+          54741874760310,
+          54801874760310
+        ],
+        "host_painter_monotonic_ns": [
+          54787720406662,
+          54884609846216
+        ]
+      },
+      "whole_viewer_session": {
+        "rgb_target_allocations": 2247,
+        "fresh_wayland_imports": 2247,
+        "egl_fence_waits": 2247,
+        "native_preparations": 2247
+      },
+      "viewer_windows_with_actual_allocations": [
+        {
+          "arrival_monotonic_ns": 54711809978918,
+          "final": false,
+          "observed_allocations": 114
+        },
+        {
+          "arrival_monotonic_ns": 54716810896080,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 54721817699029,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 54726841846781,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 54731874607927,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 54736887187483,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 54741887356380,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 54746914712039,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 54751922072026,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 54756922853387,
+          "final": false,
+          "observed_allocations": 98
+        },
+        {
+          "arrival_monotonic_ns": 54761941386214,
+          "final": false,
+          "observed_allocations": 104
+        },
+        {
+          "arrival_monotonic_ns": 54766959176869,
+          "final": false,
+          "observed_allocations": 121
+        },
+        {
+          "arrival_monotonic_ns": 54771966148628,
+          "final": false,
+          "observed_allocations": 118
+        },
+        {
+          "arrival_monotonic_ns": 54776966662209,
+          "final": false,
+          "observed_allocations": 119
+        },
+        {
+          "arrival_monotonic_ns": 54781996356878,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 54786997084186,
+          "final": false,
+          "observed_allocations": 119
+        },
+        {
+          "arrival_monotonic_ns": 54792024082464,
+          "final": false,
+          "observed_allocations": 118
+        },
+        {
+          "arrival_monotonic_ns": 54797024775902,
+          "final": false,
+          "observed_allocations": 119
+        },
+        {
+          "arrival_monotonic_ns": 54801896571470,
+          "final": true,
+          "observed_allocations": 116
+        }
+      ],
+      "activation_banner_count": 0,
+      "matched_whole_viewer_windows": {
+        "seconds": 55.137449695,
+        "count": 11,
+        "rgb_target_allocations": 1283,
+        "fresh_wayland_imports": 1283
+      }
+    },
+    {
+      "run_id": 93,
+      "arm": "B",
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "12b0113ec584252b98baaae368ed833d",
+        "source_epoch": 1
+      },
+      "clock_scopes": {
+        "viewer_observer_monotonic_ns": [
+          54812659591496,
+          54902660199418
+        ],
+        "viewer_measured_markers_monotonic_ns": [
+          54842659591496,
+          54902659591496
+        ],
+        "host_painter_monotonic_ns": [
+          54888291049431,
+          54985380448907
+        ]
+      },
+      "whole_viewer_session": {
+        "rgb_target_allocations": 2,
+        "fresh_wayland_imports": 2681,
+        "egl_fence_waits": 2681,
+        "native_preparations": 2681
+      },
+      "viewer_windows_with_actual_allocations": [
+        {
+          "arrival_monotonic_ns": 54812642066582,
+          "final": false,
+          "observed_allocations": 2
+        }
+      ],
+      "activation_banner_count": 1,
+      "matched_whole_viewer_windows": {
+        "seconds": 55.102357722,
+        "count": 11,
+        "rgb_target_allocations": 0,
+        "fresh_wayland_imports": 1582
+      }
+    },
+    {
+      "run_id": 94,
+      "arm": "B",
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "08f3c56de378679c43974155dc156fac",
+        "source_epoch": 1
+      },
+      "clock_scopes": {
+        "viewer_observer_monotonic_ns": [
+          54913065434876,
+          55003065826745
+        ],
+        "viewer_measured_markers_monotonic_ns": [
+          54943065434876,
+          55003065434876
+        ],
+        "host_painter_monotonic_ns": [
+          54988841462454,
+          55085724594017
+        ]
+      },
+      "whole_viewer_session": {
+        "rgb_target_allocations": 2,
+        "fresh_wayland_imports": 2690,
+        "egl_fence_waits": 2690,
+        "native_preparations": 2690
+      },
+      "viewer_windows_with_actual_allocations": [
+        {
+          "arrival_monotonic_ns": 54912984756364,
+          "final": false,
+          "observed_allocations": 2
+        }
+      ],
+      "activation_banner_count": 1,
+      "matched_whole_viewer_windows": {
+        "seconds": 50.089945566,
+        "count": 10,
+        "rgb_target_allocations": 0,
+        "fresh_wayland_imports": 1473
+      }
+    },
+    {
+      "run_id": 95,
+      "arm": "A",
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "eec2fcf2d301c18cb6bcdd2682026021",
+        "source_epoch": 1
+      },
+      "clock_scopes": {
+        "viewer_observer_monotonic_ns": [
+          55013503276214,
+          55103503408700
+        ],
+        "viewer_measured_markers_monotonic_ns": [
+          55043503276214,
+          55103503276214
+        ],
+        "host_painter_monotonic_ns": [
+          55089263297819,
+          55186240905130
+        ]
+      },
+      "whole_viewer_session": {
+        "rgb_target_allocations": 2324,
+        "fresh_wayland_imports": 2324,
+        "egl_fence_waits": 2324,
+        "native_preparations": 2324
+      },
+      "viewer_windows_with_actual_allocations": [
+        {
+          "arrival_monotonic_ns": 55013428778667,
+          "final": false,
+          "observed_allocations": 112
+        },
+        {
+          "arrival_monotonic_ns": 55018455438895,
+          "final": false,
+          "observed_allocations": 127
+        },
+        {
+          "arrival_monotonic_ns": 55023462468331,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55028482996778,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55033505623227,
+          "final": false,
+          "observed_allocations": 131
+        },
+        {
+          "arrival_monotonic_ns": 55038528814915,
+          "final": false,
+          "observed_allocations": 126
+        },
+        {
+          "arrival_monotonic_ns": 55043544437807,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55048560857894,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55053561505292,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55058562461083,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55063568763175,
+          "final": false,
+          "observed_allocations": 90
+        },
+        {
+          "arrival_monotonic_ns": 55068581568659,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55073594232421,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55078598607614,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55083616059186,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55088619093656,
+          "final": false,
+          "observed_allocations": 126
+        },
+        {
+          "arrival_monotonic_ns": 55093640279476,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55098646989791,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55103528741893,
+          "final": true,
+          "observed_allocations": 122
+        }
+      ],
+      "activation_banner_count": 0,
+      "matched_whole_viewer_windows": {
+        "seconds": 55.102671223,
+        "count": 11,
+        "rgb_target_allocations": 1335,
+        "fresh_wayland_imports": 1335
+      }
+    },
+    {
+      "run_id": 96,
+      "arm": "A",
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "b6f73c9084c1ffbd9f1babcd678b51ae",
+        "source_epoch": 1
+      },
+      "clock_scopes": {
+        "viewer_observer_monotonic_ns": [
+          55114074162423,
+          55204076073559
+        ],
+        "viewer_measured_markers_monotonic_ns": [
+          55144074162423,
+          55204074162423
+        ],
+        "host_painter_monotonic_ns": [
+          55189731088483,
+          55286723296267
+        ]
+      },
+      "whole_viewer_session": {
+        "rgb_target_allocations": 2255,
+        "fresh_wayland_imports": 2255,
+        "egl_fence_waits": 2255,
+        "native_preparations": 2255
+      },
+      "viewer_windows_with_actual_allocations": [
+        {
+          "arrival_monotonic_ns": 55113987716936,
+          "final": false,
+          "observed_allocations": 115
+        },
+        {
+          "arrival_monotonic_ns": 55119001875377,
+          "final": false,
+          "observed_allocations": 121
+        },
+        {
+          "arrival_monotonic_ns": 55124022278489,
+          "final": false,
+          "observed_allocations": 86
+        },
+        {
+          "arrival_monotonic_ns": 55129022696855,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55134057910115,
+          "final": false,
+          "observed_allocations": 127
+        },
+        {
+          "arrival_monotonic_ns": 55139067445299,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55144089201526,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55149090412989,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 55154114048734,
+          "final": false,
+          "observed_allocations": 127
+        },
+        {
+          "arrival_monotonic_ns": 55159114542023,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 55164128660606,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 55169154405464,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 55174162348068,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55179169320047,
+          "final": false,
+          "observed_allocations": 122
+        },
+        {
+          "arrival_monotonic_ns": 55184193092608,
+          "final": false,
+          "observed_allocations": 111
+        },
+        {
+          "arrival_monotonic_ns": 55189204365824,
+          "final": false,
+          "observed_allocations": 94
+        },
+        {
+          "arrival_monotonic_ns": 55194223544842,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55199237400675,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55204083938256,
+          "final": true,
+          "observed_allocations": 120
+        }
+      ],
+      "activation_banner_count": 0,
+      "matched_whole_viewer_windows": {
+        "seconds": 55.148213871,
+        "count": 11,
+        "rgb_target_allocations": 1314,
+        "fresh_wayland_imports": 1314
+      }
+    },
+    {
+      "run_id": 97,
+      "arm": "B",
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "75b996a10d4333aeb46fa8e2ab585c8d",
+        "source_epoch": 1
+      },
+      "clock_scopes": {
+        "viewer_observer_monotonic_ns": [
+          55214665580538,
+          55304666125749
+        ],
+        "viewer_measured_markers_monotonic_ns": [
+          55244665580538,
+          55304665580538
+        ],
+        "host_painter_monotonic_ns": [
+          55290292998186,
+          55387167299735
+        ]
+      },
+      "whole_viewer_session": {
+        "rgb_target_allocations": 2,
+        "fresh_wayland_imports": 2736,
+        "egl_fence_waits": 2736,
+        "native_preparations": 2736
+      },
+      "viewer_windows_with_actual_allocations": [
+        {
+          "arrival_monotonic_ns": 55214652454549,
+          "final": false,
+          "observed_allocations": 2
+        }
+      ],
+      "activation_banner_count": 1,
+      "matched_whole_viewer_windows": {
+        "seconds": 55.090547774,
+        "count": 11,
+        "rgb_target_allocations": 0,
+        "fresh_wayland_imports": 1579
+      }
+    },
+    {
+      "run_id": 98,
+      "arm": "B",
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "2d9e83ab1e58e6aff0ef1d84a9fafd7d",
+        "source_epoch": 1
+      },
+      "clock_scopes": {
+        "viewer_observer_monotonic_ns": [
+          55316152456940,
+          55406152670594
+        ],
+        "viewer_measured_markers_monotonic_ns": [
+          55346152456940,
+          55406152456940
+        ],
+        "host_painter_monotonic_ns": [
+          55391714345882,
+          55488794153105
+        ]
+      },
+      "whole_viewer_session": {
+        "rgb_target_allocations": 2,
+        "fresh_wayland_imports": 2746,
+        "egl_fence_waits": 2746,
+        "native_preparations": 2746
+      },
+      "viewer_windows_with_actual_allocations": [
+        {
+          "arrival_monotonic_ns": 55316128716365,
+          "final": false,
+          "observed_allocations": 2
+        }
+      ],
+      "activation_banner_count": 1,
+      "matched_whole_viewer_windows": {
+        "seconds": 55.118173483,
+        "count": 11,
+        "rgb_target_allocations": 0,
+        "fresh_wayland_imports": 1581
+      }
+    },
+    {
+      "run_id": 99,
+      "arm": "A",
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "b25563ca82a6de8a031380795240d1a9",
+        "source_epoch": 1
+      },
+      "clock_scopes": {
+        "viewer_observer_monotonic_ns": [
+          55416909464271,
+          55506909497979
+        ],
+        "viewer_measured_markers_monotonic_ns": [
+          55446909464271,
+          55506909464271
+        ],
+        "host_painter_monotonic_ns": [
+          55492552904711,
+          55589635453814
+        ]
+      },
+      "whole_viewer_session": {
+        "rgb_target_allocations": 2252,
+        "fresh_wayland_imports": 2252,
+        "egl_fence_waits": 2252,
+        "native_preparations": 2252
+      },
+      "viewer_windows_with_actual_allocations": [
+        {
+          "arrival_monotonic_ns": 55416885097497,
+          "final": false,
+          "observed_allocations": 102
+        },
+        {
+          "arrival_monotonic_ns": 55421886117076,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55426899866881,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55431911121535,
+          "final": false,
+          "observed_allocations": 81
+        },
+        {
+          "arrival_monotonic_ns": 55436938834308,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55441966612208,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55446968869892,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55451996252673,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55457013942576,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55462046728988,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55467065860019,
+          "final": false,
+          "observed_allocations": 124
+        },
+        {
+          "arrival_monotonic_ns": 55472086989364,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55477099035355,
+          "final": false,
+          "observed_allocations": 123
+        },
+        {
+          "arrival_monotonic_ns": 55482106090478,
+          "final": false,
+          "observed_allocations": 127
+        },
+        {
+          "arrival_monotonic_ns": 55487132261781,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55492161713486,
+          "final": false,
+          "observed_allocations": 87
+        },
+        {
+          "arrival_monotonic_ns": 55497187042356,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55502197033662,
+          "final": false,
+          "observed_allocations": 125
+        },
+        {
+          "arrival_monotonic_ns": 55506933481083,
+          "final": true,
+          "observed_allocations": 120
+        }
+      ],
+      "activation_banner_count": 0,
+      "matched_whole_viewer_windows": {
+        "seconds": 55.228165421,
+        "count": 11,
+        "rgb_target_allocations": 1331,
+        "fresh_wayland_imports": 1331
+      }
+    }
+  ],
+  "archive": {
+    "path": "native-wayland-4k-reuse-abba-raw.zip",
+    "sha256": "01539237bdd796073b577b00dcd2249a6623c9332dd6052a0087e2e262ed5dfb",
+    "entries": {
+      "plan.json": "8a0e2e6481e7157f968d786952e294c115eb09fa2cfe32a6592acb7a94d5363d",
+      "comparison.json": "0b862e80ee5b6214ea868a4ed30ec232e846a5a7ac443737f3b85d1f48f5571f",
+      "fixture/REPLAY.md": "9804608a8e92a93c1f2490d3837d1b67c030f15fcae3fd98a724f77a79cf7922",
+      "run-092/execution.json": "4da3522c65db3686c11dbf9576f368969a37ff7f431d98dc1882bdb59263df95",
+      "run-092/result.json": "d1f32a22692f194e1ed36cbdcfa61bef4e98259858618d2157060832b82afd6b",
+      "run-092/marker-test.log": "f5c3e4136590034a36ee8047e5d00961dcbae79a18762bbfa770e2c476b7484c",
+      "run-092/source/host.log": "48844681e74e50001311d0d8dbf4ba17d301d1a94f65c5aa314c25d670bec2b4",
+      "run-092/source/paint.jsonl": "0a1d9e17894437b2207ad5595117d09356265d746a67c4681962dadb64417fa5",
+      "run-092/viewer/observed.jsonl": "8fe4a38acfa99cf3fab0c07857635361ca4a82636709daed7756556aca00fe2b",
+      "run-092/viewer/viewer-clock.jsonl": "b2fe833498b103e6b1369c6460ccae91b44f5bb014f6e3bc8f397901a3ed93bf",
+      "run-092/viewer/viewer-events.jsonl": "463231d5d2a76b201082f2a0f135a2eec7e0935dea9ebb5b5b243232a790d87e",
+      "run-092/viewer/viewer-complete-stderr.log": "c043df5c6fc7a5ea310079e81b32fc4f5002bf9cd05bc4357b1067025c32dd0d",
+      "run-092/viewer/viewer-stage-windows.jsonl": "5a2ae223273c006b522a1fd959d338cb31cb9a40f649f39e853324d6b9c27980",
+      "run-092/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-092/source/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-092/source/xvfb.log": "18b994563c61904f959cb44346126933ebd488bf232ed5ab5e7f9fab0cd38b2c",
+      "run-093/execution.json": "4da3522c65db3686c11dbf9576f368969a37ff7f431d98dc1882bdb59263df95",
+      "run-093/result.json": "81ddd3f50c10e2f3519210605f6fb7e1cef921eebd7fe0e5b4a6f6f7f35be7ea",
+      "run-093/marker-test.log": "dbc59315d161d959e5ac542eeeb4f42fe86ad2b3653ee7b9608d4bcf29abeb59",
+      "run-093/source/host.log": "025f90a37d742378086856395f640eeb03dcaf27cd27a52d5451cd43e9f175af",
+      "run-093/source/paint.jsonl": "a96f828ddb85677b333b6e0e3fc401fbece543985600d2e210649d88a88b5f0d",
+      "run-093/viewer/observed.jsonl": "9dd2a241967a9d58f427468e88b2af6a6db80fff4e34e7ac56507a45e181f14d",
+      "run-093/viewer/viewer-clock.jsonl": "9a603cc278cc61b4b80ea3a0f3d8f1f3ec903a3cae0f7a96752336821c5769e9",
+      "run-093/viewer/viewer-events.jsonl": "2affdaa25d2995685af1a4ac36eaf3dd820265b03d5695b859ddebf0cc53361e",
+      "run-093/viewer/viewer-complete-stderr.log": "27aa252fd13f82307a091fd731325afe91be3cb711115ad09a95a20c127b0e8d",
+      "run-093/viewer/viewer-stage-windows.jsonl": "68df22c4d9228ecdc027ec07d24e9a101d1d83f2139c75c1aabc3e837f565f25",
+      "run-093/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-093/source/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-093/source/xvfb.log": "18b994563c61904f959cb44346126933ebd488bf232ed5ab5e7f9fab0cd38b2c",
+      "run-094/execution.json": "4da3522c65db3686c11dbf9576f368969a37ff7f431d98dc1882bdb59263df95",
+      "run-094/result.json": "6a0017ced7c4ed2388fe6f76602856b614a1a8fea338e7037aa1d700b99d74e1",
+      "run-094/marker-test.log": "58cb04f898c831d48a10290600481b3c1c36f8cf08471b172b75bb3f3d922ad8",
+      "run-094/source/host.log": "4a17846681d0ffaa6d66994b336588367482823ae4e5e1a85493c923d4ceadb5",
+      "run-094/source/paint.jsonl": "7c12597cfb79517381f44c08c858c8ba1899a51c16120932e576816bebff3146",
+      "run-094/viewer/observed.jsonl": "c6d0cee8f221c12c97e7b90f472452c0d9a0dc68b31fac2e621aeeb7a430d72d",
+      "run-094/viewer/viewer-clock.jsonl": "6a68cfc0eeaa4be70b631ba709926e0cbfdb85922d8e9e6bf16c48db9cb048f0",
+      "run-094/viewer/viewer-events.jsonl": "70b2e623d84284037f9afcdc754e806aaee14f47c0733420778980cf75299798",
+      "run-094/viewer/viewer-complete-stderr.log": "5b63c7b761b518b1cceea0b400b5497d7a5d0c695a3fab8faaca7f0a9264b82a",
+      "run-094/viewer/viewer-stage-windows.jsonl": "ff86c2ac1253aa69a5d23024c89715a88980563be224302d1ed978780fa5588f",
+      "run-094/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-094/source/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-094/source/xvfb.log": "18b994563c61904f959cb44346126933ebd488bf232ed5ab5e7f9fab0cd38b2c",
+      "run-095/execution.json": "4da3522c65db3686c11dbf9576f368969a37ff7f431d98dc1882bdb59263df95",
+      "run-095/result.json": "b94f378180a4c1a018d22eb1a10a9edf07a5c51f07f9769e66ef008ed5de9de1",
+      "run-095/marker-test.log": "dbc59315d161d959e5ac542eeeb4f42fe86ad2b3653ee7b9608d4bcf29abeb59",
+      "run-095/source/host.log": "9c1589d7fe12e73f0f0732aaae8839481032e70240ba3c6b23396097ea659cd6",
+      "run-095/source/paint.jsonl": "76e4b647d88c140f827e6fe4d4d0a1047562d8ccea70cdf11a6cf7a42ec8a78d",
+      "run-095/viewer/observed.jsonl": "80a596f9be698b785918c86410faddbdc3c60135376eb24d4ed3e5b96238154f",
+      "run-095/viewer/viewer-clock.jsonl": "201b6cf0f373af1e8abba98135642518cf44b94d6a2b18321baff502eea21746",
+      "run-095/viewer/viewer-events.jsonl": "86fc58cb401e1935927115c4f313912e01abf4bbc13f2380fe80052e76c9b677",
+      "run-095/viewer/viewer-complete-stderr.log": "e69ac8981025061d216dde18a5894df90d3923d5db6f8155d55bb57f2d08c782",
+      "run-095/viewer/viewer-stage-windows.jsonl": "f15b84455fa6d2de04a3f31808a4671949246b9b30f14e42941fed8b7ae521b6",
+      "run-095/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-095/source/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-095/source/xvfb.log": "18b994563c61904f959cb44346126933ebd488bf232ed5ab5e7f9fab0cd38b2c",
+      "run-096/execution.json": "4da3522c65db3686c11dbf9576f368969a37ff7f431d98dc1882bdb59263df95",
+      "run-096/result.json": "29e1149b67d8740f6efd859e606643e495a23a2423c35c873a7fe48e7a006895",
+      "run-096/marker-test.log": "d5d380bdc32f55bcb8d611965304978454061b943ffcbef20ccf5fdcaf76bd98",
+      "run-096/source/host.log": "c62a4e979e0755b3da098cb5fcaf99c5400d7f92c0492800f0c991c23accf225",
+      "run-096/source/paint.jsonl": "faaa304db2537c4cca4943c991bbc34f3b2a15d9686b750fab15678cc7bb810e",
+      "run-096/viewer/observed.jsonl": "3e2469ebb398d43978800c07a6b4c9222092e303eed83512f9f7296805635d99",
+      "run-096/viewer/viewer-clock.jsonl": "f3ed1f40a3d88a363f03f3ed99c1e3b611aa3d9300fb3628414267f5eafb3b6b",
+      "run-096/viewer/viewer-events.jsonl": "62997fdac7232092117d2acacc56136d5b8243acb35dcb69f766e0da1669a180",
+      "run-096/viewer/viewer-complete-stderr.log": "4563e3f2bf89fdad711af8045b59f0689f14b3d771ee86f0c6b4c4486688a677",
+      "run-096/viewer/viewer-stage-windows.jsonl": "2ab1e62a122e8d5a183d57b7d9d4778cd424b9fa4ef9c79ac7641641ef656a94",
+      "run-096/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-096/source/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-096/source/xvfb.log": "18b994563c61904f959cb44346126933ebd488bf232ed5ab5e7f9fab0cd38b2c",
+      "run-097/execution.json": "4da3522c65db3686c11dbf9576f368969a37ff7f431d98dc1882bdb59263df95",
+      "run-097/result.json": "7e029686c2f4ff5b26b3722a6a1918ea16cc275ac561b2c7bb51a279edc62010",
+      "run-097/marker-test.log": "206bbf5863f722aa14dad4107b22b5da6edb821718f7af2b9ba08784dc5d1b4e",
+      "run-097/source/host.log": "a04cf5bda1904c4fbf066102671c3c4eecfa7993a7f535279626eba592d9a4b4",
+      "run-097/source/paint.jsonl": "70073aed36f9201f6cc6604dd12933ea4a7aba87e2cdec3dc7e6683c751ecfeb",
+      "run-097/viewer/observed.jsonl": "7267bec2a3bec996d31fc833856bc6eebd3fc5c9d5cf84d8803c7d3391db2fb1",
+      "run-097/viewer/viewer-clock.jsonl": "99555999147f5213da78b0ad8b172619fcf19cf3ecedf37368d46edcc65aa789",
+      "run-097/viewer/viewer-events.jsonl": "6df5539e4af8598f69a15b8a20f0e63d5c7fe945ff5502735b5d629d7e7c7e4a",
+      "run-097/viewer/viewer-complete-stderr.log": "3ffc7f16254c5ed289242a0c1f55c4adb73cf804e05ba0edab95ad14c026bd23",
+      "run-097/viewer/viewer-stage-windows.jsonl": "9b39a6f32fc9107e7fcfd777213f6d2154294f2f8b3ee7f0f17c7b2823b9ca34",
+      "run-097/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-097/source/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-097/source/xvfb.log": "18b994563c61904f959cb44346126933ebd488bf232ed5ab5e7f9fab0cd38b2c",
+      "run-098/execution.json": "4da3522c65db3686c11dbf9576f368969a37ff7f431d98dc1882bdb59263df95",
+      "run-098/result.json": "bec5abc515bf1606324fc4f9d2a4a4a8ceb90d9981234092c22aeee48b950116",
+      "run-098/marker-test.log": "d61c8211c486a988cfc3a70f742c6d7fd383d6fbe291595d9600f02b663b246d",
+      "run-098/source/host.log": "001dcaef6bd499307ede1909d4dcf1b7833990c2186be6313d8f7d22da35986f",
+      "run-098/source/paint.jsonl": "4345d70857f2dd79cc8cc43334b5ec2ee9f5f8f378d637aae6d20004d72bf0b2",
+      "run-098/viewer/observed.jsonl": "fdb775e4a59e5d09b2794bcaa078f49bfb22f5b8004ece475bdf058eb159066b",
+      "run-098/viewer/viewer-clock.jsonl": "c58d79735c65bf99205c1ed7f1bce131bf3fcf744765d08fd3956749e8d923ce",
+      "run-098/viewer/viewer-events.jsonl": "3bd9e102b3e33ff88be31fb0455406262e9301521fcca309f1a57050c37fa173",
+      "run-098/viewer/viewer-complete-stderr.log": "bd0b6c6e6f5417718a3d477b7512c8aae3eab4645341c8e2a3da04afd2f8f8ff",
+      "run-098/viewer/viewer-stage-windows.jsonl": "42984f4028b3e57bc6219978e7c9d43cab7f6aaee595a82d93b5d19aea5f527e",
+      "run-098/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-098/source/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-098/source/xvfb.log": "18b994563c61904f959cb44346126933ebd488bf232ed5ab5e7f9fab0cd38b2c",
+      "run-099/execution.json": "4da3522c65db3686c11dbf9576f368969a37ff7f431d98dc1882bdb59263df95",
+      "run-099/result.json": "952cb24196506298e70b8e7c671668ff70e6523d556a2b1bf9c4554c61d910f7",
+      "run-099/marker-test.log": "dbc59315d161d959e5ac542eeeb4f42fe86ad2b3653ee7b9608d4bcf29abeb59",
+      "run-099/source/host.log": "38af8be5f3deaca528811f7b7f42d96e621b6e5f9f2b77064a4ffcdf978173b3",
+      "run-099/source/paint.jsonl": "938d51adad6478032014ca3eca29417e59e33b48c520101a8c04b753154d086f",
+      "run-099/viewer/observed.jsonl": "4bb58aa8b02d766423e97f756870c704c33fe6e9629a201e8f68ecaa821f09a8",
+      "run-099/viewer/viewer-clock.jsonl": "89666b28bccd605f3906f6b3d6ce995aa5bade17594e5f714926fc637ef99c98",
+      "run-099/viewer/viewer-events.jsonl": "40682105d40d8a54e952d3035d492e04f6e1db5e71c2ea87b76691c17d1c5716",
+      "run-099/viewer/viewer-complete-stderr.log": "b19dac320b85bf8746b3fb713d6e88104e4fd6b66e76a78495ab3d24c9386a3d",
+      "run-099/viewer/viewer-stage-windows.jsonl": "34f949e86ec307393ab26f2fbe8337405fa33d384d4a4d4d7c3de771c280e244",
+      "run-099/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-099/source/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run-099/source/xvfb.log": "18b994563c61904f959cb44346126933ebd488bf232ed5ab5e7f9fab0cd38b2c",
+      "fixture/preflight.py": "8223adccad32125a748a7db81ab0d96c94def6c0aff9eae5681cfc6e02c34c7a",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/viewer-stats-wrapper.sh": "ac2854e16165615a12eb485947492b73bc240250539aaf3be0ad92c71283744c",
+      "fixture/tee_stderr.py": "a6da4ec18277a78fefcf308a7b87bd04bc66ee4f547a1903b05dc91019547e79",
+      "fixture/historical.py": "ad0986624ef562490cce7a5a048df8b16bc5bce86eaa7bf2d9dcb942227c9977",
+      "fixture/validate_phases.py": "03e991464140c037855dbd61acbc6c62c12448b4fb07b060cf700cc3a7ff7a3b",
+      "fixture/test-remote-wayland-4k-marker.sh": "8ae5881373f36ab54120083af037e0672d0142487a387d07574b6afdf319d71a",
+      "fixture/run_abba.py": "03d95832dcedc3859aeec1b5f76d46123cd044c8ea61dda2afcc5abebf6694df"
+    }
+  }
+}

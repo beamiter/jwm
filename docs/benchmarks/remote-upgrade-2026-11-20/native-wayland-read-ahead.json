@@ -1,0 +1,199 @@
+{
+  "archive": {
+    "entries_sha256": {
+      "ffmpeg-linked-versions.txt": "23d963ee806c86eb1a48d88120053237f577c82f03e8ef2980ceec2431509cf2",
+      "fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "gpu-cli.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "gpu-cli.log": "7441ee64fcbea905514ebeabfac0218c0bcf76d42f63a6e8b2efb8cd33e4f558",
+      "kernel-version.txt": "4b52053462c5d2c7266fba0c7982691d81c35abcafe476cf58f10bf561dba384",
+      "native-cli.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "native-cli.log": "571cf73216c422161f9c07872509d55333be1941487e0c51c3a8adb0b8e4deeb",
+      "render-driver.txt": "84a066475f40bb1b7410d52ecead58dda387a33fdc7a6420cb7dd50cc6d434c1",
+      "source-sha256.txt": "ba60f0867cb95f65951ce9b0ebf74e3eeeb001cca581ac954c1252f9b9f2dc9c",
+      "x11-shared-client/client_decode_queue--tests.log": "0474b569173bbcbfb0e1966cdae599441a848e5c295816a84ac7b6db878baebc",
+      "x11-shared-client/read_ahead.log": "d7a1a46ffe0a0a5749348414b723116ff1800656074a0755c71a25ab2c45b38c",
+      "x11-shared-client/result.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "x11-shared-client/source-sha256.txt": "ea06560dde0fe547fe4c491f60265f7e48246144fab6e6d8541261cd16ed2022"
+    },
+    "path": "native-wayland-read-ahead-raw.zip",
+    "sha256": "52f03b120f01f47773e270c19a2dae7910d7eabbc4a1167c3b8a4a9e82087869"
+  },
+  "hardware_cli": {
+    "passed": 1,
+    "queued_video_frames": 398,
+    "render_node": "/dev/dri/renderD128",
+    "stages": [
+      {
+        "codec": "H.264",
+        "hardware_download_observations": 0,
+        "host_acked": 98,
+        "host_capture_path": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "samples_bgrx": [
+          [
+            0,
+            1,
+            255,
+            255
+          ],
+          [
+            0,
+            1,
+            255,
+            255
+          ],
+          [
+            0,
+            1,
+            255,
+            255
+          ]
+        ],
+        "scenario": "first",
+        "source_epoch": 1,
+        "viewer_acked": 99,
+        "viewer_path": "wayland-vaapi-dmabuf"
+      },
+      {
+        "codec": "H.264",
+        "hardware_download_observations": 0,
+        "host_acked": 99,
+        "host_capture_path": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "samples_bgrx": [
+          [
+            0,
+            0,
+            0,
+            255
+          ],
+          [
+            0,
+            1,
+            255,
+            255
+          ],
+          [
+            0,
+            1,
+            255,
+            255
+          ]
+        ],
+        "scenario": "resized",
+        "source_epoch": 1,
+        "viewer_acked": 99,
+        "viewer_path": "wayland-vaapi-dmabuf"
+      },
+      {
+        "codec": "H.264",
+        "hardware_download_observations": 0,
+        "host_acked": 98,
+        "host_capture_path": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "samples_bgrx": [
+          [
+            255,
+            0,
+            1,
+            255
+          ],
+          [
+            255,
+            0,
+            1,
+            255
+          ],
+          [
+            255,
+            0,
+            1,
+            255
+          ]
+        ],
+        "scenario": "second",
+        "source_epoch": 2,
+        "viewer_acked": 98,
+        "viewer_path": "wayland-vaapi-dmabuf"
+      },
+      {
+        "codec": "H.264",
+        "hardware_download_observations": 98,
+        "host_acked": 99,
+        "host_capture_path": "wayland-surface/vaapi-resize/wayland-dmabuf/no-damage/no-cursor",
+        "samples_bgrx": [
+          [
+            253,
+            0,
+            0,
+            255
+          ],
+          [
+            253,
+            0,
+            0,
+            255
+          ],
+          [
+            253,
+            0,
+            0,
+            255
+          ]
+        ],
+        "scenario": "fallback",
+        "source_epoch": 2,
+        "viewer_acked": 99,
+        "viewer_path": "rgb"
+      },
+      {
+        "codec": "JPEG",
+        "hardware_download_observations": 2,
+        "host_acked": 5,
+        "host_capture_path": "wayland-surface/cpu-resize/shm/no-damage/no-cursor",
+        "samples_bgrx": [
+          [
+            254,
+            0,
+            0,
+            255
+          ],
+          [
+            254,
+            0,
+            0,
+            255
+          ],
+          [
+            254,
+            0,
+            0,
+            255
+          ]
+        ],
+        "scenario": "capture_fallback",
+        "source_epoch": 2,
+        "viewer_acked": 4,
+        "viewer_path": "rgb"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "scope": "Native view-only read-ahead through real CLI subprocesses and two owned Wayland compositors on Mint loopback.",
+  "shared_x11_queue_checks": {
+    "decode_queue": 5,
+    "passed": 6,
+    "read_ahead_barrier": 1
+  },
+  "software_cli": {
+    "passed": 11,
+    "read_ahead_source_switch_arms": [
+      {
+        "queued_video_frames": 0,
+        "read_ahead": false
+      },
+      {
+        "queued_video_frames": 3,
+        "read_ahead": true
+      }
+    ],
+    "scenario": "Red to blue to red on one authenticated TCP session. The test reads the held replacement buffer and delivers old-role positive feedback before confirming the replacement."
+  }
+}

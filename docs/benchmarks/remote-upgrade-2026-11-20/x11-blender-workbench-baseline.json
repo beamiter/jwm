@@ -1,0 +1,1716 @@
+{
+  "schema_version": 1,
+  "scope": "single-machine isolated X11 software Workbench pixel baseline",
+  "manifest": {
+    "scene": "workbench_scene.py",
+    "scene_sha256": "b1ed7bed12578dcfe73e0b62240af3a350efbf6ec64906c04f9f719f6eb65e71",
+    "blender": "/tmp/jwm-blender-acceptance.VR4FQlr0/blender-4.5.16-linux-x64/blender",
+    "release": "/tmp/jwm-p08-p09-release/jwm-remote",
+    "release_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+    "attempted_trials": 3,
+    "scope": "one machine, private Xvfb displays, software OpenGL and loopback",
+    "capture": "owned X11 root Auto scaling",
+    "viewer": "X11 1:1 decoder",
+    "phases": [
+      "static",
+      "motion"
+    ],
+    "poll_hz_ceiling": 90
+  },
+  "scene_hash_verified": true,
+  "release_hash_verified": true,
+  "trial_status_counts": {
+    "qualified_gate_miss": 1,
+    "qualified_gate_pass": 2
+  },
+  "trials": [
+    {
+      "trial": 1,
+      "controller_outcome": {
+        "trial": 1,
+        "status": "completed",
+        "source_qualified": true,
+        "telemetry_complete": true,
+        "viewer_motion_gate_met": false
+      },
+      "validation_errors": [],
+      "phases": [
+        {
+          "phase": "static",
+          "warmup_seconds": 30,
+          "measurement_seconds": 60,
+          "start_monotonic_ns": 52661841702572,
+          "end_monotonic_ns": 52721841702572,
+          "tail_end_monotonic_ns": 52729841702572,
+          "observer_covers_both_intervals": true,
+          "exact_score_replay": true,
+          "samples": {
+            "source": {
+              "distinct_mesh_positions": 0,
+              "unique_content_fps": 0.0,
+              "one_second_unique_bins": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "zero_unique_bins": 60,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 1.651285,
+              "gap_ms": {
+                "p95": 60000.0,
+                "max": 60000.0
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            },
+            "viewer": {
+              "distinct_mesh_positions": 0,
+              "unique_content_fps": 0.0,
+              "one_second_unique_bins": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "zero_unique_bins": 60,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 1.638054,
+              "gap_ms": {
+                "p95": 60000.0,
+                "max": 60000.0
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            }
+          },
+          "telemetry": {
+            "host": {
+              "window_seconds": 60.089991368,
+              "whole_windows": 12,
+              "session_ids": [
+                "4c5a0c01c3aa27fd6c5f61c98b15ab3f"
+              ],
+              "actual_routes": [
+                "root/xrender/shm/no-damage/cursor-events"
+              ],
+              "frames_with_scope": 12,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "captured": 1763,
+                "sent": 15,
+                "drawn_acks": 15,
+                "bytes": 5115
+              },
+              "valid": true
+            },
+            "viewer": {
+              "window_seconds": 60.007794214,
+              "whole_windows": 12,
+              "session_ids": [
+                "4c5a0c01c3aa27fd6c5f61c98b15ab3f"
+              ],
+              "actual_routes": [
+                "rgb"
+              ],
+              "frames_with_scope": 12,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "received": 15,
+                "decoded": 15,
+                "drawn": 15,
+                "acked": 15
+              },
+              "valid": true
+            }
+          }
+        },
+        {
+          "phase": "motion",
+          "warmup_seconds": 30,
+          "measurement_seconds": 60,
+          "start_monotonic_ns": 52760065661170,
+          "end_monotonic_ns": 52820065661170,
+          "tail_end_monotonic_ns": 52828065661170,
+          "observer_covers_both_intervals": true,
+          "exact_score_replay": true,
+          "samples": {
+            "source": {
+              "distinct_mesh_positions": 2723,
+              "unique_content_fps": 45.38333333333333,
+              "one_second_unique_bins": [
+                44,
+                42,
+                46,
+                44,
+                44,
+                45,
+                46,
+                45,
+                46,
+                45,
+                45,
+                44,
+                44,
+                45,
+                45,
+                45,
+                47,
+                46,
+                46,
+                48,
+                45,
+                43,
+                47,
+                45,
+                46,
+                46,
+                46,
+                47,
+                44,
+                47,
+                44,
+                45,
+                44,
+                46,
+                45,
+                48,
+                46,
+                45,
+                47,
+                47,
+                43,
+                45,
+                43,
+                47,
+                45,
+                45,
+                46,
+                47,
+                46,
+                46,
+                46,
+                47,
+                46,
+                47,
+                46,
+                45,
+                44,
+                44,
+                45,
+                45
+              ],
+              "zero_unique_bins": 0,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 2.767643,
+              "gap_ms": {
+                "p95": 33.385666,
+                "max": 144.463966
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            },
+            "viewer": {
+              "distinct_mesh_positions": 1616,
+              "unique_content_fps": 26.933333333333334,
+              "one_second_unique_bins": [
+                27,
+                26,
+                26,
+                28,
+                27,
+                26,
+                28,
+                26,
+                28,
+                27,
+                25,
+                28,
+                27,
+                28,
+                26,
+                28,
+                27,
+                27,
+                28,
+                26,
+                28,
+                26,
+                27,
+                27,
+                26,
+                26,
+                29,
+                26,
+                27,
+                28,
+                26,
+                26,
+                27,
+                28,
+                26,
+                28,
+                28,
+                28,
+                28,
+                27,
+                28,
+                27,
+                27,
+                26,
+                27,
+                28,
+                26,
+                28,
+                25,
+                29,
+                26,
+                26,
+                27,
+                28,
+                25,
+                27,
+                26,
+                26,
+                27,
+                26
+              ],
+              "zero_unique_bins": 0,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 2.706571,
+              "gap_ms": {
+                "p95": 46.744503,
+                "max": 179.883377
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            }
+          },
+          "telemetry": {
+            "host": {
+              "window_seconds": 65.08862909,
+              "whole_windows": 13,
+              "session_ids": [
+                "4c5a0c01c3aa27fd6c5f61c98b15ab3f"
+              ],
+              "actual_routes": [
+                "root/xrender/shm/no-damage/cursor-events"
+              ],
+              "frames_with_scope": 13,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "captured": 1903,
+                "sent": 1903,
+                "drawn_acks": 1903,
+                "bytes": 4876949
+              },
+              "valid": true
+            },
+            "viewer": {
+              "window_seconds": 65.005045386,
+              "whole_windows": 13,
+              "session_ids": [
+                "4c5a0c01c3aa27fd6c5f61c98b15ab3f"
+              ],
+              "actual_routes": [
+                "rgb"
+              ],
+              "frames_with_scope": 13,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "received": 1902,
+                "decoded": 1902,
+                "drawn": 1902,
+                "acked": 1902
+              },
+              "valid": true
+            }
+          }
+        }
+      ],
+      "route": {
+        "application_start": {
+          "scene": "jwm-workbench-cube-v1",
+          "application_version": "4.5.16 LTS",
+          "build_hash": "3f6797307da5",
+          "renderer": "llvmpipe (LLVM 20.1.2, 256 bits)",
+          "render_engine": "BLENDER_WORKBENCH",
+          "shading": "SOLID",
+          "camera": "CAMERA",
+          "viewport": [
+            0,
+            27,
+            792,
+            543
+          ],
+          "window_size": [
+            960,
+            640
+          ],
+          "timeline_fps": 60,
+          "frame": 1,
+          "playing": false,
+          "playback_requested": false
+        },
+        "application_last": {
+          "scene": "jwm-workbench-cube-v1",
+          "application_version": "4.5.16 LTS",
+          "build_hash": "3f6797307da5",
+          "renderer": "llvmpipe (LLVM 20.1.2, 256 bits)",
+          "render_engine": "BLENDER_WORKBENCH",
+          "shading": "SOLID",
+          "camera": "CAMERA",
+          "viewport": [
+            0,
+            27,
+            792,
+            543
+          ],
+          "window_size": [
+            960,
+            640
+          ],
+          "timeline_fps": 60,
+          "frame": 5868,
+          "playing": true,
+          "playback_requested": true
+        },
+        "scan_row": 300,
+        "static_mesh_spans": {
+          "source": {
+            "left": 251,
+            "right": 321,
+            "center_x": 286
+          },
+          "viewer": {
+            "left": 251,
+            "right": 321,
+            "center_x": 286
+          }
+        },
+        "motion_end_mesh_spans": {
+          "source": {
+            "left": 263,
+            "right": 344,
+            "center_x": 303
+          },
+          "viewer": {
+            "left": 261,
+            "right": 340,
+            "center_x": 300
+          }
+        }
+      },
+      "motion_gate": false,
+      "telemetry_verified": true,
+      "session_id": "4c5a0c01c3aa27fd6c5f61c98b15ab3f",
+      "static_idle_verified": true,
+      "source_qualified": true,
+      "status": "qualified_gate_miss"
+    },
+    {
+      "trial": 2,
+      "controller_outcome": {
+        "trial": 2,
+        "status": "completed",
+        "source_qualified": true,
+        "telemetry_complete": true,
+        "viewer_motion_gate_met": true
+      },
+      "validation_errors": [],
+      "phases": [
+        {
+          "phase": "static",
+          "warmup_seconds": 30,
+          "measurement_seconds": 60,
+          "start_monotonic_ns": 52859925498169,
+          "end_monotonic_ns": 52919925498169,
+          "tail_end_monotonic_ns": 52927925498169,
+          "observer_covers_both_intervals": true,
+          "exact_score_replay": true,
+          "samples": {
+            "source": {
+              "distinct_mesh_positions": 0,
+              "unique_content_fps": 0.0,
+              "one_second_unique_bins": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "zero_unique_bins": 60,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 1.834975,
+              "gap_ms": {
+                "p95": 60000.0,
+                "max": 60000.0
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            },
+            "viewer": {
+              "distinct_mesh_positions": 0,
+              "unique_content_fps": 0.0,
+              "one_second_unique_bins": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "zero_unique_bins": 60,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 1.76834,
+              "gap_ms": {
+                "p95": 60000.0,
+                "max": 60000.0
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            }
+          },
+          "telemetry": {
+            "host": {
+              "window_seconds": 60.072537046,
+              "whole_windows": 12,
+              "session_ids": [
+                "50bec7595de4ce47a2553633edd7844e"
+              ],
+              "actual_routes": [
+                "root/xrender/shm/no-damage/cursor-events"
+              ],
+              "frames_with_scope": 12,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "captured": 1761,
+                "sent": 15,
+                "drawn_acks": 15,
+                "bytes": 5115
+              },
+              "valid": true
+            },
+            "viewer": {
+              "window_seconds": 60.008773766,
+              "whole_windows": 12,
+              "session_ids": [
+                "50bec7595de4ce47a2553633edd7844e"
+              ],
+              "actual_routes": [
+                "rgb"
+              ],
+              "frames_with_scope": 12,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "received": 15,
+                "decoded": 15,
+                "drawn": 15,
+                "acked": 15
+              },
+              "valid": true
+            }
+          }
+        },
+        {
+          "phase": "motion",
+          "warmup_seconds": 30,
+          "measurement_seconds": 60,
+          "start_monotonic_ns": 52958157886058,
+          "end_monotonic_ns": 53018157886058,
+          "tail_end_monotonic_ns": 53026157886058,
+          "observer_covers_both_intervals": true,
+          "exact_score_replay": true,
+          "samples": {
+            "source": {
+              "distinct_mesh_positions": 2710,
+              "unique_content_fps": 45.166666666666664,
+              "one_second_unique_bins": [
+                43,
+                44,
+                43,
+                46,
+                48,
+                48,
+                47,
+                45,
+                45,
+                44,
+                48,
+                45,
+                44,
+                47,
+                47,
+                45,
+                46,
+                46,
+                45,
+                47,
+                46,
+                46,
+                42,
+                45,
+                42,
+                47,
+                47,
+                45,
+                45,
+                46,
+                45,
+                46,
+                43,
+                42,
+                45,
+                45,
+                43,
+                47,
+                46,
+                46,
+                44,
+                45,
+                45,
+                45,
+                47,
+                44,
+                42,
+                45,
+                48,
+                44,
+                45,
+                43,
+                46,
+                48,
+                46,
+                44,
+                42,
+                45,
+                45,
+                45
+              ],
+              "zero_unique_bins": 0,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 2.549371,
+              "gap_ms": {
+                "p95": 33.344485,
+                "max": 132.845627
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            },
+            "viewer": {
+              "distinct_mesh_positions": 1622,
+              "unique_content_fps": 27.033333333333335,
+              "one_second_unique_bins": [
+                26,
+                26,
+                27,
+                28,
+                27,
+                26,
+                28,
+                27,
+                27,
+                27,
+                26,
+                27,
+                26,
+                27,
+                28,
+                28,
+                27,
+                27,
+                29,
+                27,
+                27,
+                26,
+                29,
+                26,
+                27,
+                27,
+                28,
+                26,
+                27,
+                26,
+                27,
+                28,
+                26,
+                27,
+                27,
+                26,
+                29,
+                26,
+                27,
+                26,
+                27,
+                27,
+                27,
+                27,
+                27,
+                26,
+                27,
+                27,
+                27,
+                27,
+                28,
+                27,
+                27,
+                29,
+                28,
+                27,
+                27,
+                26,
+                29,
+                26
+              ],
+              "zero_unique_bins": 0,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 2.777272,
+              "gap_ms": {
+                "p95": 45.690264,
+                "max": 144.601361
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            }
+          },
+          "telemetry": {
+            "host": {
+              "window_seconds": 65.079622959,
+              "whole_windows": 13,
+              "session_ids": [
+                "50bec7595de4ce47a2553633edd7844e"
+              ],
+              "actual_routes": [
+                "root/xrender/shm/no-damage/cursor-events"
+              ],
+              "frames_with_scope": 13,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "captured": 1902,
+                "sent": 1902,
+                "drawn_acks": 1902,
+                "bytes": 4875672
+              },
+              "valid": true
+            },
+            "viewer": {
+              "window_seconds": 65.010696497,
+              "whole_windows": 13,
+              "session_ids": [
+                "50bec7595de4ce47a2553633edd7844e"
+              ],
+              "actual_routes": [
+                "rgb"
+              ],
+              "frames_with_scope": 13,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "received": 1900,
+                "decoded": 1900,
+                "drawn": 1900,
+                "acked": 1900
+              },
+              "valid": true
+            }
+          }
+        }
+      ],
+      "route": {
+        "application_start": {
+          "scene": "jwm-workbench-cube-v1",
+          "application_version": "4.5.16 LTS",
+          "build_hash": "3f6797307da5",
+          "renderer": "llvmpipe (LLVM 20.1.2, 256 bits)",
+          "render_engine": "BLENDER_WORKBENCH",
+          "shading": "SOLID",
+          "camera": "CAMERA",
+          "viewport": [
+            0,
+            27,
+            792,
+            543
+          ],
+          "window_size": [
+            960,
+            640
+          ],
+          "timeline_fps": 60,
+          "frame": 1,
+          "playing": false,
+          "playback_requested": false
+        },
+        "application_last": {
+          "scene": "jwm-workbench-cube-v1",
+          "application_version": "4.5.16 LTS",
+          "build_hash": "3f6797307da5",
+          "renderer": "llvmpipe (LLVM 20.1.2, 256 bits)",
+          "render_engine": "BLENDER_WORKBENCH",
+          "shading": "SOLID",
+          "camera": "CAMERA",
+          "viewport": [
+            0,
+            27,
+            792,
+            543
+          ],
+          "window_size": [
+            960,
+            640
+          ],
+          "timeline_fps": 60,
+          "frame": 5844,
+          "playing": true,
+          "playback_requested": true
+        },
+        "scan_row": 300,
+        "static_mesh_spans": {
+          "source": {
+            "left": 251,
+            "right": 321,
+            "center_x": 286
+          },
+          "viewer": {
+            "left": 251,
+            "right": 321,
+            "center_x": 286
+          }
+        },
+        "motion_end_mesh_spans": {
+          "source": {
+            "left": 261,
+            "right": 340,
+            "center_x": 300
+          },
+          "viewer": {
+            "left": 259,
+            "right": 337,
+            "center_x": 298
+          }
+        }
+      },
+      "motion_gate": true,
+      "telemetry_verified": true,
+      "session_id": "50bec7595de4ce47a2553633edd7844e",
+      "static_idle_verified": true,
+      "source_qualified": true,
+      "status": "qualified_gate_pass"
+    },
+    {
+      "trial": 3,
+      "controller_outcome": {
+        "trial": 3,
+        "status": "completed",
+        "source_qualified": true,
+        "telemetry_complete": true,
+        "viewer_motion_gate_met": true
+      },
+      "validation_errors": [],
+      "phases": [
+        {
+          "phase": "static",
+          "warmup_seconds": 30,
+          "measurement_seconds": 60,
+          "start_monotonic_ns": 53058080827188,
+          "end_monotonic_ns": 53118080827188,
+          "tail_end_monotonic_ns": 53126080827188,
+          "observer_covers_both_intervals": true,
+          "exact_score_replay": true,
+          "samples": {
+            "source": {
+              "distinct_mesh_positions": 0,
+              "unique_content_fps": 0.0,
+              "one_second_unique_bins": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "zero_unique_bins": 60,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 9.193541,
+              "gap_ms": {
+                "p95": 60000.0,
+                "max": 60000.0
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            },
+            "viewer": {
+              "distinct_mesh_positions": 0,
+              "unique_content_fps": 0.0,
+              "one_second_unique_bins": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "zero_unique_bins": 60,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 1.759921,
+              "gap_ms": {
+                "p95": 60000.0,
+                "max": 60000.0
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            }
+          },
+          "telemetry": {
+            "host": {
+              "window_seconds": 60.105101695,
+              "whole_windows": 12,
+              "session_ids": [
+                "32e6b7f28db410e2375bf9adecf20a21"
+              ],
+              "actual_routes": [
+                "root/xrender/shm/no-damage/cursor-events"
+              ],
+              "frames_with_scope": 12,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "captured": 1763,
+                "sent": 15,
+                "drawn_acks": 15,
+                "bytes": 5115
+              },
+              "valid": true
+            },
+            "viewer": {
+              "window_seconds": 60.008384422,
+              "whole_windows": 12,
+              "session_ids": [
+                "32e6b7f28db410e2375bf9adecf20a21"
+              ],
+              "actual_routes": [
+                "rgb"
+              ],
+              "frames_with_scope": 12,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "received": 15,
+                "decoded": 15,
+                "drawn": 15,
+                "acked": 15
+              },
+              "valid": true
+            }
+          }
+        },
+        {
+          "phase": "motion",
+          "warmup_seconds": 30,
+          "measurement_seconds": 60,
+          "start_monotonic_ns": 53156348229051,
+          "end_monotonic_ns": 53216348229051,
+          "tail_end_monotonic_ns": 53224348229051,
+          "observer_covers_both_intervals": true,
+          "exact_score_replay": true,
+          "samples": {
+            "source": {
+              "distinct_mesh_positions": 2725,
+              "unique_content_fps": 45.416666666666664,
+              "one_second_unique_bins": [
+                47,
+                45,
+                47,
+                48,
+                44,
+                45,
+                48,
+                46,
+                46,
+                46,
+                42,
+                47,
+                45,
+                45,
+                47,
+                47,
+                44,
+                45,
+                44,
+                49,
+                43,
+                46,
+                46,
+                43,
+                45,
+                45,
+                46,
+                46,
+                45,
+                45,
+                48,
+                44,
+                42,
+                46,
+                44,
+                47,
+                45,
+                45,
+                47,
+                46,
+                47,
+                46,
+                45,
+                46,
+                45,
+                47,
+                46,
+                46,
+                46,
+                46,
+                44,
+                44,
+                45,
+                44,
+                46,
+                44,
+                45,
+                43,
+                46,
+                43
+              ],
+              "zero_unique_bins": 0,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 3.258539,
+              "gap_ms": {
+                "p95": 33.35191,
+                "max": 144.391851
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            },
+            "viewer": {
+              "distinct_mesh_positions": 1628,
+              "unique_content_fps": 27.133333333333333,
+              "one_second_unique_bins": [
+                27,
+                26,
+                27,
+                27,
+                28,
+                28,
+                27,
+                27,
+                26,
+                27,
+                24,
+                28,
+                27,
+                28,
+                27,
+                29,
+                27,
+                25,
+                27,
+                27,
+                28,
+                26,
+                28,
+                28,
+                26,
+                27,
+                28,
+                27,
+                26,
+                28,
+                27,
+                27,
+                26,
+                28,
+                28,
+                27,
+                28,
+                28,
+                28,
+                27,
+                27,
+                27,
+                28,
+                27,
+                28,
+                27,
+                27,
+                27,
+                27,
+                26,
+                28,
+                28,
+                27,
+                27,
+                28,
+                28,
+                27,
+                26,
+                26,
+                27
+              ],
+              "zero_unique_bins": 0,
+              "reads": 5400,
+              "invalid_mesh_reads": 0,
+              "observer_max_read_ms": 2.840263,
+              "gap_ms": {
+                "p95": 45.782992,
+                "max": 146.488405
+              },
+              "covers_score_interval": true,
+              "scope_samples_match": true,
+              "result_samples_match": true
+            }
+          },
+          "telemetry": {
+            "host": {
+              "window_seconds": 65.082041764,
+              "whole_windows": 13,
+              "session_ids": [
+                "32e6b7f28db410e2375bf9adecf20a21"
+              ],
+              "actual_routes": [
+                "root/xrender/shm/no-damage/cursor-events"
+              ],
+              "frames_with_scope": 13,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "captured": 1904,
+                "sent": 1904,
+                "drawn_acks": 1904,
+                "bytes": 4880557
+              },
+              "valid": true
+            },
+            "viewer": {
+              "window_seconds": 65.011128675,
+              "whole_windows": 13,
+              "session_ids": [
+                "32e6b7f28db410e2375bf9adecf20a21"
+              ],
+              "actual_routes": [
+                "rgb"
+              ],
+              "frames_with_scope": 13,
+              "frame_scopes_match_960x640_jpeg": true,
+              "source_geometry_epochs": [
+                [
+                  1,
+                  2
+                ]
+              ],
+              "retained_windows_exact_match": true,
+              "progress": {
+                "received": 1901,
+                "decoded": 1901,
+                "drawn": 1901,
+                "acked": 1901
+              },
+              "valid": true
+            }
+          }
+        }
+      ],
+      "route": {
+        "application_start": {
+          "scene": "jwm-workbench-cube-v1",
+          "application_version": "4.5.16 LTS",
+          "build_hash": "3f6797307da5",
+          "renderer": "llvmpipe (LLVM 20.1.2, 256 bits)",
+          "render_engine": "BLENDER_WORKBENCH",
+          "shading": "SOLID",
+          "camera": "CAMERA",
+          "viewport": [
+            0,
+            27,
+            792,
+            543
+          ],
+          "window_size": [
+            960,
+            640
+          ],
+          "timeline_fps": 60,
+          "frame": 1,
+          "playing": false,
+          "playback_requested": false
+        },
+        "application_last": {
+          "scene": "jwm-workbench-cube-v1",
+          "application_version": "4.5.16 LTS",
+          "build_hash": "3f6797307da5",
+          "renderer": "llvmpipe (LLVM 20.1.2, 256 bits)",
+          "render_engine": "BLENDER_WORKBENCH",
+          "shading": "SOLID",
+          "camera": "CAMERA",
+          "viewport": [
+            0,
+            27,
+            792,
+            543
+          ],
+          "window_size": [
+            960,
+            640
+          ],
+          "timeline_fps": 60,
+          "frame": 5857,
+          "playing": true,
+          "playback_requested": true
+        },
+        "scan_row": 300,
+        "static_mesh_spans": {
+          "source": {
+            "left": 251,
+            "right": 321,
+            "center_x": 286
+          },
+          "viewer": {
+            "left": 251,
+            "right": 321,
+            "center_x": 286
+          }
+        },
+        "motion_end_mesh_spans": {
+          "source": {
+            "left": 266,
+            "right": 347,
+            "center_x": 306
+          },
+          "viewer": {
+            "left": 266,
+            "right": 347,
+            "center_x": 306
+          }
+        }
+      },
+      "motion_gate": true,
+      "telemetry_verified": true,
+      "session_id": "32e6b7f28db410e2375bf9adecf20a21",
+      "static_idle_verified": true,
+      "source_qualified": true,
+      "status": "qualified_gate_pass"
+    }
+  ],
+  "archive": {
+    "path": "x11-blender-workbench-raw.zip",
+    "sha256": "25ab85b3e82c7d43f1920bbb53f090c44b4e38edbf78f0c10602ad4711bf2dc9",
+    "entries": {
+      "manifest.json": "f60583b655828118c29ed115739d8b1fbfda6263cb1cac07c4bf1ab612d38b50",
+      "outcomes.json": "f4d8f7d4651203318f1e91acf36d4429f84a426a2318b144678e063fa3c56c04",
+      "fixture/workbench_scene.py": "b1ed7bed12578dcfe73e0b62240af3a350efbf6ec64906c04f9f719f6eb65e71",
+      "fixture/run_workbench.py": "a6ba22f4a74576de6b9a059d0e65507ffccdfddfc89081629099f9bd4fe589de",
+      "fixture/x11_session.py": "9ee4cb960400f5bbc17dcc1387d77c827929bd47c8ff40eefc74df6ef8a521f0",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/validate_archive.py": "c7e025a59e71f30525e1a3ad75aae74287338548149e8e48dc3d51863fef3ba9",
+      "trial-01/blender-positioned.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-01/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-01/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-01/blender-window.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-01/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-01/host-clocked-telemetry.jsonl": "107c45c85857a080f3e75979742787ea4eb259b55dfe5f130fb37ec40ffc3546",
+      "trial-01/motion-host.jsonl": "6f22467730a97c332acabbd5b8bf0d20900f1667984bf3ff495915c7b2c6e8c8",
+      "trial-01/motion-pixels.jsonl": "83d784af88146360e24e1ad4c40005428977a2e6a83cb100dd6439e27f2ef1ee",
+      "trial-01/motion-scope.json": "d6346a737e3e239924e2d5010bd7bf7b28de970f3b632efc646a0d09bdbb86ea",
+      "trial-01/motion-viewer.jsonl": "f7ee813a8d138b37bb70d8e0fd493fe070dfa511651b17881f412799522ec4bc",
+      "trial-01/result.json": "5a9c25b5e6eaafecaf79394495753bd58ebb44d96482d93fe50bfbb9b926d929",
+      "trial-01/source-motion-end.ppm": "7afb297493fa07c8dad1a8e59c3d53fe39d6e665087450bfb8f29942ec220bac",
+      "trial-01/source-static.ppm": "ff244c63315dccc62a359ae5c47fc2d307f5703232cabe6153916cd857ac1517",
+      "trial-01/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-01/static-host.jsonl": "eb52d2ad1877aa4197b82883e8b5c1df1c15cd37b4158aa20624c3181704d908",
+      "trial-01/static-pixels.jsonl": "14a7129fc77460c685a5cc12671ded0b54a356d0f19340920204c919ba80500e",
+      "trial-01/static-scope.json": "cc9a4c0b409f90461fd1a530cf051d5d097b7c2be4091a25c79c69155669dad9",
+      "trial-01/static-viewer.jsonl": "5d6b1b22c06d4f5e027077ca6c13604e2ea2d35107ef1ed63c843c8737c19cbf",
+      "trial-01/viewer-clocked-telemetry.jsonl": "f6063cdbfa2cda21b67a78877b2a0f7d68e1895053d5cb0859521e652c6a10aa",
+      "trial-01/viewer-motion-end.ppm": "0fa583aeb24dc3cf835b8de8a0ef93e4996ae4094ba743803571d1808390bb8e",
+      "trial-01/viewer-static.ppm": "7be7b0fa9a5f6b4a8cc8da9a8a824e9179ba4d38883a385413d807e5bb8eb51b",
+      "trial-01/viewer-window.log": "8a321165169f5f2e2346eabcebacab60fe1d8df59e9dca911dd6ba235cbddd0e",
+      "trial-01/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-01/workbench-initial-oracle.json": "cae4839fb4edece2cba24e8b40ac8ec5e405482ee24e030b930d2a4514076fd1",
+      "trial-01/workbench-static-state.json": "eb61b3c8755ba9443dc2f07e19524f6c13047cfc80c264b4e66f57ad10702364",
+      "trial-01/workbench-view.json": "ffefa1899ea4b171d1a4d54c21675677ec8d4ed1d666caaddc49c73770d1c134",
+      "trial-02/blender-positioned.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-02/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-02/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-02/blender-window.log": "045bf849bbb31c29228572757778766579299e357b0c37a51052441f6c9e7c13",
+      "trial-02/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-02/host-clocked-telemetry.jsonl": "8fe4a24406ce133f05011e359a9288ab6423807d37b47a4081d6340a60fa6981",
+      "trial-02/motion-host.jsonl": "e95807e0f95227bef1d8fc2cd8d1fc5d951738853446c944333dd676447a84e0",
+      "trial-02/motion-pixels.jsonl": "4f4eb243d77486aac9ea5a6ba75c0b94c95f7935d06635329d5d88c3fc1e6633",
+      "trial-02/motion-scope.json": "9f3eacef88af56fbebd38bfecc1f4b0820bf9266cbddad9cfcd685ae297b9ced",
+      "trial-02/motion-viewer.jsonl": "7b741c66ecc867fabce713708d1b2df6137192583464197bc668267e01995d2d",
+      "trial-02/result.json": "98ddc3735beabc8eb643eb33e34c64c3e54d14170bd8ef05f81871500f14b53a",
+      "trial-02/source-motion-end.ppm": "7b6174ec8bcb66f40923b3685f51992a5768b0e900e60cf4355a265bedfdd562",
+      "trial-02/source-static.ppm": "ff244c63315dccc62a359ae5c47fc2d307f5703232cabe6153916cd857ac1517",
+      "trial-02/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-02/static-host.jsonl": "d57f3901315a0898cb8744f5233dc878e16384db513e560022a5f766b281cdb6",
+      "trial-02/static-pixels.jsonl": "da6377b26404580bab93a15642e21eb16f2262463db53e03190df74081907971",
+      "trial-02/static-scope.json": "1ca1b2be042a19863357c511ad1ed38916ec6542746011a122d7fb1752f5a343",
+      "trial-02/static-viewer.jsonl": "16c8a0ce5f432aef9eb1d521e64601b7a4725b38010d38cf30eff5fff89c0c5c",
+      "trial-02/viewer-clocked-telemetry.jsonl": "c56735b46294b627799eaa6da387e62f82f6f3f8ec040470d119ef97271fafdc",
+      "trial-02/viewer-motion-end.ppm": "db057320d300a6a3384d6f4148994cb1b3012970a63f4997858600c99ff35f72",
+      "trial-02/viewer-static.ppm": "bb285d33f415c50d70e980bbaa144c73bdfc29b337cfbb8a8294cb9029aa8401",
+      "trial-02/viewer-window.log": "09478f73f37f4d72423e6041e0ea5316e1079b3ad9aef7ded4fcdfd767ea0413",
+      "trial-02/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-02/workbench-initial-oracle.json": "cae4839fb4edece2cba24e8b40ac8ec5e405482ee24e030b930d2a4514076fd1",
+      "trial-02/workbench-static-state.json": "eb61b3c8755ba9443dc2f07e19524f6c13047cfc80c264b4e66f57ad10702364",
+      "trial-02/workbench-view.json": "38bd34e4eba9eee94355dd3b64cad7236164f71d0ca314544713d1b09f47eb1f",
+      "trial-03/blender-positioned.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-03/blender-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-03/blender-stdout.log": "b852871dc6d1208206a118a2a72d671417e03d6ee0609a6c23504c41875eca7d",
+      "trial-03/blender-window.log": "03cbb6fdf482bf7f423850fde2f57b999733d3eb7350af25db6589419eed9965",
+      "trial-03/disconnect.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trial-03/host-clocked-telemetry.jsonl": "6462729ac965598eff79fec8facc01294dea702ce4151be14c5f91318e930019",
+      "trial-03/motion-host.jsonl": "d6f220ab5b5f22ff0078a748c93b7edac89ab282e3eacf6ddf0492b12a6d7eb8",
+      "trial-03/motion-pixels.jsonl": "fde308ae0505ae3de399407b07bca8a43dd834f9dc87e283358a4e4370a6ae00",
+      "trial-03/motion-scope.json": "5636ed551aafe40b5babc3072ed8d63e279a305f3d858fb516a909217063f6c9",
+      "trial-03/motion-viewer.jsonl": "40c369eac8d2d651557d3ffc16956f4a463a568eeb963eaeee0cfd854d5f0381",
+      "trial-03/result.json": "c679632788dd6c1a8b905e4c68156b168ba7a85e79b97f2fed7673fcab4df737",
+      "trial-03/source-motion-end.ppm": "74c8b71d8b77d75501f7937cbad12c702f9eb3f0cb41415dda9d13108660c1ca",
+      "trial-03/source-static.ppm": "ff244c63315dccc62a359ae5c47fc2d307f5703232cabe6153916cd857ac1517",
+      "trial-03/source-xvfb.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trial-03/static-host.jsonl": "8308dbb996c4d5b29aeb07f7c52e783b973157d2b496cc1b9fcdd604a58e61de",
+      "trial-03/static-pixels.jsonl": "eacebb017521ad787a359697331f28b117ea763dffd0019f2c6cac4694195fdf",
+      "trial-03/static-scope.json": "b3682e833f0524a9174907bb19f04b37b1c170ee953c99bfb1bc906d623d2beb",
+      "trial-03/static-viewer.jsonl": "10be45ebe0aa4f10eee4544d25eefd39fe123475ceb8c7dd1487305451d1e757",
+      "trial-03/viewer-clocked-telemetry.jsonl": "b15286d20803478f50971f69035d0a26307aa5af19589c7a8b8dd13fbb4ab5ee",
+      "trial-03/viewer-motion-end.ppm": "349659b67489d05df3c30674c0a345698e1cafd79b21139a6347f8d93da6bbf5",
+      "trial-03/viewer-static.ppm": "6b7735a970e0b18cc4804749d8f19d68b89228fc0e44da40d5a2a004d5ac5ef5",
+      "trial-03/viewer-window.log": "f4f06adb3ef402639bddb540eada0a739f0d12e10ae677e0a70d783e417f81bd",
+      "trial-03/viewer-xvfb.log": "5869be18c41cd09de42b23423d47db3f3062946a6a3ad2770e911082c884da02",
+      "trial-03/workbench-initial-oracle.json": "cae4839fb4edece2cba24e8b40ac8ec5e405482ee24e030b930d2a4514076fd1",
+      "trial-03/workbench-static-state.json": "eb61b3c8755ba9443dc2f07e19524f6c13047cfc80c264b4e66f57ad10702364",
+      "trial-03/workbench-view.json": "2b13a928f2132a737e4efd3e63a75da63d670898a883fd1014a78e0a75db94ee",
+      "x11-blender-workbench-baseline.json": "474ce7c44a9746dfad2709d0b0517e3ee96e212fc61d010adec811f38a6c67d5"
+    }
+  }
+}

@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "label": "soak-fixed-1080p",
+  "role_results": {
+    "host": {
+      "identity": {
+        "pid": 403351,
+        "start_ticks": 5113109,
+        "exe_device": 66306,
+        "exe_inode": 13773569
+      },
+      "anchor_ns": 48229790741841,
+      "measurement_start_ns": 48289790741841,
+      "measurement_end_ns": 49189790741841,
+      "measurement_seconds": 900.0,
+      "resource_samples": 180,
+      "burn_in_samples": 12,
+      "missed_sample_slots": 0,
+      "max_gap_between_samples_or_boundary_seconds": 5.000483014,
+      "resources": {
+        "rss_kib": {
+          "min": 238940,
+          "median": 239138.0,
+          "peak": 239340,
+          "first_minute_median": 238950.0,
+          "last_minute_median": 239326.0,
+          "median_delta": 376.0
+        },
+        "threads": {
+          "min": 10,
+          "median": 10.0,
+          "peak": 10,
+          "first_minute_median": 10.0,
+          "last_minute_median": 10.0,
+          "median_delta": 0.0
+        },
+        "fds": {
+          "min": 45,
+          "median": 45.0,
+          "peak": 45,
+          "first_minute_median": 45.0,
+          "last_minute_median": 45.0,
+          "median_delta": 0.0
+        }
+      },
+      "video": {
+        "session_id": "a3778b6483363b4b7c9b6be49c80dfdc",
+        "completed_telemetry_windows": 179,
+        "covered_telemetry_seconds": 896.093704848,
+        "head_coverage_gap_seconds": 0.074964525,
+        "tail_coverage_gap_seconds": 3.831354995,
+        "h264_frames": 25703,
+        "drawn_acks": 25703,
+        "zero_sent_windows": 0,
+        "outstanding_credits_at_window_end": {
+          "2": 23,
+          "1": 155,
+          "0": 1
+        },
+        "peak_reported_outstanding_credits": 2,
+        "peak_sampled_end_outstanding_credits": 2,
+        "max_window_credit_wait_p99_ms": 271.988,
+        "bytes": 996006816
+      }
+    },
+    "viewer": {
+      "identity": {
+        "pid": 786535,
+        "start_ticks": 4814131,
+        "exe_device": 2050,
+        "exe_inode": 8952529
+      },
+      "anchor_ns": 48147527545222,
+      "measurement_start_ns": 48207527545222,
+      "measurement_end_ns": 49107527545222,
+      "measurement_seconds": 900.0,
+      "resource_samples": 180,
+      "burn_in_samples": 12,
+      "missed_sample_slots": 0,
+      "max_gap_between_samples_or_boundary_seconds": 5.000502671,
+      "resources": {
+        "rss_kib": {
+          "min": 126240,
+          "median": 126288.0,
+          "peak": 126288,
+          "first_minute_median": 126240.0,
+          "last_minute_median": 126288.0,
+          "median_delta": 48.0
+        },
+        "threads": {
+          "min": 6,
+          "median": 6.0,
+          "peak": 6,
+          "first_minute_median": 6.0,
+          "last_minute_median": 6.0,
+          "median_delta": 0.0
+        },
+        "fds": {
+          "min": 30,
+          "median": 30.0,
+          "peak": 30,
+          "first_minute_median": 30.0,
+          "last_minute_median": 30.0,
+          "median_delta": 0.0
+        }
+      },
+      "video": {
+        "session_id": "a3778b6483363b4b7c9b6be49c80dfdc",
+        "completed_telemetry_windows": 179,
+        "covered_telemetry_seconds": 895.244582295,
+        "head_coverage_gap_seconds": 0.022442407,
+        "tail_coverage_gap_seconds": 4.732963292,
+        "received": 25679,
+        "drawn": 25679,
+        "acked": 25679,
+        "zero_drawn_windows": 0,
+        "max_decode_queue_records": 0
+      }
+    }
+  },
+  "clean_shutdown": true,
+  "codec": "H.264 NVENC",
+  "workload": "isolated X11 motion fixture",
+  "dimensions": [
+    1920,
+    1080
+  ],
+  "arm": "fixed",
+  "requested_encoder_fps": 30,
+  "burn_in_seconds": 60,
+  "measure_seconds": 900,
+  "sample_interval_seconds": 5,
+  "configured_proxy_bytes_per_second": 0,
+  "socket_configuration": {},
+  "source": {
+    "start": {
+      "type": "p09_start",
+      "role": "source",
+      "clock": "monotonic",
+      "monotonic_ns": 48223259971410,
+      "run_id": 1,
+      "width": 1920,
+      "height": 1080,
+      "fps": 60,
+      "seconds": 1025,
+      "seed": 7,
+      "window": "0x200001"
+    },
+    "end": {
+      "type": "p09_end",
+      "role": "source",
+      "monotonic_ns": 49190292567297,
+      "run_id": 1,
+      "submitted": 58022,
+      "deadline_skips": 0,
+      "first_submit_ns": 48223274316163,
+      "last_submit_ns": 49190278010458,
+      "max_render_sync_ns": 14305468,
+      "interrupted": true
+    },
+    "painter_span_seconds": 967.003694295,
+    "submitted_per_second": 60.00080490106149
+  },
+  "scope": "RSS, threads and FDs of the JWM endpoint processes. Xvfb, proxy, SSH and painter excluded. Process RSS omits GPU allocations; head/tail trend is descriptive and coverage is finite.",
+  "build": {
+    "features": [
+      "remote-x11",
+      "remote-wayland",
+      "remote-h264"
+    ],
+    "profile": "release, locked, no default features",
+    "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+    "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5"
+  },
+  "mode": "Two private Xvfb displays with core XGetImage on the Ubuntu host, fixed RTX 5060 Laptop NVENC H.264, Intel VA-API decode on the viewer, CPU RGB X11 presentation and an SSH forward without proxy pacing.",
+  "frame_counts_scope": "Drawn counters include repeated content. Viewer-visible uniqueness was unmeasured.",
+  "archive": {
+    "path": "x11-nvenc-resource-soak-raw.zip",
+    "sha256": "474fa22fd3928cb636a80b4f440d79cbba04bfc6959a2bda2771fefd19fa3dd4",
+    "entries": {
+      "trace/host-resources.jsonl": "a7cdc575752a6884e19e51599d80750a314835b6338d470e550156290e753d38",
+      "trace/host-telemetry.jsonl": "a8c6770a29a707363eeb58984fa01bd5765ef1f39c84bf2e27fdb2cd917ad1fe",
+      "trace/viewer-resources.jsonl": "eb5063778071cccea354e729c844277cbdf906536ef72b4650e71587fd0cc387",
+      "trace/viewer-telemetry.jsonl": "b1214ec912d1ce8786d412d15e7067cf2c912c0e6e109c5e3fdcf75f27fd1cf5",
+      "trace/paint.jsonl": "def27b864c338a09f7e7ed196d670de6e7a3524469847d93f233b8a14b3845e5",
+      "trace/result.json": "e6d5be00cc2b1654f2ef9144510b6ea50b3b2ee63484fbfe27e853dc576b9185",
+      "fixture/README.md": "d283245d16836b89f99f9660e4ca7d874df132293cf40348212e2243e6428e0e",
+      "fixture/soak.py": "98b623297b3f77362bc900c77fa5e90b99fdff4713c9406b7c5f94be53f93e37",
+      "fixture/source.py": "f7a762352bd1548e1ddd4405b425bfa428f93ae44fc214eb066fa1c456ab63d9",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2",
+      "fixture/test_resources.py": "fa516ca6d6dbc8e36f06509cb720a72cc59bd437e6851c2f56fd0e83cf2f97d0",
+      "fixture/p09-workload.c": "771a888f3e74946ed51dd02a34e3dd04c18e0336b60a714492dc25c9efec163d",
+      "fixture/accept-buffers.c": "13fb8e4976881349fe4130b97318a713213a0fda841d5d5a8dc229d901819138",
+      "fixture/proxy-compat.py": "6b1af29494e64e29432b881275afe003405da23d20dd096fff6a0b2cc4c4df30",
+      "fixture/remote-fault-proxy.py": "25a7dc5de64e77d15545fcd5460d186dd346ef5cb017619e0ba9369f842ea679"
+    }
+  }
+}

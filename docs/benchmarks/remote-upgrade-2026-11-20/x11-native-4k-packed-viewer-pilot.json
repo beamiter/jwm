@@ -1,0 +1,400 @@
+{
+  "schema_version": 1,
+  "status": "diagnostic pair",
+  "controller_exit_code": 0,
+  "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+  "scope": "Both runs use the same Ubuntu NVENC host and native-size Auto MIT-SHM capture, parallel 4:2:0 at both ends, uncapped SSH, and an exact 3840x2160 X11 viewer. The new viewer revision includes both direct band packing and read-stage telemetry. Short observation windows include warm-up.",
+  "timing_note": "Old conversion and full-frame RGB copy have separate timing samples. The new conversion stage includes each band's visible row copy and has no standalone full-frame copy. Total decode time is directly comparable across revisions.",
+  "trials": [
+    {
+      "arm": "treatment",
+      "configured_cap_bytes_per_second": 0,
+      "send_buffer_bytes_requested": 0,
+      "pilot": true,
+      "session_id": "6d1aa8f488e5cf6b8a206530d55f7295",
+      "ffmpeg_encoder": "h264_nvenc",
+      "codec": "H.264",
+      "source_and_encoded_dimensions": [
+        3840,
+        2160
+      ],
+      "requested_fps": 30,
+      "host_window_seconds": 35.071393841,
+      "observer_window_seconds": 30.048479748,
+      "host_h264_frames": 465,
+      "host_drawn_acks": 463,
+      "host_zero_frame_windows": 0,
+      "viewer_zero_drawn_windows": 0,
+      "viewer_drawn_frames": 416,
+      "observer_unique_source_frames": 414,
+      "observer_unique_frames_per_second": 13.777735295495457,
+      "observer_gap_ms": {
+        "median": 65.592064,
+        "p95": 122.221188,
+        "max": 278.780819
+      },
+      "host_payload_mbps": 18.951525309010883,
+      "host_write_mean_ms_max_window": 0.3553944202898551,
+      "host_credit_wait_mean_ms_max_window": 69.405317625,
+      "source_observed_submit_fps": 60.038598369491396,
+      "source_summary": {
+        "type": "p09_end",
+        "role": "source",
+        "monotonic_ns": 51194476290998,
+        "run_id": 1,
+        "submitted": 2457,
+        "deadline_skips": 1,
+        "first_submit_ns": 51153565477427,
+        "last_submit_ns": 51194472495024,
+        "max_render_sync_ns": 49003886,
+        "interrupted": true
+      },
+      "viewer_observer_summary": {
+        "type": "p09_end",
+        "role": "observer",
+        "monotonic_ns": 51111997181187,
+        "run_id": 1,
+        "reads": 486,
+        "unique": 481,
+        "duplicates": 2,
+        "invalid": 3,
+        "wrong_run": 0,
+        "reordered": 0,
+        "damage_events": 486,
+        "max_read_ns": 521916,
+        "interrupted": false,
+        "target_lost": false
+      },
+      "host_rate_targets": [],
+      "host_nvenc_applies": [],
+      "host_send_buffer_diagnostics": [],
+      "viewer_observer_start_ns": 51080583009357,
+      "viewer_observer_end_ns": 51110631489105,
+      "uncapped_unique_fps_gate_met": null,
+      "adaptive_bitrate_step_applied": false,
+      "adaptive_fps_step_applied": false,
+      "feature_flag": "JWM_REMOTE_PARALLEL_YUV420",
+      "enabled_at": "both",
+      "host_capture_scaling_policy": "auto",
+      "host_capture_modes": [
+        "root/xrender/shm/no-damage/cursor-events"
+      ],
+      "viewer_scaling_policy": "cpu",
+      "host_candidate_diagnostics": [
+        "jwm-remote: parallel 4:2:0 conversion active (RGB24 -> YUV420P, 3840x2160, 4 bands)"
+      ],
+      "viewer_candidate_diagnostics": [
+        "jwm-remote: parallel 4:2:0 conversion active (NV12 -> RGB24, 3840x2160, 4 bands)"
+      ],
+      "expected_candidate_path": {
+        "host": true,
+        "viewer": true
+      },
+      "observed_candidate_path": {
+        "host": true,
+        "viewer": true
+      },
+      "candidate_path_verified": true,
+      "viewer_binary_sha256": "b51bdd70ece747a3f535a261086a873d0ace3388acb067a7a099347f58a5cdd6",
+      "packed_rgb_diagnostic": false,
+      "authenticated_read_observations": {
+        "frame_header_wait_ms": 0,
+        "frame_body_receive_ms": 0,
+        "frame_authentication_ms": 0
+      },
+      "separate_rgb_copy_observations": 417,
+      "host_native_capture_observations": {
+        "shm_readback_ms": 474,
+        "core_readback_ms": 0,
+        "cpu_resize_ms": 0
+      },
+      "viewer_stage_windows": {
+        "decode_ms": {
+          "windows": 6,
+          "observations": 417,
+          "recent_window_samples": 417,
+          "median_window_p50_ms": 48.566,
+          "max_window_p99_ms": 95.867
+        },
+        "hardware_download_ms": {
+          "windows": 6,
+          "observations": 417,
+          "recent_window_samples": 417,
+          "median_window_p50_ms": 23.0485,
+          "max_window_p99_ms": 68.437
+        },
+        "hardware_conversion_ms": {
+          "windows": 6,
+          "observations": 417,
+          "recent_window_samples": 417,
+          "median_window_p50_ms": 18.0385,
+          "max_window_p99_ms": 26.856
+        },
+        "hardware_rgb_copy_ms": {
+          "windows": 6,
+          "observations": 417,
+          "recent_window_samples": 417,
+          "median_window_p50_ms": 6.84,
+          "max_window_p99_ms": 7.587
+        },
+        "presentation_completion_ms": {
+          "windows": 6,
+          "observations": 416,
+          "recent_window_samples": 416,
+          "median_window_p50_ms": 48.736999999999995,
+          "max_window_p99_ms": 96.753
+        },
+        "frame_header_wait_ms": {
+          "windows": 0,
+          "observations": 0,
+          "recent_window_samples": 0,
+          "median_window_p50_ms": null,
+          "max_window_p99_ms": null
+        },
+        "frame_body_receive_ms": {
+          "windows": 0,
+          "observations": 0,
+          "recent_window_samples": 0,
+          "median_window_p50_ms": null,
+          "max_window_p99_ms": null
+        },
+        "frame_authentication_ms": {
+          "windows": 0,
+          "observations": 0,
+          "recent_window_samples": 0,
+          "median_window_p50_ms": null,
+          "max_window_p99_ms": null
+        }
+      },
+      "host_stage_windows": {
+        "capture_ms": {
+          "windows": 7,
+          "observations": null,
+          "recent_window_samples": 474,
+          "median_window_p50_ms": 11.818,
+          "max_window_p99_ms": 38.523
+        },
+        "h264_ms": {
+          "windows": 7,
+          "observations": null,
+          "recent_window_samples": 465,
+          "median_window_p50_ms": 18.397,
+          "max_window_p99_ms": 186.716
+        },
+        "send_to_ack_ms": {
+          "windows": 7,
+          "observations": null,
+          "recent_window_samples": 463,
+          "median_window_p50_ms": 118.907,
+          "max_window_p99_ms": 329.019
+        }
+      }
+    },
+    {
+      "arm": "treatment",
+      "configured_cap_bytes_per_second": 0,
+      "send_buffer_bytes_requested": 0,
+      "pilot": true,
+      "session_id": "1ecdf850ccf1d5d5a4fb6f1f0f2d51cc",
+      "ffmpeg_encoder": "h264_nvenc",
+      "codec": "H.264",
+      "source_and_encoded_dimensions": [
+        3840,
+        2160
+      ],
+      "requested_fps": 30,
+      "host_window_seconds": 35.050849001,
+      "observer_window_seconds": 30.039008751,
+      "host_h264_frames": 483,
+      "host_drawn_acks": 482,
+      "host_zero_frame_windows": 0,
+      "viewer_zero_drawn_windows": 0,
+      "viewer_drawn_frames": 420,
+      "observer_unique_source_frames": 420,
+      "observer_unique_frames_per_second": 13.98181955608033,
+      "observer_gap_ms": {
+        "median": 64.930342,
+        "p95": 119.728277,
+        "max": 273.314468
+      },
+      "host_payload_mbps": 19.687163411656954,
+      "host_write_mean_ms_max_window": 0.36075537931034485,
+      "host_credit_wait_mean_ms_max_window": 62.63266470689655,
+      "source_observed_submit_fps": 60.032662305378025,
+      "source_summary": {
+        "type": "p09_end",
+        "role": "source",
+        "monotonic_ns": 51234149435772,
+        "run_id": 1,
+        "submitted": 2289,
+        "deadline_skips": 1,
+        "first_submit_ns": 51196032652189,
+        "last_submit_ns": 51234145238107,
+        "max_render_sync_ns": 43454692,
+        "interrupted": true
+      },
+      "viewer_observer_summary": {
+        "type": "p09_end",
+        "role": "observer",
+        "monotonic_ns": 51151574231543,
+        "run_id": 1,
+        "reads": 504,
+        "unique": 501,
+        "duplicates": 2,
+        "invalid": 1,
+        "wrong_run": 0,
+        "reordered": 0,
+        "damage_events": 504,
+        "max_read_ns": 488985,
+        "interrupted": false,
+        "target_lost": false
+      },
+      "host_rate_targets": [],
+      "host_nvenc_applies": [],
+      "host_send_buffer_diagnostics": [],
+      "viewer_observer_start_ns": 51120173720693,
+      "viewer_observer_end_ns": 51150212729444,
+      "uncapped_unique_fps_gate_met": null,
+      "adaptive_bitrate_step_applied": false,
+      "adaptive_fps_step_applied": false,
+      "feature_flag": "JWM_REMOTE_PARALLEL_YUV420",
+      "enabled_at": "both",
+      "host_capture_scaling_policy": "auto",
+      "host_capture_modes": [
+        "root/xrender/shm/no-damage/cursor-events"
+      ],
+      "viewer_scaling_policy": "cpu",
+      "host_candidate_diagnostics": [
+        "jwm-remote: parallel 4:2:0 conversion active (RGB24 -> YUV420P, 3840x2160, 4 bands)"
+      ],
+      "viewer_candidate_diagnostics": [
+        "jwm-remote: parallel 4:2:0 conversion active (NV12 -> RGB24, 3840x2160, 4 bands)"
+      ],
+      "expected_candidate_path": {
+        "host": true,
+        "viewer": true
+      },
+      "observed_candidate_path": {
+        "host": true,
+        "viewer": true
+      },
+      "candidate_path_verified": true,
+      "viewer_binary_sha256": "0bcbd715b559b540b20281b7b5f35ca6912b42eee0714ca74f0ba4b8def971b2",
+      "packed_rgb_diagnostic": true,
+      "authenticated_read_observations": {
+        "frame_header_wait_ms": 421,
+        "frame_body_receive_ms": 421,
+        "frame_authentication_ms": 421
+      },
+      "separate_rgb_copy_observations": 0,
+      "host_native_capture_observations": {
+        "shm_readback_ms": 492,
+        "core_readback_ms": 0,
+        "cpu_resize_ms": 0
+      },
+      "viewer_stage_windows": {
+        "decode_ms": {
+          "windows": 6,
+          "observations": 421,
+          "recent_window_samples": 421,
+          "median_window_p50_ms": 41.975,
+          "max_window_p99_ms": 93.642
+        },
+        "hardware_download_ms": {
+          "windows": 6,
+          "observations": 421,
+          "recent_window_samples": 421,
+          "median_window_p50_ms": 22.9765,
+          "max_window_p99_ms": 72.144
+        },
+        "hardware_conversion_ms": {
+          "windows": 6,
+          "observations": 421,
+          "recent_window_samples": 421,
+          "median_window_p50_ms": 17.994500000000002,
+          "max_window_p99_ms": 22.227
+        },
+        "hardware_rgb_copy_ms": {
+          "windows": 0,
+          "observations": 0,
+          "recent_window_samples": 0,
+          "median_window_p50_ms": null,
+          "max_window_p99_ms": null
+        },
+        "presentation_completion_ms": {
+          "windows": 6,
+          "observations": 420,
+          "recent_window_samples": 420,
+          "median_window_p50_ms": 44.5575,
+          "max_window_p99_ms": 96.99
+        },
+        "frame_header_wait_ms": {
+          "windows": 6,
+          "observations": 421,
+          "recent_window_samples": 421,
+          "median_window_p50_ms": 5.3665,
+          "max_window_p99_ms": 167.688
+        },
+        "frame_body_receive_ms": {
+          "windows": 6,
+          "observations": 421,
+          "recent_window_samples": 421,
+          "median_window_p50_ms": 11.7835,
+          "max_window_p99_ms": 26.819
+        },
+        "frame_authentication_ms": {
+          "windows": 6,
+          "observations": 421,
+          "recent_window_samples": 421,
+          "median_window_p50_ms": 0.754,
+          "max_window_p99_ms": 1.22
+        }
+      },
+      "host_stage_windows": {
+        "capture_ms": {
+          "windows": 7,
+          "observations": null,
+          "recent_window_samples": 492,
+          "median_window_p50_ms": 11.949,
+          "max_window_p99_ms": 40.09
+        },
+        "h264_ms": {
+          "windows": 7,
+          "observations": null,
+          "recent_window_samples": 483,
+          "median_window_p50_ms": 18.527,
+          "max_window_p99_ms": 191.068
+        },
+        "send_to_ack_ms": {
+          "windows": 7,
+          "observations": null,
+          "recent_window_samples": 482,
+          "median_window_p50_ms": 115.435,
+          "max_window_p99_ms": 348.03
+        }
+      }
+    }
+  ],
+  "archive": {
+    "path": "x11-native-4k-packed-viewer-pilot-raw.zip",
+    "sha256": "fba1179db0c8e04aa4a88a6a7e1c907cdb1e83b4e12ba949297480bc4c2e6963",
+    "entries": {
+      "fixture/benchmark.py": "b8869cabd953238bc6a9ded7360bc7d77b600664356f69c1c2823deaca74b166",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/run.sh": "c944932b554352f722a8070a62103b86b1507a6495e1e5406739953240671e13",
+      "build/v2-source-sha256.txt": "564f0cb68bc1671ae9767f293c9ea2a9d697b147efd7982140b01fa83b6d0307",
+      "packing-v2-control-01-treatment/result.json": "183f4e1c5aa635a4aa31297877bd2fdefb2db323aca7d89acd18ab2b86791f52",
+      "packing-v2-control-01-treatment/retained-host.jsonl": "b64d8e6c4c363a406d1585499ff0d462d20236b943d1db83309bb4d45782cd31",
+      "packing-v2-control-01-treatment/retained-viewer.jsonl": "a59240d8e44ef8245ebe916195a17d8b1b5aa24178f053ee2816f4c0a93b73cd",
+      "packing-v2-control-01-treatment/retained-markers.jsonl": "b1a47392a9357919262c2b435907c9cb8018eb677b25456efaf5fd433aee6974",
+      "packing-v2-control-01-treatment/observed.jsonl": "92e34c13ca77450af9712a3119ac1fcd450a73c8d3ccd37e058e7f60500f9a34",
+      "packing-v2-control-01-treatment/remote/paint.jsonl": "95bd17a9d63e2e1289bff3d475a081d72c4a1a457f88c6d8b01127b1ade8b316",
+      "packing-v2-new-01-treatment/result.json": "76bcddbfd843e7ec623aaa8acf3b38e32c1fb35cd1755064bf69198d3b16d1b9",
+      "packing-v2-new-01-treatment/retained-host.jsonl": "f79a4a0c74254e0a046b135a2f202df37403bb9312b31b16c9acdcd7b1af054e",
+      "packing-v2-new-01-treatment/retained-viewer.jsonl": "cddafb2efca497ba72dc9fd3eb2b44341946e1947fa56540efe695879ffad116",
+      "packing-v2-new-01-treatment/retained-markers.jsonl": "43ce8035a32eaf4579742e177af27bb98cf433230754d05aead8807c9753b365",
+      "packing-v2-new-01-treatment/observed.jsonl": "d1b5413882c93a77e277ccf97809c78aae041d59b57483830c70075e641fa8ba",
+      "packing-v2-new-01-treatment/remote/paint.jsonl": "8e9245950dc9965aaf2c73c7fa3ca9f06e83e1ebd1d5dc536176d1ea3fa863e6"
+    }
+  }
+}

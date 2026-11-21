@@ -56,3 +56,8 @@ pub mod server {
 pub(crate) fn keyboard_key_allowed(key: u32) -> bool {
     matches!(key, 1..=57 | 97 | 102..=111) && key != 55
 }
+
+/// Physical modifiers supported during a scoped compound pointer gesture.
+pub(crate) fn gesture_modifier_allowed(key: u32) -> bool {
+    matches!(key, 29 | 42 | 54 | 56 | 97)
+}

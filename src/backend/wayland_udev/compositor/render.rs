@@ -4047,17 +4047,14 @@ impl WaylandCompositor {
             && visible_scene.len() == 1
             && damage_scissor.is_none()
             && frame_is_calm
-            && !draw_rings
-            && !self.shadow_enabled
-            && !self.blur_enabled
             && self.external_elements.is_empty()
             && self.desktop_visual.is_none()
             && !self.eva_overlay.visible()
+            && self.dock_preview.is_none()
+            && self.minimized_windows.is_empty()
             && !self.transition_active
             && self.workspace_swipe.is_none()
             && !self.postprocess_active
-            && !self.temporal_blur_enabled
-            && !self.window_tilt_enabled
             && self.wallpaper_transition_start.is_none()
             && !self.tail_overlay_visibility().any();
 
@@ -4077,6 +4074,7 @@ impl WaylandCompositor {
             self.dispatch_scene_linear_decode_pass(gl, &projection, -1, 1.0, None);
         }
         self.frame_profiler.zone_start("windows");
+        self.composited_window_bounds.clear();
         let ui_palette = crate::backend::compositor_common::ui_theme::palette();
         let status_bar_name = frame_status_bar_name;
         unsafe {
@@ -4109,6 +4107,7 @@ impl WaylandCompositor {
                     Some(tex) => tex,
                     None => continue,
                 };
+                let mut sampled = None;
 
                 let is_focused = focused == Some(win_id);
                 let fade = wt.fade_opacity;
@@ -4468,16 +4467,14 @@ impl WaylandCompositor {
                     gl.ActiveTexture(ffi::TEXTURE0);
                     self.bind_window_texture(gl, texture);
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
-                    // This branch really sampled this exact texture. No mesh,
-                    // UV crop, opacity, motion, or color/effect fallback may
-                    // promote a window merely because it is present in scene.
+                    // The exact opaque texture overwrites the backdrop, including
+                    // shadows and glow, wherever the rounded mask is solid.
                     if presentation_route
                         && let Some(candidate) = presentation_candidate
                         && candidate.window == win_id
                         && candidate.texture == texture
                         && candidate.rect == (x, y, w, h)
-                        && wt.width == w
-                        && wt.height == h
+                        && (wt.width, wt.height) == candidate.texture_size
                         && !wt.has_alpha
                         && !wt.is_shaped
                         && !wt.is_moving
@@ -4493,14 +4490,13 @@ impl WaylandCompositor {
                         && opacity == 1.0
                         && dim == 1.0
                         && desat == 0.0
-                        && radius == 0.0
                         && scale == 1.0
                         && wt.scale == 1.0
                         && anim.dy == 0.0
                         && (draw_x, draw_y, draw_w, draw_h)
                             == (x as f32, y as f32, w as f32, h as f32)
                     {
-                        presentation_drawn = Some(candidate);
+                        sampled = Some((candidate, radius));
                     }
 
                     // Reset to default off so the next iteration's blur/ghost
@@ -4515,7 +4511,14 @@ impl WaylandCompositor {
                     }
                 }
 
-                if draw_rings {
+                if layer_opacity > 0.0 {
+                    self.composited_window_bounds.insert(
+                        win_id,
+                        crate::backend::api::CompositorRect::new(draw_x, draw_y, draw_w, draw_h),
+                    );
+                }
+
+                let ring_extent = if draw_rings {
                     self.draw_window_ring(
                         gl,
                         &projection,
@@ -4525,7 +4528,14 @@ impl WaylandCompositor {
                         focus_highlight_active,
                         scene_linear_active,
                         &status_bar_name,
-                    );
+                    )
+                } else {
+                    None
+                };
+                if let Some((candidate, radius)) = sampled {
+                    presentation_drawn = candidate
+                        .visible_interior(radius, ring_extent)
+                        .map(|rect| (candidate, rect));
                 }
             }
 
@@ -6401,6 +6411,7 @@ impl WaylandCompositor {
     /// One window's border ring, drawn right after the window itself in the
     /// back-to-front scene pass so a window stacked above covers it (X11's
     /// order). Leaves the window program bound for the next window.
+    /// Returns the extent needed to bound the ring away from a sampled interior.
     #[allow(clippy::too_many_arguments)]
     unsafe fn draw_window_ring(
         &self,
@@ -6412,16 +6423,14 @@ impl WaylandCompositor {
         focus_highlight_active: bool,
         scene_linear: bool,
         status_bar_name: &str,
-    ) {
-        let Some(wt) = self.windows.get(&win_id) else {
-            return;
-        };
+    ) -> Option<f32> {
+        let wt = self.windows.get(&win_id)?;
         unsafe {
             gl.UseProgram(self.border_program);
             self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
             gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
             gl.BindVertexArray(self.quad_vao);
-            self.draw_window_ring_inner(
+            let extent = self.draw_window_ring_inner(
                 gl,
                 projection,
                 wt,
@@ -6433,6 +6442,7 @@ impl WaylandCompositor {
                 status_bar_name,
             );
             gl.UseProgram(self.program);
+            extent
         }
     }
 
@@ -6448,7 +6458,7 @@ impl WaylandCompositor {
         focus_highlight_active: bool,
         scene_linear: bool,
         status_bar_name: &str,
-    ) {
+    ) -> Option<f32> {
         unsafe {
             let is_focused = focused == Some(win_id);
             let attention_active_for_win =
@@ -6459,12 +6469,12 @@ impl WaylandCompositor {
                 status_bar_name,
                 self.is_unmanaged_overlay(win_id),
             ) {
-                return;
+                return None;
             }
 
             let fade = wt.fade_opacity;
             if fade <= 0.0 {
-                return;
+                return None;
             }
 
             let radius = if wt.is_shaped || wt.is_fullscreen {
@@ -6507,7 +6517,7 @@ impl WaylandCompositor {
                     self.border_width,
                 )
             });
-            let Some(style) = window_border_style(&WindowBorderInputs {
+            let style = window_border_style(&WindowBorderInputs {
                 is_focused,
                 is_pip: wt.is_pip,
                 focus_highlight_progress,
@@ -6519,9 +6529,7 @@ impl WaylandCompositor {
                 highlight_color: self.focus_highlight_color,
                 pip_color: self.pip_border_color,
                 pip_width: self.pip_border_width,
-            }) else {
-                return;
-            };
+            })?;
             let border_color = [
                 style.color[0],
                 style.color[1],
@@ -6603,6 +6611,7 @@ impl WaylandCompositor {
 
                 self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
+            Some(outer_radius.max(border_width))
         }
     }
 

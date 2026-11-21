@@ -1,0 +1,2950 @@
+[
+  {
+    "commit": "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17",
+    "counter_windows": {
+      "backpressure_skipped": 12,
+      "damage_skipped": 12,
+      "h264_frames": 12,
+      "hevc444_frames": 12
+    },
+    "dimensions_seen": {
+      "encoded_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ],
+      "source_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ]
+    },
+    "ignored_diagnostic_lines": 0,
+    "kind": "jwm_remote_workload_report",
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "payload_mbit_per_reported_second": 2.3928492365659473,
+    "physical_input_to_display": null,
+    "reported_seconds": 60.072712398,
+    "run_id": "01-baseline",
+    "schema_version": 1,
+    "sent_frames_per_reported_second": 27.649825248365172,
+    "stages": {
+      "atlas_pack_and_jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.757,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6887870503597122,
+          0.705936345323741
+        ]
+      },
+      "atlas_pack_ms": {
+        "max_reported_window_recent_p95_ms": 0.018,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.013349863309352518,
+          0.01389897709923664
+        ]
+      },
+      "capture_ms": {
+        "max_reported_window_recent_p95_ms": 4.518,
+        "mean_denominator": "captured",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 2.875342076966933,
+        "window_means_range_ms": [
+          2.7853251360544222,
+          2.933876823129252
+        ]
+      },
+      "capture_start_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 102.727,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 13.269689669476218,
+        "window_means_range_ms": [
+          11.124207503597122,
+          27.59679743410853
+        ]
+      },
+      "credit_wait_ms": {
+        "max_reported_window_recent_p95_ms": 60.082,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.0001255986394557823,
+          5.624110304347826
+        ]
+      },
+      "dirty_scan_ms": {
+        "max_reported_window_recent_p95_ms": 0.839,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6761316326530612,
+          0.7126608775510205
+        ]
+      },
+      "h264_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "h264_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "hevc444_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "hevc444_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.742,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.674668057142857,
+          0.6914595035971223
+        ]
+      },
+      "mailbox_age_ms": {
+        "max_reported_window_recent_p95_ms": 27.432,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.063351,
+          2.31941818115942
+        ]
+      },
+      "send_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 98.591,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 8.677064993377483,
+        "window_means_range_ms": [
+          6.844127683453237,
+          20.90240719379845
+        ]
+      },
+      "socket_write_ms": {
+        "max_reported_window_recent_p95_ms": 0.078,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.06640190367248645,
+        "window_means_range_ms": [
+          0.06470017142857143,
+          0.06916634782608697
+        ]
+      },
+      "writer_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.000566057194461168,
+        "window_means_range_ms": [
+          0.0005499642857142858,
+          0.0006068167938931299
+        ]
+      }
+    },
+    "totals": {
+      "backpressure_skipped": 10,
+      "bytes": 17968118,
+      "captured": 1754,
+      "damage_skipped": 0,
+      "dirty_tiles": 106880,
+      "drawn_acks": 1661,
+      "h264_frames": 0,
+      "hevc444_frames": 0,
+      "replaced": 1,
+      "scheduled": 1764,
+      "sent": 1661,
+      "total_tiles": 13553760,
+      "unchanged_suppressed": 93,
+      "viewer_superseded": 0
+    },
+    "version": "0.2.0",
+    "windows": 12,
+    "workload": "terminal",
+    "x11_capture": {
+      "reported_seconds": 60.072712398,
+      "stages": {
+        "core_readback_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "cpu_resize_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "monitor_geometry_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "pixel_conversion_ms": {
+          "max_reported_window_recent_p95_ms": 2.361,
+          "mean_denominator": "observations",
+          "observations": 1754,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.7459880724059293,
+          "window_means_range_ms": [
+            1.7208516714285715,
+            1.7822188979591835
+          ]
+        },
+        "shm_readback_ms": {
+          "max_reported_window_recent_p95_ms": 2.318,
+          "mean_denominator": "observations",
+          "observations": 1754,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.1130025746864312,
+          "window_means_range_ms": [
+            1.0377316870748299,
+            1.1403921156462584
+          ]
+        }
+      },
+      "totals": {
+        "damage_notifications": 0,
+        "forced_refreshes": 0
+      },
+      "windows": 12
+    }
+  },
+  {
+    "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+    "counter_windows": {
+      "backpressure_skipped": 12,
+      "damage_skipped": 12,
+      "h264_frames": 12,
+      "hevc444_frames": 12
+    },
+    "cursor_stages": {
+      "poll_interval_ms": {
+        "max_reported_window_recent_p95_ms": 16.217,
+        "mean_denominator": "observations",
+        "observations": 3729,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 16.106170417806382,
+        "window_means_range_ms": [
+          16.086726977491963,
+          16.12244035483871
+        ]
+      },
+      "poll_ms": {
+        "max_reported_window_recent_p95_ms": 2.239,
+        "mean_denominator": "observations",
+        "observations": 3729,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.4042885309734513,
+        "window_means_range_ms": [
+          0.33551287500000004,
+          0.4678742797427653
+        ]
+      }
+    },
+    "dimensions_seen": {
+      "encoded_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ],
+      "source_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ]
+    },
+    "hardware_encode_stages": {
+      "conversion_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "output_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "padding_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "rgb_copy_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "submit_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      }
+    },
+    "ignored_diagnostic_lines": 0,
+    "kind": "jwm_remote_workload_report",
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "payload_mbit_per_reported_second": 2.400118516846537,
+    "physical_input_to_display": null,
+    "reported_seconds": 60.059930786,
+    "run_id": "02-candidate",
+    "schema_version": 1,
+    "sent_frames_per_reported_second": 27.73895970570025,
+    "stages": {
+      "atlas_pack_and_jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.785,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6917918428571429,
+          0.7104894420289856
+        ]
+      },
+      "atlas_pack_ms": {
+        "max_reported_window_recent_p95_ms": 0.017,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.013342664285714284,
+          0.013908376811594203
+        ]
+      },
+      "capture_ms": {
+        "max_reported_window_recent_p95_ms": 4.436,
+        "mean_denominator": "captured",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 2.837714926704545,
+        "window_means_range_ms": [
+          2.778310285714286,
+          2.905085668918919
+        ]
+      },
+      "capture_start_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 61.19,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 12.598750003597123,
+        "window_means_range_ms": [
+          11.388084266187052,
+          22.97379582352941
+        ]
+      },
+      "credit_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.0001506734693877551,
+          4.119478645390071
+        ]
+      },
+      "dirty_scan_ms": {
+        "max_reported_window_recent_p95_ms": 0.756,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6724811013513513,
+          0.7266201224489796
+        ]
+      },
+      "h264_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "h264_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "hevc444_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "hevc444_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.769,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6776453571428571,
+          0.6958969202898551
+        ]
+      },
+      "mailbox_age_ms": {
+        "max_reported_window_recent_p95_ms": 0.109,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.06283745578231292,
+          1.7305554539007093
+        ]
+      },
+      "send_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 47.129,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 8.111467779376499,
+        "window_means_range_ms": [
+          7.053027683453236,
+          16.48892063235294
+        ]
+      },
+      "socket_write_ms": {
+        "max_reported_window_recent_p95_ms": 0.078,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.06669409843937575,
+        "window_means_range_ms": [
+          0.06512395652173913,
+          0.06937259712230215
+        ]
+      },
+      "writer_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.000427734693877551,
+        "window_means_range_ms": [
+          0.00040689928057553954,
+          0.00043857971014492754
+        ]
+      }
+    },
+    "totals": {
+      "backpressure_skipped": 6,
+      "bytes": 18018869,
+      "captured": 1760,
+      "damage_skipped": 0,
+      "dirty_tiles": 107200,
+      "drawn_acks": 1668,
+      "h264_frames": 0,
+      "hevc444_frames": 0,
+      "replaced": 1,
+      "scheduled": 1766,
+      "sent": 1666,
+      "total_tiles": 13594560,
+      "unchanged_suppressed": 94,
+      "viewer_superseded": 0
+    },
+    "version": "0.2.0",
+    "viewer": {
+      "backends": [
+        "x11"
+      ],
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "last_frame_codecs_seen": [
+        "JPEG"
+      ],
+      "negotiated_codecs": [
+        "JPEG"
+      ],
+      "reported_seconds": 60.006718344,
+      "sender_max_sampled_at_dequeue": {
+        "bulk_bytes": 0,
+        "bulk_records": 0,
+        "control_bytes": 16,
+        "control_records": 2
+      },
+      "session_matching": {
+        "host_only": 0,
+        "host_windows_without_id": 0,
+        "matched": 1,
+        "viewer_only": 0
+      },
+      "stages": {
+        "cursor_interval_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "decode_ms": {
+          "max_reported_window_recent_p95_ms": 1.319,
+          "mean_denominator": "observations",
+          "observations": 1664,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.177526680889423,
+          "window_means_range_ms": [
+            0.9884562173913044,
+            1.2423230499999998
+          ]
+        },
+        "decode_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.235,
+          "mean_denominator": "observations",
+          "observations": 1664,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.13093409314903848,
+          "window_means_range_ms": [
+            0.10727496376811595,
+            0.1625881726618705
+          ]
+        },
+        "first_presentation_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_conversion_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_decode_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_download_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_rgb_copy_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "presentation_completion_ms": {
+          "max_reported_window_recent_p95_ms": 3.154,
+          "mean_denominator": "observations",
+          "observations": 1664,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 2.305352078125,
+          "window_means_range_ms": [
+            2.245957471014493,
+            2.490527043165468
+          ]
+        },
+        "presentation_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.237,
+          "mean_denominator": "observations",
+          "observations": 1664,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.14113905348557693,
+          "window_means_range_ms": [
+            0.09505747142857143,
+            0.164318654676259
+          ]
+        },
+        "sender_bulk_queue_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_bulk_write_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_control_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.214,
+          "mean_denominator": "observations",
+          "observations": 1963,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.11265630820173204,
+          "window_means_range_ms": [
+            0.060613512658227856,
+            0.16299830303030302
+          ]
+        },
+        "sender_control_write_ms": {
+          "max_reported_window_recent_p95_ms": 0.105,
+          "mean_denominator": "observations",
+          "observations": 1963,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.0737624268976057,
+          "window_means_range_ms": [
+            0.059259417177914116,
+            0.0834021393939394
+          ]
+        },
+        "sender_input_queue_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_oldest_queued_ms": {
+          "max_reported_window_recent_p95_ms": 0.214,
+          "mean_denominator": "observations",
+          "observations": 1963,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.11265630820173204,
+          "window_means_range_ms": [
+            0.060613512658227856,
+            0.16299830303030302
+          ]
+        },
+        "source_switch_presentation_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        }
+      },
+      "totals": {
+        "acked": 1664,
+        "decoded": 1664,
+        "drawn": 1664,
+        "received": 1664,
+        "replaced": 0
+      },
+      "version": "0.2.0",
+      "windows": 12
+    },
+    "windows": 12,
+    "workload": "terminal",
+    "x11_capture": {
+      "reported_seconds": 60.059930786,
+      "stages": {
+        "core_readback_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "cpu_resize_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "monitor_geometry_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "pixel_conversion_ms": {
+          "max_reported_window_recent_p95_ms": 1.905,
+          "mean_denominator": "observations",
+          "observations": 1760,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.7381559136363638,
+          "window_means_range_ms": [
+            1.712856319727891,
+            1.7644440748299322
+          ]
+        },
+        "shm_readback_ms": {
+          "max_reported_window_recent_p95_ms": 2.386,
+          "mean_denominator": "observations",
+          "observations": 1760,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.084767130681818,
+          "window_means_range_ms": [
+            1.0459364149659862,
+            1.1437683108108108
+          ]
+        }
+      },
+      "totals": {
+        "damage_notifications": 0,
+        "forced_refreshes": 0
+      },
+      "windows": 12
+    }
+  },
+  {
+    "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+    "counter_windows": {
+      "backpressure_skipped": 12,
+      "damage_skipped": 12,
+      "h264_frames": 12,
+      "hevc444_frames": 12
+    },
+    "cursor_stages": {
+      "poll_interval_ms": {
+        "max_reported_window_recent_p95_ms": 16.213,
+        "mean_denominator": "observations",
+        "observations": 3730,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 16.11285713780161,
+        "window_means_range_ms": [
+          16.09775407051282,
+          16.137977649517683
+        ]
+      },
+      "poll_ms": {
+        "max_reported_window_recent_p95_ms": 2.137,
+        "mean_denominator": "observations",
+        "observations": 3730,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.3840575694369973,
+        "window_means_range_ms": [
+          0.24512088745980706,
+          0.5176058038585208
+        ]
+      }
+    },
+    "dimensions_seen": {
+      "encoded_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ],
+      "source_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ]
+    },
+    "hardware_encode_stages": {
+      "conversion_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "output_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "padding_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "rgb_copy_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "submit_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      }
+    },
+    "ignored_diagnostic_lines": 0,
+    "kind": "jwm_remote_workload_report",
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "payload_mbit_per_reported_second": 2.3978457408396263,
+    "physical_input_to_display": null,
+    "reported_seconds": 60.090167414,
+    "run_id": "03-candidate",
+    "schema_version": 1,
+    "sent_frames_per_reported_second": 27.70836014698942,
+    "stages": {
+      "atlas_pack_and_jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 1.259,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6922606762589929,
+          0.7240315611510791
+        ]
+      },
+      "atlas_pack_ms": {
+        "max_reported_window_recent_p95_ms": 0.023,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.01330869014084507,
+          0.014466999999999999
+        ]
+      },
+      "capture_ms": {
+        "max_reported_window_recent_p95_ms": 4.444,
+        "mean_denominator": "captured",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 2.815782257972665,
+        "window_means_range_ms": [
+          2.73125380952381,
+          2.923190272108844
+        ]
+      },
+      "capture_start_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 105.41,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 12.400494422822822,
+        "window_means_range_ms": [
+          10.118273936170214,
+          32.1450468515625
+        ]
+      },
+      "credit_wait_ms": {
+        "max_reported_window_recent_p95_ms": 66.269,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.00014481632653061226,
+          7.301102503703704
+        ]
+      },
+      "dirty_scan_ms": {
+        "max_reported_window_recent_p95_ms": 1.876,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6727558648648649,
+          0.7317365102040817
+        ]
+      },
+      "h264_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "h264_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "hevc444_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "hevc444_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 1.234,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.677809618705036,
+          0.7092610503597122
+        ]
+      },
+      "mailbox_age_ms": {
+        "max_reported_window_recent_p95_ms": 34.179,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.06451663945578232,
+          2.989103
+        ]
+      },
+      "send_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 101.238,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 7.873114865465466,
+        "window_means_range_ms": [
+          5.749591971631206,
+          24.812063640625
+        ]
+      },
+      "socket_write_ms": {
+        "max_reported_window_recent_p95_ms": 0.109,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.06727344504504504,
+        "window_means_range_ms": [
+          0.06571709352517985,
+          0.07019227857142857
+        ]
+      },
+      "writer_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.00039286366366366365,
+        "window_means_range_ms": [
+          0.0003735251798561151,
+          0.00042368749999999996
+        ]
+      }
+    },
+    "totals": {
+      "backpressure_skipped": 11,
+      "bytes": 18010869,
+      "captured": 1756,
+      "damage_skipped": 0,
+      "dirty_tiles": 107136,
+      "drawn_acks": 1665,
+      "h264_frames": 0,
+      "hevc444_frames": 0,
+      "replaced": 1,
+      "scheduled": 1767,
+      "sent": 1665,
+      "total_tiles": 13586400,
+      "unchanged_suppressed": 91,
+      "viewer_superseded": 0
+    },
+    "version": "0.2.0",
+    "viewer": {
+      "backends": [
+        "x11"
+      ],
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "last_frame_codecs_seen": [
+        "JPEG"
+      ],
+      "negotiated_codecs": [
+        "JPEG"
+      ],
+      "reported_seconds": 60.009433166,
+      "sender_max_sampled_at_dequeue": {
+        "bulk_bytes": 0,
+        "bulk_records": 0,
+        "control_bytes": 16,
+        "control_records": 2
+      },
+      "session_matching": {
+        "host_only": 0,
+        "host_windows_without_id": 0,
+        "matched": 1,
+        "viewer_only": 0
+      },
+      "stages": {
+        "cursor_interval_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "decode_ms": {
+          "max_reported_window_recent_p95_ms": 1.288,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.9537089283995187,
+          "window_means_range_ms": [
+            0.6592298188405797,
+            1.1944201884057972
+          ]
+        },
+        "decode_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.239,
+          "mean_denominator": "observations",
+          "observations": 1663,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.12158066025255562,
+          "window_means_range_ms": [
+            0.08886678571428572,
+            0.13461325179856115
+          ]
+        },
+        "first_presentation_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_conversion_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_decode_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_download_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_rgb_copy_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "presentation_completion_ms": {
+          "max_reported_window_recent_p95_ms": 3.116,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.845221417569194,
+          "window_means_range_ms": [
+            1.5519937898550726,
+            2.3674795323741007
+          ]
+        },
+        "presentation_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.237,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.1417173880866426,
+          "window_means_range_ms": [
+            0.12783405,
+            0.16368025581395348
+          ]
+        },
+        "sender_bulk_queue_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_bulk_write_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_control_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.206,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.10301149158592555,
+          "window_means_range_ms": [
+            0.08621446060606061,
+            0.13395964024390242
+          ]
+        },
+        "sender_control_write_ms": {
+          "max_reported_window_recent_p95_ms": 0.105,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.06524755022947476,
+          "window_means_range_ms": [
+            0.04421250909090909,
+            0.08020424539877301
+          ]
+        },
+        "sender_input_queue_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_oldest_queued_ms": {
+          "max_reported_window_recent_p95_ms": 0.206,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.10301149158592555,
+          "window_means_range_ms": [
+            0.08621446060606061,
+            0.13395964024390242
+          ]
+        },
+        "source_switch_presentation_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        }
+      },
+      "totals": {
+        "acked": 1662,
+        "decoded": 1662,
+        "drawn": 1662,
+        "received": 1663,
+        "replaced": 0
+      },
+      "version": "0.2.0",
+      "windows": 12
+    },
+    "windows": 12,
+    "workload": "terminal",
+    "x11_capture": {
+      "reported_seconds": 60.090167414,
+      "stages": {
+        "core_readback_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "cpu_resize_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "monitor_geometry_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "pixel_conversion_ms": {
+          "max_reported_window_recent_p95_ms": 1.986,
+          "mean_denominator": "observations",
+          "observations": 1756,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.7332279191343964,
+          "window_means_range_ms": [
+            1.6988358445945946,
+            1.7607158027210883
+          ]
+        },
+        "shm_readback_ms": {
+          "max_reported_window_recent_p95_ms": 2.288,
+          "mean_denominator": "observations",
+          "observations": 1756,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.0677679464692482,
+          "window_means_range_ms": [
+            1.0046885918367348,
+            1.1477249455782315
+          ]
+        }
+      },
+      "totals": {
+        "damage_notifications": 0,
+        "forced_refreshes": 0
+      },
+      "windows": 12
+    }
+  },
+  {
+    "commit": "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17",
+    "counter_windows": {
+      "backpressure_skipped": 12,
+      "damage_skipped": 12,
+      "h264_frames": 12,
+      "hevc444_frames": 12
+    },
+    "dimensions_seen": {
+      "encoded_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ],
+      "source_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ]
+    },
+    "ignored_diagnostic_lines": 0,
+    "kind": "jwm_remote_workload_report",
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "payload_mbit_per_reported_second": 2.3935511543472354,
+    "physical_input_to_display": null,
+    "reported_seconds": 60.091523734,
+    "run_id": "04-baseline",
+    "schema_version": 1,
+    "sent_frames_per_reported_second": 27.65781089787268,
+    "stages": {
+      "atlas_pack_and_jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 1.266,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.691425515625,
+          0.7337398992805756
+        ]
+      },
+      "atlas_pack_ms": {
+        "max_reported_window_recent_p95_ms": 0.025,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.013690287769784175,
+          0.014937517985611512
+        ]
+      },
+      "capture_ms": {
+        "max_reported_window_recent_p95_ms": 4.298,
+        "mean_denominator": "captured",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 2.8342881855022832,
+        "window_means_range_ms": [
+          2.7622780204081634,
+          2.901066547945206
+        ]
+      },
+      "capture_start_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 94.446,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 13.260778353790615,
+        "window_means_range_ms": [
+          11.273437807142855,
+          27.53147606153846
+        ]
+      },
+      "credit_wait_ms": {
+        "max_reported_window_recent_p95_ms": 19.919,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          7.476190476190476e-05,
+          6.1402801268656715
+        ]
+      },
+      "dirty_scan_ms": {
+        "max_reported_window_recent_p95_ms": 1.891,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6406764657534246,
+          0.7550148707482994
+        ]
+      },
+      "h264_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "h264_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "hevc444_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "hevc444_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 1.24,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6768275859375,
+          0.7181088848920864
+        ]
+      },
+      "mailbox_age_ms": {
+        "max_reported_window_recent_p95_ms": 0.132,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.039725561643835616,
+          2.050985679104478
+        ]
+      },
+      "send_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 90.201,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 8.729165714801445,
+        "window_means_range_ms": [
+          7.020599307142857,
+          21.129140492307695
+        ]
+      },
+      "socket_write_ms": {
+        "max_reported_window_recent_p95_ms": 0.105,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.06810760529482551,
+        "window_means_range_ms": [
+          0.0669448273381295,
+          0.06981673571428572
+        ]
+      },
+      "writer_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.0005725246690734055,
+        "window_means_range_ms": [
+          0.0005489999999999999,
+          0.0006371500000000001
+        ]
+      }
+    },
+    "totals": {
+      "backpressure_skipped": 12,
+      "bytes": 17979017,
+      "captured": 1752,
+      "damage_skipped": 0,
+      "dirty_tiles": 106944,
+      "drawn_acks": 1662,
+      "h264_frames": 0,
+      "hevc444_frames": 0,
+      "replaced": 2,
+      "scheduled": 1764,
+      "sent": 1662,
+      "total_tiles": 13561920,
+      "unchanged_suppressed": 87,
+      "viewer_superseded": 0
+    },
+    "version": "0.2.0",
+    "windows": 12,
+    "workload": "terminal",
+    "x11_capture": {
+      "reported_seconds": 60.091523734,
+      "stages": {
+        "core_readback_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "cpu_resize_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "monitor_geometry_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "pixel_conversion_ms": {
+          "max_reported_window_recent_p95_ms": 1.881,
+          "mean_denominator": "observations",
+          "observations": 1752,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.719201455479452,
+          "window_means_range_ms": [
+            1.6734343469387754,
+            1.767721794117647
+          ]
+        },
+        "shm_readback_ms": {
+          "max_reported_window_recent_p95_ms": 2.356,
+          "mean_denominator": "observations",
+          "observations": 1752,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.0989822260273974,
+          "window_means_range_ms": [
+            1.0392851224489799,
+            1.1336682602739727
+          ]
+        }
+      },
+      "totals": {
+        "damage_notifications": 0,
+        "forced_refreshes": 0
+      },
+      "windows": 12
+    }
+  },
+  {
+    "commit": "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17",
+    "counter_windows": {
+      "backpressure_skipped": 12,
+      "damage_skipped": 12,
+      "h264_frames": 12,
+      "hevc444_frames": 12
+    },
+    "dimensions_seen": {
+      "encoded_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ],
+      "source_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ]
+    },
+    "ignored_diagnostic_lines": 0,
+    "kind": "jwm_remote_workload_report",
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "payload_mbit_per_reported_second": 2.3896802096515986,
+    "physical_input_to_display": null,
+    "reported_seconds": 60.078586005,
+    "run_id": "05-baseline",
+    "schema_version": 1,
+    "sent_frames_per_reported_second": 27.613832320586422,
+    "stages": {
+      "atlas_pack_and_jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 1.069,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6912031942446044,
+          0.7226493
+        ]
+      },
+      "atlas_pack_ms": {
+        "max_reported_window_recent_p95_ms": 0.023,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.013204755395683453,
+          0.0143213
+        ]
+      },
+      "capture_ms": {
+        "max_reported_window_recent_p95_ms": 4.308,
+        "mean_denominator": "captured",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 2.8601629754846067,
+        "window_means_range_ms": [
+          2.801397863945578,
+          2.906328013605442
+        ]
+      },
+      "capture_start_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 105.557,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 12.988673765521398,
+        "window_means_range_ms": [
+          9.709616776978416,
+          32.11884362307693
+        ]
+      },
+      "credit_wait_ms": {
+        "max_reported_window_recent_p95_ms": 65.59,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          8.057142857142857e-05,
+          7.282417620437957
+        ]
+      },
+      "dirty_scan_ms": {
+        "max_reported_window_recent_p95_ms": 1.96,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6286198571428571,
+          0.7894736496350365
+        ]
+      },
+      "h264_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "h264_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "hevc444_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "hevc444_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 1.042,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.676881762589928,
+          0.7076165384615385
+        ]
+      },
+      "mailbox_age_ms": {
+        "max_reported_window_recent_p95_ms": 33.209,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.04443340136054422,
+          2.928137109489051
+        ]
+      },
+      "send_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 100.441,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 8.478707806509947,
+        "window_means_range_ms": [
+          5.4379382517985615,
+          25.00103223846154
+        ]
+      },
+      "socket_write_ms": {
+        "max_reported_window_recent_p95_ms": 0.108,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.06731520192887282,
+        "window_means_range_ms": [
+          0.06568565217391305,
+          0.06884892805755395
+        ]
+      },
+      "writer_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.0005609059674502713,
+        "window_means_range_ms": [
+          0.0005523309352517985,
+          0.0005763692307692307
+        ]
+      }
+    },
+    "totals": {
+      "backpressure_skipped": 10,
+      "bytes": 17946076,
+      "captured": 1754,
+      "damage_skipped": 0,
+      "dirty_tiles": 106752,
+      "drawn_acks": 1659,
+      "h264_frames": 0,
+      "hevc444_frames": 0,
+      "replaced": 1,
+      "scheduled": 1764,
+      "sent": 1659,
+      "total_tiles": 13537440,
+      "unchanged_suppressed": 93,
+      "viewer_superseded": 0
+    },
+    "version": "0.2.0",
+    "windows": 12,
+    "workload": "terminal",
+    "x11_capture": {
+      "reported_seconds": 60.078586005,
+      "stages": {
+        "core_readback_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "cpu_resize_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "monitor_geometry_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "pixel_conversion_ms": {
+          "max_reported_window_recent_p95_ms": 1.893,
+          "mean_denominator": "observations",
+          "observations": 1754,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.7456553517673887,
+          "window_means_range_ms": [
+            1.7226809591836734,
+            1.7712867536231882
+          ]
+        },
+        "shm_readback_ms": {
+          "max_reported_window_recent_p95_ms": 2.447,
+          "mean_denominator": "observations",
+          "observations": 1754,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.098509626567845,
+          "window_means_range_ms": [
+            1.057325306122449,
+            1.1362242312925168
+          ]
+        }
+      },
+      "totals": {
+        "damage_notifications": 0,
+        "forced_refreshes": 0
+      },
+      "windows": 12
+    }
+  },
+  {
+    "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+    "counter_windows": {
+      "backpressure_skipped": 12,
+      "damage_skipped": 12,
+      "h264_frames": 12,
+      "hevc444_frames": 12
+    },
+    "cursor_stages": {
+      "poll_interval_ms": {
+        "max_reported_window_recent_p95_ms": 16.211,
+        "mean_denominator": "observations",
+        "observations": 3729,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 16.105953264145885,
+        "window_means_range_ms": [
+          16.091781881410256,
+          16.119202543408363
+        ]
+      },
+      "poll_ms": {
+        "max_reported_window_recent_p95_ms": 2.128,
+        "mean_denominator": "observations",
+        "observations": 3729,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.4135915417001877,
+        "window_means_range_ms": [
+          0.3252911762820513,
+          0.4830834551282051
+        ]
+      }
+    },
+    "dimensions_seen": {
+      "encoded_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ],
+      "source_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ]
+    },
+    "hardware_encode_stages": {
+      "conversion_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "output_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "padding_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "rgb_copy_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "submit_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      }
+    },
+    "ignored_diagnostic_lines": 0,
+    "kind": "jwm_remote_workload_report",
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "payload_mbit_per_reported_second": 2.3973383236584693,
+    "physical_input_to_display": null,
+    "reported_seconds": 60.062561291,
+    "run_id": "06-candidate",
+    "schema_version": 1,
+    "sent_frames_per_reported_second": 27.7044462346187,
+    "stages": {
+      "atlas_pack_and_jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.812,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6905578601398602,
+          0.7190281079136691
+        ]
+      },
+      "atlas_pack_ms": {
+        "max_reported_window_recent_p95_ms": 0.021,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.01308073381294964,
+          0.013894647482014388
+        ]
+      },
+      "capture_ms": {
+        "max_reported_window_recent_p95_ms": 4.646,
+        "mean_denominator": "captured",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 2.8268240188034186,
+        "window_means_range_ms": [
+          2.6704727253521123,
+          2.9666132721088436
+        ]
+      },
+      "capture_start_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 97.821,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 12.518406431490385,
+        "window_means_range_ms": [
+          9.982685949640288,
+          25.27145385185185
+        ]
+      },
+      "credit_wait_ms": {
+        "max_reported_window_recent_p95_ms": 52.968,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.00015019727891156463,
+          5.251964633802817
+        ]
+      },
+      "dirty_scan_ms": {
+        "max_reported_window_recent_p95_ms": 1.348,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6716988085106382,
+          0.7428063741496599
+        ]
+      },
+      "h264_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "h264_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "hevc444_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "hevc444_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.796,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.676535083916084,
+          0.7043964748201439
+        ]
+      },
+      "mailbox_age_ms": {
+        "max_reported_window_recent_p95_ms": 20.627,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.06392293197278913,
+          2.541455415492958
+        ]
+      },
+      "send_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 93.777,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 8.02197570673077,
+        "window_means_range_ms": [
+          5.75436190647482,
+          19.37060385185185
+        ]
+      },
+      "socket_write_ms": {
+        "max_reported_window_recent_p95_ms": 0.08,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.0671336454326923,
+        "window_means_range_ms": [
+          0.0640482030075188,
+          0.06969361151079137
+        ]
+      },
+      "writer_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.00044357331730769233,
+        "window_means_range_ms": [
+          0.0004290428571428571,
+          0.00048539097744360906
+        ]
+      }
+    },
+    "totals": {
+      "backpressure_skipped": 12,
+      "bytes": 17998785,
+      "captured": 1755,
+      "damage_skipped": 0,
+      "dirty_tiles": 107072,
+      "drawn_acks": 1664,
+      "h264_frames": 0,
+      "hevc444_frames": 0,
+      "replaced": 1,
+      "scheduled": 1767,
+      "sent": 1664,
+      "total_tiles": 13578240,
+      "unchanged_suppressed": 90,
+      "viewer_superseded": 0
+    },
+    "version": "0.2.0",
+    "viewer": {
+      "backends": [
+        "x11"
+      ],
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "last_frame_codecs_seen": [
+        "JPEG"
+      ],
+      "negotiated_codecs": [
+        "JPEG"
+      ],
+      "reported_seconds": 60.00690299,
+      "sender_max_sampled_at_dequeue": {
+        "bulk_bytes": 0,
+        "bulk_records": 0,
+        "control_bytes": 16,
+        "control_records": 2
+      },
+      "session_matching": {
+        "host_only": 0,
+        "host_windows_without_id": 0,
+        "matched": 1,
+        "viewer_only": 0
+      },
+      "stages": {
+        "cursor_interval_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "decode_ms": {
+          "max_reported_window_recent_p95_ms": 1.276,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.8936382268351384,
+          "window_means_range_ms": [
+            0.5323121857142856,
+            1.2018365428571431
+          ]
+        },
+        "decode_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.211,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.11926824368231047,
+          "window_means_range_ms": [
+            0.07093748529411764,
+            0.15972889208633093
+          ]
+        },
+        "first_presentation_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_conversion_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_decode_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_download_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_rgb_copy_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "presentation_completion_ms": {
+          "max_reported_window_recent_p95_ms": 3.103,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.889871625752106,
+          "window_means_range_ms": [
+            1.2589525857142858,
+            2.9740284782608697
+          ]
+        },
+        "presentation_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.249,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.13864353610108304,
+          "window_means_range_ms": [
+            0.08446472794117646,
+            0.168958654676259
+          ]
+        },
+        "sender_bulk_queue_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_bulk_write_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_control_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.191,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.09143240693523713,
+          "window_means_range_ms": [
+            0.03381645625,
+            0.13081042944785276
+          ]
+        },
+        "sender_control_write_ms": {
+          "max_reported_window_recent_p95_ms": 0.103,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.053944825089240186,
+          "window_means_range_ms": [
+            0.04055583536585366,
+            0.06813659036144579
+          ]
+        },
+        "sender_input_queue_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_oldest_queued_ms": {
+          "max_reported_window_recent_p95_ms": 0.191,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.09143240693523713,
+          "window_means_range_ms": [
+            0.03381645625,
+            0.13081042944785276
+          ]
+        },
+        "source_switch_presentation_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        }
+      },
+      "totals": {
+        "acked": 1662,
+        "decoded": 1662,
+        "drawn": 1662,
+        "received": 1662,
+        "replaced": 0
+      },
+      "version": "0.2.0",
+      "windows": 12
+    },
+    "windows": 12,
+    "workload": "terminal",
+    "x11_capture": {
+      "reported_seconds": 60.062561291,
+      "stages": {
+        "core_readback_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "cpu_resize_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "monitor_geometry_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "pixel_conversion_ms": {
+          "max_reported_window_recent_p95_ms": 2.368,
+          "mean_denominator": "observations",
+          "observations": 1755,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.733039565811966,
+          "window_means_range_ms": [
+            1.6574502464788732,
+            1.7813569591836738
+          ]
+        },
+        "shm_readback_ms": {
+          "max_reported_window_recent_p95_ms": 2.337,
+          "mean_denominator": "observations",
+          "observations": 1755,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.0792510216524216,
+          "window_means_range_ms": [
+            0.9994859929577464,
+            1.1704968843537416
+          ]
+        }
+      },
+      "totals": {
+        "damage_notifications": 0,
+        "forced_refreshes": 0
+      },
+      "windows": 12
+    }
+  },
+  {
+    "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+    "counter_windows": {
+      "backpressure_skipped": 12,
+      "damage_skipped": 12,
+      "h264_frames": 12,
+      "hevc444_frames": 12
+    },
+    "cursor_stages": {
+      "poll_interval_ms": {
+        "max_reported_window_recent_p95_ms": 16.197,
+        "mean_denominator": "observations",
+        "observations": 3733,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 16.099243238949906,
+        "window_means_range_ms": [
+          16.074484379421225,
+          16.112339257234726
+        ]
+      },
+      "poll_ms": {
+        "max_reported_window_recent_p95_ms": 1.743,
+        "mean_denominator": "observations",
+        "observations": 3733,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.3853623410125904,
+        "window_means_range_ms": [
+          0.2598647395498392,
+          0.46723449032258063
+        ]
+      }
+    },
+    "dimensions_seen": {
+      "encoded_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ],
+      "source_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ]
+    },
+    "hardware_encode_stages": {
+      "conversion_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "output_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "padding_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "rgb_copy_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "submit_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "observations",
+        "observations": 0,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      }
+    },
+    "ignored_diagnostic_lines": 0,
+    "kind": "jwm_remote_workload_report",
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "payload_mbit_per_reported_second": 2.3985110397791565,
+    "physical_input_to_display": null,
+    "reported_seconds": 60.104742321,
+    "run_id": "07-candidate",
+    "schema_version": 1,
+    "sent_frames_per_reported_second": 27.718278719213743,
+    "stages": {
+      "atlas_pack_and_jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.752,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.690270390070922,
+          0.7082852589928057
+        ]
+      },
+      "atlas_pack_ms": {
+        "max_reported_window_recent_p95_ms": 0.017,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.013191893617021277,
+          0.013747090909090908
+        ]
+      },
+      "capture_ms": {
+        "max_reported_window_recent_p95_ms": 3.928,
+        "mean_denominator": "captured",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 2.7756199534355477,
+        "window_means_range_ms": [
+          2.6707608783783785,
+          2.8467303469387755
+        ]
+      },
+      "capture_start_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 105.304,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 13.893705534213685,
+        "window_means_range_ms": [
+          11.72811890647482,
+          32.88126520454546
+        ]
+      },
+      "credit_wait_ms": {
+        "max_reported_window_recent_p95_ms": 65.213,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.00013878231292517007,
+          7.273658107913669
+        ]
+      },
+      "dirty_scan_ms": {
+        "max_reported_window_recent_p95_ms": 0.765,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6382088843537415,
+          0.7261248027210885
+        ]
+      },
+      "h264_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "h264_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "hevc444_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "hevc444_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.737,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.676379170212766,
+          0.6938679999999999
+        ]
+      },
+      "mailbox_age_ms": {
+        "max_reported_window_recent_p95_ms": 33.091,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.04088452380952381,
+          3.793981834532374
+        ]
+      },
+      "send_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 100.483,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 9.381855455582233,
+        "window_means_range_ms": [
+          7.614387575539567,
+          25.00016053030303
+        ]
+      },
+      "socket_write_ms": {
+        "max_reported_window_recent_p95_ms": 0.078,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.06650758223289316,
+        "window_means_range_ms": [
+          0.06230391366906474,
+          0.06831427338129496
+        ]
+      },
+      "writer_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.0004173067226890756,
+        "window_means_range_ms": [
+          0.00040378417266187045,
+          0.00043558273381294965
+        ]
+      }
+    },
+    "totals": {
+      "backpressure_skipped": 9,
+      "bytes": 18020236,
+      "captured": 1761,
+      "damage_skipped": 0,
+      "dirty_tiles": 107200,
+      "drawn_acks": 1666,
+      "h264_frames": 0,
+      "hevc444_frames": 0,
+      "replaced": 0,
+      "scheduled": 1770,
+      "sent": 1666,
+      "total_tiles": 13594560,
+      "unchanged_suppressed": 95,
+      "viewer_superseded": 0
+    },
+    "version": "0.2.0",
+    "viewer": {
+      "backends": [
+        "x11"
+      ],
+      "commit": "3086bbaeda7dad8fe40e475dc435a85843e8f8d6",
+      "last_frame_codecs_seen": [
+        "JPEG"
+      ],
+      "negotiated_codecs": [
+        "JPEG"
+      ],
+      "reported_seconds": 60.007829471,
+      "sender_max_sampled_at_dequeue": {
+        "bulk_bytes": 0,
+        "bulk_records": 0,
+        "control_bytes": 16,
+        "control_records": 2
+      },
+      "session_matching": {
+        "host_only": 0,
+        "host_windows_without_id": 0,
+        "matched": 1,
+        "viewer_only": 0
+      },
+      "stages": {
+        "cursor_interval_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "decode_ms": {
+          "max_reported_window_recent_p95_ms": 1.281,
+          "mean_denominator": "observations",
+          "observations": 1663,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.14907609500902,
+          "window_means_range_ms": [
+            1.0446772785714284,
+            1.222495615942029
+          ]
+        },
+        "decode_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.208,
+          "mean_denominator": "observations",
+          "observations": 1663,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.12990235538184006,
+          "window_means_range_ms": [
+            0.0799733165467626,
+            0.15894312765957447
+          ]
+        },
+        "first_presentation_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_conversion_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_decode_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_download_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "hardware_rgb_copy_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "presentation_completion_ms": {
+          "max_reported_window_recent_p95_ms": 3.126,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 2.515044344163658,
+          "window_means_range_ms": [
+            2.140465434782609,
+            2.975034251798561
+          ]
+        },
+        "presentation_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.233,
+          "mean_denominator": "observations",
+          "observations": 1662,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.14929288267148014,
+          "window_means_range_ms": [
+            0.10702660606060606,
+            0.17685893525179855
+          ]
+        },
+        "sender_bulk_queue_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_bulk_write_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_control_queue_ms": {
+          "max_reported_window_recent_p95_ms": 0.222,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.13768841509433963,
+          "window_means_range_ms": [
+            0.11765088461538462,
+            0.17241987804878048
+          ]
+        },
+        "sender_control_write_ms": {
+          "max_reported_window_recent_p95_ms": 0.117,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.0716983722590515,
+          "window_means_range_ms": [
+            0.04206270909090909,
+            0.08942069512195122
+          ]
+        },
+        "sender_input_queue_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "sender_oldest_queued_ms": {
+          "max_reported_window_recent_p95_ms": 0.222,
+          "mean_denominator": "observations",
+          "observations": 1961,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 0.13768841509433963,
+          "window_means_range_ms": [
+            0.11765088461538462,
+            0.17241987804878048
+          ]
+        },
+        "source_switch_presentation_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        }
+      },
+      "totals": {
+        "acked": 1662,
+        "decoded": 1663,
+        "drawn": 1662,
+        "received": 1663,
+        "replaced": 0
+      },
+      "version": "0.2.0",
+      "windows": 12
+    },
+    "windows": 12,
+    "workload": "terminal",
+    "x11_capture": {
+      "reported_seconds": 60.104742321,
+      "stages": {
+        "core_readback_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "cpu_resize_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "monitor_geometry_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "pixel_conversion_ms": {
+          "max_reported_window_recent_p95_ms": 2.293,
+          "mean_denominator": "observations",
+          "observations": 1761,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.7078081243611583,
+          "window_means_range_ms": [
+            1.653766462585034,
+            1.7594153809523811
+          ]
+        },
+        "shm_readback_ms": {
+          "max_reported_window_recent_p95_ms": 2.212,
+          "mean_denominator": "observations",
+          "observations": 1761,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.0533253685406019,
+          "window_means_range_ms": [
+            1.000367939189189,
+            1.0976226530612245
+          ]
+        }
+      },
+      "totals": {
+        "damage_notifications": 0,
+        "forced_refreshes": 0
+      },
+      "windows": 12
+    }
+  },
+  {
+    "commit": "0631f2639676e6dc1cc4d1c81cdad8d0a2804e17",
+    "counter_windows": {
+      "backpressure_skipped": 12,
+      "damage_skipped": 12,
+      "h264_frames": 12,
+      "hevc444_frames": 12
+    },
+    "dimensions_seen": {
+      "encoded_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ],
+      "source_dimensions": [
+        [
+          1920,
+          1080
+        ]
+      ]
+    },
+    "ignored_diagnostic_lines": 0,
+    "kind": "jwm_remote_workload_report",
+    "limitations": [
+      "ACK timing is not physical key-to-photon latency or network RTT.",
+      "Recent per-window quantiles cannot reconstruct whole-run percentiles.",
+      "Stages overlap and have different denominators; do not add their means.",
+      "Mode, GPU synchronization and readback subdivision require separate capture traces.",
+      "No competitor ranking, hardware target or end-to-end acceptance is inferred."
+    ],
+    "payload_mbit_per_reported_second": 2.3847091026016707,
+    "physical_input_to_display": null,
+    "reported_seconds": 60.093142532,
+    "run_id": "08-baseline",
+    "schema_version": 1,
+    "sent_frames_per_reported_second": 27.557220844594188,
+    "stages": {
+      "atlas_pack_and_jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.777,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6895520431654677,
+          0.7123561151079136
+        ]
+      },
+      "atlas_pack_ms": {
+        "max_reported_window_recent_p95_ms": 0.019,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.013344035971223023,
+          0.014873856115107914
+        ]
+      },
+      "capture_ms": {
+        "max_reported_window_recent_p95_ms": 4.569,
+        "mean_denominator": "captured",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 2.888958456832476,
+        "window_means_range_ms": [
+          2.797873448979592,
+          2.9422108707482995
+        ]
+      },
+      "capture_start_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 152.569,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 14.016735250603864,
+        "window_means_range_ms": [
+          11.695616223021583,
+          27.8209124296875
+        ]
+      },
+      "credit_wait_ms": {
+        "max_reported_window_recent_p95_ms": 30.059,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.00010531972789115646,
+          5.889731253731344
+        ]
+      },
+      "dirty_scan_ms": {
+        "max_reported_window_recent_p95_ms": 0.783,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6686069863945578,
+          0.74010237414966
+        ]
+      },
+      "h264_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "h264_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "hevc444_ms": {
+        "max_reported_window_recent_p95_ms": null,
+        "mean_denominator": "hevc444_frames",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": null
+      },
+      "jpeg_ms": {
+        "max_reported_window_recent_p95_ms": 0.738,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.6754596834532375,
+          0.696744
+        ]
+      },
+      "mailbox_age_ms": {
+        "max_reported_window_recent_p95_ms": 0.11,
+        "mean_denominator": null,
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": null,
+        "window_means_range_ms": [
+          0.05387271428571428,
+          1.9717671268656716
+        ]
+      },
+      "send_to_ack_ms": {
+        "max_reported_window_recent_p95_ms": 108.449,
+        "mean_denominator": "drawn_acks",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 9.400145924516908,
+        "window_means_range_ms": [
+          7.404381323741006,
+          21.4493081484375
+        ]
+      },
+      "socket_write_ms": {
+        "max_reported_window_recent_p95_ms": 0.078,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.06577163888888889,
+        "window_means_range_ms": [
+          0.0621718273381295,
+          0.0680314892086331
+        ]
+      },
+      "writer_wait_ms": {
+        "max_reported_window_recent_p95_ms": 0.0,
+        "mean_denominator": "sent",
+        "whole_run_percentiles": null,
+        "whole_run_weighted_mean_ms": 0.0005381666666666666,
+        "window_means_range_ms": [
+          0.0005148489208633093,
+          0.0005689142857142857
+        ]
+      }
+    },
+    "totals": {
+      "backpressure_skipped": 16,
+      "bytes": 17913083,
+      "captured": 1749,
+      "damage_skipped": 0,
+      "dirty_tiles": 106560,
+      "drawn_acks": 1656,
+      "h264_frames": 0,
+      "hevc444_frames": 0,
+      "replaced": 2,
+      "scheduled": 1765,
+      "sent": 1656,
+      "total_tiles": 13512960,
+      "unchanged_suppressed": 91,
+      "viewer_superseded": 0
+    },
+    "version": "0.2.0",
+    "windows": 12,
+    "workload": "terminal",
+    "x11_capture": {
+      "reported_seconds": 60.093142532,
+      "stages": {
+        "core_readback_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "cpu_resize_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "monitor_geometry_ms": {
+          "max_reported_window_recent_p95_ms": null,
+          "mean_denominator": "observations",
+          "observations": 0,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": null,
+          "window_means_range_ms": null
+        },
+        "pixel_conversion_ms": {
+          "max_reported_window_recent_p95_ms": 2.249,
+          "mean_denominator": "observations",
+          "observations": 1749,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.7481581640937678,
+          "window_means_range_ms": [
+            1.70891268707483,
+            1.7756554965986393
+          ]
+        },
+        "shm_readback_ms": {
+          "max_reported_window_recent_p95_ms": 2.455,
+          "mean_denominator": "observations",
+          "observations": 1749,
+          "whole_run_percentiles": null,
+          "whole_run_weighted_mean_ms": 1.1243882572898798,
+          "window_means_range_ms": [
+            1.0734879591836735,
+            1.1576067346938776
+          ]
+        }
+      },
+      "totals": {
+        "damage_notifications": 0,
+        "forced_refreshes": 0
+      },
+      "windows": 12
+    }
+  }
+]

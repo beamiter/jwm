@@ -296,9 +296,14 @@ impl PresentationFeedbackCallback {
 pub struct PresentationFeedbackCachedState {
     /// Holds the registered presentation feedbacks
     pub callbacks: Vec<PresentationFeedbackCallback>,
+    surface_commit: bool,
 }
 
 impl PresentationFeedbackCachedState {
+    pub(crate) fn mark_surface_commit(&mut self) {
+        self.surface_commit = true;
+    }
+
     fn add_callback(
         &mut self,
         surface: &wl_surface::WlSurface,
@@ -315,22 +320,26 @@ impl PresentationFeedbackCachedState {
 
 impl Cacheable for PresentationFeedbackCachedState {
     fn commit(&mut self, _dh: &DisplayHandle) -> Self {
+        // A parent can snapshot an unchanged synchronized child without a
+        // wl_surface.commit. Its pending callbacks still belong to the next
+        // explicit child commit.
+        if !std::mem::take(&mut self.surface_commit) {
+            return Self::default();
+        }
         PresentationFeedbackCachedState {
             callbacks: std::mem::take(&mut self.callbacks),
+            surface_commit: true,
         }
     }
 
     fn merge_into(mut self, into: &mut Self, _dh: &DisplayHandle) {
-        // In case our cached state does not contain any callbacks we can
-        // exit early. This is important for commits on a subsurface tree
-        // where we might end up merging the state multiple times which
-        // would override the callbacks without this check.
-        if self.callbacks.is_empty() {
+        if !self.surface_commit {
             return;
         }
+        into.surface_commit = true;
 
-        // discard unprocessed callbacks as defined by the spec
-        // ...the user did not see the content update because it was superseded...
+        // An explicit commit supersedes old feedback even when the new
+        // commit has no feedback of its own.
         for callback in std::mem::replace(&mut into.callbacks, std::mem::take(&mut self.callbacks)) {
             callback.discarded();
         }

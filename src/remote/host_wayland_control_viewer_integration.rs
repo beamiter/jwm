@@ -8,6 +8,8 @@ use crate::backend::wayland_udev::{
 };
 use crate::remote::{
     client::{ClientOptions, run_client},
+    connect_toggle::{ConnectToggle, ControlState},
+    engine::WaylandInputState,
     host,
     viewer_backend::{ViewerBackend, with_wayland_control_observer, with_wayland_test_stream},
     wayland_capture::WaylandCapture,
@@ -71,6 +73,7 @@ fn options(scroll: bool, horizontal_scroll: bool) -> host::HostOptions {
         allow_wayland_horizontal_scroll: horizontal_scroll,
         allow_wayland_popup_pointer: false,
         allow_wayland_control: true,
+        allow_wayland_gestures: false,
         allow_resumable_control: false,
         allow_wayland_text: false,
         allow_static_lossless: false,
@@ -240,6 +243,11 @@ impl Readback {
         }
     }
     fn pixels(&mut self, s: &mut Server, gl: &mut HeadlessSmithayGles) -> Vec<u8> {
+        self.sample(s, gl)
+            .expect("production GL readback source is still live")
+    }
+
+    fn sample(&mut self, s: &mut Server, gl: &mut HeadlessSmithayGles) -> Option<Vec<u8>> {
         let (buffer, mut file) = shm(s, &mut self.client, [0x5a; 4], self.size.0, self.size.1);
         let frame = self.client.new_id();
         self.client.request(self.session, 0, &[frame]);
@@ -255,20 +263,31 @@ impl Readback {
         );
         s.roundtrip();
         s.roundtrip();
+        let events = self.client.events();
+        self.client.request(frame, 0, &[]);
+        s.roundtrip();
+        // ext_image_copy_capture_frame_v1.failed(stopped)
+        if events
+            .iter()
+            .any(|e| e.sender == frame && e.opcode == 4 && e.args == [2])
+        {
+            return None;
+        }
         assert!(
-            self.client
-                .events()
+            events.iter().any(|e| e.sender == frame && e.opcode == 3),
+            "production GL readback at {:?} did not become ready: {:?}",
+            self.size,
+            events
                 .iter()
-                .any(|e| e.sender == frame && e.opcode == 3),
-            "production GL ready"
+                .filter(|e| e.sender == frame)
+                .map(|e| (e.opcode, &e.args))
+                .collect::<Vec<_>>()
         );
         file.seek(SeekFrom::Start(0)).unwrap();
         let mut pixels = Vec::new();
         file.read_to_end(&mut pixels).unwrap();
         assert_eq!(pixels.len(), (self.size.0 * self.size.1 * 4) as usize);
-        self.client.request(frame, 0, &[]);
-        s.roundtrip();
-        pixels
+        Some(pixels)
     }
 }
 type ProofFixtureConfig = Option<(bool, bool, bool, Arc<host::ProofDeltaProbe>)>;
@@ -287,6 +306,7 @@ struct FixtureLayout {
     source: (u32, u32),
     viewer: (u32, u32),
     lossless: (bool, bool),
+    managed: bool,
 }
 impl Default for FixtureLayout {
     fn default() -> Self {
@@ -294,6 +314,7 @@ impl Default for FixtureLayout {
             source: (SW, SH),
             viewer: (VW, VH),
             lossless: (false, false),
+            managed: false,
         }
     }
 }
@@ -314,6 +335,7 @@ struct Harness {
     identified_viewer: Option<WlSurface>,
     hold_visual_repair: bool,
     layout: FixtureLayout,
+    controller: Option<Arc<ControlState>>,
     repair_observation: RepairObservation,
     control_lifetime: Arc<Mutex<Option<(Instant, Instant)>>>,
     resumable_commands: Arc<Mutex<std::collections::VecDeque<bool>>>,
@@ -349,6 +371,37 @@ struct Harness {
     host: Option<thread::JoinHandle<()>>,
 }
 impl Harness {
+    fn configure_viewer(&mut self, size: (u32, u32)) {
+        let (&window, top) = self.local.state.toplevels.iter().next().unwrap();
+        let geometry = self.local.state.window_geometry.get_mut(&window).unwrap();
+        (geometry.w, geometry.h) = size;
+        top.with_pending_state(|state| state.size = Some((size.0 as i32, size.1 as i32).into()));
+        top.send_configure();
+        self.layout.viewer = size;
+        self.readback = None;
+    }
+
+    fn close_managed(&mut self, gl: &mut HeadlessSmithayGles) {
+        self.controller.as_ref().unwrap().close();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut client = None;
+        let mut host = None;
+        while client.is_none() || host.is_none() {
+            self.tick(gl, true);
+            client = client.or_else(|| self.client_done.try_recv().ok());
+            host = host.or_else(|| self.host_done.try_recv().ok());
+            assert!(
+                Instant::now() < deadline,
+                "managed viewer or host did not disconnect"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        client.unwrap().unwrap();
+        host.unwrap().unwrap();
+        self.client.take().unwrap().join().unwrap();
+        self.host.take().unwrap().join().unwrap();
+    }
+
     fn new(gl: &mut HeadlessSmithayGles, held_on_enter: bool) -> Self {
         Self::new_with_scroll(gl, held_on_enter, false, false, 7)
     }
@@ -721,8 +774,15 @@ impl Harness {
         let client_acks = resumable_acks.clone();
         let (client_tx, client_done) = mpsc::channel();
         let cleanup_probe = crate::remote::client::cleanup_probe::current();
+        let (toggle, controller) = if layout.managed {
+            let (toggle, control) = ConnectToggle::local();
+            (Some(toggle), Some(control))
+        } else {
+            (None, None)
+        };
         let client = thread::spawn(move || {
             let opts = ClientOptions {
+                stats_json: false,
                 control_duration,
                 viewer_backend: ViewerBackend::Wayland,
                 viewer_wayland_display: None,
@@ -732,6 +792,7 @@ impl Harness {
                 wayland_horizontal_scroll: viewer_scroll.1,
                 wayland_popup_pointer: false,
                 wayland_control: true,
+                wayland_gestures: false,
                 resumable_control: resumable.1,
                 wayland_seamless_input: seamless,
                 wayland_text: None,
@@ -743,6 +804,7 @@ impl Harness {
                     height: layout.viewer.1 as u16,
                 }),
                 window_position: None,
+                x11_parent_window: None,
                 frame_limits: Default::default(),
                 address: address.to_string(),
                 peer_label: "owned native control".into(),
@@ -773,9 +835,19 @@ impl Harness {
                                                 with_wayland_test_stream(stream, || {
                                                     crate::remote::client::with_resumable_control_test_driver(
                                                         client_commands, client_acks, || {
-                                                            let run = || match cleanup_probe {
-                                                                Some(probe) => crate::remote::client::cleanup_probe::scoped(probe, || run_client(opts)),
+                                                            let connect = || match toggle.as_ref() {
+                                                                Some(toggle) => crate::remote::client::reconnect_client(
+                                                                    opts,
+                                                                    0,
+                                                                    crate::remote::messages::FrameCodec::JpegTiles,
+                                                                    Some(toggle),
+                                                                    false,
+                                                                ),
                                                                 None => run_client(opts),
+                                                            };
+                                                            let run = || match cleanup_probe {
+                                                                Some(probe) => crate::remote::client::cleanup_probe::scoped(probe, connect),
+                                                                None => connect(),
                                                             };
                                                             match ack_barrier {
                                                                 Some((reached, release)) => crate::remote::client::with_resumable_control_ack_barrier(reached, release, run),
@@ -802,6 +874,7 @@ impl Harness {
             identified_viewer: None,
             hold_visual_repair: false,
             layout,
+            controller,
             repair_observation,
             control_lifetime,
             resumable_commands,
@@ -1510,6 +1583,285 @@ impl Harness {
     }
 }
 #[test]
+fn managed_wayland_control_releases_shift_before_confirming_and_continues_viewing() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    exercise_managed_release(&mut gl, ManagedRelease::Command);
+}
+
+#[test]
+fn managed_wayland_focus_exit_releases_shift_and_retains_read_only_view() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    for trigger in [
+        ManagedRelease::PointerLeave,
+        ManagedRelease::KeyboardLeave,
+        ManagedRelease::WindowDeactivation,
+    ] {
+        exercise_managed_release(&mut gl, trigger);
+    }
+}
+
+#[test]
+fn managed_wayland_resize_before_first_presentation_defers_control_admission() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut h = managed_fixture(&mut gl);
+    h.wait(&mut gl, "first commit before configure", false, |s| {
+        s.pointer.is_some() && s.keyboard.is_some() && !s.feedback.is_empty()
+    });
+    let obsolete = std::mem::take(&mut h.feedback);
+    h.configure_viewer((320, 240));
+    h.wait(
+        &mut gl,
+        "replacement commit before first feedback",
+        false,
+        |s| !s.feedback.is_empty(),
+    );
+    present(&mut h.local, obsolete);
+    let drain = Instant::now() + Duration::from_millis(40);
+    while Instant::now() < drain {
+        h.tick(&mut gl, false);
+        assert_eq!(h.frames.lock().unwrap().1, None);
+        assert_eq!(remote_control::attempts_for_test(&h.native.state), 0);
+        h.received.assert_no_input();
+        thread::sleep(Duration::from_millis(1));
+    }
+    h.wait(
+        &mut gl,
+        "actual resized presentation grants once",
+        true,
+        |s| s.ready.lock().unwrap().is_some() && remote_control::active(&s.native.state),
+    );
+    assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
+    h.close_managed(&mut gl);
+    eprintln!("managed resize before admission: obsolete first feedback did not grant input");
+}
+
+#[test]
+fn managed_wayland_resize_retires_old_feedback_and_remaps_on_original_lease() {
+    let Some(mut gl) = HeadlessSmithayGles::new() else {
+        return;
+    };
+    let mut h = managed_fixture(&mut gl);
+    h.activate(&mut gl);
+    let initial_lease = remote_control::cli_lease_snapshot_for_test(&h.native.state).unwrap();
+    let surface = viewer_surface(&h.local);
+    let controller = h.controller.as_ref().unwrap().clone();
+    h.wait(&mut gl, "managed lease active", false, |_| {
+        controller.snapshot().wayland_input == Some(WaylandInputState::Active)
+    });
+    h.key(50, 42, true);
+    h.wait(&mut gl, "Shift held on original surface", true, |s| {
+        s.received.keys == [(42, 1)]
+    });
+
+    h.repaint(true);
+    h.wait(&mut gl, "pending feedback from old viewport", false, |s| {
+        !s.feedback.is_empty() && s.frames.lock().unwrap().0 > s.presented_sequence
+    });
+    let obsolete = std::mem::take(&mut h.feedback);
+    let last_completed = h.frames.lock().unwrap().1;
+    h.configure_viewer((320, 240));
+    h.wait(
+        &mut gl,
+        "replacement commit before old feedback",
+        false,
+        |s| !s.feedback.is_empty(),
+    );
+    present(&mut h.local, obsolete);
+    let drain = Instant::now() + Duration::from_millis(40);
+    while Instant::now() < drain {
+        h.tick(&mut gl, false);
+        assert_eq!(h.frames.lock().unwrap().1, last_completed);
+        assert_eq!(h.received.keys, [(42, 1)]);
+        thread::sleep(Duration::from_millis(1));
+    }
+    h.wait(
+        &mut gl,
+        "new viewport is presented with held Shift",
+        true,
+        |s| s.blue_presented,
+    );
+    h.key(51, 42, false);
+    h.wait(
+        &mut gl,
+        "balanced Shift reaches original surface",
+        true,
+        |s| s.received.keys == [(42, 1), (42, 0)],
+    );
+    h.repaint_and_ready(&mut gl, false);
+
+    // One press before configure and its release after configure cannot turn
+    // into a native click even if the pointer remains at the same local point.
+    let pointer = h.pointer.as_ref().unwrap().clone();
+    pointer.button(60, 60, 0x110, ButtonState::Pressed);
+    pointer.frame();
+    h.configure_viewer((480, 360));
+    pointer.button(61, 61, 0x110, ButtonState::Released);
+    pointer.frame();
+    let presentations = h.presentations;
+    // Compositor feedback belongs to a commit. A local redraw of already
+    // acknowledged red pixels may keep the same authenticated sequence.
+    h.presented_sequence = None;
+    h.wait(&mut gl, "second viewport presents red pixels", true, |s| {
+        s.presentations > presentations && !s.blue_presented
+    });
+    h.repaint_and_ready(&mut gl, true);
+    assert!(h.received.pointer_actions.is_empty());
+    h.click();
+    h.wait(
+        &mut gl,
+        "fresh click mapped using 480x360 viewport",
+        true,
+        |s| s.received.pointer_actions.len() == 3,
+    );
+    assert_eq!(h.received.pointer_actions[0].0, 2);
+    assert_eq!(&h.received.pointer_actions[0].1[1..], &[66 * 256, 50 * 256]);
+    assert_eq!(&h.received.pointer_actions[1].1[2..], &[0x110, 1]);
+    assert_eq!(&h.received.pointer_actions[2].1[2..], &[0x110, 0]);
+    assert_eq!(viewer_surface(&h.local), surface);
+    assert_eq!(
+        controller.snapshot().wayland_input,
+        Some(WaylandInputState::Active)
+    );
+    assert_eq!(
+        remote_control::cli_lease_snapshot_for_test(&h.native.state),
+        Some(initial_lease)
+    );
+    assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
+    h.close_managed(&mut gl);
+    eprintln!(
+        "managed resize: old feedback and split click discarded, same lease and new coordinates verified"
+    );
+}
+
+#[derive(Debug)]
+enum ManagedRelease {
+    Command,
+    PointerLeave,
+    KeyboardLeave,
+    WindowDeactivation,
+}
+
+fn managed_fixture(gl: &mut HeadlessSmithayGles) -> Harness {
+    Harness::new_configured(
+        gl,
+        false,
+        (false, false),
+        (false, false),
+        7,
+        None,
+        (
+            None,
+            FixtureLayout {
+                managed: true,
+                ..FixtureLayout::default()
+            },
+            (false, false),
+            None,
+            false,
+            None,
+        ),
+    )
+}
+
+fn exercise_managed_release(gl: &mut HeadlessSmithayGles, trigger: ManagedRelease) {
+    let mut h = managed_fixture(gl);
+    let controller = h.controller.as_ref().unwrap().clone();
+    assert!(controller.release_input().is_err());
+    h.activate(gl);
+    h.wait(gl, "managed input activated", true, |_| {
+        controller.snapshot().wayland_input == Some(WaylandInputState::Active)
+    });
+    h.key(50, 42, true);
+    h.wait(gl, "target received held Shift", true, |s| {
+        s.received.keys == [(42, 1)]
+    });
+    let surface = viewer_surface(&h.local);
+    match trigger {
+        ManagedRelease::Command => controller.release_input().unwrap(),
+        ManagedRelease::PointerLeave => {
+            let pointer = h.pointer.as_ref().unwrap();
+            pointer.leave(52, &surface);
+            pointer.frame();
+        }
+        ManagedRelease::KeyboardLeave => h.keyboard.as_ref().unwrap().leave(52, &surface),
+        ManagedRelease::WindowDeactivation => {
+            let top = h.local.state.toplevels.values().next().unwrap();
+            top.with_pending_state(|state| state.states.unset(TopState::Activated));
+            top.send_configure();
+        }
+    }
+
+    // Drive the local viewer but withhold the host compositor. The request
+    // can cross TCP, but the host cannot yet process the native revoke.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while controller.snapshot().wayland_input != Some(WaylandInputState::Releasing) {
+        h.local.roundtrip();
+        assert!(
+            Instant::now() < deadline,
+            "managed controller did not start release"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(remote_control::active(&h.native.state));
+    assert_eq!(h.received.keys, [(42, 1)]);
+    assert!(controller.release_input().is_err());
+    h.wait(gl, "host compositor confirmed managed release", true, |s| {
+        controller.snapshot().wayland_input == Some(WaylandInputState::Released)
+            && s.received.keys == [(42, 1), (42, 0)]
+    });
+    assert!(!remote_control::active(&h.native.state));
+    h.unexpected.assert_no_input();
+
+    let owner = surface.client().unwrap();
+    assert_eq!(
+        h.local
+            .state
+            .seat
+            .get_keyboard()
+            .unwrap()
+            .client_keyboards(&owner)
+            .count(),
+        0
+    );
+    assert_eq!(
+        h.local
+            .state
+            .seat
+            .get_pointer()
+            .unwrap()
+            .client_pointers(&owner)
+            .count(),
+        0
+    );
+    h.configure_viewer((320, 240));
+    // A read-only local redraw can present the retained sequence again. The
+    // fixture must still acknowledge that distinct Wayland commit.
+    h.presented_sequence = None;
+    let presentations = h.presentations;
+    h.repaint(true);
+    h.wait(
+        gl,
+        "resized viewer keeps presenting after input release",
+        true,
+        |s| s.presentations > presentations && s.blue_presented,
+    );
+    assert_eq!(viewer_surface(&h.local), surface);
+    assert_eq!(h.received.keys, [(42, 1), (42, 0)]);
+    assert_eq!(remote_control::attempts_for_test(&h.native.state), 1);
+
+    h.close_managed(gl);
+    eprintln!(
+        "managed control ({trigger:?}): host Shift released, 320x240 view continued, clean disconnect"
+    );
+}
+
+#[test]
 fn actual_wayland_control_viewer_tcp_click_repaint_type_and_either_focus_loss_revoke_together() {
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
@@ -2037,6 +2389,13 @@ mod seamless_integration;
 
 #[path = "host_wayland_cli_process_integration.rs"]
 mod cli_process_integration;
+
+#[cfg(feature = "remote-h264")]
+#[path = "host_wayland_gpu_fence_integration.rs"]
+mod gpu_fence_integration;
+
+#[path = "host_wayland_application_integration.rs"]
+mod application_integration;
 
 #[path = "host_wayland_duration_integration.rs"]
 mod duration_integration;

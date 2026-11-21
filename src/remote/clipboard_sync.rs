@@ -37,7 +37,9 @@
 
 use super::RemoteResult;
 use super::clipboard_files::{ArchiveReceiver, Manifest, ManifestReader, Staging, human_bytes};
+use super::clipboard_policy::ClipboardDirection;
 use super::clipboard_wire::{ClipboardRestriction, validate_successor};
+use super::engine::ClipboardProgress;
 use super::messages::{MAX_CLIPBOARD_BYTES, decode_clipboard, encode_clipboard};
 use super::protocol::MessageKind;
 use crate::backend::clipboard_x11::{
@@ -49,7 +51,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -57,6 +59,54 @@ use std::time::{Duration, Instant};
 pub const TRANSFER_CHUNK_BYTES: usize = 128 * 1024;
 /// Unacknowledged copied data a sender may have in flight.
 pub const TRANSFER_WINDOW_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct TransferBudget {
+    chunk: usize,
+    window: u64,
+}
+
+impl Default for TransferBudget {
+    fn default() -> Self {
+        Self {
+            chunk: TRANSFER_CHUNK_BYTES,
+            window: TRANSFER_WINDOW_BYTES,
+        }
+    }
+}
+
+impl TransferBudget {
+    fn for_link(kbit_per_second: u32) -> Self {
+        // At the configured rate, aim for one record per 25 ms and up to
+        // 60 ms of queued/unacknowledged data. The minimum permits progress
+        // on very slow links. Fast links retain the existing record limits.
+        let rate = u64::from(kbit_per_second);
+        let chunk = (rate * 25 / 8).clamp(8 * 1024, TRANSFER_CHUNK_BYTES as u64);
+        let window = (rate * 60 / 8).clamp(chunk, TRANSFER_WINDOW_BYTES);
+        Self {
+            chunk: chunk as usize,
+            window,
+        }
+    }
+
+    fn local() -> Result<Self, String> {
+        let Some(value) = std::env::var_os("JWM_REMOTE_CLIPBOARD_BULK_KBIT") else {
+            return Ok(Self::default());
+        };
+        let kbit_per_second = value
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|rate| *rate > 0)
+            .ok_or("JWM_REMOTE_CLIPBOARD_BULK_KBIT must be a positive integer")?;
+        let budget = Self::for_link(kbit_per_second);
+        eprintln!(
+            "jwm-remote: clipboard file/image budget rate={} kbit/s chunk={} bytes window={} bytes",
+            kbit_per_second, budget.chunk, budget.window,
+        );
+        Ok(budget)
+    }
+}
+
 /// Largest image shared through the clipboard.
 pub const MAX_SHARED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 /// Default for `--clipboard-file-limit`.
@@ -303,6 +353,16 @@ pub struct Outgoing {
 pub struct SyncStatus {
     line: Mutex<Option<String>>,
     version: AtomicU64,
+    transfer: Mutex<Option<TransferActivity>>,
+    progress_wake: OnceLock<Box<dyn Fn() + Send + Sync>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TransferActivity {
+    receiving: bool,
+    kind: TransferKind,
+    bytes_processed: u64,
+    total_bytes: u64,
 }
 
 impl SyncStatus {
@@ -328,6 +388,36 @@ impl SyncStatus {
                 .clone();
             (version, line)
         })
+    }
+
+    pub(super) fn wake_on_progress(&self, wake: impl Fn() + Send + Sync + 'static) {
+        let _ = self.progress_wake.set(Box::new(wake));
+    }
+
+    pub(super) fn viewer_transfer(&self) -> Option<ClipboardProgress> {
+        let transfer = *self.transfer.lock().unwrap_or_else(|p| p.into_inner());
+        transfer.map(|transfer| ClipboardProgress {
+            direction: if transfer.receiving {
+                ClipboardDirection::FromHost
+            } else {
+                ClipboardDirection::ToHost
+            },
+            kind: transfer.kind,
+            bytes_processed: transfer.bytes_processed,
+            total_bytes: transfer.total_bytes,
+        })
+    }
+
+    fn set_transfer(&self, next: Option<TransferActivity>) {
+        let mut transfer = self.transfer.lock().unwrap_or_else(|p| p.into_inner());
+        if *transfer == next {
+            return;
+        }
+        *transfer = next;
+        drop(transfer);
+        if let Some(wake) = self.progress_wake.get() {
+            wake();
+        }
     }
 }
 
@@ -742,6 +832,7 @@ impl ClipboardTarget for RemoteSetter {
 fn spawn_worker<T: ClipboardTarget + Send + 'static>(
     target: T,
     options: SyncOptions,
+    transfer_budget: TransferBudget,
     staging_root: Option<PathBuf>,
     wake: Option<Wake>,
 ) -> Result<
@@ -778,6 +869,7 @@ fn spawn_worker<T: ClipboardTarget + Send + 'static>(
         in_flight: Arc::clone(&in_flight),
         status: Arc::clone(&status),
         options,
+        transfer_budget,
         staging_root,
         staging: None,
         next_id: 1,
@@ -817,6 +909,11 @@ impl ClipboardSync {
         options: SyncOptions,
         wake: Option<Wake>,
     ) -> Result<(Self, ClipboardInbox, ClipboardOutbox), String> {
+        let transfer_budget = if options.send && (options.images || options.files) {
+            TransferBudget::local()?
+        } else {
+            TransferBudget::default()
+        };
         let (captures, setter) = RemoteClipboard::start(
             display,
             RemoteClipboardOptions {
@@ -828,7 +925,8 @@ impl ClipboardSync {
             },
         )?;
         let (backend_stop, backend) = setter.take_shutdown();
-        let (commands, worker, inbox, outbox, status) = spawn_worker(setter, options, None, wake)?;
+        let (commands, worker, inbox, outbox, status) =
+            spawn_worker(setter, options, transfer_budget, None, wake)?;
         let stop = Arc::new(AtomicBool::new(false));
         let forward_commands = commands.clone();
         let forward_stop = Arc::clone(&stop);
@@ -1077,6 +1175,7 @@ struct Worker<T> {
     in_flight: Arc<AtomicU64>,
     status: Arc<SyncStatus>,
     options: SyncOptions,
+    transfer_budget: TransferBudget,
     /// Where received files go; `None` is the user's cache directory.
     staging_root: Option<PathBuf>,
     staging: Option<Staging>,
@@ -1192,6 +1291,7 @@ impl<T: ClipboardTarget> Worker<T> {
         if let Some(token) = self.pending_token.take() {
             self.target.serve(RemoteServe::Abandon { token });
         }
+        self.status.set_transfer(None);
     }
 
     // A rejected command is terminal: continuing would lose ownership ordering
@@ -1265,6 +1365,7 @@ impl<T: ClipboardTarget> Worker<T> {
             Source::Files(_) => content & 4 == 0,
         }) {
             self.sending = None;
+            self.status.set_transfer(None);
         }
         // Do not compete with a saturated data queue for Cancel/Refuse slots.
         // The ordered policy record stops the peer, while final dispatch turns
@@ -1277,6 +1378,7 @@ impl<T: ClipboardTarget> Worker<T> {
             // reserved fence clears all forbidden offers, including this token.
             // Retain pending_token for teardown if the fence cannot complete.
             self.receiving = None;
+            self.status.set_transfer(None);
             if let Some(staging) = self.staging.as_mut() {
                 staging.discard_in_progress();
             }
@@ -1417,10 +1519,10 @@ impl<T: ClipboardTarget> Worker<T> {
         let Some(sending) = self.sending.as_mut() else {
             return;
         };
-        while !sending.ended && self.sent_total - self.acked_total < TRANSFER_WINDOW_BYTES {
-            let room = (TRANSFER_WINDOW_BYTES - (self.sent_total - self.acked_total))
+        while !sending.ended && self.sent_total - self.acked_total < self.transfer_budget.window {
+            let room = (self.transfer_budget.window - (self.sent_total - self.acked_total))
                 .min(sending.length - sending.sent)
-                .min(TRANSFER_CHUNK_BYTES as u64) as usize;
+                .min(self.transfer_budget.chunk as u64) as usize;
             if room == 0 {
                 sending.ended = true;
                 let id = sending.id;
@@ -1475,6 +1577,7 @@ impl<T: ClipboardTarget> Worker<T> {
 
     fn abort_sending(&mut self) {
         if let Some(sending) = self.sending.take() {
+            self.status.set_transfer(None);
             self.queue_op(&TransferOp::Cancel { id: sending.id });
             self.show_outcome(format!("{} not shared", sending.label));
         }
@@ -1482,10 +1585,12 @@ impl<T: ClipboardTarget> Worker<T> {
 
     /// A newer copy supersedes the outgoing transfer.
     fn cancel_sending(&mut self) {
-        if let Some(sending) = self.sending.take()
-            && !(sending.ended && self.acked_total >= sending.start.saturating_add(sending.length))
-        {
-            self.queue_op(&TransferOp::Cancel { id: sending.id });
+        if let Some(sending) = self.sending.take() {
+            self.status.set_transfer(None);
+            if !(sending.ended && self.acked_total >= sending.start.saturating_add(sending.length))
+            {
+                self.queue_op(&TransferOp::Cancel { id: sending.id });
+            }
         }
     }
 
@@ -1499,6 +1604,7 @@ impl<T: ClipboardTarget> Worker<T> {
         }
         // Keep the token available to boundary cleanup if queueing's wake panics.
         let receiving = self.receiving.take().expect("receiving was present");
+        self.status.set_transfer(None);
         let token = receiving.token;
         drop(receiving);
         if self.serve(RemoteServe::Abandon { token }) {
@@ -1623,12 +1729,14 @@ impl<T: ClipboardTarget> Worker<T> {
                         sending.started.elapsed().as_secs_f64()
                     );
                     self.sending = None;
+                    self.status.set_transfer(None);
                     self.status.set(None);
                 }
             }
             TransferOp::Refuse { id } => {
                 if self.sending.as_ref().is_some_and(|s| s.id == id) {
                     self.sending = None;
+                    self.status.set_transfer(None);
                     self.status.set(None);
                 }
             }
@@ -1729,6 +1837,7 @@ impl<T: ClipboardTarget> Worker<T> {
         let Some(receiving) = self.receiving.take_if(|r| r.id == id) else {
             return;
         };
+        self.status.set_transfer(None);
         let elapsed = receiving.started.elapsed().as_secs_f64();
         let complete = receiving.received == receiving.length;
         let token = receiving.token;
@@ -1805,28 +1914,45 @@ impl<T: ClipboardTarget> Worker<T> {
     }
 
     fn publish_progress(&self) {
-        let line = if let Some(receiving) = &self.receiving {
-            Some(format!(
-                "receiving {} {}%",
-                receiving.label,
-                percent(receiving.received, receiving.length)
-            ))
+        let (verb, label, activity) = if let Some(receiving) = &self.receiving {
+            (
+                "receiving",
+                &receiving.label,
+                TransferActivity {
+                    receiving: true,
+                    kind: match receiving.sink {
+                        Sink::Image(_) => TransferKind::Image,
+                        Sink::Files(_) => TransferKind::Files,
+                    },
+                    bytes_processed: receiving.received,
+                    total_bytes: receiving.length,
+                },
+            )
+        } else if let Some(sending) = &self.sending {
+            (
+                "sending",
+                &sending.label,
+                TransferActivity {
+                    receiving: false,
+                    kind: match sending.source {
+                        Source::Image(_) => TransferKind::Image,
+                        Source::Files(_) => TransferKind::Files,
+                    },
+                    bytes_processed: self
+                        .acked_total
+                        .saturating_sub(sending.start)
+                        .min(sending.length),
+                    total_bytes: sending.length,
+                },
+            )
         } else {
-            self.sending.as_ref().map(|sending| {
-                let acked = self
-                    .acked_total
-                    .saturating_sub(sending.start)
-                    .min(sending.length);
-                format!(
-                    "sending {} {}%",
-                    sending.label,
-                    percent(acked, sending.length)
-                )
-            })
+            return;
         };
-        if let Some(line) = line {
-            self.status.set(Some(line));
-        }
+        self.status.set(Some(format!(
+            "{verb} {label} {}%",
+            percent(activity.bytes_processed, activity.total_bytes)
+        )));
+        self.status.set_transfer(Some(activity));
     }
 }
 
@@ -1947,6 +2073,7 @@ mod tests {
         let (commands, join, inbox, outbox, status) = spawn_worker(
             Recorder(served_tx),
             options,
+            TransferBudget::default(),
             Some(staging.0.join("remote-clipboard")),
             None,
         )
@@ -1975,6 +2102,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn managed_progress_wakes_without_outgoing_records_and_clears_on_cancel() {
+        let (endpoint, inbox, outbox) = end(options(1024));
+        let (notify, notified) = mpsc::channel();
+        endpoint.status.wake_on_progress(move || {
+            let _ = notify.send(());
+        });
+        let deliver = |operation: TransferOp| {
+            inbox
+                .deliver(MessageKind::ClipboardTransfer, &operation.encode())
+                .unwrap();
+        };
+        let progress = |count| ClipboardProgress {
+            direction: ClipboardDirection::FromHost,
+            kind: TransferKind::Image,
+            bytes_processed: count,
+            total_bytes: 4,
+        };
+
+        deliver(TransferOp::Begin {
+            id: 1,
+            kind: TransferKind::Image,
+            length: 4,
+            entries: 0,
+            items: 1,
+        });
+        notified.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(endpoint.status.viewer_transfer(), Some(progress(0)));
+        assert!(outbox.try_next().unwrap().is_none());
+        assert_eq!(
+            endpoint.status.changed_since(0).unwrap().1.as_deref(),
+            Some("receiving image 0%")
+        );
+        deliver(TransferOp::Data {
+            id: 1,
+            bytes: vec![0; 2],
+        });
+        notified.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(endpoint.status.viewer_transfer(), Some(progress(2)));
+        deliver(TransferOp::Cancel { id: 1 });
+        notified.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(endpoint.status.viewer_transfer(), None);
+    }
+
+    #[test]
+    fn managed_sender_progress_uses_flow_credit_only_while_active() {
+        let (recorder, _served) = mpsc::channel();
+        let mut worker = worker_for_target(Recorder(recorder), options(1024));
+        worker.share_local(CopiedClipboard::Png(vec![1; 4]));
+        worker.pump();
+        let progress = |count| ClipboardProgress {
+            direction: ClipboardDirection::ToHost,
+            kind: TransferKind::Image,
+            bytes_processed: count,
+            total_bytes: 4,
+        };
+        assert_eq!(worker.status.viewer_transfer(), Some(progress(0)));
+        worker.on_peer(TransferOp::Ack { id: 1, consumed: 2 });
+        worker.publish_progress();
+        assert_eq!(worker.status.viewer_transfer(), Some(progress(2)));
+        worker.on_peer(TransferOp::Ack { id: 1, consumed: 4 });
+        assert_eq!(worker.status.viewer_transfer(), None);
+    }
+
     fn worker_for_target<T: ClipboardTarget>(target: T, options: SyncOptions) -> Worker<T> {
         Worker {
             policy: RuntimeClipboardPolicy::new(options.content()),
@@ -1987,6 +2178,7 @@ mod tests {
             in_flight: Arc::new(AtomicU64::new(0)),
             status: Arc::new(SyncStatus::default()),
             options,
+            transfer_budget: TransferBudget::default(),
             staging_root: None,
             staging: None,
             next_id: 1,
@@ -2683,6 +2875,7 @@ mod tests {
         let (commands, join, inbox, outbox, _) = spawn_worker(
             PanickingTarget(served_tx),
             options(u64::MAX),
+            TransferBudget::default(),
             None,
             Some(Box::new(move || {
                 woken_tx.send(()).unwrap();
@@ -2728,6 +2921,7 @@ mod tests {
         let (commands, join, inbox, outbox, _) = spawn_worker(
             Recorder(served_tx),
             options(u64::MAX),
+            TransferBudget::default(),
             None,
             Some(Box::new(move || {
                 woken_tx.send(()).unwrap();
@@ -2783,6 +2977,7 @@ mod tests {
         let (commands, join, _inbox, outbox, _) = spawn_worker(
             Recorder(served_tx),
             options(u64::MAX),
+            TransferBudget::default(),
             None,
             Some(Box::new(move || {
                 woken_tx.send(()).unwrap();
@@ -3051,6 +3246,48 @@ mod tests {
         worker.run_guarded(&commands);
         assert!(commands.closed());
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn configured_bulk_budget_limits_chunk_size_and_resumes_after_partial_ack() {
+        let (mut worker, _) = policy_worker(options(u64::MAX));
+        worker.transfer_budget = TransferBudget::for_link(10_000);
+        let width = worker.transfer_budget.chunk;
+        let window = worker.transfer_budget.window;
+        assert_eq!((width, window), (31_250, 75_000));
+        worker.start_sending(
+            TransferKind::Image,
+            Source::Image(vec![1; 120_000]),
+            120_000,
+            0,
+            1,
+        );
+        let begin = worker.out.try_recv().unwrap();
+        assert!(matches!(
+            TransferOp::decode(&begin.payload).unwrap(),
+            TransferOp::Begin { id: 1, .. }
+        ));
+        worker.pump();
+        let mut chunks = Vec::new();
+        while let Ok(record) = worker.out.try_recv() {
+            let TransferOp::Data { id: 1, bytes } = TransferOp::decode(&record.payload).unwrap()
+            else {
+                panic!("expected a Data record");
+            };
+            chunks.push(bytes.len());
+        }
+        assert_eq!(chunks, [31_250, 31_250, 12_500]);
+        assert_eq!(worker.sent_total - worker.acked_total, window);
+        worker.on_peer(TransferOp::Ack {
+            id: 1,
+            consumed: 8000,
+        });
+        worker.pump();
+        let record = worker.out.try_recv().unwrap();
+        assert!(
+            matches!(TransferOp::decode(&record.payload).unwrap(), TransferOp::Data { id: 1, bytes } if bytes.len() == 8000)
+        );
+        assert_eq!(worker.sent_total - worker.acked_total, window);
     }
 
     #[test]
@@ -3706,6 +3943,7 @@ mod tests {
                 barrier: Mutex::new(Some(barrier)),
             },
             options(1024),
+            TransferBudget::default(),
             None,
             None,
         )

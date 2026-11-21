@@ -1,0 +1,72 @@
+{
+  "application": "Gedit 41.0, GTK 3 Wayland backend",
+  "machine": "ubuntu@192.168.0.78, Ubuntu 22.04.5 LTS",
+  "environment": "Two private JWM/Smithay displays, private D-Bus, mandatory software GLES, independent CLI processes and authenticated loopback TCP",
+  "capture_logical_size": [
+    640,
+    480
+  ],
+  "viewer_size": [
+    640,
+    480
+  ],
+  "input_profile": "explicit managed Wayland gestures",
+  "actions": [
+    "Ctrl+A",
+    "GTK Unicode entry U+4E2D",
+    "GTK Unicode entry U+6587",
+    "Ctrl+S",
+    "click hamburger menu",
+    "click Preferences in menu",
+    "disconnect"
+  ],
+  "saved_document_utf8": "中文",
+  "result": [
+    {
+      "committed_client_buffer_scale": 1,
+      "runs_passed": 3,
+      "selection_changed_pixels": 10063,
+      "selected_to_edited_changed_pixels": 2959,
+      "menu_changed_pixels_in_viewer_readback": [
+        96752,
+        96752,
+        96752
+      ]
+    },
+    {
+      "committed_client_buffer_scale": 2,
+      "runs_passed": 3,
+      "selection_changed_pixels": 10063,
+      "selected_to_edited_changed_pixels": 2959,
+      "menu_changed_pixels_in_viewer_readback": [
+        96644,
+        96644,
+        96644
+      ]
+    }
+  ],
+  "host_and_viewer_exited_successfully": true,
+  "editor_menu_selection_verified": true,
+  "physical_input_to_display_latency_measured": false,
+  "native_source_control_manager_version": 7,
+  "menu_effect": "Gedit created and mapped the Preferences toplevel",
+  "native_policy_regression": {
+    "exact_child_local_coordinates_and_balanced_left_click": true,
+    "original_compositor_pointer_focus_position_and_serial_preserved": true,
+    "stale_child_input_region_rejected_at_release": true,
+    "unrelated_client_received_no_input": true
+  },
+  "regression": {
+    "native_control_tests_passed": {
+      "development": 34,
+      "ubuntu_192_168_0_78": 34
+    },
+    "firefox": {
+      "url_entry_tab_switch_click_and_wheel": true,
+      "reported_scroll_css_px": 321
+    },
+    "blender": {
+      "orbit_zoom_wireframe_menu_selection": true
+    }
+  }
+}

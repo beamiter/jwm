@@ -1,0 +1,337 @@
+{
+  "archive": {
+    "bytes": 1171590,
+    "file": "firefox-x11-hevc444-idr-diagnostic-raw.zip",
+    "member_sha256": {
+      "README.txt": "a725eb7cf0ae183493270482411cb06595379caec64e4a9136b46921efbffbc3",
+      "align.py": "fe94106bf6b328976443ae3a38e6935fefc835a7c76a0d1638eb3c76f480f10d",
+      "build-proof.json": "b547d5926527e71b0987ed9c209395ceab04e886ab6d26d320ec3d932017f81d",
+      "expected.json": "44ac0d245675cc0b8676ca7c7efdcc1c0e007274ffc3646f013239ca751b9420",
+      "hevc_evidence.py": "eafc1a3883cbdf9ad4dad09073bbe11031c72285d57fe2efa64613c4eb5c1f10",
+      "manifest.json": "fa49c5c29b1cdaa645be730913399a35807a4c7bd0f7c1508dfe9c1ae10bd938",
+      "raw/geometry-guard.json": "88cf3251afdc253798a55f7c3084fffdd9365ae986bd0e48e679b97df04132d9",
+      "raw/host-clocked-telemetry.jsonl": "44f5a4c1c163f0212c8b10778a936f40826c8c7f6d8952f318cf160972d28bc8",
+      "raw/host.log": "e0401c17bf68bdb8c6e040623ee2a0c7c3c0182abb65568920121dfda5bb13e4",
+      "raw/identity.json": "ca14740193f378f1dbe2af5bae40a69396a04d19d7fe726139173bdb09bcf8c4",
+      "raw/motion-host.jsonl": "fae0f9cd5c37b9b66255be4351573f43a0b0086a397cbf7dc59cef6516bc0700",
+      "raw/motion-pixels.jsonl": "210d1eef15a8b4f116087f6aa725a43376f90efc527c68497a38961f930de802",
+      "raw/motion-scope.json": "0004dc9d9b217f9d28d7f7dae169166eab62b8abd1c51b4c98eb9b7fd17599b5",
+      "raw/shutdown.json": "5cbd6b540106c1389c977ce2b34ec0f0e23cc0f45cad206625073c495726d493",
+      "raw/static-host.jsonl": "5689f46a8cfe9fb2d26b458f5df78d5f83cf582a1a309e216376ea3b62ed2f55",
+      "raw/static-pixels.jsonl": "2a481db37f48e4dfb3ec80ebe79d26066c50815d691bcd1e124ab43ce322b2a6",
+      "raw/static-scope.json": "fea7b1e3092c61ecafbbdedc8978f1358d46f32b26c4db3be3bc97af146f6c47",
+      "raw/viewer/geometry-guard.json": "1938d48d6f05787239460b6d277eeab1593de764beec652766ec0a0360effa75",
+      "raw/viewer/motion-pixels.jsonl": "136897dac3eb7abcf41d98d3588ad7b87fda407fe9e3c46c4e8aea153dc541a1",
+      "raw/viewer/motion-scope.json": "81d5460a8c59431b2d3d90709822ff8296adb64da5c96cd474cc77445014cb3e",
+      "raw/viewer/motion-viewer.jsonl": "2f66a1954339a43209b5762ba10871bb09fe02c8ce3184008e3590f466cb45a4",
+      "raw/viewer/static-pixels.jsonl": "8cbc21d8f3b1bfbb43ed1c2e772e64e0246071d744daa9e2a20e7a762321c5d8",
+      "raw/viewer/static-scope.json": "1083328ac2d33db503015412f176e41dcfcb568e7dfb83fe0658c4020db32000",
+      "raw/viewer/static-viewer.jsonl": "831a457b86decd632594ad7169127ecd6b4401ce91f9d6a7d85da468ea4afe1f",
+      "raw/viewer/viewer-clocked-telemetry.jsonl": "6b4423d1d7a7833a33d5c07d818fd0316c40d5cb973c448181bc39c8fb12f65b",
+      "raw/viewer/viewer.log": "81527a1cdd67df200eec21e33257cf76b7cebf409c4846998657c9bbd62d4329",
+      "replay.py": "af8b224a9719e76c957ec89163ba4411f716f3035bf6935348bc170fa93ceefc",
+      "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3"
+    },
+    "sha256": "07a017ddd0afa93ed4d0933269f7af332751c6ac4c87145693ad2554b2d3b293"
+  },
+  "build": {
+    "build_evidence": {
+      "mint_release_completed": true,
+      "rust_trace_overflow_test_passed": true,
+      "trial_process_exit": 0,
+      "ubuntu_final_verification_exit": 0,
+      "ubuntu_post_build_metadata_detail": "optional rg was unavailable after release build completed",
+      "ubuntu_post_build_metadata_exit": 127,
+      "ubuntu_release_completed": true
+    },
+    "codec_configuration": {
+      "decoder_path": "NVDEC",
+      "delay": 0,
+      "encoder_description_source_sha256": "a754ce6a35a4c049ddc43497aa92a8a952fbb8aeb69cf6ce53eafc03b47edf37",
+      "encoder_path": "NVENC",
+      "ffmpeg_encoder": "hevc_nvenc",
+      "forced_idr": true,
+      "gop_frames_at_30_fps": 60,
+      "lookahead_frames": 0,
+      "low_latency": true,
+      "max_b_frames": 0,
+      "preset": "p3",
+      "profile": "rext",
+      "rate_control": "cbr",
+      "scope": "fixed application encoder settings verified in staged source",
+      "target_bitrate_bps": 10000000,
+      "tune": "ull",
+      "ubuntu_linked_libavcodec_soname": "libavcodec.so.58",
+      "vbv_bits": 1333333
+    },
+    "source_and_cargo_sha256_as_built": {
+      "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+      "Cargo.toml": "9dd243ceb81417a3781afabf9b040a105ad39eb63d18af118ac43a232d1c0ae6",
+      "src/remote/client.rs": "7631b0052ed6af88fbf0556cbe2b9c1f21dae93a6253bc24e065a4b1dd06f048",
+      "src/remote/host.rs": "90753a185122a7ef83858912c204deaceb48228161a312c83c7aa424375b3bfd",
+      "src/remote/telemetry.rs": "bfd8cdb257478e09bd2b07ef68a5642838725bb59d423a76acdc74e5fa0d0f69"
+    },
+    "source_sha256_before_trace": {
+      "src/remote/client.rs": "78274426ab5699d530c0ebacb19b9acd4c87ec2ca4e0288527aeb068950d189f",
+      "src/remote/host.rs": "401b64ca9687d1db48a7ff47929472ce78cafa073b994ea1af542c547157c5cc",
+      "src/remote/telemetry.rs": "6710ecdcc9b197fe5cb6c1db624b50dfd6516bf2d139877a8caff99d7e07f3de"
+    },
+    "staged_endpoint_binary_sha256": {
+      "host": "9f214df096c2968f10b98cdd96dff6abf444d6a3bf573fb243d30aed7a7f2a49",
+      "viewer": "74dc2389d4925354c5ae8fb26d0781ec94e5289a7bdc7fcd839b111a01124709"
+    }
+  },
+  "hardware_path": {
+    "errors": [],
+    "matching_source_geometry_epoch": [
+      1,
+      2
+    ],
+    "records_examined": {
+      "host": 40,
+      "viewer": 40
+    },
+    "retained_activity": {
+      "motion": {
+        "host_hevc_encodes": 1887,
+        "host_sent": 1887,
+        "viewer_drawn": 1886,
+        "viewer_hardware_decodes": 1886
+      },
+      "static": {
+        "host_hevc_encodes": 1653,
+        "host_sent": 1653,
+        "viewer_drawn": 1651,
+        "viewer_hardware_decodes": 1651
+      }
+    },
+    "verified": true
+  },
+  "interpretation": [
+    "Fourteen source-exact entries aligned with individual IDRs. Fourteen entries were ambiguous under the conservative overlap rule.",
+    "Eleven exits from the source-exact mask aligned with individual non-IDR pictures. Seventeen exits were ambiguous.",
+    "The viewer met the motion threshold and failed static stillness. Existing fixed JPEG trials provide separate evidence.",
+    "The IDR count is session-wide. Directional attribution covers only the independently scored static raster phase. The mask covers one browser text ROI at the configured threshold.",
+    "Viewer attribution uses drained X11 drawable copies. It cannot establish physical scanout, causation, quantization parameters, or the content of discarded/overlapping observations."
+  ],
+  "manifest": {
+    "diagnostic_batch": true,
+    "dimensions": [
+      1920,
+      1080
+    ],
+    "hardware_rate_policy": "pinned fixed NVENC, governor off",
+    "hardware_trace": {
+      "JWM_REMOTE_TRACE_HARDWARE_FRAMES": "1",
+      "endpoints": [
+        "host",
+        "viewer"
+      ]
+    },
+    "pins": {
+      "firefox": "ddf58d7cb36bd35e8e9dab7bc70ce31e17340ce87fc7c0fe81e495ccbd863965",
+      "fixtures": {
+        "align.py": "fe94106bf6b328976443ae3a38e6935fefc835a7c76a0d1638eb3c76f480f10d",
+        "browser-trial.html": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+        "dual_browser.py": "8af5f8c5cb0f65ca0124ee51866383b06a3223122e5c227d021216ba232564a5",
+        "firefox-profile-user.js": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+        "fixture-manifest.json": "b3ad4bac6df43044599c5399a08c47f8bffa5a0a19debf51f121ba25c3a923d7",
+        "geometry_guard.py": "18ea821549cad83ad41d4a92003be9ebcf5d120149f570429b194284ed0c22af",
+        "hevc_evidence.py": "eafc1a3883cbdf9ad4dad09073bbe11031c72285d57fe2efa64613c4eb5c1f10",
+        "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+        "run_baseline.py": "5bd348c562da0f6381ca45aca1072a1765d5e8f33b257d0647721e6e87825d46",
+        "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3"
+      },
+      "host": "9f214df096c2968f10b98cdd96dff6abf444d6a3bf573fb243d30aed7a7f2a49",
+      "trace_patch": "50d607ad9b2d3bcc23485aafde7e0ee506e15f00006f29cc04add6baf4a58ce0",
+      "viewer": "74dc2389d4925354c5ae8fb26d0781ec94e5289a7bdc7fcd839b111a01124709"
+    },
+    "requested_codec": "HEVC 4:4:4",
+    "requested_fps": 30,
+    "requested_trials": 1,
+    "required_runtime_path": {
+      "host": "NVENC",
+      "viewer": "NVDEC"
+    },
+    "score_seconds": 60,
+    "source": "Mint Firefox source and original X11 capture policy",
+    "target": "owned X11 viewer, HEVC 4:4:4 at 1:1",
+    "telemetry_tail_seconds": 8,
+    "transport": "dual",
+    "warm_seconds": 30,
+    "workload": {
+      "motion_visible_label_unchanged": "Motion stops after 30 s.",
+      "original_sha256": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+      "sole_trial_change": {
+        "after": "elapsed >= 105000",
+        "before": "elapsed >= 30000"
+      },
+      "source_fixture": "tests/fixtures/remote-workloads/browser.html",
+      "static_uses_inactive_motion_handler": true,
+      "trial_sha256": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c"
+    }
+  },
+  "replay": {
+    "command_after_extraction": "python3 -B replay.py",
+    "exit_status": 0,
+    "result": {
+      "host_idr": 90,
+      "host_sent": 5384,
+      "source_exact": {
+        "dominant_viewer_mask_matches_source": false,
+        "dominant_viewer_mask_samples": 4578,
+        "mask_transitions_from_source_exact": {
+          "non_idr": 11,
+          "unassignable": 17
+        },
+        "mask_transitions_to_source_exact": {
+          "idr": 14,
+          "unassignable": 14
+        },
+        "source_exact_observed_onsets": 28,
+        "source_exact_onset_interval_median_ms": 2055.476488,
+        "source_exact_samples": 256,
+        "valid_samples": 5400
+      },
+      "static_unchanged": false,
+      "status": "verified",
+      "viewer_motion_fps": 28.916666666666668
+    }
+  },
+  "run_exit": {
+    "host_exit": 0,
+    "peer_exit": 0,
+    "process_exit": 0,
+    "viewer_disconnect_event": true
+  },
+  "schema_version": 1,
+  "scope": "diagnostic X11 raster observations on separate machines over OpenSSH",
+  "scope_checks": {
+    "both_live_processes_used_trace_opt_in_and_verified_binary_sha256": true,
+    "each_drawable_fixed_with_structure_notify_guard": true,
+    "same_authenticated_session_and_source_geometry_epochs": true
+  },
+  "scoring": {
+    "diagnostic_motion_and_static_met": false,
+    "phases": {
+      "motion": {
+        "hardware_activity": {
+          "host_hevc_encodes": 1887,
+          "host_sent": 1887,
+          "viewer_drawn": 1886,
+          "viewer_hardware_decodes": 1886
+        },
+        "host": {
+          "raster": {
+            "distinct_scroll_signatures": 2840,
+            "gap_ms": {
+              "max": 34.055197,
+              "p50": 19.812894,
+              "p95": 22.61865
+            },
+            "invalid_scroll_reads": 0,
+            "invalid_tile_reads": 0,
+            "scroll_changes_seen": 3538,
+            "unique_content_fps": 58.96666666666667,
+            "unique_tile_changes": 3538,
+            "zero_unique_bins": 0
+          }
+        },
+        "viewer": {
+          "raster": {
+            "distinct_scroll_signatures": 1679,
+            "gap_ms": {
+              "max": 249.059389,
+              "p50": 33.359383,
+              "p95": 43.951055
+            },
+            "invalid_scroll_reads": 0,
+            "invalid_tile_reads": 0,
+            "scroll_changes_seen": 1736,
+            "unique_content_fps": 28.916666666666668,
+            "unique_tile_changes": 1735,
+            "zero_unique_bins": 0
+          }
+        }
+      },
+      "static": {
+        "hardware_activity": {
+          "host_hevc_encodes": 1653,
+          "host_sent": 1653,
+          "viewer_drawn": 1651,
+          "viewer_hardware_decodes": 1651
+        },
+        "host": {
+          "raster": {
+            "distinct_scroll_signatures": 1,
+            "gap_ms": {
+              "max": 60000.0,
+              "p50": 60000.0,
+              "p95": 60000.0
+            },
+            "invalid_scroll_reads": 0,
+            "invalid_tile_reads": 0,
+            "scroll_changes_seen": 0,
+            "unique_content_fps": 0.0,
+            "unique_tile_changes": 0,
+            "zero_unique_bins": 60
+          }
+        },
+        "viewer": {
+          "raster": {
+            "distinct_scroll_signatures": 3,
+            "gap_ms": {
+              "max": 60000.0,
+              "p50": 60000.0,
+              "p95": 60000.0
+            },
+            "invalid_scroll_reads": 0,
+            "invalid_tile_reads": 0,
+            "scroll_changes_seen": 140,
+            "unique_content_fps": 0.0,
+            "unique_tile_changes": 0,
+            "zero_unique_bins": 60
+          }
+        }
+      }
+    },
+    "source_motion_fps": 58.96666666666667,
+    "source_qualified": true,
+    "static_unchanged": false,
+    "viewer_motion_fps": 28.916666666666668,
+    "viewer_motion_gate_met": true
+  },
+  "status": "completed",
+  "trace_alignment": {
+    "host_sent_hardware_frames": 5384,
+    "host_sent_idrs": 90,
+    "mask_changes": {
+      "idr": 14,
+      "non_idr": 47,
+      "unassignable": 79
+    },
+    "qualified_trace": true,
+    "raster_mask_field": "scroll_text",
+    "raster_samples": {
+      "copy_not_certifiably_stable": 277,
+      "sample_crosses_trace_boundary": 638,
+      "usable": 4485
+    },
+    "source_reference": {
+      "dominant_viewer_mask_matches_source": false,
+      "dominant_viewer_mask_samples": 4578,
+      "mask_transitions_from_source_exact": {
+        "non_idr": 11,
+        "unassignable": 17
+      },
+      "mask_transitions_to_source_exact": {
+        "idr": 14,
+        "unassignable": 14
+      },
+      "source_exact_observed_onsets": 28,
+      "source_exact_onset_interval_median_ms": 2055.476488,
+      "source_exact_samples": 256,
+      "valid_samples": 5400
+    }
+  }
+}

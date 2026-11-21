@@ -1,3 +1,4 @@
+use super::fbo_presentation::OutputRoute;
 use crate::backend::wayland_udev::capture_popup_snapshot;
 
 #[path = "presentation_batch.rs"]
@@ -36,10 +37,14 @@ use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
 use smithay::backend::renderer::element::texture::TextureRenderElement;
-use smithay::backend::renderer::element::{AsRenderElements, Element, Id, Kind};
+use smithay::backend::renderer::element::{
+    AsRenderElements, Element, Id, Kind, RenderElement, UnderlyingStorage,
+};
 use smithay::backend::renderer::gles::GlesRenderbuffer;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_surface_tree};
+use smithay::backend::renderer::utils::{
+    CommitCounter, DamageSet, OpaqueRegions, RendererSurfaceStateUserData, import_surface_tree,
+};
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Renderer};
 use smithay::backend::session::Session;
 use smithay::backend::session::libseat::LibSeatSession;
@@ -58,24 +63,112 @@ use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Buffer as BufferCoord, Clock, Monotonic, Size};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
-use smithay::wayland::compositor::{TraversalAction, with_states, with_surface_tree_downward};
+use smithay::utils::user_data::UserDataMap;
+use smithay::wayland::compositor::{
+    TraversalAction, get_children, with_states, with_surface_tree_downward,
+};
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::presentation::{PresentationFeedbackCachedState, PresentationFeedbackCallback, Refresh};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use crate::backend::api::CompositorRect;
-use crate::backend::common_define::StdCursorKind;
+use crate::backend::common_define::{StdCursorKind, WindowId};
 use crate::backend::error::{BackendErrorContext, ErrorBoundary};
 
 use xcursor::{CursorTheme, parser::Image};
 
 smithay::backend::renderer::element::render_elements! {
-    pub KmsRenderElement<=GlesRenderer>;
+    pub(crate) KmsRenderElement<=GlesRenderer>;
     Surface=WaylandSurfaceRenderElement<GlesRenderer>,
+    PhysicalSurface=PhysicalRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
     Solid=SolidColorRenderElement,
     Memory=MemoryRenderBufferRenderElement<GlesRenderer>,
-    Texture=TextureRenderElement<GlesTexture>,
+    PhysicalMemory=PhysicalRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
+    Texture=PhysicalRenderElement<TextureRenderElement<GlesTexture>>,
+}
+
+/// The WM has already positioned and sized this element in scanout pixels.
+/// Keep its physical footprint when Smithay tracks client elements at a
+/// different logical scale on the same output.
+pub(crate) struct PhysicalRenderElement<E>(E);
+
+impl<E: Element> Element for PhysicalRenderElement<E> {
+    fn id(&self) -> &Id {
+        self.0.id()
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.0.current_commit()
+    }
+
+    fn location(&self, _scale: Scale<f64>) -> Point<i32, Physical> {
+        self.0.location(Scale::from(1.0))
+    }
+
+    fn src(&self) -> Rectangle<f64, BufferCoord> {
+        self.0.src()
+    }
+
+    fn transform(&self) -> Transform {
+        self.0.transform()
+    }
+
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.0.geometry(Scale::from(1.0))
+    }
+
+    fn damage_since(
+        &self,
+        _scale: Scale<f64>,
+        commit: Option<CommitCounter>,
+    ) -> DamageSet<i32, Physical> {
+        self.0.damage_since(Scale::from(1.0), commit)
+    }
+
+    fn opaque_regions(&self, _scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
+        self.0.opaque_regions(Scale::from(1.0))
+    }
+
+    fn alpha(&self) -> f32 {
+        self.0.alpha()
+    }
+
+    fn kind(&self) -> Kind {
+        self.0.kind()
+    }
+
+    fn is_framebuffer_effect(&self) -> bool {
+        self.0.is_framebuffer_effect()
+    }
+}
+
+impl<R: Renderer, E: RenderElement<R>> RenderElement<R> for PhysicalRenderElement<E> {
+    fn draw(
+        &self,
+        frame: &mut R::Frame<'_, '_>,
+        src: Rectangle<f64, BufferCoord>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        cache: Option<&UserDataMap>,
+    ) -> Result<(), R::Error> {
+        self.0.draw(frame, src, dst, damage, opaque_regions, cache)
+    }
+
+    fn underlying_storage(&self, renderer: &mut R) -> Option<UnderlyingStorage<'_>> {
+        self.0.underlying_storage(renderer)
+    }
+
+    fn capture_framebuffer(
+        &self,
+        frame: &mut R::Frame<'_, '_>,
+        src: Rectangle<f64, BufferCoord>,
+        dst: Rectangle<i32, Physical>,
+        cache: &UserDataMap,
+    ) -> Result<(), R::Error> {
+        self.0.capture_framebuffer(frame, src, dst, cache)
+    }
 }
 
 pub(super) type KmsHandle = Rc<RefCell<KmsState>>;
@@ -220,6 +313,7 @@ struct KmsOutputState {
     client_gamma_pending: bool,
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
+    supports_dpms: bool,
     /// Desired HDR metadata blob for the next frame. Replaced handles remain
     /// owned in retired_color_blobs until the current generation presents.
     /// The public `output_hdr_metadata_active` and advertised image
@@ -287,6 +381,21 @@ impl KmsOutputState {
         let (throttle, refresh_interval) = refresh_timing_for_mode(mode);
         self.frame_callback_throttle = throttle;
         self.refresh_interval = refresh_interval;
+    }
+
+    fn cancel_pending_frame(&mut self) {
+        // Take and drop Smithay's queue userdata, which owns the exact
+        // callbacks from the canceled frame.
+        let _ = self.drm_output.frame_submitted();
+        self.frame_pending = false;
+        self.frame_pending_since = None;
+        self.frame_pending_boundary = None;
+        self.presentation_submission = None;
+        self.frame_pending_lock_epoch = None;
+        self.color_delivery_observation_uncertain = true;
+        self.presentation_uncertain = true;
+        self.color_delivery_retry_required = true;
+        self.color_delivery.invalidate();
     }
 }
 
@@ -2776,6 +2885,7 @@ pub(super) struct KmsState {
     pub(super) needs_render: bool,
     compositor_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
     fbo_presentation: Option<super::fbo_presentation::Proof>,
+    direct_presentation_waiting: Vec<DirectPresentationWait>,
     /// Same wrapper cache for the compositor's dedicated capture-view texture,
     /// used only while an offscreen capture render runs.
     capture_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
@@ -3065,51 +3175,128 @@ fn next_presentation_identity() -> u64 {
     }
 }
 
-// First FBO proof supports no output slicing, scaling or rotation. A visible
-// whole-texture element alone cannot establish that the sampled window lies
-// inside the particular physical output's slice of a global FBO.
-fn fbo_output_domain_is_exact(
-    origin: (i32, i32),
-    mode: (i32, i32),
-    fbo: (u32, u32),
-    scale: f64,
-    transform: Transform,
-) -> bool {
-    origin == (0, 0)
-        && mode.0 > 0
-        && mode.1 > 0
-        && (mode.0 as u32, mode.1 as u32) == fbo
-        && scale == 1.0
-        && transform == Transform::Normal
+fn presentation_rect(rect: (i32, i32, u32, u32)) -> Option<Rectangle<i32, Physical>> {
+    let (x, y, w, h) = rect;
+    let (w, h) = (i32::try_from(w).ok()?, i32::try_from(h).ok()?);
+    x.checked_add(w)?;
+    y.checked_add(h)?;
+    (w > 0 && h > 0).then(|| Rectangle::new((x, y).into(), (w, h).into()))
 }
 
-// Half-open pixel rectangles. Empty/overflowing domains are unknown, not
-// evidence of separation. i64 arithmetic avoids wrapping at hostile edges.
-fn fbo_cursor_rect_is_disjoint(
+// Every participating output uses the same physical-pixel desktop domain.
+// A scaled peer can sample beyond its nominal bounds from the same FBO.
+fn unique_presentation_output(
+    source: (i32, i32, u32, u32),
+    outputs: impl IntoIterator<Item = Option<OutputRoute>>,
+) -> Option<OutputRoute> {
+    let source_rect = presentation_rect(source)?;
+    let mut selected = None;
+    for output in outputs {
+        let output = output?;
+        if source_rect.overlaps(presentation_rect(output.desktop_rect)?) {
+            if selected.is_some() || output.local_rect(source).is_none() {
+                return None;
+            }
+            selected = Some(output);
+        }
+    }
+    selected
+}
+
+fn crosses_presentation_outputs(
+    source: (i32, i32, u32, u32),
+    outputs: impl IntoIterator<Item = Option<OutputRoute>>,
+) -> bool {
+    let Some(source) = presentation_rect(source) else {
+        return false;
+    };
+    let mut first = None;
+    let mut crossing = false;
+    let mut can_fit = false;
+    for output in outputs {
+        let Some(rect) = output.and_then(|output| presentation_rect(output.desktop_rect)) else {
+            return false;
+        };
+        if !source.overlaps(rect) {
+            continue;
+        }
+        can_fit |= source.size.w <= rect.size.w && source.size.h <= rect.size.h;
+        if let Some(first) = first {
+            if crossing || rect.overlaps(first) {
+                return false;
+            }
+            crossing = true;
+        } else {
+            first = Some(rect);
+        }
+    }
+    crossing && can_fit
+}
+
+fn scanout_preserves_visible_area(
     target: (i32, i32, u32, u32),
-    cursor: Rectangle<i32, Physical>,
+    occluders: impl IntoIterator<Item = Rectangle<i32, Physical>>,
 ) -> bool {
     let (tx, ty, tw, th) = target;
-    if tx < 0 || ty < 0 || tw == 0 || th == 0 || cursor.size.w <= 0 || cursor.size.h <= 0 {
+    let (Ok(tw), Ok(th)) = (i32::try_from(tw), i32::try_from(th)) else {
         return false;
-    }
-    let tr = i64::from(tx) + i64::from(tw);
-    let tb = i64::from(ty) + i64::from(th);
-    let cr = i64::from(cursor.loc.x) + i64::from(cursor.size.w);
-    let cb = i64::from(cursor.loc.y) + i64::from(cursor.size.h);
-    if [tr, tb, cr, cb]
-        .into_iter()
-        .any(|edge| edge > i64::from(i32::MAX) || edge < i64::from(i32::MIN))
+    };
+    if tx < 0
+        || ty < 0
+        || tw == 0
+        || th == 0
+        || tx.checked_add(tw).is_none()
+        || ty.checked_add(th).is_none()
     {
         return false;
     }
-    cr <= i64::from(tx)
-        || cb <= i64::from(ty)
-        || i64::from(cursor.loc.x) >= tr
-        || i64::from(cursor.loc.y) >= tb
+
+    let target = Rectangle::<i32, Physical>::new((tx, ty).into(), (tw, th).into());
+    let mut covered = Vec::new();
+    for occluder in occluders {
+        if occluder.size.w <= 0
+            || occluder.size.h <= 0
+            || occluder.loc.x.checked_add(occluder.size.w).is_none()
+            || occluder.loc.y.checked_add(occluder.size.h).is_none()
+        {
+            return false;
+        }
+        if let Some(intersection) = target.intersection(occluder) {
+            covered.push(intersection);
+        }
+    }
+    if covered.is_empty() {
+        return true;
+    }
+
+    // Treat every occluder's bounds as opaque. Coverage changes only at a
+    // rectangle's top or bottom, so test the union of horizontal
+    // intervals once per row band without splitting rectangles.
+    let mut rows = Vec::with_capacity(2 * covered.len() + 2);
+    rows.extend([ty, ty + th]);
+    for rect in &covered {
+        rows.extend([rect.loc.y, rect.loc.y + rect.size.h]);
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    covered.sort_unstable_by_key(|rect| rect.loc.x);
+    rows.windows(2).any(|band| {
+        let y = band[0];
+        let mut covered_to = tx;
+        for rect in &covered {
+            if y < rect.loc.y || y >= rect.loc.y + rect.size.h {
+                continue;
+            }
+            if rect.loc.x > covered_to {
+                return true;
+            }
+            covered_to = covered_to.max(rect.loc.x + rect.size.w);
+        }
+        covered_to < tx + tw
+    })
 }
 
-fn fbo_proof_frame_flags(mut flags: FrameFlags, has_proof: bool) -> FrameFlags {
+fn presentation_proof_frame_flags(mut flags: FrameFlags, has_proof: bool) -> FrameFlags {
     if has_proof {
         // Smithay's cursor-copy fast path may leave hardware plane padding
         // uninitialized. Only software primary composition has the exact
@@ -3126,6 +3313,7 @@ fn fbo_cursor_composition_is_safe(
     cursor_prefix_len: usize,
     compositor_index: Option<usize>,
     target: (i32, i32, u32, u32),
+    scale: Scale<f64>,
 ) -> bool {
     if compositor_index != Some(cursor_prefix_len)
         || cursor_prefix_len.checked_add(1) != Some(elements.len())
@@ -3135,34 +3323,122 @@ fn fbo_cursor_composition_is_safe(
     // Only the actual cursor assembly prefix is trusted, not an arbitrary
     // external element that happens to advertise Kind::Cursor. Later code only
     // appends elements; the screenshot texture swap touches the FBO index alone.
-    elements[..cursor_prefix_len].iter().all(|element| {
+    let cursors = &elements[..cursor_prefix_len];
+    cursors.iter().all(|element| {
         matches!(
             element,
-            KmsRenderElement::Memory(_) | KmsRenderElement::Solid(_)
+            KmsRenderElement::PhysicalMemory(_) | KmsRenderElement::Solid(_)
         ) && element.kind() == Kind::Cursor
-            && fbo_cursor_rect_is_disjoint(target, element.geometry(Scale::from(1.0)))
-    })
+    }) && scanout_preserves_visible_area(
+        target,
+        cursors.iter().map(|element| element.geometry(scale)),
+    )
+}
+
+struct DirectPresentationRoot {
+    surface: WlSurface,
+    output_generation: u64,
+    local_rect: (i32, i32, u32, u32),
+}
+
+const DIRECT_PRESENTATION_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+struct DirectPresentationWait {
+    window: WindowId,
+    surface: WlSurface,
+    commit: u64,
+    generation: u64,
+    expires: std::time::Instant,
+    callbacks: Vec<PresentationFeedbackCallback>,
+}
+
+impl DirectPresentationWait {
+    fn live(&self, state: &crate::backend::wayland::state::JwmWaylandState) -> bool {
+        !state.session_locked
+            && state.presentation_generation == Some(self.generation)
+            && self.surface.is_alive()
+            && state.mapped_windows.contains(&self.window)
+            && state.surface_for_window(self.window).as_ref() == Some(&self.surface)
+            && state.surface_commit_epoch(self.window) == Some(self.commit)
+    }
+}
+
+impl Drop for DirectPresentationWait {
+    fn drop(&mut self) {
+        for callback in self.callbacks.drain(..) {
+            callback.discarded();
+        }
+    }
+}
+
+impl DirectPresentationRoot {
+    fn has_visible_opaque_area(&self, elements: &[KmsRenderElement], scale: Scale<f64>) -> bool {
+        let id = Id::from_wayland_resource(&self.surface);
+        let Some(index) = elements.iter().position(|element| element.id() == &id) else {
+            log::debug!(target: "jwm::kms::presentation",
+                "direct_feedback_rejected=surface_element_missing surface={:?} output_visible_rect={:?}",
+                self.surface.id(), self.local_rect);
+            return false;
+        };
+        let Some(rect) = presentation_rect(self.local_rect) else {
+            return false;
+        };
+        let element = &elements[index];
+        if !matches!(
+            element,
+            KmsRenderElement::Surface(_) | KmsRenderElement::PhysicalSurface(_)
+        ) {
+            return false;
+        }
+        let geometry = element.geometry(scale);
+        let opaque = geometry == rect
+            && element.alpha() == 1.0
+            && element
+                .opaque_regions(scale)
+                .contains(&Rectangle::from_size(rect.size));
+        let visible = opaque
+            && scanout_preserves_visible_area(
+                self.local_rect,
+                elements[..index].iter().map(|front| front.geometry(scale)),
+            );
+        if !visible {
+            log::debug!(target: "jwm::kms::presentation",
+                "direct_feedback_rejected=unproven_surface_element surface={:?} geometry={geometry:?} output_visible_rect={:?} opaque={opaque} preceding_elements={index}",
+                self.surface.id(), self.local_rect);
+        }
+        visible
+    }
+}
+
+fn presentation_element_visible(
+    render_states: &smithay::backend::renderer::element::RenderElementStates,
+    element: impl Into<Id>,
+) -> bool {
+    render_states
+        .element_render_state(element)
+        .is_some_and(|r| {
+            r.visible_area > 0
+                && r.presentation_state
+                    != smithay::backend::renderer::element::RenderElementPresentationState::Skipped
+        })
 }
 
 fn take_rendered_presentation_callbacks(
     roots: &[WlSurface],
     render_states: &smithay::backend::renderer::element::RenderElementStates,
-    proven_route: bool,
+    mut include_root: impl FnMut(&WlSurface) -> Option<bool>,
 ) -> Vec<PresentationFeedbackCallback> {
     let mut sampled = Vec::new();
     for root in roots {
+        let Some(proven_route) = include_root(root) else {
+            continue;
+        };
         with_surface_tree_downward(
             root,
             (),
             |_, _, _| TraversalAction::DoChildren(()),
             |surface, states, _| {
-                let visible = proven_route
-                    && render_states
-                        .element_render_state(surface)
-                        .is_some_and(|r| {
-                            r.visible_area > 0 && r.presentation_state !=
-                        smithay::backend::renderer::element::RenderElementPresentationState::Skipped
-                        });
+                let visible = proven_route && presentation_element_visible(render_states, surface);
                 let mut cached = states.cached_state.get::<PresentationFeedbackCachedState>();
                 for callback in cached.current().callbacks.drain(..) {
                     if visible {
@@ -3179,8 +3455,142 @@ fn take_rendered_presentation_callbacks(
 }
 
 impl KmsState {
-    pub(super) fn single_presentation_output(&self) -> bool {
-        self.outputs.len() == 1
+    fn presenting_pixel_domains<'a>(
+        &'a self,
+        state: &'a crate::backend::wayland::state::JwmWaylandState,
+    ) -> impl Iterator<Item = Option<OutputRoute>> + 'a {
+        self.outputs
+            .iter()
+            .filter(|out| Self::output_participates(out, state))
+            .map(|out| {
+                let (x, y) = out.origin;
+                let (w, h) = out.mode_size;
+                let scale = out.output.current_scale().fractional_scale();
+                if out.drm_mode_uncertain
+                    || x < 0
+                    || y < 0
+                    || w <= 0
+                    || h <= 0
+                    || !scale.is_finite()
+                    || scale <= 0.0
+                    || out.output.current_transform() != Transform::Normal
+                {
+                    return None;
+                }
+                Some(OutputRoute {
+                    generation: out.presentation_output_generation,
+                    desktop_rect: (x, y, w as u32, h as u32),
+                })
+            })
+    }
+
+    pub(super) fn fbo_presentation_output(
+        &self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        source_rect: (i32, i32, u32, u32),
+        fbo_size: (u32, u32),
+    ) -> Option<OutputRoute> {
+        let output = unique_presentation_output(source_rect, self.presenting_pixel_domains(state))?;
+        let (x, y, w, h) = output.desktop_rect;
+        screenshot_route::output_fits_source((x, y), (w as i32, h as i32), fbo_size)
+            .then_some(output)
+    }
+
+    fn direct_presentation_roots(
+        &mut self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        allow_crossing_retry: bool,
+    ) -> Vec<DirectPresentationRoot> {
+        let mut waiting = std::mem::take(&mut self.direct_presentation_waiting);
+        let Some(generation) = state.presentation_generation else {
+            return Vec::new();
+        };
+        if self.outputs.len() == 1 || state.session_locked {
+            return Vec::new();
+        }
+        let now = std::time::Instant::now();
+        waiting
+            .retain(|pending| allow_crossing_retry && pending.expires > now && pending.live(state));
+        let roots = state
+            .window_stack
+            .iter()
+            .filter(|win| state.mapped_windows.contains(win))
+            .filter_map(|win| {
+                let surface = state.toplevels.get(win)?.wl_surface();
+                let geometry = state.window_geometry.get(win)?;
+                let already_waiting = waiting.iter().any(|pending| &pending.surface == surface);
+                let (source, has_feedback) = with_states(surface, |states| {
+                    let mut feedback = states.cached_state.get::<PresentationFeedbackCachedState>();
+                    let has_feedback = !feedback.current().callbacks.is_empty();
+                    if !has_feedback && !already_waiting {
+                        return None;
+                    }
+                    let data = states.data_map.get::<RendererSurfaceStateUserData>()?;
+                    let view = data.lock_safe().view()?;
+                    let mut shell = states.cached_state.get::<SurfaceCachedState>();
+                    let offset = shell
+                        .current()
+                        .geometry
+                        .map(|rect| rect.loc)
+                        .unwrap_or_default();
+                    let x = geometry
+                        .x
+                        .checked_sub(offset.x)?
+                        .checked_add(view.offset.x)?;
+                    let y = geometry
+                        .y
+                        .checked_sub(offset.y)?
+                        .checked_add(view.offset.y)?;
+                    let w = u32::try_from(view.dst.w).ok()?;
+                    let h = u32::try_from(view.dst.h).ok()?;
+                    Some(((x, y, w, h), has_feedback))
+                })?;
+                if !surface.is_alive() || !get_children(surface).is_empty() {
+                    log::debug!(target: "jwm::kms::presentation",
+                        "direct_feedback_rejected=unproven_surface_tree window={win:?} target={source:?}");
+                    return None;
+                }
+                let layout = (geometry.x, geometry.y, geometry.w, geometry.h);
+                let output = unique_presentation_output(source, self.presenting_pixel_domains(state))
+                    .filter(|output| output.local_rect(layout).is_some());
+                let Some(output) = output else {
+                    if allow_crossing_retry
+                        && has_feedback
+                        && !already_waiting
+                        && let Some(commit) = state.surface_commit_epoch(*win)
+                        && commit > 0
+                        && commit < u64::MAX
+                        && crosses_presentation_outputs(source, self.presenting_pixel_domains(state))
+                    {
+                        let callbacks = with_states(surface, |states| {
+                            let mut feedback = states.cached_state.get::<PresentationFeedbackCachedState>();
+                            std::mem::take(&mut feedback.current().callbacks)
+                        });
+                        log::debug!(target: "jwm::kms::presentation",
+                            "direct_feedback_deferred=output_crossing window={win:?} commit={commit} target={source:?} layout={layout:?}");
+                        waiting.push(DirectPresentationWait {
+                            window: *win,
+                            surface: surface.clone(),
+                            generation,
+                            commit,
+                            expires: now + DIRECT_PRESENTATION_RETRY_TIMEOUT,
+                            callbacks,
+                        });
+                    } else if !already_waiting {
+                        log::debug!(target: "jwm::kms::presentation",
+                            "direct_feedback_rejected=unproven_output_domain window={win:?} target={source:?} layout={layout:?}");
+                    }
+                    return None;
+                };
+                Some(DirectPresentationRoot {
+                    surface: surface.clone(),
+                    output_generation: output.generation,
+                    local_rect: output.local_rect(source)?,
+                })
+            })
+            .collect();
+        self.direct_presentation_waiting = waiting;
+        roots
     }
     pub(super) fn set_fbo_presentation(&mut self, proof: Option<super::fbo_presentation::Proof>) {
         self.fbo_presentation = proof;
@@ -3460,10 +3870,9 @@ impl KmsState {
             .any(|output| output.output_name == output_name && !output.dpms_off)
     }
 
-    /// Return the nearest deadline at which a queued frame must be retired if
-    /// its page-flip event never arrives. Keeping this deadline in the outer
-    /// event-loop timeout is essential: after a successful queue there may be
-    /// no animation, client, or handler work left to wake the loop again.
+    /// Wake the outer loop to retire an overdue flip or a presentation
+    /// callback that is still waiting for a window to fit on one output.
+    /// These deadlines remain active without new animation or client work.
     pub(super) fn next_frame_watchdog_wakeup(&self) -> Option<std::time::Duration> {
         let now = std::time::Instant::now();
         self.outputs
@@ -3476,6 +3885,11 @@ impl KmsState {
                         frame_watchdog_remaining(out.refresh_interval, pending_for)
                     })
             })
+            .chain(
+                self.direct_presentation_waiting
+                    .iter()
+                    .map(|pending| pending.expires.saturating_duration_since(now)),
+            )
             .min()
     }
 
@@ -3483,9 +3897,15 @@ impl KmsState {
     /// the scheduler decides whether KMS can accept another frame. This cannot
     /// live in `render_if_needed`: the outer loop deliberately suppresses that
     /// call while any frame is pending.
-    pub(super) fn recover_stale_frames(&mut self) -> usize {
+    pub(super) fn recover_stale_frames(
+        &mut self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+    ) -> usize {
         let now = std::time::Instant::now();
         let mut recovered = 0;
+        let pending = self.direct_presentation_waiting.len();
+        self.direct_presentation_waiting
+            .retain(|wait| wait.expires > now && wait.live(state));
 
         for out in &mut self.outputs {
             if out.dpms_off || !out.frame_pending {
@@ -3505,26 +3925,115 @@ impl KmsState {
                 out.output.name(),
                 timeout,
             );
-            // Retire Smithay's queued user data together with the local flag.
-            // A late kernel event is rejected by the queue boundary in
-            // `on_vblank`, and the next accepted observation is fail-closed.
-            let _ = out.drm_output.frame_submitted();
-            out.frame_pending = false;
-            out.frame_pending_since = None;
-            out.frame_pending_boundary = None;
-            out.presentation_submission = None;
-            // Unknown whether it reached the screen: the next locked frame
-            // confirms instead.
-            out.frame_pending_lock_epoch = None;
-            out.color_delivery_observation_uncertain = true;
-            out.presentation_uncertain = true;
-            out.color_delivery_retry_required = true;
-            out.color_delivery.invalidate();
+            out.cancel_pending_frame();
             recovered += 1;
         }
 
         if recovered > 0 {
             self.needs_render = true;
+        }
+        if (recovered > 0 || self.direct_presentation_waiting.len() != pending)
+            && !self.flush_pending.swap(true, Ordering::SeqCst)
+        {
+            let _ = self.flush_tx.send(());
+        }
+        recovered
+    }
+
+    pub(super) fn presentation_output_ready(&self, route: OutputRoute) -> bool {
+        self.outputs.iter().any(|out| {
+            out.presentation_output_generation == route.generation && !out.presentation_uncertain
+        })
+    }
+
+    pub(super) fn presentation_scene_is_dark(
+        &self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        source_rect: (i32, i32, u32, u32),
+    ) -> bool {
+        let source = presentation_rect(source_rect);
+        let mut presenting = false;
+        let mut overlaps_dark = false;
+        for out in &self.outputs {
+            let participating = Self::output_participates(out, state);
+            presenting |= participating;
+            let (x, y) = out.origin;
+            let (w, h) = out.mode_size;
+            let overlaps = w > 0
+                && h > 0
+                && presentation_rect((x, y, w as u32, h as u32))
+                    .is_some_and(|output| source.is_some_and(|source| source.overlaps(output)));
+            if overlaps {
+                if participating {
+                    return false;
+                }
+                overlaps_dark = true;
+            }
+        }
+        !presenting || overlaps_dark
+    }
+
+    /// Put a synchronous, callback-free frame between a canceled page flip
+    /// and the next submission that can own client feedback. The successful
+    /// non-event commit finishes before any subsequent queue boundary, so a
+    /// late event from the canceled flip cannot acknowledge a fresh frame.
+    pub(super) fn recover_presentation_outputs(
+        &mut self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+    ) -> bool {
+        if self.color_pipeline_delivery_blocked {
+            return false;
+        }
+        let mut recovered = false;
+        for out in &mut self.outputs {
+            if out.frame_pending
+                || !out.presentation_uncertain
+                || out.drm_mode_uncertain
+                || !Self::output_participates(out, state)
+            {
+                continue;
+            }
+            self.needs_render = true;
+            out.drm_output.prepare_color_transition();
+            let result = (|| -> Result<(), String> {
+                let frame = out
+                    .drm_output
+                    .render_frame::<_, KmsRenderElement>(
+                        &mut self.renderer,
+                        &[],
+                        smithay::backend::renderer::Color32F::BLACK,
+                        FrameFlags::empty(),
+                    )
+                    .map_err(|error| format!("render recovery frame: {error:?}"))?;
+                if frame.is_empty {
+                    return Err("empty recovery frame".into());
+                }
+                if frame.needs_sync()
+                    && let PrimaryPlaneElement::Swapchain(primary) = frame.primary_element
+                {
+                    primary
+                        .sync
+                        .wait()
+                        .map_err(|error| format!("wait for recovery frame: {error:?}"))?;
+                }
+                out.drm_output
+                    .commit_frame()
+                    .map_err(|error| format!("commit recovery frame: {error:?}"))
+            })();
+            match result {
+                Ok(()) => {
+                    out.presentation_uncertain = false;
+                    out.color_delivery_observation_uncertain = false;
+                    // The black frame establishes ordering; the normal
+                    // software scene and color state still need a new flip.
+                    out.color_delivery_retry_required = true;
+                    recovered = true;
+                    log::debug!(target: "jwm::kms::presentation",
+                        "output={} recovery_barrier_completed", out.output_name);
+                }
+                Err(error) => log::debug!(target: "jwm::kms::presentation",
+                    "output={} recovery_barrier_pending error={error}", out.output_name),
+            }
         }
         recovered
     }
@@ -5160,6 +5669,27 @@ impl KmsState {
         self.outputs.iter().position(|o| o.output.name() == name)
     }
 
+    pub(super) fn output_index_by_identity(&self, output: &Output) -> Option<usize> {
+        self.outputs
+            .iter()
+            .position(|candidate| &candidate.output == output)
+    }
+
+    pub(super) fn output_power_is_on(&self, index: usize) -> Option<bool> {
+        let output = self.outputs.get(index)?;
+        output.supports_dpms.then_some(!output.dpms_off)
+    }
+
+    pub(super) fn output_power_modes(&self) -> impl Iterator<Item = (Output, bool)> + '_ {
+        self.outputs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, output)| {
+                self.output_power_is_on(index)
+                    .map(|on| (output.output.clone(), on))
+            })
+    }
+
     pub(super) fn set_dpms_for_output(
         &mut self,
         output_idx: usize,
@@ -5193,9 +5723,20 @@ impl KmsState {
         // here on a failed set, the next refresh would either re-install the
         // LUT on a powered-down CRTC or skip a still-powered-on one.
         if result.is_ok() {
-            let participation_changed = self.outputs[output_idx].dpms_off == on;
-            self.outputs[output_idx].dpms_off = !on;
+            let out = &mut self.outputs[output_idx];
+            let participation_changed = out.dpms_off == on;
+            out.dpms_off = !on;
             if participation_changed {
+                let retired_generation = out.presentation_output_generation;
+                out.presentation_output_generation = next_presentation_identity();
+                if self
+                    .fbo_presentation
+                    .as_ref()
+                    .and_then(|proof| proof.output())
+                    .is_some_and(|route| route.generation == retired_generation)
+                {
+                    self.fbo_presentation = None;
+                }
                 crate::backend::compositor_common::companion_scene::invalidate_presentation_evidence();
                 if !on {
                     crate::backend::compositor_common::companion_scene::presentation_route(
@@ -5213,14 +5754,10 @@ impl KmsState {
                 // already queued flip. Retire the DrmOutput bookkeeping now so
                 // it cannot keep every other CRTC behind `can_present=false`,
                 // and so power-on starts from a clean full-redraw request.
-                let _ = self.outputs[output_idx].drm_output.frame_submitted();
-                self.outputs[output_idx].frame_pending = false;
-                self.outputs[output_idx].frame_pending_since = None;
-                self.outputs[output_idx].frame_pending_boundary = None;
-                self.outputs[output_idx].presentation_submission = None;
-                self.outputs[output_idx].frame_pending_lock_epoch = None;
-                self.outputs[output_idx].color_delivery_observation_uncertain = true;
-                self.outputs[output_idx].presentation_uncertain = true;
+                self.outputs[output_idx].cancel_pending_frame();
+                if !self.flush_pending.swap(true, Ordering::SeqCst) {
+                    let _ = self.flush_tx.send(());
+                }
             }
             // Change the connector power state first. If that write fails the
             // still-visible scanout must retain its matching LUT/CTM instead
@@ -6854,18 +7391,20 @@ impl KmsState {
         origin: (i32, i32),
     ) -> KmsRenderElement {
         let context_id = renderer.context_id();
-        KmsRenderElement::Texture(TextureRenderElement::from_static_texture(
-            Id::new(),
-            context_id,
-            ((-origin.0) as f64, (-origin.1) as f64),
-            texture,
-            1,
-            Transform::Flipped180,
-            None,
-            None,
-            None,
-            None,
-            Kind::Unspecified,
+        KmsRenderElement::Texture(PhysicalRenderElement(
+            TextureRenderElement::from_static_texture(
+                Id::new(),
+                context_id,
+                (-f64::from(origin.0), -f64::from(origin.1)),
+                texture,
+                1,
+                Transform::Flipped180,
+                None,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            ),
         ))
     }
 
@@ -7879,7 +8418,7 @@ impl KmsState {
                         (tv_sec & 0xFFFFFFFF) as u32,
                         now.subsec_nanos(),
                     );
-                    frame_info.mark_ready();
+                    frame_info.mark_ready(state, elements.len());
                     frame_info.frame.ready();
                     Self::note_image_capture_fulfilled(counters);
                 } else {
@@ -8013,7 +8552,7 @@ impl KmsState {
                         (tv_sec & 0xFFFFFFFF) as u32,
                         now.subsec_nanos(),
                     );
-                    frame_info.mark_ready();
+                    frame_info.mark_ready(state, elements.len());
                     frame_info.frame.ready();
                     Self::note_image_capture_fulfilled(counters);
                 }
@@ -8540,6 +9079,7 @@ impl KmsState {
             // &mut self which isn't available here). The same scan also
             // captures the raw property handles the controlled atomic commit
             // programs later, plus the connector signalling handles.
+            let mut supports_dpms = false;
             let (color_pipeline_caps, color_property_handles) = {
                 let mgr = drm_output_manager.lock();
                 let dev = mgr.device();
@@ -8574,6 +9114,7 @@ impl KmsState {
                     for &prop_handle in handles {
                         if let Ok(info) = dev.get_property(prop_handle) {
                             match info.name().to_str().unwrap_or("") {
+                                "DPMS" => supports_dpms = true,
                                 "Colorspace" => {
                                     color_handles.colorspace = Some(u32::from(prop_handle));
                                     // The BT2020_RGB enum value is required to
@@ -8691,6 +9232,7 @@ impl KmsState {
                 last_software_region_planned: false,
                 last_hardware_pair_active: false,
                 dpms_off: false,
+                supports_dpms,
             });
         }
 
@@ -8717,6 +9259,7 @@ impl KmsState {
             needs_render: true,
             compositor_texture_cache: None,
             fbo_presentation: None,
+            direct_presentation_waiting: Vec::new(),
             capture_texture_cache: None,
             compositor_texture_keepalive: Vec::new(),
             background_id: Id::new(),
@@ -8836,6 +9379,21 @@ impl KmsState {
         Ok(handle)
     }
 
+    pub(super) fn probe_connectors(&mut self) {
+        let manager = self.drm_output_manager.lock();
+        let device = manager.device();
+        match device.resource_handles() {
+            Ok(resources) => {
+                for &connector in resources.connectors() {
+                    if let Err(error) = device.get_connector(connector, true) {
+                        log::debug!("failed to reprobe DRM connector {connector:?}: {error}");
+                    }
+                }
+            }
+            Err(error) => log::debug!("failed to enumerate DRM connectors for reprobe: {error}"),
+        }
+    }
+
     pub(super) fn native_presentation_supported(&self) -> bool {
         self.driver_supports_monotonic_timestamp
             && self
@@ -8910,10 +9468,28 @@ impl KmsState {
         let im_popups = state.im_popup_positions();
         let mut any_skipped = false;
         let mut any_failed = false;
-        let unambiguous_presentation_output = self.outputs.len() == 1;
+        let single_presentation_output = self.outputs.len() == 1;
+        let direct_presentation_roots = self.direct_presentation_roots(state, compositor.is_none());
         // Take ownership once. Any skipped output/render error drops callbacks;
         // no cached texture or subsequent client commit can reacquire them.
-        let mut fbo_presentation = self.fbo_presentation.take();
+        let mut fbo_presentation = self.fbo_presentation.take().filter(|proof| {
+            let valid = proof.output().is_some_and(|output| {
+                compositor.is_some_and(|comp| {
+                    self.presentation_output_ready(output)
+                        && self.fbo_presentation_output(
+                            state,
+                            proof.source_rect(),
+                            comp.screen_size(),
+                        ) == Some(output)
+                })
+            });
+            if !valid {
+                log::debug!(target: "jwm::kms::presentation",
+                    "compositor_feedback_rejected=unproven_output_domain target={:?} route={:?}",
+                    proof.target_rect(), proof.output());
+            }
+            valid
+        });
         for out_idx in 0..self.outputs.len() {
             // Outputs marked soft-disabled by wlr-output-management
             // `disable_head` Apply stop receiving frames but keep their
@@ -8947,6 +9523,14 @@ impl KmsState {
                 any_skipped = true;
                 // Nothing about this output changed; repeat last frame's
                 // verdict rather than dropping it out of the report.
+                self.repeat_last_presentation(out_idx);
+                continue;
+            }
+            if self.outputs[out_idx].presentation_uncertain {
+                // Recovery must not consume or display any fresh client
+                // commit on this output while a canceled flip can race it.
+                // Other outputs can keep making progress.
+                any_failed = true;
                 self.repeat_last_presentation(out_idx);
                 continue;
             }
@@ -9009,7 +9593,11 @@ impl KmsState {
                         None,
                         Kind::Cursor,
                     ) {
-                        elements.push(KmsRenderElement::Memory(elem));
+                        // The bitmap and its hotspot were already rasterized in
+                        // physical pixels by cursor_bitmap at this output scale.
+                        elements.push(KmsRenderElement::PhysicalMemory(PhysicalRenderElement(
+                            elem,
+                        )));
                     }
                 } else {
                     // Fallback: simple software pointer so we still have a visible cursor.
@@ -9402,18 +9990,18 @@ impl KmsState {
 
             if use_compositor {
                 let comp = compositor.unwrap();
-                // Compositor path: surfaces already imported in compositor_render_frame;
-                // just collect frame_roots for callback delivery.
-                for win in state.window_stack.iter().rev() {
-                    if !state.mapped_windows.contains(win) {
-                        continue;
+                // Use the desktop FBO's actual draw positions, including
+                // layout animation and popup placement, for this output's
+                // surface membership and frame callbacks.
+                let mut collect_composited_root = |surface: &WlSurface, window_id| {
+                    if !comp
+                        .composited_window_overlaps_output(window_id, output_rect_global_physical)
+                    {
+                        return;
                     }
-                    let Some(surface) = state.surface_for_window(*win) else {
-                        continue;
-                    };
                     frame_roots.push(surface.clone());
                     with_surface_tree_downward(
-                        &surface,
+                        surface,
                         (),
                         |_, _, _| TraversalAction::DoChildren(()),
                         |child_surface, child_states, _| {
@@ -9428,51 +10016,27 @@ impl KmsState {
                         },
                         |_, _, _| true,
                     );
-                }
-                // Include xdg_popup surfaces for frame callbacks.
-                for popup in state.popups.values() {
-                    let popup_surface = popup.wl_surface().clone();
-                    frame_roots.push(popup_surface.clone());
-                    with_surface_tree_downward(
-                        &popup_surface,
-                        (),
-                        |_, _, _| TraversalAction::DoChildren(()),
-                        |child_surface, child_states, _| {
-                            let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
-                            let Some(data) = data else {
-                                return;
-                            };
-                            if data.lock_safe().view().is_some() {
-                                out.output.enter(child_surface);
-                                visible_surfaces.insert(child_surface.downgrade());
-                            }
-                        },
-                        |_, _, _| true,
-                    );
-                }
-                // Include IME popup surfaces for frame callbacks.
-                for popup in &state.im_popups {
-                    if !popup.alive() {
-                        continue;
+                };
+                for win in state.window_stack.iter().rev() {
+                    if state.mapped_windows.contains(win)
+                        && let Some(surface) = state.surface_for_window(*win)
+                    {
+                        collect_composited_root(&surface, win.raw());
                     }
-                    let im_surface = popup.wl_surface().clone();
-                    frame_roots.push(im_surface.clone());
-                    with_surface_tree_downward(
-                        &im_surface,
-                        (),
-                        |_, _, _| TraversalAction::DoChildren(()),
-                        |child_surface, child_states, _| {
-                            let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
-                            let Some(data) = data else {
-                                return;
-                            };
-                            if data.lock_safe().view().is_some() {
-                                out.output.enter(child_surface);
-                                visible_surfaces.insert(child_surface.downgrade());
-                            }
-                        },
-                        |_, _, _| true,
-                    );
+                }
+                for popup in state.popups.values() {
+                    let surface = popup.wl_surface();
+                    let window_id =
+                        crate::backend::wayland_udev::compositor::XDG_POPUP_WINDOW_ID_PREFIX
+                            | u64::from(surface.id().protocol_id());
+                    collect_composited_root(surface, window_id);
+                }
+                for anchor in &im_popups {
+                    let surface = &anchor.surface;
+                    let window_id =
+                        crate::backend::wayland_udev::compositor::IME_POPUP_WINDOW_ID_PREFIX
+                            | u64::from(surface.id().protocol_id());
+                    collect_composited_root(surface, window_id);
                 }
                 // Wrap the compositor's output FBO texture as a full-screen render element.
                 let (sw, sh) = comp.screen_size();
@@ -9626,15 +10190,35 @@ impl KmsState {
                     } else {
                         Kind::Unspecified
                     };
-                    let window_elements: Vec<KmsRenderElement> = render_elements_from_surface_tree(
-                        &mut self.renderer,
-                        &surface,
-                        location,
-                        scale,
-                        1.0,
-                        window_kind,
-                    );
-                    elements.extend(window_elements);
+                    // Native toplevels receive physical WM dimensions in
+                    // xdg_toplevel.configure. The committed surface view
+                    // already removes the client's buffer scale. Keep its
+                    // destination and tree offsets in the WM pixel domain;
+                    // applying the output scale again clips large viewers.
+                    let physical_window = scale.x != 1.0
+                        && out.output.current_transform() == Transform::Normal
+                        && state.toplevels.contains_key(win);
+                    let window_scale = if physical_window {
+                        Scale::from(1.0)
+                    } else {
+                        scale
+                    };
+                    let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                        render_elements_from_surface_tree(
+                            &mut self.renderer,
+                            &surface,
+                            location,
+                            window_scale,
+                            1.0,
+                            window_kind,
+                        );
+                    elements.extend(window_elements.into_iter().map(|element| {
+                        if physical_window {
+                            KmsRenderElement::PhysicalSurface(PhysicalRenderElement(element))
+                        } else {
+                            KmsRenderElement::Surface(element)
+                        }
+                    }));
 
                     // Render window borders (server-side decorations for tiling WM).
                     if geo.border > 0 {
@@ -10019,13 +10603,23 @@ impl KmsState {
                 // guarantees a real replacement queue/vblank observation.
                 out.drm_output.reset_buffers();
             }
-            let frame_flags = fbo_proof_frame_flags(
+            let output_generation = out.presentation_output_generation;
+            let fbo_for_output = use_compositor
+                && fbo_presentation
+                    .as_ref()
+                    .and_then(|proof| proof.output())
+                    .is_some_and(|route| route.generation == output_generation);
+            let direct_for_output = !use_compositor
+                && direct_presentation_roots
+                    .iter()
+                    .any(|root| root.output_generation == output_generation);
+            let frame_flags = presentation_proof_frame_flags(
                 frame_flags_for_color_delivery(
                     color_delivery_retry_required,
                     manual_surface_path,
                     direct_scanout_eligible,
                 ),
-                fbo_presentation.is_some(),
+                fbo_for_output || direct_for_output,
             );
 
             match out.drm_output.render_frame(
@@ -10038,26 +10632,121 @@ impl KmsState {
                     // Render and callback extraction occur without dispatching
                     // another client commit. Direct surfaces use actual element
                     // states; the narrow FBO route consumes only the earlier
-                    // owned import/draw receipt. Unproven routes discard.
+                    // owned import/draw receipt. An output cannot drain a
+                    // direct root routed to a different CRTC.
+                    let direct_rendered =
+                        !use_compositor && !res.is_empty && !out.drm_mode_uncertain;
+                    let mut waited_callbacks = Vec::new();
+                    let waiting = &mut self.direct_presentation_waiting;
                     let mut callbacks = take_rendered_presentation_callbacks(
                         &frame_roots,
                         &res.states,
-                        unambiguous_presentation_output && !use_compositor && !res.is_empty,
+                        |surface| {
+                            if single_presentation_output {
+                                return Some(direct_rendered);
+                            }
+                            match direct_presentation_roots
+                                .iter()
+                                .find(|root| &root.surface == surface)
+                            {
+                                Some(root) if root.output_generation != output_generation => None,
+                                Some(root) => {
+                                    let proven = direct_rendered
+                                        && root.has_visible_opaque_area(&elements, scale);
+                                    if proven
+                                        && presentation_element_visible(&res.states, surface)
+                                        && let Some(index) =
+                                            waiting.iter().position(|wait| &wait.surface == surface)
+                                    {
+                                        waited_callbacks
+                                            .append(&mut waiting.swap_remove(index).callbacks);
+                                    }
+                                    if log::log_enabled!(target: "jwm::kms::presentation", log::Level::Debug)
+                                    {
+                                        let render_state = res.states.element_render_state(surface);
+                                        if !proven
+                                            || render_state.is_none_or(|r| r.visible_area == 0)
+                                        {
+                                            log::debug!(target: "jwm::kms::presentation",
+                                                "output={} direct_feedback_sample surface={:?} proven={proven} state={render_state:?} use_compositor={use_compositor} empty_frame={}",
+                                                out.output_name, surface.id(), res.is_empty);
+                                        }
+                                    }
+                                    Some(proven)
+                                }
+                                None => Some(false),
+                            }
+                        },
                     );
-                    if use_compositor && unambiguous_presentation_output && !res.is_empty
-                        && fbo_presentation.as_ref().is_some_and(|proof|
-                            fbo_cursor_composition_is_safe(&elements, cursor_prefix_len,
-                                compositor_element_index, proof.target_rect()))
-                        && compositor.is_some_and(|comp| fbo_output_domain_is_exact(
-                            (ox, oy), (out_w, out_h), comp.screen_size(),
-                            out.output.current_scale().fractional_scale(), out.output.current_transform()))
-                        && compositor_element_index.and_then(|index| elements.get(index))
-                            .and_then(|element| res.states.element_render_state(element.id().clone())).is_some_and(|r|
-                            r.visible_area > 0 && r.presentation_state != smithay::backend::renderer::element::RenderElementPresentationState::Skipped)
+                    callbacks.append(&mut waited_callbacks);
+                    let direct_feedback_count = callbacks.len();
+                    let mut compositor_feedback_debug = None;
+                    if fbo_for_output
                         && let (Some(proof), Some(comp)) = (fbo_presentation.take(), compositor)
                     {
-                        callbacks.extend(proof.consume(state, comp.output_texture_id(),
-                            comp.output_texture_generation(), comp.output_content_serial()));
+                        let local_target = proof
+                            .output()
+                            .and_then(|route| route.local_rect(proof.target_rect()));
+                        let rejection = if local_target.is_none() {
+                            Some("unproven_output_domain")
+                        } else if res.is_empty {
+                            Some("empty_frame")
+                        } else if !local_target.is_some_and(|target| {
+                            fbo_cursor_composition_is_safe(
+                                &elements,
+                                cursor_prefix_len,
+                                compositor_element_index,
+                                target,
+                                scale,
+                            )
+                        }) {
+                            Some("unsafe_cursor_or_overlay")
+                        } else if !compositor_element_index
+                            .and_then(|index| elements.get(index))
+                            .and_then(|element| {
+                                res.states.element_render_state(element.id().clone())
+                            })
+                            .is_some_and(|r| {
+                                r.visible_area > 0
+                                    && r.presentation_state
+                                        != smithay::backend::renderer::element::RenderElementPresentationState::Skipped
+                            })
+                        {
+                            Some("compositor_element_not_visible")
+                        } else {
+                            None
+                        };
+                        if let Some(reason) = rejection {
+                            log::debug!(target: "jwm::kms::presentation",
+                                "output={} compositor_feedback_rejected={reason} target={:?} cursor_elements={} elements={}",
+                                out.output_name, proof.target_rect(), cursor_prefix_len, elements.len());
+                        } else if let Some(local_target) = local_target {
+                            let visible_rect = proof.target_rect();
+                            let feedback = proof.consume(
+                                state,
+                                comp.output_texture_id(),
+                                comp.output_texture_generation(),
+                                comp.output_content_serial(),
+                            );
+                            if !feedback.is_empty()
+                                && log::log_enabled!(target: "jwm::kms::presentation", log::Level::Debug)
+                            {
+                                // The admission check above validated the size
+                                // and the exact list of software cursor elements.
+                                let (x, y, width, height) = local_target;
+                                let rect = Rectangle::<i32, Physical>::new(
+                                    (x, y).into(),
+                                    (width as i32, height as i32).into(),
+                                );
+                                let overlapping = elements[..cursor_prefix_len]
+                                    .iter()
+                                    .filter(|cursor| rect.overlaps(cursor.geometry(scale)))
+                                    .count();
+                                compositor_feedback_debug =
+                                    Some((feedback.len(), visible_rect, local_target, overlapping));
+                            }
+                            callbacks.extend(feedback);
+                        }
                     }
                     let queue_boundary = FrameQueueBoundary::now();
                     let submission = Submission {
@@ -10074,7 +10763,9 @@ impl KmsState {
                         direct_scanout_eligible,
                         matches!(
                             &res.primary_element,
-                            PrimaryPlaneElement::Element(KmsRenderElement::Surface(_))
+                            PrimaryPlaneElement::Element(
+                                KmsRenderElement::Surface(_) | KmsRenderElement::PhysicalSurface(_)
+                            )
                         ),
                     );
                     if res.is_empty {
@@ -10185,6 +10876,18 @@ impl KmsState {
                             }
                         }
                     } else {
+                        if direct_feedback_count != 0 {
+                            log::debug!(target: "jwm::kms::presentation",
+                                "output={} submission={} direct_feedback_callbacks={direct_feedback_count}",
+                                out.output_name, submission.serial);
+                        }
+                        if let Some((count, visible_rect, local_rect, overlapping)) =
+                            compositor_feedback_debug
+                        {
+                            log::debug!(target: "jwm::kms::presentation",
+                                "output={} submission={} compositor_feedback_callbacks={count} visible_rect={visible_rect:?} overlapping_cursor_elements={overlapping} output_visible_rect={local_rect:?}",
+                                out.output_name, submission.serial);
+                        }
                         out.frame_pending = true;
                         out.frame_pending_since = Some(std::time::Instant::now());
                         out.frame_pending_boundary = Some(queue_boundary);
@@ -10231,7 +10934,7 @@ impl KmsState {
         }
 
         if !any_skipped && !any_failed {
-            self.needs_render = false;
+            self.needs_render = !self.direct_presentation_waiting.is_empty();
         }
 
         // Rendering can enqueue Wayland events (enter/leave, etc.).
@@ -10254,10 +10957,9 @@ impl KmsState {
         };
 
         // A watchdog or DPMS cancellation may leave its page-flip event in the
-        // DRM fd. Never let that late event acknowledge user data belonging to
-        // a newer queue. Timestamp comparison handles the common case; the
-        // uncertainty flag makes the first post-cancellation observation
-        // fail-closed when event timing cannot disambiguate it.
+        // DRM fd. Recovery completes a synchronous commit before sampling the
+        // next queue boundary. Events from the older commit remain too early
+        // to acknowledge that newer frame.
         {
             let out = &mut self.outputs[output_idx];
             if !out.frame_pending {
@@ -10303,14 +11005,30 @@ impl KmsState {
                         monotonic_time: presentation_time,
                         uncertain: out.presentation_uncertain
                             || uncertain
+                            || submission.output_generation != out.presentation_output_generation
                             || presentation_generation.is_none()
                             || frame.presentation_generation != presentation_generation,
                     };
-                    batch.complete(evidence, |callback, time| {
-                        callback.presented(&out.output, time, Refresh::Unknown,
-                            metadata.as_ref().map_or(0, |m| u64::from(m.sequence)),
-                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock);
+                    let callbacks = batch.callback_count();
+                    let sequence = metadata.as_ref().map_or(0, |m| u64::from(m.sequence));
+                    let completed = batch.complete(evidence, |callback, time| {
+                        // A DRM event can carry a software timestamp. Its
+                        // monotonic clock alone cannot certify hw_clock.
+                        callback.presented(
+                            &out.output,
+                            time,
+                            Refresh::Unknown,
+                            sequence,
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+                        );
                     });
+                    if callbacks > 0 {
+                        log::debug!(target: "jwm::kms::presentation",
+                            "output={} submission={} flip_ns={} sequence={} callbacks={} completed={}",
+                            out.output_name, submission.serial,
+                            presentation_time.map_or(0, |time| time.as_nanos()),
+                            sequence, callbacks, completed);
+                    }
                 }
                 // Missing queue identity drops the batch and discards.
             }
@@ -14605,84 +15323,112 @@ mod frame_color_transaction_tests {
 }
 
 #[cfg(test)]
-mod fbo_output_domain_tests {
-    use super::{Transform, fbo_output_domain_is_exact};
+mod presentation_output_tests {
+    use super::{OutputRoute, crosses_presentation_outputs, unique_presentation_output};
+
+    const LEFT: OutputRoute = OutputRoute {
+        generation: 7,
+        desktop_rect: (0, 0, 800, 600),
+    };
+    const RIGHT: OutputRoute = OutputRoute {
+        generation: 8,
+        desktop_rect: (800, 100, 800, 600),
+    };
+
     #[test]
-    fn only_identity_single_output_pixel_domain_is_proven() {
-        assert!(fbo_output_domain_is_exact(
-            (0, 0),
-            (800, 600),
-            (800, 600),
-            1.0,
-            Transform::Normal
-        ));
+    fn contained_surface_routes_to_its_exact_output() {
+        let outputs = [Some(LEFT), Some(RIGHT)];
+        assert_eq!(
+            unique_presentation_output((5, 20, 795, 70), outputs),
+            Some(LEFT)
+        );
+        assert_eq!(
+            unique_presentation_output((800, 100, 100, 60), outputs),
+            Some(RIGHT)
+        );
+        assert_eq!(
+            RIGHT.local_rect((850, 120, 100, 20)),
+            Some((50, 20, 100, 20))
+        );
     }
+
     #[test]
-    fn global_fbo_with_shifted_physical_slice_is_not_proof() {
-        assert!(!fbo_output_domain_is_exact(
-            (800, 0),
-            (800, 600),
-            (1600, 600),
-            1.0,
-            Transform::Normal
-        ));
-        assert!(!fbo_output_domain_is_exact(
-            (-800, 0),
-            (800, 600),
-            (800, 600),
-            1.0,
-            Transform::Normal
-        ));
-        assert!(!fbo_output_domain_is_exact(
-            (0, 0),
-            (800, 600),
-            (1600, 600),
-            1.0,
-            Transform::Normal
-        ));
+    fn straddling_mirrored_or_partially_overlapping_routes_are_rejected() {
+        let outputs = [Some(LEFT), Some(RIGHT)];
+        assert_eq!(
+            unique_presentation_output((780, 100, 40, 100), outputs),
+            None
+        );
+        assert_eq!(unique_presentation_output((780, 0, 40, 100), outputs), None);
+        let matching = OutputRoute {
+            generation: 8,
+            ..LEFT
+        };
+        assert_eq!(
+            unique_presentation_output((20, 100, 100, 100), [Some(LEFT), Some(matching)]),
+            None
+        );
+        let overlapping = OutputRoute {
+            generation: 8,
+            desktop_rect: (50, 40, 100, 50),
+        };
+        assert_eq!(
+            unique_presentation_output((20, 50, 40, 30), [Some(LEFT), Some(overlapping)]),
+            None
+        );
     }
+
     #[test]
-    fn scaled_rotated_or_empty_domains_fail_closed() {
-        assert!(!fbo_output_domain_is_exact(
-            (0, 0),
-            (800, 600),
-            (800, 600),
-            2.0,
-            Transform::Normal
+    fn unsupported_geometry_and_overflow_fail_closed() {
+        assert_eq!(
+            unique_presentation_output((20, 100, 100, 100), [Some(LEFT), None]),
+            None
+        );
+        assert_eq!(
+            unique_presentation_output((20, 100, 0, 100), [Some(LEFT)]),
+            None
+        );
+        assert_eq!(
+            unique_presentation_output((i32::MAX, 100, 1, 100), [Some(LEFT)]),
+            None
+        );
+        let overflow = OutputRoute {
+            generation: 8,
+            desktop_rect: (i32::MAX, 0, 800, 600),
+        };
+        assert_eq!(
+            unique_presentation_output((20, 100, 100, 100), [Some(LEFT), Some(overflow)]),
+            None
+        );
+    }
+
+    #[test]
+    fn crossing_retry_requires_two_disjoint_outputs_and_a_possible_fit() {
+        let outputs = [Some(LEFT), Some(RIGHT)];
+        assert!(crosses_presentation_outputs((780, 110, 40, 30), outputs));
+        assert!(!crosses_presentation_outputs((780, 0, 40, 100), outputs));
+        assert!(!crosses_presentation_outputs((5, 110, 1000, 30), outputs));
+        assert!(!crosses_presentation_outputs((800, 110, 40, 30), outputs));
+        assert!(!crosses_presentation_outputs(
+            (20, 100, 100, 100),
+            [Some(LEFT), Some(LEFT)]
         ));
-        assert!(!fbo_output_domain_is_exact(
-            (0, 0),
-            (800, 600),
-            (800, 600),
-            1.0,
-            Transform::_90
-        ));
-        assert!(!fbo_output_domain_is_exact(
-            (0, 0),
-            (0, 600),
-            (0, 600),
-            1.0,
-            Transform::Normal
-        ));
-        assert!(!fbo_output_domain_is_exact(
-            (0, 0),
-            (-1, 600),
-            (u32::MAX, 600),
-            1.0,
-            Transform::Normal
+        assert!(!crosses_presentation_outputs(
+            (780, 110, 40, 30),
+            [Some(LEFT), Some(RIGHT), None]
         ));
     }
 }
 
 #[cfg(test)]
 mod fbo_cursor_rect_tests {
-    use super::{Physical, Rectangle, fbo_cursor_rect_is_disjoint};
+    use super::{Physical, Rectangle, scanout_preserves_visible_area};
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
         Rectangle::new((x, y).into(), (w, h).into())
     }
     const TARGET: (i32, i32, u32, u32) = (20, 20, 40, 30);
     #[test]
-    fn cursor_outside_and_exact_edge_are_disjoint() {
+    fn cursor_outside_and_exact_edge_preserve_the_target() {
         for r in [
             rect(0, 0, 8, 8),
             rect(0, 20, 20, 10),
@@ -14690,24 +15436,38 @@ mod fbo_cursor_rect_tests {
             rect(20, 50, 10, 10),
             rect(-8, 20, 8, 12),
         ] {
-            assert!(fbo_cursor_rect_is_disjoint(TARGET, r));
+            assert!(scanout_preserves_visible_area(TARGET, [r]));
         }
     }
     #[test]
-    fn one_pixel_and_shadow_overlap_are_not_disjoint() {
-        for r in [
-            rect(19, 20, 2, 10),
-            rect(59, 20, 10, 10),
-            rect(20, 49, 10, 10),
-            rect(25, 25, 2, 2),
-        ] {
-            assert!(!fbo_cursor_rect_is_disjoint(TARGET, r));
-        }
-        assert!(fbo_cursor_rect_is_disjoint(TARGET, rect(0, 10, 20, 10)));
-        assert!(
-            !fbo_cursor_rect_is_disjoint(TARGET, rect(1, 11, 20, 10)),
-            "shadow alone overlaps"
-        );
+    fn cursor_preserves_presentation_only_with_uncovered_pixels() {
+        assert!(scanout_preserves_visible_area(
+            TARGET,
+            [rect(19, 20, 10, 30), rect(50, 20, 9, 30)]
+        ));
+        assert!(scanout_preserves_visible_area(
+            TARGET,
+            [rect(20, 20, 39, 30)]
+        ));
+        assert!(!scanout_preserves_visible_area(
+            TARGET,
+            [rect(20, 20, 40, 30)]
+        ));
+        assert!(!scanout_preserves_visible_area(
+            TARGET,
+            [rect(10, 10, 32, 50), rect(41, 20, 19, 30)]
+        ));
+        assert!(!scanout_preserves_visible_area(
+            (0, 0, 5, 5),
+            [
+                rect(2, 3, 1, 1),
+                rect(1, 1, 1, 1),
+                rect(0, 4, 4, 1),
+                rect(0, 3, 5, 2),
+                rect(0, 0, 3, 5),
+                rect(1, 0, 4, 4),
+            ]
+        ));
     }
     #[test]
     fn malformed_or_overflowing_rectangles_fail_closed() {
@@ -14721,10 +15481,10 @@ mod fbo_cursor_rect_tests {
             rect(i32::MAX, 0, 1, 4),
             rect(0, i32::MAX, 4, 1),
         ] {
-            assert!(!fbo_cursor_rect_is_disjoint(TARGET, r));
+            assert!(!scanout_preserves_visible_area(TARGET, [r]));
         }
         for t in [(0, 0, 0, 1), (0, 0, u32::MAX, 1), (-1, 0, 1, 1)] {
-            assert!(!fbo_cursor_rect_is_disjoint(t, rect(100, 100, 1, 1)));
+            assert!(!scanout_preserves_visible_area(t, []));
         }
     }
 }
@@ -14733,8 +15493,9 @@ mod fbo_cursor_rect_tests {
 pub(crate) fn compositor_frame_element_for_test(
     renderer: &GlesRenderer,
     texture: GlesTexture,
+    origin: (i32, i32),
 ) -> KmsRenderElement {
-    KmsState::compositor_frame_element(renderer, texture, (0, 0))
+    KmsState::compositor_frame_element(renderer, texture, origin)
 }
 
 #[cfg(test)]
@@ -14742,8 +15503,9 @@ pub(crate) fn composite_fbo_elements_for_test(
     renderer: &mut GlesRenderer,
     elements: &[KmsRenderElement],
     size: (i32, i32),
+    scale: f64,
 ) -> Option<Vec<u8>> {
-    let texture = KmsState::composite_elements_to_texture(renderer, elements, size, 1.0)?;
+    let texture = KmsState::composite_elements_to_texture(renderer, elements, size, scale)?;
     let mapping = renderer
         .copy_texture(
             &texture,
@@ -14756,11 +15518,11 @@ pub(crate) fn composite_fbo_elements_for_test(
 
 #[cfg(test)]
 mod fbo_cursor_frame_flag_tests {
-    use super::{FrameFlags, fbo_proof_frame_flags};
+    use super::{FrameFlags, presentation_proof_frame_flags};
     #[test]
     fn proof_forces_cursor_and_overlay_software_without_changing_other_flags() {
         let input = FrameFlags::all();
-        let actual = fbo_proof_frame_flags(input, true);
+        let actual = presentation_proof_frame_flags(input, true);
         assert!(!actual.intersects(
             FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT
         ));
@@ -14771,14 +15533,14 @@ mod fbo_cursor_frame_flag_tests {
                     | FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT)
         );
         assert_eq!(
-            fbo_proof_frame_flags(FrameFlags::empty(), true),
+            presentation_proof_frame_flags(FrameFlags::empty(), true),
             FrameFlags::empty()
         );
     }
     #[test]
     fn ordinary_frames_retain_original_plane_policy() {
         for flags in [FrameFlags::empty(), FrameFlags::DEFAULT, FrameFlags::all()] {
-            assert_eq!(fbo_proof_frame_flags(flags, false), flags);
+            assert_eq!(presentation_proof_frame_flags(flags, false), flags);
         }
     }
 }
@@ -14789,6 +15551,20 @@ pub(crate) fn fbo_cursor_composition_for_test(
     cursor_prefix_len: usize,
     compositor_index: Option<usize>,
     target: (i32, i32, u32, u32),
+    scale: f64,
 ) -> bool {
-    fbo_cursor_composition_is_safe(elements, cursor_prefix_len, compositor_index, target)
+    fbo_cursor_composition_is_safe(
+        elements,
+        cursor_prefix_len,
+        compositor_index,
+        target,
+        Scale::from(scale),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn physical_cursor_element_for_test(
+    element: MemoryRenderBufferRenderElement<GlesRenderer>,
+) -> KmsRenderElement {
+    KmsRenderElement::PhysicalMemory(PhysicalRenderElement(element))
 }

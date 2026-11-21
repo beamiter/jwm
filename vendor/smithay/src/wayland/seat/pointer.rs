@@ -1,3 +1,4 @@
+use crate::utils::Logical;
 use std::sync::{Arc, Mutex, atomic::Ordering};
 
 use portable_atomic::AtomicF64;
@@ -66,6 +67,7 @@ impl<D: SeatHandler + 'static> PointerHandle<D> {
 pub struct AuthorizedPointerSnapshot {
     target: WlSurface,
     generation: u64,
+    enter: Serial,
     receivers: Vec<WlPointer>,
 }
 
@@ -250,6 +252,7 @@ where
         Some(AuthorizedPointerSnapshot {
             target: expected.clone(),
             generation: inner.authority_generation,
+            enter: self.last_enter()?,
             receivers,
         })
     }
@@ -257,7 +260,7 @@ where
     fn with_authorized_pointer(
         &self,
         snapshot: &AuthorizedPointerSnapshot,
-        deliver: impl FnOnce(&[WlPointer]),
+        deliver: impl FnOnce(&[WlPointer], Point<f64, Logical>),
     ) -> bool {
         let inner = self.inner.lock().unwrap();
         if inner.authority_generation == u64::MAX
@@ -288,13 +291,14 @@ where
         }
         // Keep both locks through the entire atomic motion/click, so receiver
         // registration or focus mutation cannot interleave with the pair.
-        deliver(&snapshot.receivers);
+        let local = inner.location - inner.focus.as_ref().unwrap().1;
+        deliver(&snapshot.receivers, local);
         true
     }
 
     /// Recheck the exact snapshot without generating any input.
     pub fn authorized_pointer_snapshot_is_current(&self, snapshot: &AuthorizedPointerSnapshot) -> bool {
-        self.with_authorized_pointer(snapshot, |_| {})
+        self.with_authorized_pointer(snapshot, |_, _| {})
     }
 
     /// Deliver exactly one vertical wheel detent to the original authorized
@@ -338,7 +342,7 @@ where
         {
             return false;
         }
-        self.with_authorized_pointer(snapshot, |receivers| {
+        self.with_authorized_pointer(snapshot, |receivers, _| {
             for pointer in receivers {
                 pointer.motion(time.millis(), x, y);
                 if pointer.version() >= 5 {
@@ -374,7 +378,7 @@ where
         if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 || x > 16384.0 || y > 16384.0 {
             return false;
         }
-        self.with_authorized_pointer(snapshot, |receivers| {
+        self.with_authorized_pointer(snapshot, |receivers, _| {
             for pointer in receivers {
                 pointer.motion(time.millis(), x, y);
                 if click {
@@ -386,6 +390,119 @@ where
                 }
             }
         })
+    }
+
+    /// Deliver motion or an atomic click to a validated subsurface and restore the
+    /// client's original pointer focus. The compositor keeps its original
+    /// focus, position and grabs. The new serial does not grant seat authority.
+    pub fn send_authorized_subsurface(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        target: &WlSurface,
+        position: (f64, f64),
+        click: bool,
+        serial: Serial,
+        time: InputTime,
+    ) -> bool {
+        let (x, y) = position;
+        if !target.is_alive()
+            || target == &snapshot.target
+            || target.client().map(|client| client.id()) != snapshot.target.client().map(|client| client.id())
+            || !(0.0..=16384.0).contains(&x)
+            || !(0.0..=16384.0).contains(&y)
+        {
+            return false;
+        }
+        self.with_authorized_pointer(snapshot, |receivers, root_position| {
+            for pointer in receivers {
+                pointer.leave(serial.into(), &snapshot.target);
+                pointer.enter(serial.into(), target, x, y);
+                pointer.motion(time.millis(), x, y);
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+                if click {
+                    pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Pressed);
+                    pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Released);
+                    if pointer.version() >= 5 {
+                        pointer.frame();
+                    }
+                }
+                pointer.leave(serial.into(), target);
+                pointer.enter(
+                    snapshot.enter.into(),
+                    &snapshot.target,
+                    root_position.x,
+                    root_position.y,
+                );
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+        })
+    }
+
+    /// Begin an in-surface drag on the original receivers. This serial is
+    /// never recorded in the seat and cannot authorize a compositor grab.
+    pub fn start_authorized_drag(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        position: (f64, f64),
+        serial: Serial,
+        time: InputTime,
+    ) -> bool {
+        let (x, y) = position;
+        if !(0.0..=16384.0).contains(&x) || !(0.0..=16384.0).contains(&y) {
+            return false;
+        }
+        self.with_authorized_pointer(snapshot, |receivers, _| {
+            for pointer in receivers {
+                pointer.motion(time.millis(), x, y);
+                pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Pressed);
+                if pointer.version() >= 5 {
+                    pointer.frame();
+                }
+            }
+        })
+    }
+
+    /// Balance exactly the old receivers that retain the original enter.
+    /// New receivers never observe a release. A leave has already ended
+    /// the old sequence, even if the same surface later regains focus.
+    pub fn cleanup_authorized_drag(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        serial: Serial,
+        time: InputTime,
+    ) -> bool {
+        let inner = self.inner.lock().unwrap();
+        if inner.pressed_buttons.contains(&0x110) {
+            return false;
+        }
+        self.cleanup_authorized_drag_after_keyboard_leave(snapshot, serial, time)
+    }
+
+    /// Balance the original pointer enter when the keyboard loses focus.
+    /// This does not acquire the pointer dispatch lock, which can already be
+    /// held during a pointer-driven keyboard focus change. The compositor
+    /// must revoke synthetic input before dispatching any local input edge.
+    pub fn cleanup_authorized_drag_after_keyboard_leave(
+        &self,
+        snapshot: &AuthorizedPointerSnapshot,
+        serial: Serial,
+        time: InputTime,
+    ) -> bool {
+        let current_enter = self.wl_pointer.last_enter.lock().unwrap();
+        if !snapshot.target.is_alive() || *current_enter != Some(snapshot.enter) {
+            return false;
+        }
+        for pointer in snapshot.receivers.iter().filter(|pointer| pointer.is_alive()) {
+            pointer.button(serial.into(), time.millis(), 0x110, WlButtonState::Released);
+            if pointer.version() >= 5 {
+                pointer.frame();
+            }
+        }
+        true
     }
 }
 

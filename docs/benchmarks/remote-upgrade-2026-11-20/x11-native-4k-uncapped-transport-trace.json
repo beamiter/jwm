@@ -1,0 +1,3668 @@
+{
+  "schema_version": 1,
+  "previous_gap_ms": 7411.00723,
+  "previous_multi_second_gap_reproduced": false,
+  "build": {
+    "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "features": [
+      "remote-x11",
+      "remote-wayland",
+      "remote-h264"
+    ],
+    "profile": "release, locked, no default features",
+    "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "viewer_binary_sha256": "b51bdd70ece747a3f535a261086a873d0ace3388acb067a7a099347f58a5cdd6",
+    "host_linked_ffmpeg_sonames": [
+      "libavcodec.so.58",
+      "libavutil.so.56",
+      "libswscale.so.5"
+    ],
+    "viewer_linked_ffmpeg_sonames": [
+      "libavcodec.so.60",
+      "libavutil.so.58",
+      "libswscale.so.7"
+    ]
+  },
+  "result": {
+    "arm": "treatment",
+    "configured_cap_bytes_per_second": 0,
+    "send_buffer_bytes_requested": 0,
+    "pilot": true,
+    "session_id": "2826f248708b446691aeb40456bbfcaf",
+    "ffmpeg_encoder": "h264_nvenc",
+    "codec": "H.264",
+    "source_and_encoded_dimensions": [
+      3840,
+      2160
+    ],
+    "requested_fps": 30,
+    "host_window_seconds": 35.940126687,
+    "observer_window_seconds": 30.004454789,
+    "host_h264_frames": 265,
+    "host_drawn_acks": 265,
+    "host_zero_frame_windows": 0,
+    "viewer_zero_drawn_windows": 0,
+    "viewer_drawn_frames": 223,
+    "observer_unique_source_frames": 223,
+    "observer_unique_frames_per_second": 7.432229699496307,
+    "observer_gap_ms": {
+      "median": 126.277138,
+      "p95": 218.04184,
+      "max": 265.965842
+    },
+    "host_payload_mbps": 10.550482342544337,
+    "host_write_mean_ms_max_window": 0.5028587499999999,
+    "host_credit_wait_mean_ms_max_window": 42.102477121212125,
+    "source_observed_submit_fps": 59.91679702858207,
+    "source_summary": {
+      "type": "p09_end",
+      "role": "source",
+      "monotonic_ns": 50548998891102,
+      "run_id": 1,
+      "submitted": 2476,
+      "deadline_skips": 6,
+      "first_submit_ns": 50507682882221,
+      "last_submit_ns": 50548990163697,
+      "max_render_sync_ns": 63493384,
+      "interrupted": true
+    },
+    "viewer_observer_summary": {
+      "type": "p09_end",
+      "role": "observer",
+      "monotonic_ns": 50466275716866,
+      "run_id": 1,
+      "reads": 271,
+      "unique": 268,
+      "duplicates": 2,
+      "invalid": 1,
+      "wrong_run": 0,
+      "reordered": 0,
+      "damage_events": 271,
+      "max_read_ns": 505380,
+      "interrupted": false,
+      "target_lost": false
+    },
+    "host_rate_targets": [],
+    "host_nvenc_applies": [],
+    "host_send_buffer_diagnostics": [],
+    "viewer_observer_start_ns": 50434757981640,
+    "viewer_observer_end_ns": 50464762436429,
+    "uncapped_unique_fps_gate_met": null,
+    "adaptive_bitrate_step_applied": false,
+    "adaptive_fps_step_applied": false,
+    "feature_flag": "JWM_REMOTE_PARALLEL_YUV420",
+    "enabled_at": "both",
+    "host_capture_scaling_policy": "cpu",
+    "host_capture_modes": [
+      "root/cpu-resize/core-getimage/no-damage/cursor-events"
+    ],
+    "viewer_scaling_policy": "cpu",
+    "host_candidate_diagnostics": [
+      "jwm-remote: parallel 4:2:0 conversion active (RGB24 -> YUV420P, 3840x2160, 4 bands)"
+    ],
+    "viewer_candidate_diagnostics": [
+      "jwm-remote: parallel 4:2:0 conversion active (NV12 -> RGB24, 3840x2160, 4 bands)"
+    ],
+    "expected_candidate_path": {
+      "host": true,
+      "viewer": true
+    },
+    "observed_candidate_path": {
+      "host": true,
+      "viewer": true
+    },
+    "candidate_path_verified": true,
+    "passive_tcp_counters": {
+      "viewer_loopback": "viewer_loopback-tcp.jsonl",
+      "ssh_transport": "ssh_transport-tcp.jsonl"
+    }
+  },
+  "observer_marks": [
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50434777196110,
+      "run_id": 1,
+      "source_frame": 549
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50434979296034,
+      "run_id": 1,
+      "source_frame": 555
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50435190395523,
+      "run_id": 1,
+      "source_frame": 568
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50435251066734,
+      "run_id": 1,
+      "source_frame": 580
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50435366873264,
+      "run_id": 1,
+      "source_frame": 584
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50435441817012,
+      "run_id": 1,
+      "source_frame": 590
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50435653745585,
+      "run_id": 1,
+      "source_frame": 595
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50435868335870,
+      "run_id": 1,
+      "source_frame": 608
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50435923385535,
+      "run_id": 1,
+      "source_frame": 621
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436011800850,
+      "run_id": 1,
+      "source_frame": 624
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436127896185,
+      "run_id": 1,
+      "source_frame": 629
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436222647552,
+      "run_id": 1,
+      "source_frame": 637
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436294387296,
+      "run_id": 1,
+      "source_frame": 642
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436377559477,
+      "run_id": 1,
+      "source_frame": 647
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436433984535,
+      "run_id": 1,
+      "source_frame": 651
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436515738955,
+      "run_id": 1,
+      "source_frame": 655
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436592146329,
+      "run_id": 1,
+      "source_frame": 661
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436689929395,
+      "run_id": 1,
+      "source_frame": 664
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436734711692,
+      "run_id": 1,
+      "source_frame": 670
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50436923245571,
+      "run_id": 1,
+      "source_frame": 673
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50437141337811,
+      "run_id": 1,
+      "source_frame": 684
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50437339403322,
+      "run_id": 1,
+      "source_frame": 697
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50437394189420,
+      "run_id": 1,
+      "source_frame": 709
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50437574478516,
+      "run_id": 1,
+      "source_frame": 712
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50437776424047,
+      "run_id": 1,
+      "source_frame": 723
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50437985974385,
+      "run_id": 1,
+      "source_frame": 735
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50438061391102,
+      "run_id": 1,
+      "source_frame": 748
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50438149053447,
+      "run_id": 1,
+      "source_frame": 752
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50438329812487,
+      "run_id": 1,
+      "source_frame": 757
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50438522636176,
+      "run_id": 1,
+      "source_frame": 768
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50438702058111,
+      "run_id": 1,
+      "source_frame": 780
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50438744835007,
+      "run_id": 1,
+      "source_frame": 791
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50438897427650,
+      "run_id": 1,
+      "source_frame": 796
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50438983656744,
+      "run_id": 1,
+      "source_frame": 802
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50439045087783,
+      "run_id": 1,
+      "source_frame": 807
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50439258844676,
+      "run_id": 1,
+      "source_frame": 811
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50439406255697,
+      "run_id": 1,
+      "source_frame": 824
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50439522803763,
+      "run_id": 1,
+      "source_frame": 833
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50439734384756,
+      "run_id": 1,
+      "source_frame": 840
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50439852939567,
+      "run_id": 1,
+      "source_frame": 852
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50439969473666,
+      "run_id": 1,
+      "source_frame": 861
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50440180522456,
+      "run_id": 1,
+      "source_frame": 867
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50440229896168,
+      "run_id": 1,
+      "source_frame": 879
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50440333896392,
+      "run_id": 1,
+      "source_frame": 882
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50440429531360,
+      "run_id": 1,
+      "source_frame": 891
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50440521649470,
+      "run_id": 1,
+      "source_frame": 894
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50440737030644,
+      "run_id": 1,
+      "source_frame": 901
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50440830922258,
+      "run_id": 1,
+      "source_frame": 914
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50441028511315,
+      "run_id": 1,
+      "source_frame": 918
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50441220780308,
+      "run_id": 1,
+      "source_frame": 930
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50441303603498,
+      "run_id": 1,
+      "source_frame": 943
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50441506424858,
+      "run_id": 1,
+      "source_frame": 947
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50441578758656,
+      "run_id": 1,
+      "source_frame": 959
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50441789608488,
+      "run_id": 1,
+      "source_frame": 964
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50441934785145,
+      "run_id": 1,
+      "source_frame": 976
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50442005805379,
+      "run_id": 1,
+      "source_frame": 985
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50442183083523,
+      "run_id": 1,
+      "source_frame": 989
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50442253590980,
+      "run_id": 1,
+      "source_frame": 1000
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50442493941058,
+      "run_id": 1,
+      "source_frame": 1006
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50442705837656,
+      "run_id": 1,
+      "source_frame": 1018
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50442777055663,
+      "run_id": 1,
+      "source_frame": 1031
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50442936948490,
+      "run_id": 1,
+      "source_frame": 1036
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50443133935252,
+      "run_id": 1,
+      "source_frame": 1045
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50443220208082,
+      "run_id": 1,
+      "source_frame": 1057
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50443301147641,
+      "run_id": 1,
+      "source_frame": 1062
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50443358910550,
+      "run_id": 1,
+      "source_frame": 1067
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50443584738827,
+      "run_id": 1,
+      "source_frame": 1072
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50443629651606,
+      "run_id": 1,
+      "source_frame": 1084
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50443830867596,
+      "run_id": 1,
+      "source_frame": 1087
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50443974215930,
+      "run_id": 1,
+      "source_frame": 1099
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50444186807597,
+      "run_id": 1,
+      "source_frame": 1107
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50444262828756,
+      "run_id": 1,
+      "source_frame": 1120
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50444334563894,
+      "run_id": 1,
+      "source_frame": 1124
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50444475171520,
+      "run_id": 1,
+      "source_frame": 1129
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50444589255541,
+      "run_id": 1,
+      "source_frame": 1138
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50444651542758,
+      "run_id": 1,
+      "source_frame": 1144
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50444716574485,
+      "run_id": 1,
+      "source_frame": 1148
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50444830478035,
+      "run_id": 1,
+      "source_frame": 1154
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50445048070483,
+      "run_id": 1,
+      "source_frame": 1158
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50445173575739,
+      "run_id": 1,
+      "source_frame": 1171
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50445386477237,
+      "run_id": 1,
+      "source_frame": 1179
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50445453970659,
+      "run_id": 1,
+      "source_frame": 1192
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50445655038652,
+      "run_id": 1,
+      "source_frame": 1196
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50445813907881,
+      "run_id": 1,
+      "source_frame": 1208
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50446012800550,
+      "run_id": 1,
+      "source_frame": 1223
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50446078803024,
+      "run_id": 1,
+      "source_frame": 1229
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50446332763438,
+      "run_id": 1,
+      "source_frame": 1233
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50446431585994,
+      "run_id": 1,
+      "source_frame": 1245
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50446614388576,
+      "run_id": 1,
+      "source_frame": 1255
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50446833600838,
+      "run_id": 1,
+      "source_frame": 1265
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50446908817291,
+      "run_id": 1,
+      "source_frame": 1278
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50447174302641,
+      "run_id": 1,
+      "source_frame": 1283
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50447224089872,
+      "run_id": 1,
+      "source_frame": 1288
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50447350367010,
+      "run_id": 1,
+      "source_frame": 1298
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50447474082052,
+      "run_id": 1,
+      "source_frame": 1310
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50447612652831,
+      "run_id": 1,
+      "source_frame": 1317
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50447761034089,
+      "run_id": 1,
+      "source_frame": 1321
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50447902916661,
+      "run_id": 1,
+      "source_frame": 1329
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50447953954759,
+      "run_id": 1,
+      "source_frame": 1339
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50448149322942,
+      "run_id": 1,
+      "source_frame": 1344
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50448321807613,
+      "run_id": 1,
+      "source_frame": 1358
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50448587773455,
+      "run_id": 1,
+      "source_frame": 1368
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50448747333499,
+      "run_id": 1,
+      "source_frame": 1375
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50448898723665,
+      "run_id": 1,
+      "source_frame": 1388
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50448939358058,
+      "run_id": 1,
+      "source_frame": 1399
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50449174973224,
+      "run_id": 1,
+      "source_frame": 1406
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50449373744091,
+      "run_id": 1,
+      "source_frame": 1419
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50449577529430,
+      "run_id": 1,
+      "source_frame": 1432
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50449772799612,
+      "run_id": 1,
+      "source_frame": 1444
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50449929074161,
+      "run_id": 1,
+      "source_frame": 1455
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50449985814150,
+      "run_id": 1,
+      "source_frame": 1465
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50450066182053,
+      "run_id": 1,
+      "source_frame": 1468
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50450290746515,
+      "run_id": 1,
+      "source_frame": 1474
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50450455247715,
+      "run_id": 1,
+      "source_frame": 1486
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50450513684995,
+      "run_id": 1,
+      "source_frame": 1496
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50450704800880,
+      "run_id": 1,
+      "source_frame": 1500
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50450779377641,
+      "run_id": 1,
+      "source_frame": 1511
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50450853351060,
+      "run_id": 1,
+      "source_frame": 1515
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50450935057943,
+      "run_id": 1,
+      "source_frame": 1520
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50451003135149,
+      "run_id": 1,
+      "source_frame": 1524
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50451067661831,
+      "run_id": 1,
+      "source_frame": 1529
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50451249765301,
+      "run_id": 1,
+      "source_frame": 1533
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50451412596848,
+      "run_id": 1,
+      "source_frame": 1544
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50451613439972,
+      "run_id": 1,
+      "source_frame": 1553
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50451655758728,
+      "run_id": 1,
+      "source_frame": 1565
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50451828366889,
+      "run_id": 1,
+      "source_frame": 1568
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50451872403644,
+      "run_id": 1,
+      "source_frame": 1578
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50452067336908,
+      "run_id": 1,
+      "source_frame": 1581
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50452282549221,
+      "run_id": 1,
+      "source_frame": 1593
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50452504768271,
+      "run_id": 1,
+      "source_frame": 1606
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50452554942445,
+      "run_id": 1,
+      "source_frame": 1619
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50452766564343,
+      "run_id": 1,
+      "source_frame": 1622
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50452865348032,
+      "run_id": 1,
+      "source_frame": 1635
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50453041444653,
+      "run_id": 1,
+      "source_frame": 1640
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50453209442077,
+      "run_id": 1,
+      "source_frame": 1651
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50453419676148,
+      "run_id": 1,
+      "source_frame": 1661
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50453486925050,
+      "run_id": 1,
+      "source_frame": 1674
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50453555576795,
+      "run_id": 1,
+      "source_frame": 1678
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50453757899024,
+      "run_id": 1,
+      "source_frame": 1684
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50453825805522,
+      "run_id": 1,
+      "source_frame": 1694
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50453900203695,
+      "run_id": 1,
+      "source_frame": 1698
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454059337084,
+      "run_id": 1,
+      "source_frame": 1703
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454149563619,
+      "run_id": 1,
+      "source_frame": 1712
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454216341067,
+      "run_id": 1,
+      "source_frame": 1718
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454301818776,
+      "run_id": 1,
+      "source_frame": 1722
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454368851553,
+      "run_id": 1,
+      "source_frame": 1727
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454477680546,
+      "run_id": 1,
+      "source_frame": 1731
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454682207519,
+      "run_id": 1,
+      "source_frame": 1737
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454860949298,
+      "run_id": 1,
+      "source_frame": 1749
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50454978938517,
+      "run_id": 1,
+      "source_frame": 1760
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50455096061663,
+      "run_id": 1,
+      "source_frame": 1767
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50455279629227,
+      "run_id": 1,
+      "source_frame": 1776
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50455330254271,
+      "run_id": 1,
+      "source_frame": 1785
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50455501669157,
+      "run_id": 1,
+      "source_frame": 1788
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50455690289149,
+      "run_id": 1,
+      "source_frame": 1799
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50455755193256,
+      "run_id": 1,
+      "source_frame": 1810
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50455933837328,
+      "run_id": 1,
+      "source_frame": 1814
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50456142044121,
+      "run_id": 1,
+      "source_frame": 1824
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50456338649473,
+      "run_id": 1,
+      "source_frame": 1837
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50456505112383,
+      "run_id": 1,
+      "source_frame": 1849
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50456593683710,
+      "run_id": 1,
+      "source_frame": 1859
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50456808395084,
+      "run_id": 1,
+      "source_frame": 1865
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50456948867259,
+      "run_id": 1,
+      "source_frame": 1877
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50457138648421,
+      "run_id": 1,
+      "source_frame": 1886
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50457268071143,
+      "run_id": 1,
+      "source_frame": 1899
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50457352592599,
+      "run_id": 1,
+      "source_frame": 1905
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50457499128176,
+      "run_id": 1,
+      "source_frame": 1910
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50457573821067,
+      "run_id": 1,
+      "source_frame": 1919
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50457629842754,
+      "run_id": 1,
+      "source_frame": 1923
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50457846108608,
+      "run_id": 1,
+      "source_frame": 1928
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458006640583,
+      "run_id": 1,
+      "source_frame": 1939
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458085550106,
+      "run_id": 1,
+      "source_frame": 1949
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458215586456,
+      "run_id": 1,
+      "source_frame": 1953
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458278997242,
+      "run_id": 1,
+      "source_frame": 1961
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458427317506,
+      "run_id": 1,
+      "source_frame": 1965
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458483962085,
+      "run_id": 1,
+      "source_frame": 1974
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458676790692,
+      "run_id": 1,
+      "source_frame": 1977
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458847143229,
+      "run_id": 1,
+      "source_frame": 1989
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50458966956011,
+      "run_id": 1,
+      "source_frame": 1999
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459022126633,
+      "run_id": 1,
+      "source_frame": 2006
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459224968249,
+      "run_id": 1,
+      "source_frame": 2010
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459340806424,
+      "run_id": 1,
+      "source_frame": 2022
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459419339033,
+      "run_id": 1,
+      "source_frame": 2029
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459484942913,
+      "run_id": 1,
+      "source_frame": 2033
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459559889107,
+      "run_id": 1,
+      "source_frame": 2037
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459641529314,
+      "run_id": 1,
+      "source_frame": 2042
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459849925453,
+      "run_id": 1,
+      "source_frame": 2047
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50459919615031,
+      "run_id": 1,
+      "source_frame": 2060
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50460114678413,
+      "run_id": 1,
+      "source_frame": 2064
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50460184856369,
+      "run_id": 1,
+      "source_frame": 2075
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50460402898209,
+      "run_id": 1,
+      "source_frame": 2080
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50460605781809,
+      "run_id": 1,
+      "source_frame": 2093
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50460706864047,
+      "run_id": 1,
+      "source_frame": 2105
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50460926562439,
+      "run_id": 1,
+      "source_frame": 2111
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50461136236350,
+      "run_id": 1,
+      "source_frame": 2124
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50461329788770,
+      "run_id": 1,
+      "source_frame": 2137
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50461378026193,
+      "run_id": 1,
+      "source_frame": 2148
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50461594713080,
+      "run_id": 1,
+      "source_frame": 2151
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50461667158578,
+      "run_id": 1,
+      "source_frame": 2164
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50461725525154,
+      "run_id": 1,
+      "source_frame": 2169
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50461789849904,
+      "run_id": 1,
+      "source_frame": 2173
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50461939607225,
+      "run_id": 1,
+      "source_frame": 2179
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50462006768699,
+      "run_id": 1,
+      "source_frame": 2185
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50462174075883,
+      "run_id": 1,
+      "source_frame": 2189
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50462391864708,
+      "run_id": 1,
+      "source_frame": 2199
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50462453639890,
+      "run_id": 1,
+      "source_frame": 2211
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50462584037933,
+      "run_id": 1,
+      "source_frame": 2216
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50462793105513,
+      "run_id": 1,
+      "source_frame": 2223
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50462861707264,
+      "run_id": 1,
+      "source_frame": 2236
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50462929078575,
+      "run_id": 1,
+      "source_frame": 2240
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50463097713039,
+      "run_id": 1,
+      "source_frame": 2244
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50463167976359,
+      "run_id": 1,
+      "source_frame": 2254
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50463243070022,
+      "run_id": 1,
+      "source_frame": 2259
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50463341071841,
+      "run_id": 1,
+      "source_frame": 2263
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50463547079760,
+      "run_id": 1,
+      "source_frame": 2269
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50463763348869,
+      "run_id": 1,
+      "source_frame": 2282
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50463932693585,
+      "run_id": 1,
+      "source_frame": 2294
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50464127592943,
+      "run_id": 1,
+      "source_frame": 2304
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50464219636743,
+      "run_id": 1,
+      "source_frame": 2317
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50464300441776,
+      "run_id": 1,
+      "source_frame": 2322
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50464416970234,
+      "run_id": 1,
+      "source_frame": 2327
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50464613502987,
+      "run_id": 1,
+      "source_frame": 2333
+    },
+    {
+      "type": "p09_frame",
+      "monotonic_ns": 50464682027688,
+      "run_id": 1,
+      "source_frame": 2345
+    }
+  ],
+  "socket_counters": {
+    "viewer_loopback": {
+      "samples_wholly_inside_observation": 30,
+      "ss_duration_ms_median": 49.907286,
+      "ss_duration_ms_max": 53.079998,
+      "max_sampled_rx_queue_bytes": 0,
+      "max_sampled_tx_queue_bytes": 93,
+      "receive_byte_change_between_first_and_last_sample": 38654456,
+      "trace": [
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50427012743877,
+          "end_monotonic_ns": 50427068363279,
+          "ss_duration_ns": 48750989,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 488,
+            "bytes_acked": 489,
+            "bytes_received": 349,
+            "segs_out": 9,
+            "segs_in": 9,
+            "data_segs_out": 6,
+            "data_segs_in": 3,
+            "cwnd": 10,
+            "rto": 206,
+            "rtt_ms": 5.119,
+            "rttvar_ms": 10.155
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50428012637597,
+          "end_monotonic_ns": 50428067546130,
+          "ss_duration_ns": 49076717,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 488,
+            "bytes_acked": 489,
+            "bytes_received": 349,
+            "segs_out": 9,
+            "segs_in": 9,
+            "data_segs_out": 6,
+            "data_segs_in": 3,
+            "cwnd": 10,
+            "rto": 206,
+            "rtt_ms": 5.119,
+            "rttvar_ms": 10.155
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50429012743204,
+          "end_monotonic_ns": 50429071332325,
+          "ss_duration_ns": 49336631,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 488,
+            "bytes_acked": 489,
+            "bytes_received": 349,
+            "segs_out": 9,
+            "segs_in": 9,
+            "data_segs_out": 6,
+            "data_segs_in": 3,
+            "cwnd": 10,
+            "rto": 206,
+            "rtt_ms": 5.119,
+            "rttvar_ms": 10.155
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50430012640647,
+          "end_monotonic_ns": 50430068696404,
+          "ss_duration_ns": 49389718,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 488,
+            "bytes_acked": 489,
+            "bytes_received": 1706,
+            "segs_out": 11,
+            "segs_in": 11,
+            "data_segs_out": 6,
+            "data_segs_in": 5,
+            "cwnd": 10,
+            "rto": 206,
+            "rtt_ms": 5.119,
+            "rttvar_ms": 10.155
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50431012772985,
+          "end_monotonic_ns": 50431069616879,
+          "ss_duration_ns": 50186087,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 93,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 1139,
+            "bytes_acked": 1047,
+            "bytes_received": 948125,
+            "segs_out": 41,
+            "segs_in": 48,
+            "data_segs_out": 13,
+            "data_segs_in": 36,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 203,
+            "rtt_ms": 2.33,
+            "rttvar_ms": 4.547
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50432012784733,
+          "end_monotonic_ns": 50432070994344,
+          "ss_duration_ns": 50092366,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 2441,
+            "bytes_acked": 2442,
+            "bytes_received": 2588885,
+            "segs_out": 83,
+            "segs_in": 117,
+            "data_segs_out": 27,
+            "data_segs_in": 93,
+            "cwnd": 10,
+            "rto": 214,
+            "rtt_ms": 13.849,
+            "rttvar_ms": 19.524
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50433012813245,
+          "end_monotonic_ns": 50433071218433,
+          "ss_duration_ns": 51466400,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 3743,
+            "bytes_acked": 3744,
+            "bytes_received": 4141792,
+            "segs_out": 123,
+            "segs_in": 180,
+            "data_segs_out": 41,
+            "data_segs_in": 146,
+            "cwnd": 10,
+            "rto": 213,
+            "rtt_ms": 12.184,
+            "rttvar_ms": 14.727
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50434012779639,
+          "end_monotonic_ns": 50434072857531,
+          "ss_duration_ns": 51238804,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 4859,
+            "bytes_acked": 4860,
+            "bytes_received": 5374208,
+            "segs_out": 158,
+            "segs_in": 232,
+            "data_segs_out": 53,
+            "data_segs_in": 188,
+            "cwnd": 10,
+            "rto": 214,
+            "rtt_ms": 13.078,
+            "rttvar_ms": 18.229
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50435012766517,
+          "end_monotonic_ns": 50435070315782,
+          "ss_duration_ns": 50291494,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 5975,
+            "bytes_acked": 5976,
+            "bytes_received": 6451438,
+            "segs_out": 187,
+            "segs_in": 278,
+            "data_segs_out": 65,
+            "data_segs_in": 224,
+            "cwnd": 10,
+            "rto": 211,
+            "rtt_ms": 10.12,
+            "rttvar_ms": 10.287
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50436012637067,
+          "end_monotonic_ns": 50436070252754,
+          "ss_duration_ns": 50763598,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 7184,
+            "bytes_acked": 7185,
+            "bytes_received": 8071301,
+            "segs_out": 230,
+            "segs_in": 341,
+            "data_segs_out": 78,
+            "data_segs_in": 278,
+            "cwnd": 10,
+            "rto": 212,
+            "rtt_ms": 11.686,
+            "rttvar_ms": 16.438
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50437012802638,
+          "end_monotonic_ns": 50437070176977,
+          "ss_duration_ns": 49775125,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 8579,
+            "bytes_acked": 8580,
+            "bytes_received": 9836310,
+            "segs_out": 275,
+            "segs_in": 411,
+            "data_segs_out": 93,
+            "data_segs_in": 337,
+            "cwnd": 10,
+            "rto": 212,
+            "rtt_ms": 11.884,
+            "rttvar_ms": 16.322
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50438012836162,
+          "end_monotonic_ns": 50438069779929,
+          "ss_duration_ns": 49416003,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 9509,
+            "bytes_acked": 9510,
+            "bytes_received": 11002100,
+            "segs_out": 318,
+            "segs_in": 461,
+            "data_segs_out": 103,
+            "data_segs_in": 377,
+            "cwnd": 10,
+            "rto": 210,
+            "rtt_ms": 9.761,
+            "rttvar_ms": 15.352
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50439012814589,
+          "end_monotonic_ns": 50439069423360,
+          "ss_duration_ns": 49570837,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 93,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 10718,
+            "bytes_acked": 10719,
+            "bytes_received": 12360592,
+            "segs_out": 352,
+            "segs_in": 517,
+            "data_segs_out": 116,
+            "data_segs_in": 423,
+            "cwnd": 10,
+            "rto": 217,
+            "rtt_ms": 16.347,
+            "rttvar_ms": 19.0
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50440012681684,
+          "end_monotonic_ns": 50440070950873,
+          "ss_duration_ns": 48615811,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 11834,
+            "bytes_acked": 11835,
+            "bytes_received": 13445610,
+            "segs_out": 382,
+            "segs_in": 562,
+            "data_segs_out": 128,
+            "data_segs_in": 459,
+            "cwnd": 10,
+            "rto": 213,
+            "rtt_ms": 12.89,
+            "rttvar_ms": 16.84
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50441012680307,
+          "end_monotonic_ns": 50441068755458,
+          "ss_duration_ns": 49531133,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 13043,
+            "bytes_acked": 13044,
+            "bytes_received": 14883844,
+            "segs_out": 417,
+            "segs_in": 622,
+            "data_segs_out": 141,
+            "data_segs_in": 507,
+            "cwnd": 10,
+            "rto": 211,
+            "rtt_ms": 10.651,
+            "rttvar_ms": 16.349
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50442012683777,
+          "end_monotonic_ns": 50442071398382,
+          "ss_duration_ns": 49219816,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 14159,
+            "bytes_acked": 14160,
+            "bytes_received": 16123665,
+            "segs_out": 450,
+            "segs_in": 674,
+            "data_segs_out": 153,
+            "data_segs_in": 549,
+            "cwnd": 10,
+            "rto": 216,
+            "rtt_ms": 15.611,
+            "rttvar_ms": 20.343
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50443012772051,
+          "end_monotonic_ns": 50443068942155,
+          "ss_duration_ns": 49009398,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 15182,
+            "bytes_acked": 15183,
+            "bytes_received": 17240413,
+            "segs_out": 480,
+            "segs_in": 723,
+            "data_segs_out": 164,
+            "data_segs_in": 587,
+            "cwnd": 10,
+            "rto": 209,
+            "rtt_ms": 8.607,
+            "rttvar_ms": 14.289
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50444012815057,
+          "end_monotonic_ns": 50444069369667,
+          "ss_duration_ns": 49176387,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 16391,
+            "bytes_acked": 16392,
+            "bytes_received": 18597810,
+            "segs_out": 515,
+            "segs_in": 780,
+            "data_segs_out": 177,
+            "data_segs_in": 633,
+            "cwnd": 10,
+            "rto": 208,
+            "rtt_ms": 7.143,
+            "rttvar_ms": 9.276
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50445012757562,
+          "end_monotonic_ns": 50445069265018,
+          "ss_duration_ns": 49946040,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 17600,
+            "bytes_acked": 17601,
+            "bytes_received": 20222786,
+            "segs_out": 555,
+            "segs_in": 844,
+            "data_segs_out": 190,
+            "data_segs_in": 687,
+            "cwnd": 10,
+            "rto": 213,
+            "rtt_ms": 12.074,
+            "rttvar_ms": 17.095
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50446012819579,
+          "end_monotonic_ns": 50446069821263,
+          "ss_duration_ns": 50244378,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 18716,
+            "bytes_acked": 18717,
+            "bytes_received": 21475731,
+            "segs_out": 588,
+            "segs_in": 896,
+            "data_segs_out": 202,
+            "data_segs_in": 729,
+            "cwnd": 10,
+            "rto": 207,
+            "rtt_ms": 6.339,
+            "rttvar_ms": 10.279
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50447012766510,
+          "end_monotonic_ns": 50447072217046,
+          "ss_duration_ns": 49873895,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 93,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 19739,
+            "bytes_acked": 19647,
+            "bytes_received": 22530594,
+            "segs_out": 616,
+            "segs_in": 941,
+            "data_segs_out": 213,
+            "data_segs_in": 764,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 202,
+            "rtt_ms": 1.79,
+            "rttvar_ms": 3.161
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50448012770509,
+          "end_monotonic_ns": 50448073468505,
+          "ss_duration_ns": 53079998,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 20948,
+            "bytes_acked": 20949,
+            "bytes_received": 23836156,
+            "segs_out": 656,
+            "segs_in": 998,
+            "data_segs_out": 226,
+            "data_segs_in": 811,
+            "cwnd": 10,
+            "rto": 211,
+            "rtt_ms": 10.602,
+            "rttvar_ms": 15.184
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50449012810948,
+          "end_monotonic_ns": 50449069036349,
+          "ss_duration_ns": 48926156,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 21971,
+            "bytes_acked": 21879,
+            "bytes_received": 24879219,
+            "segs_out": 696,
+            "segs_in": 1040,
+            "data_segs_out": 237,
+            "data_segs_in": 847,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 215,
+            "rtt_ms": 14.122,
+            "rttvar_ms": 13.949
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50450012729803,
+          "end_monotonic_ns": 50450068959060,
+          "ss_duration_ns": 49606947,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 93,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 22901,
+            "bytes_acked": 22902,
+            "bytes_received": 26139351,
+            "segs_out": 740,
+            "segs_in": 1091,
+            "data_segs_out": 247,
+            "data_segs_in": 889,
+            "cwnd": 10,
+            "rto": 218,
+            "rtt_ms": 17.388,
+            "rttvar_ms": 19.128
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50451012746265,
+          "end_monotonic_ns": 50451062305936,
+          "ss_duration_ns": 41619518,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 93,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 24203,
+            "bytes_acked": 24111,
+            "bytes_received": 27737955,
+            "segs_out": 781,
+            "segs_in": 1157,
+            "data_segs_out": 261,
+            "data_segs_in": 943,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 210,
+            "rtt_ms": 9.921,
+            "rttvar_ms": 13.492
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50452012695531,
+          "end_monotonic_ns": 50452070907023,
+          "ss_duration_ns": 50694717,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 25319,
+            "bytes_acked": 25320,
+            "bytes_received": 28965212,
+            "segs_out": 812,
+            "segs_in": 1210,
+            "data_segs_out": 273,
+            "data_segs_in": 985,
+            "cwnd": 10,
+            "rto": 215,
+            "rtt_ms": 14.153,
+            "rttvar_ms": 16.312
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50453012720706,
+          "end_monotonic_ns": 50453071141143,
+          "ss_duration_ns": 51182329,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 26342,
+            "bytes_acked": 26343,
+            "bytes_received": 30026771,
+            "segs_out": 840,
+            "segs_in": 1257,
+            "data_segs_out": 284,
+            "data_segs_in": 1021,
+            "cwnd": 10,
+            "rto": 209,
+            "rtt_ms": 8.609,
+            "rttvar_ms": 14.032
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50454012727655,
+          "end_monotonic_ns": 50454070442372,
+          "ss_duration_ns": 50374623,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 27551,
+            "bytes_acked": 27552,
+            "bytes_received": 31503492,
+            "segs_out": 878,
+            "segs_in": 1318,
+            "data_segs_out": 297,
+            "data_segs_in": 1070,
+            "cwnd": 10,
+            "rto": 209,
+            "rtt_ms": 8.664,
+            "rttvar_ms": 14.223
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50455012779844,
+          "end_monotonic_ns": 50455070347078,
+          "ss_duration_ns": 50030033,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 28853,
+            "bytes_acked": 28854,
+            "bytes_received": 33127267,
+            "segs_out": 927,
+            "segs_in": 1382,
+            "data_segs_out": 311,
+            "data_segs_in": 1124,
+            "cwnd": 10,
+            "rto": 215,
+            "rtt_ms": 14.939,
+            "rttvar_ms": 14.802
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50456012799466,
+          "end_monotonic_ns": 50456069164832,
+          "ss_duration_ns": 49273908,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 29969,
+            "bytes_acked": 29970,
+            "bytes_received": 34321679,
+            "segs_out": 970,
+            "segs_in": 1434,
+            "data_segs_out": 323,
+            "data_segs_in": 1164,
+            "cwnd": 10,
+            "rto": 212,
+            "rtt_ms": 11.145,
+            "rttvar_ms": 16.759
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50457012676456,
+          "end_monotonic_ns": 50457070045889,
+          "ss_duration_ns": 50320946,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 30992,
+            "bytes_acked": 30993,
+            "bytes_received": 35416459,
+            "segs_out": 1000,
+            "segs_in": 1483,
+            "data_segs_out": 334,
+            "data_segs_in": 1202,
+            "cwnd": 10,
+            "rto": 210,
+            "rtt_ms": 9.421,
+            "rttvar_ms": 15.224
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50458012858598,
+          "end_monotonic_ns": 50458070463000,
+          "ss_duration_ns": 50244504,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 32201,
+            "bytes_acked": 32202,
+            "bytes_received": 36846025,
+            "segs_out": 1037,
+            "segs_in": 1541,
+            "data_segs_out": 347,
+            "data_segs_in": 1250,
+            "cwnd": 10,
+            "rto": 208,
+            "rtt_ms": 7.145,
+            "rttvar_ms": 11.648
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50459012829517,
+          "end_monotonic_ns": 50459069666777,
+          "ss_duration_ns": 49279480,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 33410,
+            "bytes_acked": 33411,
+            "bytes_received": 38290188,
+            "segs_out": 1074,
+            "segs_in": 1598,
+            "data_segs_out": 360,
+            "data_segs_in": 1298,
+            "cwnd": 10,
+            "rto": 211,
+            "rtt_ms": 10.608,
+            "rttvar_ms": 15.888
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50460012731999,
+          "end_monotonic_ns": 50460070724714,
+          "ss_duration_ns": 51481501,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 34619,
+            "bytes_acked": 34620,
+            "bytes_received": 39898955,
+            "segs_out": 1120,
+            "segs_in": 1662,
+            "data_segs_out": 373,
+            "data_segs_in": 1352,
+            "cwnd": 10,
+            "rto": 209,
+            "rtt_ms": 8.898,
+            "rttvar_ms": 13.366
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50461012795954,
+          "end_monotonic_ns": 50461072098589,
+          "ss_duration_ns": 51389639,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 35642,
+            "bytes_acked": 35643,
+            "bytes_received": 40955921,
+            "segs_out": 1149,
+            "segs_in": 1706,
+            "data_segs_out": 384,
+            "data_segs_in": 1388,
+            "cwnd": 10,
+            "rto": 210,
+            "rtt_ms": 9.239,
+            "rttvar_ms": 10.358
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50462012690958,
+          "end_monotonic_ns": 50462070128359,
+          "ss_duration_ns": 49842495,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 93,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 36944,
+            "bytes_acked": 36852,
+            "bytes_received": 42363580,
+            "segs_out": 1186,
+            "segs_in": 1761,
+            "data_segs_out": 398,
+            "data_segs_in": 1436,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 217,
+            "rtt_ms": 16.337,
+            "rttvar_ms": 12.362
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50463012819191,
+          "end_monotonic_ns": 50463070761728,
+          "ss_duration_ns": 50849873,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 38060,
+            "bytes_acked": 38061,
+            "bytes_received": 43843744,
+            "segs_out": 1222,
+            "segs_in": 1822,
+            "data_segs_out": 410,
+            "data_segs_in": 1485,
+            "cwnd": 10,
+            "rto": 215,
+            "rtt_ms": 14.052,
+            "rttvar_ms": 17.988
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50464012642113,
+          "end_monotonic_ns": 50464071273627,
+          "ss_duration_ns": 49940677,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 39176,
+            "bytes_acked": 39177,
+            "bytes_received": 45105894,
+            "segs_out": 1255,
+            "segs_in": 1875,
+            "data_segs_out": 422,
+            "data_segs_in": 1527,
+            "cwnd": 10,
+            "rto": 206,
+            "rtt_ms": 5.885,
+            "rttvar_ms": 9.808
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50465012730874,
+          "end_monotonic_ns": 50465070618543,
+          "ss_duration_ns": 50508787,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 40478,
+            "bytes_acked": 40479,
+            "bytes_received": 46704780,
+            "segs_out": 1295,
+            "segs_in": 1941,
+            "data_segs_out": 436,
+            "data_segs_in": 1581,
+            "cwnd": 10,
+            "rto": 212,
+            "rtt_ms": 11.993,
+            "rttvar_ms": 16.297
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "viewer_loopback",
+          "start_monotonic_ns": 50466012687657,
+          "end_monotonic_ns": 50466070390088,
+          "ss_duration_ns": 50186540,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 41594,
+            "bytes_acked": 41595,
+            "bytes_received": 47932204,
+            "segs_out": 1327,
+            "segs_in": 1995,
+            "data_segs_out": 448,
+            "data_segs_in": 1623,
+            "cwnd": 10,
+            "rto": 208,
+            "rtt_ms": 7.592,
+            "rttvar_ms": 12.676
+          }
+        },
+        {
+          "type": "p09_owned_tcp_summary",
+          "schema_version": 1,
+          "clock": "monotonic",
+          "role": "viewer_loopback",
+          "pid": 819094,
+          "proc_start_ticks": 5042600,
+          "socket_inode": 16186165,
+          "remote_port": 55271,
+          "start_monotonic_ns": 50426012511875,
+          "end_monotonic_ns": 50466817167819,
+          "interval_seconds": 1,
+          "max_sample_slots": 90,
+          "missed_slots": 0,
+          "counts": {
+            "owned_tcp_socket_unavailable": 1,
+            "tcp_info": 40
+          },
+          "end_reason": "closed"
+        }
+      ]
+    },
+    "ssh_transport": {
+      "samples_wholly_inside_observation": 30,
+      "ss_duration_ms_median": 50.1709485,
+      "ss_duration_ms_max": 53.736346,
+      "max_sampled_rx_queue_bytes": 0,
+      "max_sampled_tx_queue_bytes": 168,
+      "receive_byte_change_between_first_and_last_sample": 38667868,
+      "trace": [
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50426013626555,
+          "end_monotonic_ns": 50426076633153,
+          "ss_duration_ns": 51348935,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 60,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 3423,
+            "bytes_acked": 3364,
+            "bytes_received": 2942,
+            "segs_out": 15,
+            "segs_in": 13,
+            "data_segs_out": 10,
+            "data_segs_in": 8,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 218,
+            "rtt_ms": 17.29,
+            "rttvar_ms": 22.912
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50427011573765,
+          "end_monotonic_ns": 50427066121357,
+          "ss_duration_ns": 49327126,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 4147,
+            "bytes_acked": 4148,
+            "bytes_received": 4370,
+            "segs_out": 24,
+            "segs_in": 23,
+            "data_segs_out": 15,
+            "data_segs_in": 14,
+            "cwnd": 10,
+            "rto": 235,
+            "rtt_ms": 34.848,
+            "rttvar_ms": 44.733
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50428011400244,
+          "end_monotonic_ns": 50428068958242,
+          "ss_duration_ns": 50283171,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 4147,
+            "bytes_acked": 4148,
+            "bytes_received": 4370,
+            "segs_out": 24,
+            "segs_in": 23,
+            "data_segs_out": 15,
+            "data_segs_in": 14,
+            "cwnd": 10,
+            "rto": 235,
+            "rtt_ms": 34.848,
+            "rttvar_ms": 44.733
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50429011490566,
+          "end_monotonic_ns": 50429066714252,
+          "ss_duration_ns": 49345187,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 4147,
+            "bytes_acked": 4148,
+            "bytes_received": 4370,
+            "segs_out": 24,
+            "segs_in": 23,
+            "data_segs_out": 15,
+            "data_segs_in": 14,
+            "cwnd": 10,
+            "rto": 235,
+            "rtt_ms": 34.848,
+            "rttvar_ms": 44.733
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50430011393661,
+          "end_monotonic_ns": 50430066740702,
+          "ss_duration_ns": 50021297,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 4147,
+            "bytes_acked": 4148,
+            "bytes_received": 5802,
+            "segs_out": 26,
+            "segs_in": 25,
+            "data_segs_out": 15,
+            "data_segs_in": 16,
+            "cwnd": 10,
+            "rto": 235,
+            "rtt_ms": 34.848,
+            "rttvar_ms": 44.733
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50431011549908,
+          "end_monotonic_ns": 50431067351337,
+          "ss_duration_ns": 49822459,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 5315,
+            "bytes_acked": 5316,
+            "bytes_received": 953350,
+            "segs_out": 290,
+            "segs_in": 688,
+            "data_segs_out": 29,
+            "data_segs_in": 672,
+            "cwnd": 10,
+            "rto": 229,
+            "rtt_ms": 28.346,
+            "rttvar_ms": 24.032
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50432011442545,
+          "end_monotonic_ns": 50432069689250,
+          "ss_duration_ns": 51641240,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 7763,
+            "bytes_acked": 7632,
+            "bytes_received": 2563294,
+            "bytes_retrans": 132,
+            "segs_out": 778,
+            "segs_in": 1821,
+            "data_segs_out": 57,
+            "data_segs_in": 1790,
+            "cwnd": 10,
+            "rto": 219,
+            "rtt_ms": 18.371,
+            "rttvar_ms": 15.134,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50433011591342,
+          "end_monotonic_ns": 50433070190876,
+          "ss_duration_ns": 51593937,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 10115,
+            "bytes_acked": 9984,
+            "bytes_received": 4150918,
+            "bytes_retrans": 132,
+            "segs_out": 1242,
+            "segs_in": 2947,
+            "data_segs_out": 85,
+            "data_segs_in": 2894,
+            "cwnd": 10,
+            "rto": 214,
+            "rtt_ms": 13.049,
+            "rttvar_ms": 14.395,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50434011521174,
+          "end_monotonic_ns": 50434067921845,
+          "ss_duration_ns": 50897345,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 36,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 12059,
+            "bytes_acked": 11928,
+            "bytes_received": 5384854,
+            "bytes_retrans": 132,
+            "segs_out": 1621,
+            "segs_in": 3826,
+            "data_segs_out": 107,
+            "data_segs_in": 3753,
+            "cwnd": 10,
+            "rto": 215,
+            "rtt_ms": 14.039,
+            "rttvar_ms": 17.504,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50435011420611,
+          "end_monotonic_ns": 50435067780342,
+          "ss_duration_ns": 50847832,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 13967,
+            "bytes_acked": 13836,
+            "bytes_received": 6463398,
+            "bytes_retrans": 132,
+            "segs_out": 1954,
+            "segs_in": 4595,
+            "data_segs_out": 128,
+            "data_segs_in": 4503,
+            "cwnd": 10,
+            "rto": 210,
+            "rtt_ms": 9.377,
+            "rttvar_ms": 10.117,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50436011488851,
+          "end_monotonic_ns": 50436067185917,
+          "ss_duration_ns": 50628804,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 16151,
+            "bytes_acked": 15984,
+            "bytes_received": 8028506,
+            "bytes_retrans": 132,
+            "segs_out": 2421,
+            "segs_in": 5702,
+            "data_segs_out": 154,
+            "data_segs_in": 5592,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 213,
+            "rtt_ms": 12.243,
+            "rttvar_ms": 9.689,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50437011407503,
+          "end_monotonic_ns": 50437066462781,
+          "ss_duration_ns": 49425895,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 18671,
+            "bytes_acked": 18504,
+            "bytes_received": 9781970,
+            "bytes_retrans": 132,
+            "segs_out": 2902,
+            "segs_in": 6938,
+            "data_segs_out": 184,
+            "data_segs_in": 6811,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 215,
+            "rtt_ms": 14.587,
+            "rttvar_ms": 14.506,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50438011432486,
+          "end_monotonic_ns": 50438067128762,
+          "ss_duration_ns": 50432080,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 20351,
+            "bytes_acked": 20220,
+            "bytes_received": 10959794,
+            "bytes_retrans": 132,
+            "segs_out": 3227,
+            "segs_in": 7777,
+            "data_segs_out": 204,
+            "data_segs_in": 7630,
+            "cwnd": 10,
+            "rto": 207,
+            "rtt_ms": 6.352,
+            "rttvar_ms": 7.124,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50439011538035,
+          "end_monotonic_ns": 50439067017516,
+          "ss_duration_ns": 49872491,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 132,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 22499,
+            "bytes_acked": 22368,
+            "bytes_received": 12379778,
+            "bytes_retrans": 132,
+            "segs_out": 3614,
+            "segs_in": 8783,
+            "data_segs_out": 229,
+            "data_segs_in": 8618,
+            "cwnd": 10,
+            "rto": 216,
+            "rtt_ms": 15.215,
+            "rttvar_ms": 12.996,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50440011418760,
+          "end_monotonic_ns": 50440066033741,
+          "ss_duration_ns": 49126495,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 24363,
+            "bytes_acked": 24232,
+            "bytes_received": 13466106,
+            "bytes_retrans": 132,
+            "segs_out": 3901,
+            "segs_in": 9553,
+            "data_segs_out": 249,
+            "data_segs_in": 9373,
+            "cwnd": 10,
+            "rto": 217,
+            "rtt_ms": 16.438,
+            "rttvar_ms": 14.695,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50441011492889,
+          "end_monotonic_ns": 50441067357605,
+          "ss_duration_ns": 49433009,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 26511,
+            "bytes_acked": 26380,
+            "bytes_received": 14906066,
+            "bytes_retrans": 132,
+            "segs_out": 4301,
+            "segs_in": 10572,
+            "data_segs_out": 274,
+            "data_segs_in": 10374,
+            "cwnd": 10,
+            "rto": 207,
+            "rtt_ms": 6.444,
+            "rttvar_ms": 6.531,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50442011414483,
+          "end_monotonic_ns": 50442070189317,
+          "ss_duration_ns": 50690109,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 132,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 28455,
+            "bytes_acked": 28192,
+            "bytes_received": 16147410,
+            "bytes_retrans": 132,
+            "segs_out": 4632,
+            "segs_in": 11453,
+            "data_segs_out": 296,
+            "data_segs_in": 11238,
+            "unacked": 1,
+            "cwnd": 10,
+            "rto": 218,
+            "rtt_ms": 17.101,
+            "rttvar_ms": 17.407,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50443011405328,
+          "end_monotonic_ns": 50443065849086,
+          "ss_duration_ns": 49267134,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 30231,
+            "bytes_acked": 30100,
+            "bytes_received": 17205730,
+            "bytes_retrans": 132,
+            "segs_out": 4923,
+            "segs_in": 12205,
+            "data_segs_out": 316,
+            "data_segs_in": 11974,
+            "cwnd": 10,
+            "rto": 208,
+            "rtt_ms": 7.607,
+            "rttvar_ms": 8.505,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50444011438374,
+          "end_monotonic_ns": 50444067103422,
+          "ss_duration_ns": 49900742,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 32379,
+            "bytes_acked": 32248,
+            "bytes_received": 18624602,
+            "bytes_retrans": 132,
+            "segs_out": 5326,
+            "segs_in": 13215,
+            "data_segs_out": 341,
+            "data_segs_in": 12961,
+            "cwnd": 10,
+            "rto": 212,
+            "rtt_ms": 11.454,
+            "rttvar_ms": 15.417,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50445011559338,
+          "end_monotonic_ns": 50445066991450,
+          "ss_duration_ns": 49796594,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 34599,
+            "bytes_acked": 34468,
+            "bytes_received": 20251546,
+            "bytes_retrans": 132,
+            "segs_out": 5775,
+            "segs_in": 14368,
+            "data_segs_out": 368,
+            "data_segs_in": 14094,
+            "cwnd": 10,
+            "rto": 213,
+            "rtt_ms": 12.532,
+            "rttvar_ms": 11.996,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50446011530110,
+          "end_monotonic_ns": 50446068680142,
+          "ss_duration_ns": 50168285,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 132,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 36543,
+            "bytes_acked": 36412,
+            "bytes_received": 21506018,
+            "bytes_retrans": 132,
+            "segs_out": 6122,
+            "segs_in": 15263,
+            "data_segs_out": 390,
+            "data_segs_in": 14967,
+            "cwnd": 10,
+            "rto": 205,
+            "rtt_ms": 4.252,
+            "rttvar_ms": 3.991,
+            "retransmitting_now": 0,
+            "total_retransmissions": 1
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50447011413008,
+          "end_monotonic_ns": 50447067292915,
+          "ss_duration_ns": 50169057,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 168,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 38355,
+            "bytes_acked": 37888,
+            "bytes_received": 22594066,
+            "bytes_retrans": 168,
+            "segs_out": 6431,
+            "segs_in": 16037,
+            "data_segs_out": 411,
+            "data_segs_in": 15724,
+            "unacked": 3,
+            "cwnd": 10,
+            "rto": 203,
+            "rtt_ms": 2.87,
+            "rttvar_ms": 2.448,
+            "retransmitting_now": 0,
+            "total_retransmissions": 2
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50448011519711,
+          "end_monotonic_ns": 50448071999876,
+          "ss_duration_ns": 53736346,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 40863,
+            "bytes_acked": 40300,
+            "bytes_received": 23865510,
+            "bytes_retrans": 564,
+            "segs_out": 6805,
+            "segs_in": 16942,
+            "data_segs_out": 438,
+            "data_segs_in": 16609,
+            "cwnd": 10,
+            "rto": 238,
+            "rtt_ms": 37.433,
+            "rttvar_ms": 30.135,
+            "retransmitting_now": 0,
+            "total_retransmissions": 5
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50449011551510,
+          "end_monotonic_ns": 50449066410399,
+          "ss_duration_ns": 49249256,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 42903,
+            "bytes_acked": 41944,
+            "bytes_received": 24913686,
+            "bytes_retrans": 828,
+            "segs_out": 7126,
+            "segs_in": 17684,
+            "data_segs_out": 460,
+            "data_segs_in": 17341,
+            "unacked": 1,
+            "cwnd": 7,
+            "rto": 268,
+            "rtt_ms": 50.104,
+            "rttvar_ms": 46.756,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50450011491148,
+          "end_monotonic_ns": 50450068392234,
+          "ss_duration_ns": 49838510,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 132,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 44619,
+            "bytes_acked": 43792,
+            "bytes_received": 26175334,
+            "bytes_retrans": 828,
+            "segs_out": 7486,
+            "segs_in": 18581,
+            "data_segs_out": 481,
+            "data_segs_in": 18219,
+            "cwnd": 7,
+            "rto": 215,
+            "rtt_ms": 14.662,
+            "rttvar_ms": 15.309,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50451011440167,
+          "end_monotonic_ns": 50451060348265,
+          "ss_duration_ns": 43514560,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 46935,
+            "bytes_acked": 46108,
+            "bytes_received": 27775894,
+            "bytes_retrans": 828,
+            "segs_out": 7923,
+            "segs_in": 19715,
+            "data_segs_out": 508,
+            "data_segs_in": 19332,
+            "cwnd": 7,
+            "rto": 216,
+            "rtt_ms": 15.314,
+            "rttvar_ms": 13.578,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50452011426111,
+          "end_monotonic_ns": 50452068630121,
+          "ss_duration_ns": 51292284,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 48915,
+            "bytes_acked": 48088,
+            "bytes_received": 29004670,
+            "bytes_retrans": 828,
+            "segs_out": 8268,
+            "segs_in": 20589,
+            "data_segs_out": 531,
+            "data_segs_in": 20186,
+            "cwnd": 7,
+            "rto": 210,
+            "rtt_ms": 9.843,
+            "rttvar_ms": 9.557,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50453011451296,
+          "end_monotonic_ns": 50453067678737,
+          "ss_duration_ns": 50732951,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 50691,
+            "bytes_acked": 49864,
+            "bytes_received": 30067526,
+            "bytes_retrans": 828,
+            "segs_out": 8553,
+            "segs_in": 21347,
+            "data_segs_out": 551,
+            "data_segs_in": 20925,
+            "cwnd": 7,
+            "rto": 210,
+            "rtt_ms": 9.634,
+            "rttvar_ms": 10.164,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50454011425463,
+          "end_monotonic_ns": 50454067715540,
+          "ss_duration_ns": 50994502,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 52839,
+            "bytes_acked": 52012,
+            "bytes_received": 31513214,
+            "bytes_retrans": 828,
+            "segs_out": 8969,
+            "segs_in": 22371,
+            "data_segs_out": 576,
+            "data_segs_in": 21929,
+            "cwnd": 7,
+            "rto": 218,
+            "rtt_ms": 17.005,
+            "rttvar_ms": 17.447,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50455011383559,
+          "end_monotonic_ns": 50455067212351,
+          "ss_duration_ns": 50492364,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 36,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 55155,
+            "bytes_acked": 54328,
+            "bytes_received": 33171746,
+            "bytes_retrans": 828,
+            "segs_out": 9426,
+            "segs_in": 23544,
+            "data_segs_out": 603,
+            "data_segs_in": 23082,
+            "cwnd": 7,
+            "rto": 218,
+            "rtt_ms": 17.538,
+            "rttvar_ms": 12.509,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50456011400295,
+          "end_monotonic_ns": 50456066786641,
+          "ss_duration_ns": 50115574,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 57099,
+            "bytes_acked": 56236,
+            "bytes_received": 34303950,
+            "bytes_retrans": 828,
+            "segs_out": 9728,
+            "segs_in": 24351,
+            "data_segs_out": 625,
+            "data_segs_in": 23870,
+            "unacked": 1,
+            "cwnd": 7,
+            "rto": 208,
+            "rtt_ms": 7.711,
+            "rttvar_ms": 9.495,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50457011535245,
+          "end_monotonic_ns": 50457067868779,
+          "ss_duration_ns": 50680899,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 58875,
+            "bytes_acked": 58012,
+            "bytes_received": 35402894,
+            "bytes_retrans": 828,
+            "segs_out": 10024,
+            "segs_in": 25129,
+            "data_segs_out": 645,
+            "data_segs_in": 24633,
+            "unacked": 1,
+            "cwnd": 7,
+            "rto": 211,
+            "rtt_ms": 10.983,
+            "rttvar_ms": 13.441,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50458011426943,
+          "end_monotonic_ns": 50458067610558,
+          "ss_duration_ns": 50172840,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 61059,
+            "bytes_acked": 60232,
+            "bytes_received": 36895066,
+            "bytes_retrans": 828,
+            "segs_out": 10437,
+            "segs_in": 26187,
+            "data_segs_out": 671,
+            "data_segs_in": 25671,
+            "cwnd": 7,
+            "rto": 207,
+            "rtt_ms": 6.555,
+            "rttvar_ms": 6.929,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50459011502002,
+          "end_monotonic_ns": 50459067211609,
+          "ss_duration_ns": 49951394,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 63207,
+            "bytes_acked": 62380,
+            "bytes_received": 38340978,
+            "bytes_retrans": 828,
+            "segs_out": 10830,
+            "segs_in": 27216,
+            "data_segs_out": 696,
+            "data_segs_in": 26677,
+            "cwnd": 7,
+            "rto": 210,
+            "rtt_ms": 9.678,
+            "rttvar_ms": 12.092,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50460011592351,
+          "end_monotonic_ns": 50460068300872,
+          "ss_duration_ns": 51169828,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 65391,
+            "bytes_acked": 64564,
+            "bytes_received": 39951706,
+            "bytes_retrans": 828,
+            "segs_out": 11269,
+            "segs_in": 28355,
+            "data_segs_out": 722,
+            "data_segs_in": 27797,
+            "cwnd": 7,
+            "rto": 209,
+            "rtt_ms": 8.52,
+            "rttvar_ms": 8.109,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50461011419110,
+          "end_monotonic_ns": 50461067221500,
+          "ss_duration_ns": 50429127,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 67167,
+            "bytes_acked": 66304,
+            "bytes_received": 40978926,
+            "bytes_retrans": 828,
+            "segs_out": 11550,
+            "segs_in": 29086,
+            "data_segs_out": 741,
+            "data_segs_in": 28510,
+            "unacked": 1,
+            "cwnd": 7,
+            "rto": 205,
+            "rtt_ms": 4.066,
+            "rttvar_ms": 3.766,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50462011487109,
+          "end_monotonic_ns": 50462067073240,
+          "ss_duration_ns": 50073836,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 69447,
+            "bytes_acked": 68620,
+            "bytes_received": 42419370,
+            "bytes_retrans": 828,
+            "segs_out": 11951,
+            "segs_in": 30110,
+            "data_segs_out": 767,
+            "data_segs_in": 29513,
+            "cwnd": 7,
+            "rto": 217,
+            "rtt_ms": 16.395,
+            "rttvar_ms": 15.232,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50463011556633,
+          "end_monotonic_ns": 50463067886079,
+          "ss_duration_ns": 50671656,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 71499,
+            "bytes_acked": 70672,
+            "bytes_received": 43901310,
+            "bytes_retrans": 828,
+            "segs_out": 12356,
+            "segs_in": 31159,
+            "data_segs_out": 792,
+            "data_segs_in": 30544,
+            "cwnd": 7,
+            "rto": 214,
+            "rtt_ms": 13.855,
+            "rttvar_ms": 10.115,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50464011421414,
+          "end_monotonic_ns": 50464070100046,
+          "ss_duration_ns": 50793650,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 73443,
+            "bytes_acked": 72580,
+            "bytes_received": 45131266,
+            "bytes_retrans": 828,
+            "segs_out": 12698,
+            "segs_in": 32029,
+            "data_segs_out": 814,
+            "data_segs_in": 31400,
+            "unacked": 1,
+            "cwnd": 7,
+            "rto": 209,
+            "rtt_ms": 8.861,
+            "rttvar_ms": 10.106,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50465011553142,
+          "end_monotonic_ns": 50465068060103,
+          "ss_duration_ns": 51061122,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 75795,
+            "bytes_acked": 74968,
+            "bytes_received": 46765822,
+            "bytes_retrans": 828,
+            "segs_out": 13159,
+            "segs_in": 33184,
+            "data_segs_out": 841,
+            "data_segs_in": 32537,
+            "cwnd": 7,
+            "rto": 217,
+            "rtt_ms": 16.657,
+            "rttvar_ms": 11.421,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_sample",
+          "schema_version": 1,
+          "role": "ssh_transport",
+          "start_monotonic_ns": 50466011553768,
+          "end_monotonic_ns": 50466067795857,
+          "ss_duration_ns": 50851383,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "tx_queue_bytes": 0,
+          "rx_queue_bytes": 0,
+          "tcp_info": {
+            "bytes_sent": 77739,
+            "bytes_acked": 76912,
+            "bytes_received": 47994766,
+            "bytes_retrans": 828,
+            "segs_out": 13500,
+            "segs_in": 34059,
+            "data_segs_out": 863,
+            "data_segs_in": 33391,
+            "cwnd": 7,
+            "rto": 210,
+            "rtt_ms": 9.577,
+            "rttvar_ms": 13.749,
+            "retransmitting_now": 0,
+            "total_retransmissions": 7
+          }
+        },
+        {
+          "type": "p09_owned_tcp_summary",
+          "schema_version": 1,
+          "clock": "monotonic",
+          "role": "ssh_transport",
+          "pid": 819092,
+          "proc_start_ticks": 5042556,
+          "socket_inode": 16206132,
+          "remote_port": 22,
+          "start_monotonic_ns": 50426011259115,
+          "end_monotonic_ns": 50466817735760,
+          "interval_seconds": 1,
+          "max_sample_slots": 90,
+          "missed_slots": 0,
+          "counts": {
+            "tcp_info": 41
+          },
+          "end_reason": "closed"
+        }
+      ]
+    }
+  },
+  "scope": "Unscored fixed 4K H.264 run over the same uncapped SSH route with both endpoint 4:2:0 opt-ins. Exact owned SSH transport and viewer loopback identities sampled once per second. Times use the viewer monotonic clock.",
+  "finding": "The previous multi-second gap did not recur. The current longest visible gap is shorter than the socket sampling interval. The older interruption remains unresolved."
+}

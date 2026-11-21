@@ -60,6 +60,14 @@ camera work. DOM key handling and animation callbacks are not physical latency
 measurements. Include real browser address-bar/menu/focus behavior separately;
 this fixture alone cannot validate popup/window capture integration.
 
+### Blender Workbench
+
+Use `--workload blender` for the actual Blender viewport. Pin the Blender
+build, scene, camera, renderer, and raster. Observe static detail, distinct
+positions during motion, and the return to a stable full-size image after
+playback stops. Record the encoded raster and interface edge contrast along
+with frame intervals. [Blender scene and observations](benchmarks/remote-upgrade-2026-11-20/README.md#blender-viewport-through-managed-wayland-input)
+
 ### Isaac Sim
 
 Run the actual supported Isaac Sim version on the target GPU with a fixed scene,
@@ -75,24 +83,52 @@ least 500 ms of stillness and inspect text edges, color, thin lines, stale tiles
 clipping, and transient/modal contents. Preserve the exact encode settings.
 Automated image comparison is useful only with aligned frames and known scaling.
 
-## Collect and analyze host telemetry
+## Collect and analyze telemetry
 
 Enable `--stats-json` on the documented `jwm-remote host` invocation and save its
 stderr privately. See [remote-control.md](remote-control.md#machine-readable-pipeline-timings)
 for the wire-compatible telemetry schema and stage definitions. For example,
-after collecting a steady-state log:
+after collecting steady-state host and viewer logs:
 
 ```sh
 python3 scripts/remote-workload-report.py \
-  --telemetry terminal-run1.stderr --workload terminal --run-id terminal-run1 \
+  --telemetry terminal-run1-host.stderr --viewer-telemetry terminal-run1-viewer.stderr \
+  --workload terminal --run-id terminal-run1 \
   > terminal-run1.report.json
 ```
 
-The offline parser uses Python's standard library. It accepts bounded schema-1
-host records, ignores non-JSON stderr diagnostics without copying them into the
-report, and rejects malformed JSON objects, unknown timing policies, mixed
-builds, non-finite/negative measurements and excessive input. Use a fresh output
-path: shell redirection truncates an existing file even when validation fails.
+Enable `--stats-json` on the viewer to collect its separate decode, completion
+and input queue stages. With `ssh --stats-json`, supply the same combined log
+to both arguments. The report pairs the ends by authenticated session ID and
+reports counts for unmatched sessions. Older host-only logs can be analyzed with
+`--telemetry` alone. The parser keeps typed schema-1 windows and validates
+bounded input, build identifiers, counts, timing policies and numeric values.
+
+Use `jwm-remote session --stats-json` to collect raw viewer windows on stderr
+alongside the managed session events on stdout. Native Wayland viewer windows
+can include `native_wayland_stages`. Its stages measure VA surface wait and
+frame export (`va_surface_wait_ms`, `va_frame_export_ms`), RGB target allocation
+(`rgb_target_allocation_ms`), EGL preparation and submission through fence
+creation (`egl_prepare_and_submit_ms`), fence wait (`egl_fence_wait_ms`), and
+the per-buffer Wayland DMA-BUF import request and reply
+(`wayland_dmabuf_import_ms`). These timings are already included in
+`native_preparation_and_submit_ms` and cover work the viewer performs before
+presentation feedback arrives.
+
+Native X11 viewer windows can include `native_x11_stages` with the same
+VA and EGL stage definitions. X11 separates DMA-BUF import
+(`x11_dmabuf_import_ms`), picture setup (`x11_picture_setup_ms`), the
+letterbox clear and copy or scaled composite into the clean backing
+(`x11_backing_populate_ms`), and submission of the window copy, cursor
+and completion request (`x11_window_submit_ms`). A report omits stages
+with no observations. XRender setup on a standalone resize redraw can
+occur outside these per-frame windows. The total native preparation and
+submission already includes the measured phases.
+With X11 preallocation enabled, `x11_prefetch_rgb_allocation_ms` records
+worker time for fresh targets used by a native submission. These observations
+occur on a separate thread outside the native submit duration. Count them
+alongside synchronous `rgb_target_allocation_ms` observations to track how
+many submissions used each allocator.
 
 Report interpretation:
 
@@ -105,6 +141,19 @@ Report interpretation:
   `counter_windows` identifies how many windows carried each counter. For
   X11 desktop timing, `x11_capture` covers only windows with the corresponding
   object and weights each stage by its explicit `observations` count.
+- Each stage in `viewer.native_wayland_stages` reports the number of windows
+  carrying it and weights its mean by the total `observations` in those
+  windows. The group appears only when native Wayland stages were recorded.
+- The X11 VA-API direct map stage reports the read-only map and copy into
+  padded NV12 staging. `viewer.hardware_rgb_work.vaapi_map` summarizes the
+  windows carrying mapped frames, staged bytes and fallback frames. Ordinary
+  downloads, including fallbacks, remain part of the download totals.
+- `x11_cpu_prepare_ms` covers completed worker jobs, including work discarded
+  after a source or geometry change. `x11_presenter_submit_ms` stops when the
+  X11 draw call returns. `presentation_completion_ms` extends through the
+  completion event. Use the queue stage to see time a decoded image spent
+  waiting for preparation and submission. The preparation counts can cross
+  window boundaries.
 - Stage quantiles cover the **most recent 128 observations per stage per window**.
   `max_reported_window_recent_p95_ms` is the largest such window p95, not a
   whole-run p95. Whole-run percentiles remain null. Archive raw observations if
@@ -127,25 +176,27 @@ browser timestamp, injected key event, frame ACK, or screenshot is not a valid
 substitute. At 240 fps, one frame is about 4.17 ms; disclose quantization and do
 not report precision finer than the measurement supports.
 
-Take at least 100 samples per trial and three independent trials for each
-workload/configuration. Retain failures and outliers; do not select only the
-fastest actions. Create an operator-measured CSV with this exact header:
+Take at least 100 attempts per trial and three independent trials for each
+workload and configuration. Retain all outcomes and outliers. Start the
+operator-measured CSV with this header.
 
 ```csv
 trial,sample,latency_ms
 ```
 
-Rows use non-personal trial IDs, unique positive sample IDs per trial, and finite
-nonnegative measured milliseconds. There are deliberately no example measurement
-values to confuse with real results. Add `--physical-csv measured.csv` to the
-report command. It reports nearest-rank per-trial p95, whether sampling reached
-3 × 100, and whether each measured p95 is at most the plan's 50 ms target.
-`measurement_method_verified` stays false: a CSV parser cannot certify the
-apparatus, measurement method or end-to-end acceptance. An undersampled CSV is
-explicitly flagged even if all its numbers meet the target.
+Rows use non-personal trial IDs and unique positive sample IDs per trial. In
+`latency_ms`, enter finite nonnegative measured milliseconds, `timeout`, or
+`no_response`. Add `--physical-csv measured.csv` to the report command to
+report both attempt and measured counts, unresolved sample IDs, and the
+nearest-rank p95 for each trial. The p95 ranks unresolved attempts after all
+measured values, so a finite result is an upper bound when a trial has
+unresolved attempts. When the p95 falls on an unresolved attempt, the report
+shows `null` and the 50 ms target remains unverified. The sampling check uses
+all attempts. `measurement_method_verified` remains `false` pending evidence
+of the apparatus and methodology.
 
-Maintain a result matrix for terminal, browser and Isaac Sim with: source/viewer
-configuration, FPS, payload rate, capture/encode/write/ACK timing, physical p95
+Maintain a result matrix for terminal, browser, and the selected 3D workloads.
+Include source/viewer configuration, FPS, payload rate, capture/encode/write/ACK timing, physical p95
 and uncertainty, static image quality, interaction failures, and evidence paths.
 Mark missing measurements **not measured**, not zero or pass. Compare competitors
 only under the same hardware, workload, resolution and measurement procedure.

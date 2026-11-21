@@ -395,6 +395,7 @@ impl PopupHarness {
                 return;
             }
             let opts = ClientOptions {
+                stats_json: false,
                 control_duration: Default::default(),
                 viewer_backend: ViewerBackend::Wayland,
                 viewer_wayland_display: None,
@@ -402,6 +403,7 @@ impl PopupHarness {
                 wayland_pointer: false,
                 wayland_popup_pointer: client_permission,
                 wayland_control: false,
+                wayland_gestures: false,
                 resumable_control: false,
                 wayland_seamless_input: false,
                 wayland_text: None,
@@ -415,6 +417,7 @@ impl PopupHarness {
                     height: ROOT_HEIGHT as u16,
                 }),
                 window_position: None,
+                x11_parent_window: None,
                 frame_limits: Default::default(),
                 address: address.to_string(),
                 peer_label: "owned popup action".into(),

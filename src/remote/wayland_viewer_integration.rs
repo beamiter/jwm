@@ -28,7 +28,9 @@ struct Snapshot {
 enum Command {
     Draw(u64),
     DrawFrame(Box<RecyclableDecodedFrame>),
+    EnableReadOnlyResize,
     Poll,
+    Redraw,
     InvalidateSource,
     EnableSeamless,
     Stop,
@@ -36,6 +38,7 @@ enum Command {
 #[derive(Debug)]
 enum Reply {
     Connected,
+    ResizeEnabled,
     Drawn(bool),
     Snapshot(Snapshot),
     Failed(String),
@@ -89,21 +92,29 @@ impl Peer {
                             Command::DrawFrame(frame) => {
                                 tx.send(Reply::Drawn(viewer.draw_recyclable(*frame)?))?;
                             }
-                            Command::Poll => {
+                            Command::EnableReadOnlyResize => {
+                                viewer.enable_view_only_session();
+                                tx.send(Reply::ResizeEnabled)?;
+                            }
+                            command @ (Command::Poll | Command::Redraw) => {
                                 let events = viewer.poll_events()?;
                                 assert!(
                                     events.iter().all(|e| matches!(e, ViewerEvent::Close)),
                                     "readonly viewer emits input"
                                 );
                                 let closed = events.contains(&ViewerEvent::Close);
+                                let presented = viewer.take_presented_sequences()?;
+                                if matches!(command, Command::Redraw) {
+                                    viewer.refresh_pending_redraw()?;
+                                }
                                 tx.send(Reply::Snapshot(Snapshot {
-                                    presented: viewer.take_presented_sequences()?,
+                                    presented,
                                     can_submit: viewer.can_submit_frame(),
                                     closed,
                                 }))?;
                             }
                             Command::EnableSeamless => {
-                                viewer.enable_wayland_control(false, false)?;
+                                viewer.enable_wayland_control(false, false, false, false)?;
                                 viewer.enable_wayland_seamless_input(
                                     Instant::now() + Duration::from_secs(30),
                                     30_000,
@@ -112,7 +123,7 @@ impl Peer {
                                 return Err("unsupported handoff unexpectedly enabled".into());
                             }
                             Command::InvalidateSource => {
-                                viewer.invalidate_source("replacement source".into())?;
+                                viewer.invalidate_source("replacement source".into(), false)?;
                                 return Err("source switch unexpectedly succeeded".into());
                             }
                             Command::Stop => {
@@ -169,6 +180,10 @@ impl Peer {
             Reply::Snapshot(snapshot) => snapshot,
             other => panic!("expected snapshot, got {other:?}"),
         }
+    }
+    fn enable_read_only_resize(&self, server: &mut Server) {
+        self.command.send(Command::EnableReadOnlyResize).unwrap();
+        assert!(matches!(self.recv(server), Reply::ResizeEnabled));
     }
     fn join_failed(mut self) {
         self.thread.take().unwrap().join().unwrap();
@@ -586,6 +601,7 @@ fn actual_wayland_viewer_idle_resize_waits_for_destroy_sync_and_preserves_busy_s
     };
     let (mut server, peer, probe) = server_and_peer_with_probe(false);
     assert!(matches!(peer.recv(&mut server), Reply::Connected));
+    peer.enable_read_only_resize(&mut server);
     let surface = viewer_surface(&server);
     peer.command.send(Command::Draw(101)).unwrap();
     assert!(matches!(peer.recv(&mut server), Reply::Drawn(true)));
@@ -670,6 +686,9 @@ fn actual_wayland_viewer_idle_resize_waits_for_destroy_sync_and_preserves_busy_s
         "server has deliberately not processed destroy yet"
     );
     assert_eq!(committed_buffer(&surface).id(), held_second.id());
+    let top = server.state.toplevels.values().next().unwrap();
+    top.with_pending_state(|state| state.size = Some((512, 384).into()));
+    top.send_configure();
     assert!(matches!(peer.recv(&mut server), Reply::Drawn(true)));
     let feedback = wait_feedback(&mut server, &surface);
     assert!(
@@ -680,7 +699,7 @@ fn actual_wayland_viewer_idle_resize_waits_for_destroy_sync_and_preserves_busy_s
     assert_ne!(replacement.id(), first.id());
     assert_ne!(replacement.id(), held_second.id());
     for (buffer, width, height, expected) in [
-        (&replacement, 640, 480, [0, 0, 255]),
+        (&replacement, 512, 384, [0, 0, 255]),
         (&*held_second, 800, 600, [255, 0, 0]),
     ] {
         smithay::wayland::shm::with_buffer_contents(buffer, |ptr, len, data| {
@@ -759,6 +778,68 @@ fn actual_wayland_viewer_resize_invalidates_pending_feedback_without_ack() {
     }
 }
 
+#[test]
+fn actual_wayland_viewer_rapid_read_only_resize_retires_feedback_and_storage_separately() {
+    let (mut server, peer) = server_and_peer(false);
+    assert!(matches!(peer.recv(&mut server), Reply::Connected));
+    peer.enable_read_only_resize(&mut server);
+    let surface = viewer_surface(&server);
+    peer.command.send(Command::Draw(45)).unwrap();
+    assert!(matches!(peer.recv(&mut server), Reply::Drawn(true)));
+    let first_feedback = wait_feedback(&mut server, &surface);
+    let first_busy = with_renderer_surface_state(&surface, |s| s.buffer().cloned())
+        .flatten()
+        .unwrap();
+
+    let configure = |server: &mut Server, size| {
+        let top = server.state.toplevels.values().next().unwrap();
+        top.with_pending_state(|state| state.size = Some(size));
+        top.send_configure();
+        server.roundtrip();
+    };
+    let redraw = |server: &mut Server| {
+        peer.command.send(Command::Redraw).unwrap();
+        let Reply::Snapshot(snapshot) = peer.recv(server) else {
+            panic!("redraw failed")
+        };
+        assert!(snapshot.presented.is_empty());
+    };
+    configure(&mut server, (640, 480).into());
+    redraw(&mut server);
+    let second_feedback = wait_feedback(&mut server, &surface);
+    let second = committed_buffer(&surface);
+    assert_ne!(first_busy.id(), second.id());
+
+    configure(&mut server, (320, 257).into());
+    redraw(&mut server);
+    assert_eq!(committed_buffer(&surface).id(), second.id());
+    assert!(!peer.poll(&mut server).can_submit);
+    // An old commit can report either Presented or Discarded. Neither can
+    // acknowledge the frame or release the corresponding busy buffer.
+    present(&mut server, first_feedback);
+    assert!(peer.poll(&mut server).presented.is_empty());
+    assert!(!peer.poll(&mut server).can_submit);
+    drop(first_busy);
+    server.roundtrip();
+
+    redraw(&mut server);
+    let third_feedback = wait_feedback(&mut server, &surface);
+    assert_ne!(committed_buffer(&surface).id(), second.id());
+    smithay::wayland::shm::with_buffer_contents(&committed_buffer(&surface), |_, _, data| {
+        assert_eq!((data.width, data.height), (320, 257));
+    })
+    .unwrap();
+    for callback in second_feedback {
+        callback.discarded();
+    }
+    server.roundtrip();
+    assert!(peer.poll(&mut server).presented.is_empty());
+    present(&mut server, third_feedback);
+    assert_eq!(peer.poll(&mut server).presented, [45]);
+    assert!(peer.poll(&mut server).presented.is_empty());
+    peer.stop(&mut server);
+}
+
 /// Production authenticated TCP client, decoder and native viewer. The scripted
 /// peer uses production authentication/encoding; only display completion timing
 /// belongs to the explicitly test-owned compositor, not a claimed KMS device.
@@ -766,22 +847,34 @@ fn actual_wayland_viewer_resize_invalidates_pending_feedback_without_ack() {
 fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
     use super::*;
     use crate::remote::{
-        client::{ClientOptions, run_client},
+        client::ClientOptions,
+        engine::{RemoteSession, SessionCommand, SessionState},
+        source_wire::{SourceRequest, encode_source_changed},
         tile::{TileEncodeRequest, TileEncoder},
-        viewer_backend::{ViewerBackend, with_wayland_test_stream},
+        viewer_backend::ViewerBackend,
     };
+    use std::os::unix::{fs::DirBuilderExt, net::UnixListener};
+    struct SocketDirectory(std::path::PathBuf);
+    impl Drop for SocketDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     let Some(mut gl) = HeadlessSmithayGles::new() else {
         return;
     };
     let mut server = Server::new();
     register_test_presentation(&mut server);
     server.state.image_capture_pending = Some(init_image_copy_capture(&server.display.handle()));
-    let (native, stream) = UnixStream::pair().unwrap();
-    server
-        .display
-        .handle()
-        .insert_client(native, Arc::new(JwmClientState::default()))
+    let path = std::env::temp_dir().join(format!("jwm-viewer-{:016x}", rand::random::<u64>()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
         .unwrap();
+    let directory = SocketDirectory(path);
+    let path = directory.0.join("display");
+    let native_listener = UnixListener::bind(&path).unwrap();
+    native_listener.set_nonblocking(true).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let (records, observed) = mpsc::channel();
@@ -818,10 +911,16 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
                 source: SourceId(1),
                 epoch: 1,
             },
-            entries: vec![SourceEntry {
-                id: SourceId(1),
-                label: "test-owned red source".into(),
-            }],
+            entries: vec![
+                SourceEntry {
+                    id: SourceId(1),
+                    label: "test-owned red source".into(),
+                },
+                SourceEntry {
+                    id: SourceId(2),
+                    label: "test-owned blue source".into(),
+                },
+            ],
         };
         peer.writer
             .write_message(MessageKind::SourceCatalog, &catalog.encode().unwrap())
@@ -848,53 +947,126 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             )
             .unwrap();
         peer.writer.flush().unwrap();
+        let previous_payload = payload;
         loop {
             let (kind, payload) = peer.reader.read_message().unwrap();
+            if kind == MessageKind::SourceRequest {
+                assert_eq!(
+                    SourceRequest::decode(&payload).unwrap(),
+                    SourceRequest {
+                        expected_epoch: 1,
+                        target: SourceId(2),
+                    }
+                );
+                let changed = SourceVersion {
+                    source: SourceId(2),
+                    epoch: 2,
+                };
+                peer.writer
+                    .write_message(
+                        MessageKind::SourceChanged,
+                        &encode_source_changed(changed).unwrap(),
+                    )
+                    .unwrap();
+                // This authenticated but retired epoch must never become part of the new role.
+                peer.writer
+                    .write_message(
+                        MessageKind::Frame,
+                        &crate::remote::source_wire::encode_frame_payload(
+                            1,
+                            crate::remote::source_wire::FramePurpose::Video,
+                            &previous_payload,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                let frame = CapturedFrame {
+                    geometry_epoch: 1,
+                    source_width: 800,
+                    source_height: 600,
+                    image: RgbImage::from_pixel(800, 600, Rgb([0, 0, 255])),
+                };
+                let mut encoder = TileEncoder::new();
+                encoder.plan(&frame, TileEncodeRequest::Keyframe).unwrap();
+                let mut replacement = Vec::new();
+                encoder
+                    .encode_into(&mut replacement, 72, &frame, 100)
+                    .unwrap();
+                peer.writer
+                    .write_message(
+                        MessageKind::Frame,
+                        &crate::remote::source_wire::encode_frame_payload(
+                            2,
+                            crate::remote::source_wire::FramePurpose::Video,
+                            &replacement,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                peer.writer.flush().unwrap();
+            }
             records.send((kind, payload)).unwrap();
             if kind == MessageKind::Close {
                 break;
             }
         }
     });
-    let (done_tx, done) = mpsc::channel();
-    let viewer = thread::spawn(move || {
-        let options = ClientOptions {
-            control_duration: Default::default(),
-            viewer_backend: ViewerBackend::Wayland,
-            viewer_wayland_display: None,
-            wayland_keyboard: false,
-            wayland_pointer: false,
-            wayland_control: false,
-            resumable_control: false,
-            wayland_seamless_input: false,
-            wayland_text: None,
-            static_lossless: false,
-            wayland_scroll: false,
-            wayland_horizontal_scroll: false,
-            wayland_popup_pointer: false,
-            resize_source: None,
-            follow_source_size: false,
-            window_size: None,
-            window_position: None,
-            frame_limits: Default::default(),
-            address: address.clone(),
-            peer_label: address,
-            key: crate::remote::key::KeySource::Bytes(key),
-            display: None,
-            view_only: true,
-            grab_input: false,
-            seamless_input: None,
-            clipboard: false,
-            clipboard_mode: Default::default(),
-            clipboard_direction: Default::default(),
-            clipboard_file_limit: 0,
-            escape_key: "Escape".into(),
-            scaling: Default::default(),
-        };
-        let result = with_wayland_test_stream(stream, || run_client(options));
-        done_tx.send(result.map_err(|e| e.to_string())).unwrap();
-    });
+    let options = ClientOptions {
+        stats_json: false,
+        control_duration: Default::default(),
+        viewer_backend: ViewerBackend::Wayland,
+        viewer_wayland_display: Some(path.to_str().unwrap().into()),
+        wayland_keyboard: false,
+        wayland_pointer: false,
+        wayland_control: false,
+        wayland_gestures: false,
+        resumable_control: false,
+        wayland_seamless_input: false,
+        wayland_text: None,
+        static_lossless: false,
+        wayland_scroll: false,
+        wayland_horizontal_scroll: false,
+        wayland_popup_pointer: false,
+        resize_source: None,
+        follow_source_size: false,
+        window_size: None,
+        window_position: None,
+        x11_parent_window: None,
+        frame_limits: Default::default(),
+        address: address.clone(),
+        peer_label: address,
+        key: crate::remote::key::KeySource::Bytes(key),
+        display: None,
+        view_only: true,
+        grab_input: false,
+        seamless_input: None,
+        clipboard: false,
+        clipboard_mode: Default::default(),
+        clipboard_direction: Default::default(),
+        clipboard_file_limit: 0,
+        escape_key: "Escape".into(),
+        scaling: Default::default(),
+    };
+    let viewer =
+        RemoteSession::connect(options, crate::remote::messages::FrameCodec::JpegTiles, 0).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
+    let native = loop {
+        match native_listener.accept() {
+            Ok((native, _)) => break native,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => panic!("viewer socket accept: {e}"),
+        }
+        if let SessionState::Failed(error) = viewer.state() {
+            panic!("viewer failed before opening its socket: {error:?}");
+        }
+        assert!(Instant::now() < deadline, "viewer did not open its socket");
+        thread::sleep(Duration::from_millis(1));
+    };
+    server
+        .display
+        .handle()
+        .insert_client(native, Arc::new(JwmClientState::default()))
+        .unwrap();
     let (surface, feedback) = loop {
         server.roundtrip();
         for top in server.state.toplevels.values() {
@@ -911,8 +1083,8 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
                 break (surface, feedback);
             }
         }
-        if let Ok(result) = done.try_recv() {
-            panic!("viewer ended before drawing: {result:?}");
+        if let SessionState::Failed(error) = viewer.state() {
+            panic!("viewer failed before drawing: {error:?}");
         }
         assert!(Instant::now() < deadline, "TCP viewer did not commit frame");
         thread::sleep(Duration::from_millis(1));
@@ -925,8 +1097,10 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
             .is_empty()
     );
     let mut capture = Capture::new(&mut server);
-    let _blue = App::with_color(&mut server, [255, 0, 0, 255]);
+    let interference = App::with_color(&mut server, [255, 0, 0, 255]);
     verify_actual_gl_pixels(&mut server, &mut gl, &mut capture);
+    drop(capture);
+    drop(interference);
     committed_buffer(&surface).release();
     server.roundtrip();
     let until = Instant::now() + Duration::from_millis(150);
@@ -940,7 +1114,32 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
         }
         thread::sleep(Duration::from_millis(1));
     }
+    let top = server
+        .state
+        .toplevels
+        .values()
+        .find(|top| top.wl_surface() == &surface)
+        .unwrap();
+    top.with_pending_state(|state| state.size = Some((641, 480).into()));
+    top.send_configure();
+    let resized_feedback = wait_feedback(&mut server, &surface);
+    smithay::wayland::shm::with_buffer_contents(&committed_buffer(&surface), |_, _, data| {
+        assert_eq!((data.width, data.height), (641, 480));
+    })
+    .unwrap();
     present(&mut server, feedback);
+    let until = Instant::now() + Duration::from_millis(150);
+    while Instant::now() < until {
+        server.roundtrip();
+        for (kind, _) in observed.try_iter() {
+            assert!(
+                matches!(kind, MessageKind::Viewport | MessageKind::Heartbeat),
+                "old viewport feedback released TCP credit: {kind:?}"
+            );
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    present(&mut server, resized_feedback);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         server.roundtrip();
@@ -965,29 +1164,156 @@ fn actual_wayland_viewer_tcp_ack_waits_for_presented_not_release() {
         );
         thread::sleep(Duration::from_millis(1));
     }
-    server
+    let top = server
         .state
         .toplevels
         .values()
-        .find(|t| t.wl_surface() == &surface)
-        .unwrap()
-        .send_close();
+        .find(|top| top.wl_surface() == &surface)
+        .unwrap();
+    top.with_pending_state(|state| state.size = Some((512, 384).into()));
+    top.send_configure();
+    let local_redraw = wait_feedback(&mut server, &surface);
+    let selected = viewer
+        .sources()
+        .expect("presented source exposes its authorized catalog");
+    assert_eq!(
+        selected.catalog.current,
+        SourceVersion {
+            source: SourceId(1),
+            epoch: 1
+        }
+    );
+    viewer
+        .send(SessionCommand::SelectSource {
+            session_id: selected.session_id,
+            source_epoch: 1,
+            target: SourceId(2),
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let replacement = loop {
+        server.roundtrip();
+        if !surface.is_alive() && server.state.toplevels.len() == 1 {
+            break viewer_surface(&server);
+        }
+        if let SessionState::Failed(error) = viewer.state() {
+            panic!("viewer failed during source switch: {error:?}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "viewer did not replace the old xdg role"
+        );
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert_ne!(replacement.id(), surface.id());
+    assert!(viewer.sources().is_none());
+    assert_eq!(viewer.state(), SessionState::WaitingForPresentation);
+    assert!(take_feedback(&replacement).is_empty());
+    assert!(
+        with_renderer_surface_state(&replacement, |state| state.buffer().is_none()).unwrap_or(true)
+    );
+    let top = server.state.toplevels.values().next().unwrap();
+    top.with_pending_state(|state| state.size = Some((800, 600).into()));
+    top.send_configure();
+    let new_feedback = loop {
+        server.roundtrip();
+        let feedback = take_feedback(&replacement);
+        if !feedback.is_empty() {
+            assert_eq!(feedback.len(), 1);
+            break feedback;
+        }
+        if let SessionState::Failed(error) = viewer.state() {
+            panic!("viewer failed before committing the replacement: {error:?}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "viewer never committed on the configured replacement"
+        );
+        thread::sleep(Duration::from_millis(1));
+    };
+    let mut capture = Capture::new(&mut server);
+    verify_actual_gl_color(&mut server, &mut gl, &mut capture, true);
+    present(&mut server, local_redraw);
+    let until = Instant::now() + Duration::from_millis(150);
+    let mut saw_selection = false;
+    while Instant::now() < until {
+        server.roundtrip();
+        for (kind, _) in observed.try_iter() {
+            saw_selection |= kind == MessageKind::SourceRequest;
+            assert!(
+                matches!(
+                    kind,
+                    MessageKind::SourceRequest | MessageKind::Heartbeat | MessageKind::Viewport
+                ),
+                "retired source or local redraw produced a record: {kind:?}"
+            );
+        }
+        assert!(viewer.sources().is_none());
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(saw_selection);
+    present(&mut server, new_feedback);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        server.roundtrip();
+        match observed.try_recv() {
+            Ok((MessageKind::FrameAck, payload)) => {
+                assert_eq!(
+                    crate::remote::messages::decode_source_frame_ack(&payload).unwrap(),
+                    (2, 72)
+                );
+                break;
+            }
+            Ok((kind, _)) => assert!(matches!(
+                kind,
+                MessageKind::Heartbeat | MessageKind::Viewport
+            )),
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(e) => panic!("TCP peer ended: {e}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "new source did not return frame credit"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    while viewer.sources().is_none() {
+        server.roundtrip();
+        assert!(
+            Instant::now() < deadline,
+            "presented replacement did not publish its source"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        viewer.sources().unwrap().catalog.current,
+        SourceVersion {
+            source: SourceId(2),
+            epoch: 2
+        }
+    );
+    assert!(
+        viewer
+            .send(SessionCommand::SelectSource {
+                session_id: selected.session_id,
+                source_epoch: 1,
+                target: SourceId(1),
+            })
+            .is_err()
+    );
+    viewer.send(SessionCommand::Disconnect).unwrap();
     server.roundtrip();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         server.roundtrip();
-        match done.try_recv() {
-            Ok(result) => {
-                result.unwrap();
-                break;
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(e) => panic!("viewer result lost: {e}"),
+        match viewer.state() {
+            SessionState::Closed => break,
+            SessionState::Failed(error) => panic!("viewer failed during close: {error:?}"),
+            _ => {}
         }
         assert!(Instant::now() < deadline, "viewer close stalled");
         thread::sleep(Duration::from_millis(1));
     }
-    viewer.join().unwrap();
     host.join().unwrap();
     for (kind, _) in observed.try_iter() {
         assert!(
@@ -1014,7 +1340,7 @@ fn actual_wayland_viewer_source_switch_rejects_pending_presentation_without_ack(
     peer.command.send(Command::InvalidateSource).unwrap();
     let reply = peer.recv(&mut server);
     assert!(
-        matches!(reply, Reply::Failed(ref error) if error == "Wayland viewer source switching is unsupported; session closed"),
+        matches!(reply, Reply::Failed(ref error) if error == "Wayland viewer rejected a source change without a matching view-only selection"),
         "source switch must return its specific refusal, not panic or ACK: {reply:?}"
     );
     peer.join_failed();

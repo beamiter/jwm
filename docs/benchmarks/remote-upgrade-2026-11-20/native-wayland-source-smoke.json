@@ -1,0 +1,39 @@
+{
+  "mode": "Native Wayland host and native Wayland managed viewer in plain view-only mode",
+  "fixture": {
+    "launcher": "Independent jwm-remote host and session executables",
+    "displays": "Two private JWM/Smithay compositors with software GLES",
+    "transport": "Authenticated loopback TCP on each test machine",
+    "viewer_dimensions": [400, 300],
+    "locally_authorized": [
+      {"source_id": 1, "dimensions": [200, 150], "pixels": "red"},
+      {"source_id": 2, "dimensions": [240, 180], "pixels": "blue"}
+    ],
+    "unshared_window": {"dimensions": [160, 120], "pixels": "green"}
+  },
+  "switch_round_trip": {
+    "source_ids": [1, 2, 1],
+    "source_epochs": [1, 2, 3],
+    "observed_pixels": ["red", "blue", "red"],
+    "authenticated_session_id_unchanged": true,
+    "old_xdg_surface_retired_on_each_switch": true,
+    "old_feedback_discarded_after_role_rebuild": true,
+    "catalog_waited_for_current_presentation": true,
+    "unshared_source_id_rejected": true,
+    "stale_source_epoch_rejected": true,
+    "viewer_and_host_disconnected_cleanly": true
+  },
+  "remapped_inactive_grant": {
+    "target_surface_unmapped_and_remapped_before_selection": true,
+    "original_grant_reopened": false,
+    "target_presented": false,
+    "viewer_and_host_reported_failure": true
+  },
+  "runs": {
+    "development": {"standalone_cli_process_tests_passed": 7},
+    "ubuntu_192_168_0_78": {"standalone_cli_process_tests_passed": 7}
+  },
+  "additional_development_runs_with_both_source_tests_passed": 5,
+  "development_remote_suite": {"passed": 1369, "failed": 0, "ignored": 49},
+  "development_cli_unit_tests_passed": 70
+}

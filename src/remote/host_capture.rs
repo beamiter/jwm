@@ -1,5 +1,6 @@
 //! Separate window grants from desktop capture, including all fallback paths.
 use super::resumable_control::{LeaseBudget, Negotiated};
+use super::source_session::SourceId;
 use super::x11_capture::{
     CaptureArea, CaptureImageRecycler, CaptureMode, CaptureOutcome, CursorSample, X11Capture,
     X11CaptureMetrics,
@@ -21,12 +22,13 @@ impl HostCapture {
         &mut self,
         scroll_enabled: bool,
         horizontal_enabled: bool,
+        gestures: bool,
     ) -> RemoteResult<()> {
         #[cfg(feature = "remote-wayland")]
         if let Self::Wayland(c) = self {
-            return c.enable_control(scroll_enabled, horizontal_enabled);
+            return c.enable_control(scroll_enabled, horizontal_enabled, gestures);
         }
-        let _ = (scroll_enabled, horizontal_enabled);
+        let _ = (scroll_enabled, horizontal_enabled, gestures);
         Err(std::io::Error::other("native control unavailable").into())
     }
     pub(super) fn enable_resumable_control(
@@ -115,6 +117,13 @@ impl HostCapture {
             return c.revoke_control();
         }
         ()
+    }
+    pub(super) fn confirm_control_released(&mut self) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(c) = self {
+            return c.confirm_control_released();
+        }
+        Err("native control cleanup requires a Wayland source".into())
     }
     pub(super) fn discard_control_frame(&mut self) -> () {
         #[cfg(feature = "remote-wayland")]
@@ -300,8 +309,55 @@ impl HostCapture {
         }
     }
     pub(super) fn enable_capture_metrics(&mut self) {
-        if let Self::Desktop(capture) = self {
-            capture.enable_capture_metrics();
+        match self {
+            Self::Desktop(capture) => capture.enable_capture_metrics(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(capture) => capture.enable_capture_metrics(),
+            Self::Window(_) => {}
+        }
+    }
+
+    #[cfg(feature = "remote-h264")]
+    pub(super) fn probe_gpu_capture(
+        &mut self,
+        node: &std::path::Path,
+        fps: u16,
+    ) -> RemoteResult<std::path::PathBuf> {
+        match self {
+            Self::Desktop(capture) => capture.probe_gpu_capture(node, fps),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(capture) => capture.probe_gpu_capture(node, fps),
+            Self::Window(_) => Err("this capture source does not support GPU export".into()),
+        }
+    }
+
+    #[cfg(feature = "remote-h264")]
+    pub(super) fn frame_gpu(&mut self) -> RemoteResult<Option<super::gpu_host_video::Frame>> {
+        match self {
+            Self::Desktop(capture) => capture.frame_gpu(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(capture) => capture.frame_gpu(),
+            Self::Window(_) => Err("this capture source does not support GPU export".into()),
+        }
+    }
+
+    #[cfg(feature = "remote-h264")]
+    pub(super) fn prepare_cpu_fallback(&mut self) {
+        match self {
+            Self::Desktop(capture) => capture.prepare_cpu_fallback(),
+            #[cfg(feature = "remote-wayland")]
+            Self::Wayland(capture) => capture.prepare_gpu_fallback(),
+            Self::Window(_) => {}
+        }
+    }
+
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn take_wayland_capture_observation(
+        &mut self,
+    ) -> Option<super::wayland_capture::CaptureObservation> {
+        match self {
+            Self::Wayland(capture) => capture.take_capture_observation(),
+            _ => None,
         }
     }
 
@@ -423,6 +479,19 @@ impl HostCapture {
             Self::Window(_) => Ok(None),
         }
     }
+
+    pub(super) fn cursor_capture_scope(&self) -> Option<super::x11_capture::CursorCaptureScope> {
+        match self {
+            Self::Desktop(c) if c.cursor_plane_enabled() => Some(c.cursor_capture_scope()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn enable_region_readback(&mut self) {
+        if let Self::Desktop(capture) = self {
+            capture.enable_region_readback();
+        }
+    }
     pub(super) fn switch_area(&mut self, area: CaptureArea) -> RemoteResult<()> {
         match self {
             Self::Desktop(c) => c.switch_area(area),
@@ -436,5 +505,26 @@ impl HostCapture {
             )
             .into()),
         }
+    }
+
+    pub(super) fn wayland_grant_count(&self) -> Option<usize> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(capture) = self {
+            return Some(capture.grant_count());
+        }
+        None
+    }
+
+    pub(super) fn switch_wayland_source(&mut self, target: SourceId) -> RemoteResult<()> {
+        #[cfg(feature = "remote-wayland")]
+        if let Self::Wayland(capture) = self {
+            return capture.switch_grant(target);
+        }
+        let _ = target;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "native Wayland capture is unavailable",
+        )
+        .into())
     }
 }

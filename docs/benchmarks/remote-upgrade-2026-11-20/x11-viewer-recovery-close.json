@@ -1,0 +1,123 @@
+{
+  "archive": {
+    "file": "x11-viewer-recovery-close-raw.zip",
+    "member_sha256": {
+      "evidence.json": "6c9c77ebedf9c38589c61ce334321bad16c2858cba5bee93e013be9972ff8eef",
+      "fixtures/remote-fault-proxy.py": "c207d20c09ae03af71a6c3be1562319179cac882c168a3afcbf91a87c59a75b9",
+      "fixtures/test-remote-recovery-window.py": "e78b774db04113616af604a063f8e95f3ff03299076772e50b2b6b5049e809d6",
+      "fixtures/test-remote-viewer-e2e.py": "1359c0f7ff3cbc19c1d793f264283af595caec0f84d9ec6fc048f2aacc1fbbad",
+      "logs/before-stalled-close.log": "4de51ead77038b92a926f91947ffa8904479bc84648a518893f961bb582d1b1a",
+      "logs/candidate-build.log": "7a3c293e4c2cea14a965b741b0cf54d4c3e3d41837d0ab734cb6c1335a809cb1",
+      "logs/candidate-directional-replay.log": "a00b60f87b6bf3c4a6ab17f8673882505ddebfc240ec2942c4d83d3c197f3c9b",
+      "logs/candidate-simultaneous-cut.log": "d3200a0a13e8a76a7f0e506d50d2465685312f5a50fb5db975e224a0688aa1c3",
+      "sources/client-recovery-io-excerpt.rs": "4fdee31f31837169fa13fc1b6423face122a4f2a7610635f0b09555ec109c44e"
+    },
+    "sha256": "a5cac226d802dc227ed0a94800283c59dab77baf6bbc48f163d1246aaaddbc0e"
+  },
+  "candidate_session_shell_checks": {
+    "clipboard_restriction_prevents_broader_retry": true,
+    "ordinary_window_close_during_retry_authentication": true,
+    "retained_window_and_geometry": true,
+    "toggle_cancel_during_backoff": true
+  },
+  "clipboard": {
+    "directional_fin_replay": {
+      "accepted_connections": 2,
+      "confirmed_clipboard": "clipboard restriction confirmed: text + images, to host",
+      "fault": "server_to_viewer_fin",
+      "scenario": "clipboard-recovery",
+      "session_ids": [
+        "63a896ca97ed5e7914d607212842da7e",
+        "ca4032b4a6d78a34d8ee8dfe241bf0b1"
+      ],
+      "terminal": {
+        "category": "protocol_io",
+        "cleanup": "unknown",
+        "command": "connect",
+        "io_kind": "unexpected_eof",
+        "outcome": "error",
+        "peer_close_code": null,
+        "reconnect_certified": false,
+        "schema_version": 2,
+        "stage": "session",
+        "type": "jwm_remote_command_result"
+      }
+    },
+    "directional_fixture": "Stop server-to-viewer forwarding and send a FIN. Continue receiving viewer-to-server traffic until the viewer closes its write side.",
+    "existing_retry_qualification_unchanged": true,
+    "historical_diagnostic": "Broken pipe after shutting down both proxy pumps before recovery",
+    "historical_simultaneous_proxy_teardown": {
+      "category": "cleanup_failed",
+      "cleanup": "incomplete",
+      "command": "connect",
+      "io_kind": "unexpected_eof",
+      "outcome": "error",
+      "peer_close_code": null,
+      "reconnect_certified": false,
+      "schema_version": 2,
+      "stage": "session",
+      "type": "jwm_remote_command_result"
+    }
+  },
+  "date": "2026-11-21",
+  "files": {
+    "log_redactions": [
+      "ephemeral localhost ports",
+      "workspace, build and private fixture paths"
+    ],
+    "selected_source_and_final_fixture_sha256": {
+      "fixtures/remote-fault-proxy.py": "c207d20c09ae03af71a6c3be1562319179cac882c168a3afcbf91a87c59a75b9",
+      "fixtures/test-remote-recovery-window.py": "e78b774db04113616af604a063f8e95f3ff03299076772e50b2b6b5049e809d6",
+      "fixtures/test-remote-viewer-e2e.py": "1359c0f7ff3cbc19c1d793f264283af595caec0f84d9ec6fc048f2aacc1fbbad",
+      "sources/client-recovery-io-excerpt.rs": "4fdee31f31837169fa13fc1b6423face122a4f2a7610635f0b09555ec109c44e"
+    },
+    "source_scope": "The Rust member is a current code excerpt. The Python snapshot is from the final directional replay. It does not recreate the earlier simultaneous clipboard cut.",
+    "unredacted_log_sha256": {
+      "before-stalled-close.log": "f78a0fbe8f1bd6c3c5fbbeaae918fb04980789ae5099ec6c112885bab472aa3d",
+      "candidate-build.log": "397841e93f665b471833134bc7171de22edbaee13ca8e6229921575b6401bed5",
+      "candidate-directional-replay.log": "4af9c0a4e5880b91b6998f7d7b804257f0a7ee1c09368c46c256318d8f69ac93",
+      "candidate-simultaneous-cut.log": "9d22ef722756c2dfc0950e8104fcc8711c10b1ebc14221bae2fcfdc61a22c098"
+    }
+  },
+  "fixed_close": {
+    "final_replay": {
+      "close_event": "WM_DELETE_WINDOW",
+      "close_to_exit_ms": 85.836587,
+      "initial_session_id": "f863d71b0de8b346729a29b5590ba23d",
+      "proxy_total_connections": 2,
+      "scenario": "stalled-retry-close",
+      "stalled_retry_socket_closed": true
+    },
+    "prior_run": {
+      "close_event": "WM_DELETE_WINDOW",
+      "close_to_exit_ms": 79.133818,
+      "initial_session_id": "11cd5cee648c2387819352c2ad6e016b",
+      "proxy_total_connections": 2,
+      "scenario": "stalled-retry-close",
+      "stalled_retry_socket_closed": true
+    },
+    "qualification": "The positive-control session returned an authenticated frame ACK. The retained XID received ordinary WM_DELETE_WINDOW while the second TCP socket remained open without its server-first authentication greeting. The viewer exited normally."
+  },
+  "legacy_defect": {
+    "close_event": "WM_DELETE_WINDOW",
+    "failed_to_exit_within_seconds": 2.0,
+    "phase": "authentication waiting on server greeting",
+    "second_accepted_tcp_attempt": true
+  },
+  "limits": [
+    "Fault replay measured established TCP authentication, with the same cancellation helper also used while waiting for the first authenticated frame.",
+    "DNS and TCP connection establishment cancellation were outside this patch.",
+    "Times measure one local close-to-process-exit observation per replay."
+  ],
+  "pinned_executables": {
+    "before_release_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+    "candidate_debug_sha256": "0fed5510676866558071fc36b6581eac1de30f8b0b9e1573a535c0ea84e380db",
+    "candidate_features": [
+      "remote-x11",
+      "remote-wayland",
+      "remote-h264"
+    ]
+  },
+  "schema_version": 1,
+  "scope": "P11 opt-in X11 retained viewer, private Xvfb and authenticated loopback TCP"
+}

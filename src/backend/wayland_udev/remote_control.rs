@@ -1,6 +1,6 @@
 //! Explicit single-surface control bundle: one deadline, sequence and revocation domain.
-//! Scroll requires an additional explicit v2 request. No drag, focus changes,
-//! global input or modifier-click.
+//! Scoped scroll and gestures require separate creation requests. All input
+//! uses the captured surface's original, focused receivers.
 use super::image_copy_capture::{
     CaptureAuthority, CaptureFrameData, CaptureSource, ImageCaptureSourceData, authority_is_current,
 };
@@ -9,6 +9,7 @@ use crate::remote_control_protocol::server::{
     jwm_remote_control_lease_v1::{self, JwmRemoteControlLeaseV1},
     jwm_remote_control_manager_v1::{self, JwmRemoteControlManagerV1},
 };
+use crate::remote_keyboard_protocol::gesture_modifier_allowed;
 use smithay::backend::input::{InputTime, KeyState};
 use smithay::input::keyboard::{AuthorizedKeyboardSnapshot, KeymapFile, ModifiersState};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -22,10 +23,14 @@ use std::{
     time::{Duration, Instant},
 };
 use xkbcommon::xkb;
-use smithay::input::pointer::AuthorizedPointerSnapshot;
+use smithay::input::pointer::{AuthorizedPointerSnapshot, PointerHandle};
 use smithay::reexports::wayland_server::{Weak, protocol::wl_surface::WlSurface};
 use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::server::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
-use super::remote_pointer::{Mapping, mapping, point_allowed, unconstrained};
+use smithay::wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint};
+use super::remote_pointer::{
+    Mapping, WindowInputLayout, gesture_mapping, has_empty_input_region, mapped_point, mapping,
+    unconstrained, window_gesture_mapping,
+};
 const TTL: Duration = Duration::from_secs(30);
 const TICK: Duration = Duration::from_millis(50);
 pub(crate) const DENIED: u32 = 1;
@@ -39,6 +44,35 @@ const QUOTA: u32 = 7;
 pub(crate) struct RemoteControlState {
     next_epoch: u32,
     active: Option<Lease>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeaseMode {
+    Sequential,
+    Resumable,
+    Gestures,
+    WindowGestures,
+}
+impl LeaseMode {
+    fn gestures(self) -> bool {
+        matches!(self, Self::Gestures | Self::WindowGestures)
+    }
+
+    fn pointer_mapping(self, authority: &CaptureAuthority) -> Option<Mapping> {
+        match self {
+            Self::Gestures => gesture_mapping(authority),
+            Self::WindowGestures => window_gesture_mapping(authority),
+            Self::Sequential | Self::Resumable => mapping(authority),
+        }
+    }
+}
+enum Drag {
+    Root,
+    ChildClick {
+        layout: Arc<WindowInputLayout>,
+        point: (f64, f64),
+        moved: bool,
+        at: Instant,
+    },
 }
 struct Lease {
     resource: JwmRemoteControlLeaseV1,
@@ -55,8 +89,10 @@ struct Lease {
     pointer_refill: Instant,
     xkb: xkb::State,
     held: BTreeSet<u32>,
+    drag: Option<Drag>,
+    deferred_confinement: bool,
     armed: bool,
-    resumable: bool,
+    mode: LeaseMode,
     generation: u32,
     paused_at: Option<Instant>,
     sequence: u32,
@@ -73,12 +109,12 @@ pub struct LeaseData {
 }
 #[cfg(test)]
 thread_local! {
-    static TEST_MANAGER_VERSION: std::cell::Cell<u32> = const { std::cell::Cell::new(5) };
+    static TEST_MANAGER_VERSION: std::cell::Cell<u32> = const { std::cell::Cell::new(7) };
 }
 /// Construct a genuine old-version registry for compatibility tests. No authority override.
 #[cfg(all(test, feature = "remote-wayland"))]
 pub(crate) fn with_manager_version_for_test<R>(version: u32, run: impl FnOnce() -> R) -> R {
-    assert!(matches!(version, 4 | 5));
+    assert!(matches!(version, 4..=7));
     struct Restore(u32);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -90,20 +126,31 @@ pub(crate) fn with_manager_version_for_test<R>(version: u32, run: impl FnOnce() 
 }
 pub(crate) fn init(dh: &DisplayHandle) {
     #[cfg(not(test))]
-    let version = 5;
+    let version = 7;
     #[cfg(test)]
     let version = TEST_MANAGER_VERSION.get();
     dh.create_global::<JwmWaylandState, JwmRemoteControlManagerV1, _>(version, ManagerData);
 }
+pub(super) fn needs_window_input_layout(
+    state: &JwmWaylandState,
+    authority: &Arc<CaptureAuthority>,
+) -> bool {
+    state.remote_control.active.as_ref().is_some_and(|lease| {
+        lease.mode == LeaseMode::WindowGestures && Arc::ptr_eq(&lease.authority, authority)
+    })
+}
 fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
     lease.resource.is_alive()
         && lease.source.upgrade().is_ok_and(|s| s.is_alive())
-        && unconstrained(state, &lease.authority.surface)
-        && mapping(&lease.authority).as_ref() == Some(&lease.mapping)
-        && state
-            .seat
-            .get_pointer()
-            .is_some_and(|p| p.authorized_pointer_snapshot_is_current(&lease.pointer))
+        && lease.mode.pointer_mapping(&lease.authority).as_ref() == Some(&lease.mapping)
+        && state.seat.get_pointer().is_some_and(|p| {
+            let constraint_valid = with_pointer_constraint(&lease.authority.surface, &p, |c| {
+                c.is_none_or(|c| {
+                    lease.deferred_confinement && inactive_whole_window_confinement(&c)
+                })
+            });
+            constraint_valid && p.authorized_pointer_snapshot_is_current(&lease.pointer)
+        })
         && Instant::now() < lease.deadline
         && authority_is_current(state, &lease.authority)
         && state.remote_keyboard_seat_eligible()
@@ -112,6 +159,41 @@ fn current(state: &JwmWaylandState, lease: &Lease) -> bool {
             keyboard.authorized_keyboard_snapshot_is_current(&lease.snapshot)
         })
 }
+
+fn inactive_whole_window_confinement(constraint: &PointerConstraint) -> bool {
+    matches!(constraint, PointerConstraint::Confined(_))
+        && !constraint.is_active()
+        && constraint.region().is_none()
+}
+
+/// A drag can cause an application to request normal window confinement.
+/// Defer it while keeping absolute motion on the original remote receiver.
+/// The host seat retains its ordinary focus, location, and grab state.
+pub(crate) fn defer_drag_confinement(
+    state: &mut JwmWaylandState,
+    surface: &WlSurface,
+    pointer: &PointerHandle<JwmWaylandState>,
+) -> bool {
+    if state.session_locked || state.seat.get_pointer().as_ref() != Some(pointer) {
+        return false;
+    }
+    let Some(lease) = state.remote_control.active.as_mut().filter(|lease| {
+        lease.mode.gestures()
+            && matches!(lease.drag, Some(Drag::Root))
+            && lease.authority.surface == *surface
+            && pointer.authorized_pointer_snapshot_is_current(&lease.pointer)
+    }) else {
+        return false;
+    };
+    let eligible = with_pointer_constraint(surface, pointer, |constraint| {
+        constraint.is_some_and(|c| inactive_whole_window_confinement(&c))
+    });
+    if eligible {
+        lease.deferred_confinement = true;
+    }
+    eligible
+}
+
 // Pause/resume consume the same bounded rate budget as keys. They never refill
 // authority, lifetime or quotas merely by changing the local phase.
 fn transition_budget(lease: &mut Lease) -> bool {
@@ -129,6 +211,17 @@ fn needs_keyboard_cleanup(cleanup: bool, held_count: usize) -> bool {
     cleanup && held_count != 0
 }
 fn finish(state: &mut JwmWaylandState, mut lease: Lease, reason: u32, cleanup: bool) {
+    if matches!(lease.drag, Some(Drag::Root))
+        && let Some(pointer) = state.seat.get_pointer()
+    {
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = InputTime::now();
+        if cleanup {
+            pointer.cleanup_authorized_drag(&lease.pointer, serial, time);
+        } else {
+            pointer.cleanup_authorized_drag_after_keyboard_leave(&lease.pointer, serial, time);
+        }
+    }
     // Held records only successfully delivered remote key presses. A balanced
     // release already delivered its modifiers; an unused/pointer-only lease
     // must not emit a synthetic modifiers event merely because it is revoked.
@@ -225,13 +318,14 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
         _dh: &DisplayHandle,
         init: &mut DataInit<'_, Self>,
     ) {
-        // Interface version is not consent: only the additional request grants wheel.
-        let (id, source, scroll_axes, axes_valid, resumable, ttl_ms) = match request {
+        use LeaseMode::{Gestures, Resumable, Sequential, WindowGestures};
+        // Interface version is not consent. Each opcode authorizes only its named mode.
+        let (id, source, scroll_axes, axes_valid, mode, ttl_ms) = match request {
             jwm_remote_control_manager_v1::Request::CreateLease { id, source } => {
-                (id, source, 0, true, false, TTL.as_millis() as u32)
+                (id, source, 0, true, Sequential, TTL.as_millis() as u32)
             }
             jwm_remote_control_manager_v1::Request::CreateLeaseWithScroll { id, source } => {
-                (id, source, 1, true, false, TTL.as_millis() as u32)
+                (id, source, 1, true, Sequential, TTL.as_millis() as u32)
             }
             jwm_remote_control_manager_v1::Request::CreateLeaseWithScrollAxes {
                 id,
@@ -242,18 +336,43 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
                 source,
                 axes,
                 matches!(axes, 1..=3),
-                false,
+                Sequential,
                 TTL.as_millis() as u32,
             ),
-            jwm_remote_control_manager_v1::Request::CreateResumableLease { id, source, axes } => {
-                (id, source, axes, axes <= 3, true, TTL.as_millis() as u32)
-            }
+            jwm_remote_control_manager_v1::Request::CreateResumableLease { id, source, axes } => (
+                id,
+                source,
+                axes,
+                axes <= 3,
+                Resumable,
+                TTL.as_millis() as u32,
+            ),
             jwm_remote_control_manager_v1::Request::CreateTimedResumableLease {
                 id,
                 source,
                 axes,
                 ttl_ms,
-            } => (id, source, axes, axes <= 3, true, ttl_ms),
+            } => (id, source, axes, axes <= 3, Resumable, ttl_ms),
+            jwm_remote_control_manager_v1::Request::CreateGestureLease { id, source, axes } => (
+                id,
+                source,
+                axes,
+                axes <= 3,
+                Gestures,
+                TTL.as_millis() as u32,
+            ),
+            jwm_remote_control_manager_v1::Request::CreateWindowGestureLease {
+                id,
+                source,
+                axes,
+            } => (
+                id,
+                source,
+                axes,
+                axes <= 3,
+                WindowGestures,
+                TTL.as_millis() as u32,
+            ),
             _ => return,
         };
         {
@@ -277,8 +396,10 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
             if source.client().as_ref().map(Client::id) != Some(client.id())
                 || !authority.consume_control_attempt()
                 || !axes_valid
+                || (mode == WindowGestures
+                    && (authority.include_popups || authority.family.is_some()))
                 || !(1..=300_000).contains(&ttl_ms)
-                || state.remote_control.active.is_some()
+                || active(state)
                 || super::remote_pointer::active(state)
                 || super::remote_keyboard::active(state)
                 || super::remote_text::active(state)
@@ -306,7 +427,7 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
                 resource.revoked(SEAT);
                 return;
             };
-            let Some(mapping) = mapping(&authority) else {
+            let Some(mapping) = mode.pointer_mapping(&authority) else {
                 resource.revoked(SOURCE);
                 return;
             };
@@ -354,8 +475,10 @@ impl Dispatch<JwmRemoteControlManagerV1, ManagerData> for JwmWaylandState {
                 pointer_refill: now,
                 xkb: xkb::State::new(&map),
                 held: BTreeSet::new(),
+                drag: None,
+                deferred_confinement: false,
                 armed: false,
-                resumable,
+                mode,
                 generation: 1,
                 paused_at: None,
                 sequence: 0,
@@ -432,7 +555,7 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                 sequence,
                 generation,
             } => {
-                if !lease.resumable
+                if lease.mode != LeaseMode::Resumable
                     || !lease.armed
                     || lease.paused_at.is_some()
                     || epoch != lease.epoch
@@ -478,7 +601,7 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                 generation,
                 frame,
             } => {
-                if !lease.resumable
+                if lease.mode != LeaseMode::Resumable
                     || lease.armed
                     || lease.paused_at.is_none()
                     || !lease.held.is_empty()
@@ -533,6 +656,7 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                     || epoch != lease.epoch
                     || !valid_sequence(lease.sequence, sequence)
                     || !crate::remote_keyboard_protocol::keyboard_key_allowed(key)
+                    || (lease.drag.is_some() && !gesture_modifier_allowed(key))
                     || key_state > 1
                     || (key_state == 1) == lease.held.contains(&key)
                 {
@@ -612,18 +736,22 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                 x,
                 y,
             } => {
+                let gestures = lease.mode.gestures();
                 if !lease.armed
-                    || !lease.held.is_empty()
+                    || lease.drag.is_some()
+                    || !(lease.held.is_empty()
+                        || (gestures && lease.held.iter().copied().all(gesture_modifier_allowed)))
                     || epoch != lease.epoch
                     || !valid_sequence(lease.sequence, sequence)
-                    || !action_allowed(kind, lease.scroll_axes)
-                    || x >= lease.authority.width
-                    || y >= lease.authority.height
-                    || !point_allowed(&lease.mapping, x, y)
+                    || !(action_allowed(kind, lease.scroll_axes) || gestures && kind == 6)
                 {
                     finish(state, lease, SEQUENCE, true);
                     return;
                 }
+                let Some((x, y)) = mapped_point(&lease.mapping, x, y) else {
+                    finish(state, lease, SEQUENCE, true);
+                    return;
+                };
                 let stamp = frame.data::<CaptureFrameData>().and_then(|data| {
                     let valid = frame.is_alive()
                         && frame.client().map(|c| c.id()) == resource.client().map(|c| c.id())
@@ -655,12 +783,64 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                     return;
                 }
                 lease.pointer_tokens -= 1.0;
+                let mut drag = (kind == 6).then_some(Drag::Root);
+                let mut child = None;
+                if lease.mode == LeaseMode::WindowGestures {
+                    let layout = frame
+                        .data::<CaptureFrameData>()
+                        .and_then(|data| data.window_input_layout.lock().unwrap().clone());
+                    let Some(layout) = layout.filter(|layout| {
+                        WindowInputLayout::snapshot(&lease.authority.surface).as_ref()
+                            == Some(layout.as_ref())
+                    }) else {
+                        finish(state, lease, SOURCE, true);
+                        return;
+                    };
+                    let Some((hit, local)) = layout.hit((x, y)) else {
+                        finish(state, lease, SOURCE, true);
+                        return;
+                    };
+                    if hit != &lease.authority.surface {
+                        if !matches!(kind, 0 | 1 | 6) {
+                            finish(state, lease, SEQUENCE, true);
+                            return;
+                        }
+                        child = Some((hit.clone(), local));
+                        if kind == 6 {
+                            drag = Some(Drag::ChildClick {
+                                layout,
+                                point: (x, y),
+                                moved: false,
+                                at: now,
+                            });
+                        }
+                    }
+                }
                 if !state.seat.get_pointer().is_some_and(|p| {
-                    if kind >= 2 {
+                    if let Some((hit, local)) = child {
+                        return with_pointer_constraint(&hit, &p, |c| c.is_none())
+                            && (kind == 6
+                                || p.send_authorized_subsurface(
+                                    &lease.pointer,
+                                    &hit,
+                                    local,
+                                    kind == 1,
+                                    SERIAL_COUNTER.next_serial(),
+                                    InputTime::now(),
+                                ));
+                    }
+                    if kind == 6 {
+                        p.start_authorized_drag(
+                            &lease.pointer,
+                            (x, y),
+                            SERIAL_COUNTER.next_serial(),
+                            InputTime::now(),
+                        )
+                    } else if kind >= 2 {
                         p.send_authorized_scroll_axis(
                             &lease.pointer,
-                            f64::from(x),
-                            f64::from(y),
+                            x,
+                            y,
                             if kind >= 4 {
                                 smithay::backend::input::Axis::Horizontal
                             } else {
@@ -672,8 +852,8 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                     } else {
                         p.send_authorized_pointer(
                             &lease.pointer,
-                            f64::from(x),
-                            f64::from(y),
+                            x,
+                            y,
                             kind == 1,
                             SERIAL_COUNTER.next_serial(),
                             InputTime::now(),
@@ -684,7 +864,111 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                     return;
                 }
                 lease.sequence = sequence;
+                lease.drag = drag;
                 lease.last_ready = serial;
+                lease.last_action = Some(Instant::now());
+                resource.accepted(epoch, sequence);
+            }
+            jwm_remote_control_lease_v1::Request::DragMotion {
+                epoch,
+                sequence,
+                x,
+                y,
+            } => {
+                if !valid_drag(&lease, epoch, sequence) {
+                    finish(state, lease, SEQUENCE, true);
+                    return;
+                }
+                let Some((x, y)) = mapped_point(&lease.mapping, x, y) else {
+                    finish(state, lease, SEQUENCE, true);
+                    return;
+                };
+                if !transition_budget(&mut lease) {
+                    finish(state, lease, QUOTA, true);
+                    return;
+                }
+                match lease.drag.as_mut().unwrap() {
+                    Drag::ChildClick { point, moved, .. } => {
+                        *moved |= (x - point.0).abs() > 3.0 || (y - point.1).abs() > 3.0;
+                    }
+                    Drag::Root => {
+                        if lease.mode == LeaseMode::WindowGestures
+                            && !WindowInputLayout::snapshot(&lease.authority.surface).is_some_and(
+                                |layout| {
+                                    layout
+                                        .hit((x, y))
+                                        .is_some_and(|(hit, _)| hit == &lease.authority.surface)
+                                },
+                            )
+                        {
+                            finish(state, lease, SOURCE, true);
+                            return;
+                        }
+                        if !state.seat.get_pointer().is_some_and(|pointer| {
+                            pointer.send_authorized_pointer(
+                                &lease.pointer,
+                                x,
+                                y,
+                                false,
+                                SERIAL_COUNTER.next_serial(),
+                                InputTime::now(),
+                            )
+                        }) {
+                            finish(state, lease, SEAT, true);
+                            return;
+                        }
+                    }
+                }
+                lease.sequence = sequence;
+                lease.last_action = Some(Instant::now());
+                resource.accepted(epoch, sequence);
+            }
+            jwm_remote_control_lease_v1::Request::DragRelease { epoch, sequence } => {
+                if !valid_drag(&lease, epoch, sequence) {
+                    finish(state, lease, SEQUENCE, true);
+                    return;
+                }
+                let delivered = match lease.drag.as_ref().unwrap() {
+                    Drag::Root => state.seat.get_pointer().is_some_and(|pointer| {
+                        pointer.cleanup_authorized_drag(
+                            &lease.pointer,
+                            SERIAL_COUNTER.next_serial(),
+                            InputTime::now(),
+                        )
+                    }),
+                    Drag::ChildClick { moved, at, .. }
+                        if *moved || at.elapsed() > Duration::from_secs(1) =>
+                    {
+                        true
+                    }
+                    Drag::ChildClick { layout, point, .. } => {
+                        if WindowInputLayout::snapshot(&lease.authority.surface).as_ref()
+                            != Some(layout.as_ref())
+                        {
+                            finish(state, lease, SOURCE, true);
+                            return;
+                        }
+                        layout.hit(*point).is_some_and(|(hit, local)| {
+                            state.seat.get_pointer().is_some_and(|pointer| {
+                                with_pointer_constraint(hit, &pointer, |c| c.is_none())
+                                    && pointer.send_authorized_subsurface(
+                                        &lease.pointer,
+                                        hit,
+                                        local,
+                                        true,
+                                        SERIAL_COUNTER.next_serial(),
+                                        InputTime::now(),
+                                    )
+                            })
+                        })
+                    }
+                };
+                if !delivered {
+                    finish(state, lease, SEAT, true);
+                    return;
+                }
+                lease.drag = None;
+                lease.sequence = sequence;
                 lease.last_action = Some(Instant::now());
                 resource.accepted(epoch, sequence);
             }
@@ -710,6 +994,14 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
     }
 }
 
+fn valid_drag(lease: &Lease, epoch: u32, sequence: u32) -> bool {
+    lease.mode.gestures()
+        && lease.armed
+        && lease.drag.is_some()
+        && epoch == lease.epoch
+        && valid_sequence(lease.sequence, sequence)
+}
+
 fn action_allowed(kind: u32, axes: u32) -> bool {
     axes <= 3
         && (matches!(kind, 0 | 1)
@@ -721,18 +1013,20 @@ fn valid_sequence(previous: u32, next: u32) -> bool {
 }
 pub(crate) fn surface_committed(state: &mut JwmWaylandState, surface: &WlSurface) {
     if state.remote_control.active.as_ref().is_some_and(|l| {
-        l.authority.surface == *surface && mapping(&l.authority).as_ref() != Some(&l.mapping)
+        if l.authority.surface == *surface {
+            l.mode.pointer_mapping(&l.authority).as_ref() != Some(&l.mapping)
+        } else {
+            l.mapping.is_paint_child(surface) && !has_empty_input_region(surface)
+        }
     }) {
         revoke(state, SOURCE);
     }
 }
 pub(crate) fn new_subsurface(state: &mut JwmWaylandState, surface: &WlSurface) {
-    if state
-        .remote_control
-        .active
-        .as_ref()
-        .is_some_and(|l| l.authority.surface == *surface)
-    {
+    if state.remote_control.active.as_ref().is_some_and(|l| {
+        l.mode != LeaseMode::WindowGestures
+            && (l.authority.surface == *surface || l.mapping.is_paint_child(surface))
+    }) {
         revoke(state, SOURCE);
     }
 }
@@ -808,7 +1102,7 @@ pub(crate) fn cli_lease_snapshot_for_test(
             lease.epoch,
             lease.created,
             lease.deadline,
-            lease.resumable,
+            lease.mode == LeaseMode::Resumable,
             lease.paused_at.is_some(),
             lease.generation,
             lease.held.len(),

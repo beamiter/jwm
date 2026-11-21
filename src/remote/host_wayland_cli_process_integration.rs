@@ -10,9 +10,9 @@ use std::{
     process::{Child, Command as ProcessCommand, ExitStatus, Stdio},
 };
 
-struct PrivateDir(PathBuf);
+pub(super) struct PrivateDir(pub(super) PathBuf);
 impl PrivateDir {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("jwm-cli-{:016x}", rand::random::<u64>()));
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -26,20 +26,23 @@ impl Drop for PrivateDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-struct Process {
-    child: Child,
-    status: Option<ExitStatus>,
+pub(super) struct Process {
+    pub(super) child: Child,
+    pub(super) status: Option<ExitStatus>,
     log: Arc<Mutex<Vec<u8>>>,
     reader: Option<thread::JoinHandle<()>>,
 }
 impl Process {
-    fn spawn(command: &mut ProcessCommand) -> Self {
+    pub(super) fn spawn(command: &mut ProcessCommand) -> Self {
+        Self::spawn_with_stdout(command, Stdio::null())
+    }
+    pub(super) fn spawn_with_stdout(command: &mut ProcessCommand, stdout: Stdio) -> Self {
         let mut child = command
-            .stdout(Stdio::null())
+            .stdout(stdout)
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
             .spawn()
-            .expect("spawn actual jwm-remote executable");
+            .expect("spawn owned acceptance process");
         let mut stderr = child.stderr.take().unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
         let sink = log.clone();
@@ -64,10 +67,10 @@ impl Process {
             reader: Some(reader),
         }
     }
-    fn text(&self) -> String {
+    pub(super) fn text(&self) -> String {
         String::from_utf8_lossy(&self.log.lock().unwrap()).into_owned()
     }
-    fn exited(&mut self) -> bool {
+    pub(super) fn exited(&mut self) -> bool {
         if self.status.is_none() {
             self.status = self.child.try_wait().unwrap();
         }
@@ -85,7 +88,20 @@ impl Drop for Process {
         }
     }
 }
-fn cli(binary: &Path, root: &Path) -> ProcessCommand {
+pub(super) fn cli_binary() -> PathBuf {
+    assert_eq!(
+        std::env::var("JWM_REQUIRE_HEADLESS_GL").as_deref(),
+        Ok("1"),
+        "CLI acceptance must require actual GL, not silently skip it"
+    );
+    let binary = PathBuf::from(
+        std::env::var_os("JWM_REMOTE_CLI_TEST_BIN").expect("a built CLI executable is required"),
+    );
+    assert!(binary.is_absolute() && binary.is_file());
+    binary
+}
+
+pub(super) fn cli(binary: &Path, root: &Path) -> ProcessCommand {
     let mut command = ProcessCommand::new(binary);
     command
         .env_remove("DISPLAY")
@@ -96,7 +112,7 @@ fn cli(binary: &Path, root: &Path) -> ProcessCommand {
         .env("XDG_CONFIG_HOME", root);
     command
 }
-fn accept(listener: &UnixListener, server: &mut Server) {
+pub(super) fn accept(listener: &UnixListener, server: &mut Server) {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -120,11 +136,21 @@ struct CliFixture {
     native_listener: UnixListener,
     local_listener: UnixListener,
     target: App,
+    catalog: Option<OwnedCatalog>,
+    hold_feedback: bool,
     target_pointer: u32,
     target_keyboard: u32,
     received: Recipient,
     surface: Option<WlSurface>,
+    viewer_initial_size: (u32, u32),
+    viewport: (u32, u32),
     readback: Option<Readback>,
+    readback_scale: i32,
+    lossy_aspect: Option<(usize, usize)>,
+    last_dmabuf: Option<bool>,
+    #[cfg(feature = "remote-h264")]
+    dmabuf_presentations: u64,
+    readback_samples: [[u8; 4]; 3],
     presentations: u64,
     entered: bool,
     suppressed: std::collections::HashSet<u8>,
@@ -133,6 +159,26 @@ struct CliFixture {
     binary: PathBuf,
     directory: PrivateDir,
 }
+
+struct OwnedCatalog {
+    second: App,
+    _unshared: App,
+    last_presented: Option<(WlSurface, bool)>,
+}
+
+fn set_owned_title(app: &mut App, title: &str) {
+    let mut bytes = title.as_bytes().to_vec();
+    bytes.push(0);
+    let mut words = vec![bytes.len() as u32];
+    bytes.resize(bytes.len().next_multiple_of(4), 0);
+    words.extend(
+        bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_ne_bytes(word.try_into().unwrap())),
+    );
+    app.client.request(app.toplevel, 2, &words);
+}
+
 impl CliFixture {
     fn new(host_opt_in: bool, local_version: u32) -> Self {
         Self::with_duration(host_opt_in, local_version, None, None)
@@ -143,19 +189,37 @@ impl CliFixture {
         duration: Option<u16>,
         host_max: Option<u16>,
     ) -> Self {
-        assert_eq!(
-            std::env::var("JWM_REQUIRE_HEADLESS_GL").as_deref(),
-            Ok("1"),
-            "CLI acceptance must require actual GL, not silently skip it"
-        );
-        let binary = PathBuf::from(
-            std::env::var_os("JWM_REMOTE_CLI_TEST_BIN")
-                .expect("run scripts/test-remote-wayland-cli.sh with a built CLI"),
-        );
-        assert!(
-            binary.is_absolute() && binary.is_file(),
-            "explicit executable artifact required"
-        );
+        Self::start(host_opt_in, local_version, duration, host_max, None, false)
+    }
+    fn start(
+        host_opt_in: bool,
+        local_version: u32,
+        duration: Option<u16>,
+        host_max: Option<u16>,
+        catalog_control: Option<bool>,
+        gestures: bool,
+    ) -> Self {
+        Self::start_with_host(
+            host_opt_in,
+            local_version,
+            duration,
+            host_max,
+            catalog_control,
+            gestures,
+            |_| {},
+        )
+    }
+
+    fn start_with_host(
+        host_opt_in: bool,
+        local_version: u32,
+        duration: Option<u16>,
+        host_max: Option<u16>,
+        catalog_control: Option<bool>,
+        gestures: bool,
+        configure_host: impl FnOnce(&mut ProcessCommand),
+    ) -> Self {
+        let binary = cli_binary();
         let directory = PrivateDir::new();
         let native_listener = UnixListener::bind(directory.0.join("source.sock"))
             .expect("real Unix sockets required; EPERM is a blocked acceptance run, not a pass");
@@ -179,6 +243,19 @@ impl CliFixture {
         }
         install_keymaps(&mut native, &mut local);
         let mut target = App::with_size_color(&mut native, [0, 0, 255, 255], SW, SH);
+        let catalog = catalog_control.is_some().then(|| {
+            let mut second = App::with_size_color(&mut native, [255, 0, 0, 255], 240, 180);
+            let mut unshared = App::with_size_color(&mut native, [0, 255, 0, 255], 160, 120);
+            set_owned_title(&mut target, "jwm-first-owned");
+            set_owned_title(&mut second, "jwm-second-owned");
+            set_owned_title(&mut unshared, "jwm-unshared");
+            native.roundtrip();
+            OwnedCatalog {
+                second,
+                _unshared: unshared,
+                last_presented: None,
+            }
+        });
         let (target_pointer, target_keyboard) = bind_inputs(&mut native, &mut target, 7);
         focus(&mut native, &target);
         target.client.events();
@@ -201,7 +278,6 @@ impl CliFixture {
                 "host",
                 "--wayland-select",
                 "--once",
-                "--allow-wayland-control",
                 "--listen",
                 "127.0.0.1:0",
                 "--wayland-display",
@@ -209,20 +285,29 @@ impl CliFixture {
             .arg(directory.0.join("source.sock"))
             .arg("--key-file")
             .arg(key);
+        if catalog_control != Some(false) {
+            command.arg("--allow-wayland-control");
+        }
+        if gestures {
+            command.arg("--allow-wayland-gestures");
+        }
         if host_opt_in {
             command.arg("--allow-resumable-control");
         }
         if let Some(max) = host_max {
             command.args(["--max-wayland-control-duration", &max.to_string()]);
         }
+        configure_host(&mut command);
         let mut host = Process::spawn(&mut command);
-        // Exactly one owned source exists. No title matching or user desktop.
-        host.child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(b"1\n")
-            .unwrap();
+        if catalog_control.is_none() {
+            // Exactly one owned source exists in the control fixtures.
+            host.child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"1\n")
+                .unwrap();
+        }
         Self {
             viewer: None,
             host,
@@ -231,11 +316,21 @@ impl CliFixture {
             native_listener,
             local_listener,
             target,
+            catalog,
+            hold_feedback: false,
             target_pointer,
             target_keyboard,
             received: Recipient::default(),
             surface: None,
+            viewer_initial_size: (VW, VH),
+            viewport: (VW, VH),
             readback: None,
+            readback_scale: 1,
+            lossy_aspect: None,
+            last_dmabuf: None,
+            #[cfg(feature = "remote-h264")]
+            dmabuf_presentations: 0,
+            readback_samples: [[0; 4]; 3],
             presentations: 0,
             entered: false,
             suppressed: Default::default(),
@@ -245,7 +340,7 @@ impl CliFixture {
             directory,
         }
     }
-    fn connect(&mut self, gl: &mut HeadlessSmithayGles) {
+    fn viewer_command(&mut self, gl: &mut HeadlessSmithayGles, subcommand: &str) -> ProcessCommand {
         self.wait(gl, "actual host listener announcement", |s| {
             s.host.text().contains("listening on ")
         });
@@ -259,27 +354,40 @@ impl CliFixture {
             .unwrap();
         let address: std::net::SocketAddr = address.parse().unwrap();
         assert!(address.ip().is_loopback());
+        let (width, height) = self.viewer_initial_size;
         let mut command = cli(&self.binary, &self.directory.0);
         command
             .args([
-                "connect",
+                subcommand,
                 &address.to_string(),
                 "--viewer-backend",
                 "wayland",
-                "--wayland-control",
-                "--wayland-seamless-input",
                 "--window-size",
-                "400x300",
+                &format!("{width}x{height}"),
                 "--viewer-wayland-display",
             ])
             .arg(self.directory.0.join("viewer.sock"))
             .arg("--key-file")
             .arg(self.directory.0.join("session.key"));
+        command
+    }
+    fn connect(&mut self, gl: &mut HeadlessSmithayGles) {
+        let mut command = self.viewer_command(gl, "connect");
+        command.args(["--wayland-control", "--wayland-seamless-input"]);
         if let Some(duration) = self.duration {
             command.args(["--wayland-control-duration", &duration.to_string()]);
         }
         self.viewer_started = Some(Instant::now());
         self.viewer = Some(Process::spawn(&mut command));
+    }
+    fn configure_viewer(&mut self, size: (u32, u32)) {
+        let (&window, top) = self.local.state.toplevels.iter().next().unwrap();
+        let geometry = self.local.state.window_geometry.get_mut(&window).unwrap();
+        (geometry.w, geometry.h) = size;
+        top.with_pending_state(|state| state.size = Some((size.0 as i32, size.1 as i32).into()));
+        top.send_configure();
+        self.viewport = size;
+        self.readback = None;
     }
     fn tick(&mut self, gl: &mut HeadlessSmithayGles) {
         accept(&self.native_listener, &mut self.native);
@@ -297,24 +405,30 @@ impl CliFixture {
         for (&window, top) in &self.local.state.toplevels {
             if !top.is_initial_configure_sent() {
                 let geo = self.local.state.window_geometry.get_mut(&window).unwrap();
-                geo.w = VW;
-                geo.h = VH;
+                let (width, height) = self.viewer_initial_size;
+                (geo.w, geo.h) = (width, height);
                 top.with_pending_state(|state| {
-                    state.size = Some((VW as i32, VH as i32).into());
+                    state.size = Some((width as i32, height as i32).into());
                     state.states.set(TopState::Activated);
                 });
                 top.send_configure();
             }
         }
         self.local.roundtrip();
-        if self.surface.is_none() {
-            self.surface = self
+        if self.surface.is_none() || self.catalog.is_some() {
+            let surface = self
                 .local
                 .state
                 .toplevels
                 .values()
                 .next()
                 .map(|top| top.wl_surface().clone());
+            if self.surface != surface {
+                self.readback = None;
+                self.viewport = self.viewer_initial_size;
+                self.surface = surface;
+                self.last_dmabuf = None;
+            }
         }
         if self.surface.as_ref().is_some_and(|surface| {
             self.local
@@ -327,20 +441,97 @@ impl CliFixture {
             self.entered = true;
             self.pointer(true);
         }
-        if let Some(surface) = self.surface.as_ref() {
+        if !self.hold_feedback
+            && let Some(surface) = self.surface.as_ref()
+        {
             let feedback = take_feedback(surface);
             if !feedback.is_empty() {
-                if self.readback.is_none() {
-                    self.readback = Some(Readback::new(&mut self.local, (VW, VH)));
+                let (scale, dmabuf) = with_renderer_surface_state(surface, |state| {
+                    (
+                        state.buffer_scale(),
+                        state.buffer().is_some_and(|buffer| {
+                            smithay::wayland::dmabuf::get_dmabuf(buffer).is_ok()
+                        }),
+                    )
+                })
+                .expect("committed viewer buffer");
+                if scale != self.readback_scale {
+                    self.readback_scale = scale;
+                    self.readback = None;
                 }
-                let pixels = self.readback.as_mut().unwrap().pixels(&mut self.local, gl);
-                assert!(
-                    pixels
-                        .chunks_exact(4)
-                        .all(|p| p[2] >= 250 && p[1] <= 3 && p[0] <= 3 && p[3] == 255),
-                    "actual committed viewer pixels must match the owned red source"
-                );
+                if self.readback.is_none() {
+                    self.readback = Some(Readback::new(&mut self.local, self.viewport));
+                }
+                let pixels = self.readback.as_mut().unwrap().sample(&mut self.local, gl);
+                // Readback dispatches real client requests. Closing the role
+                // during that dispatch invalidates both the grant and feedback.
+                if !surface.is_alive() {
+                    for callback in feedback {
+                        callback.discarded();
+                    }
+                    self.readback = None;
+                    self.surface = None;
+                    return;
+                }
+                let pixels = pixels.expect("live viewer role still has its pixel readback grant");
+                let (width, height) = (self.viewport.0 as usize, self.viewport.1 as usize);
+                self.readback_samples = [
+                    pixels[..4].try_into().unwrap(),
+                    pixels[((height / 2) * width + width / 2) * 4..][..4]
+                        .try_into()
+                        .unwrap(),
+                    pixels[((height - 1) * width + width / 2) * 4..][..4]
+                        .try_into()
+                        .unwrap(),
+                ];
+                let is_color = |channel: usize| {
+                    if let Some((aspect_w, aspect_h)) = self.lossy_aspect {
+                        let content_w = width.min(height * aspect_w / aspect_h);
+                        let content_h = height.min(width * aspect_h / aspect_w);
+                        let left = (width - content_w) / 2;
+                        let top = (height - content_h) / 2;
+                        pixels.chunks_exact(4).enumerate().all(|(index, p)| {
+                            let (x, y) = (index % width, index / width);
+                            if (left..left + content_w).contains(&x)
+                                && (top..top + content_h).contains(&y)
+                            {
+                                p[channel] >= 245
+                                    && p[2 - channel] <= 12
+                                    && p[1] <= 12
+                                    && p[3] == 255
+                            } else {
+                                p == [0, 0, 0, 255]
+                            }
+                        })
+                    } else {
+                        pixels.chunks_exact(4).all(|p| {
+                            p[channel] >= 250 && p[2 - channel] <= 3 && p[1] <= 3 && p[3] == 255
+                        })
+                    }
+                };
+                let red = is_color(2);
+                if let Some(catalog) = self.catalog.as_mut() {
+                    let blue = is_color(0);
+                    assert!(
+                        red || blue,
+                        "viewer must only present the two authorized sources; samples={:?}, host={}, viewer={}",
+                        self.readback_samples,
+                        self.host.text(),
+                        self.viewer.as_ref().unwrap().text()
+                    );
+                    catalog.last_presented = Some((surface.clone(), blue));
+                } else {
+                    assert!(
+                        red,
+                        "actual committed viewer pixels must match the owned red source"
+                    );
+                }
                 self.presentations += 1;
+                self.last_dmabuf = Some(dmabuf);
+                #[cfg(feature = "remote-h264")]
+                if dmabuf {
+                    self.dmabuf_presentations += 1;
+                }
                 present(&mut self.local, feedback);
             }
         }
@@ -366,16 +557,22 @@ impl CliFixture {
         }
     }
     fn pointer(&mut self, inside: bool) {
+        self.pointer_at(
+            if inside {
+                (160.0, 120.0)
+            } else {
+                (5000.0, 5000.0)
+            },
+            inside,
+        );
+    }
+
+    fn pointer_at(&mut self, location: (f64, f64), inside: bool) {
         crate::backend::wayland_udev::backend::refresh_viewer_handoff_pointer_input(
             &mut self.local.state,
         );
         let surface = self.surface.clone().expect("real CLI viewer toplevel");
-        let location = if inside {
-            (160.0, 120.0)
-        } else {
-            (5000.0, 5000.0)
-        }
-        .into();
+        let location = location.into();
         self.local.state.pointer_location = location;
         let focus = self
             .local
@@ -395,6 +592,26 @@ impl CliFixture {
             focus,
             &MotionEvent {
                 location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time: InputTime::now(),
+            },
+        );
+        pointer.frame(&mut self.local.state);
+        self.local.roundtrip();
+    }
+
+    fn left_button(&mut self, pressed: bool) {
+        use smithay::{backend::input::ButtonState, input::pointer::ButtonEvent};
+        let pointer = self.local.state.seat.get_pointer().unwrap();
+        pointer.button(
+            &mut self.local.state,
+            &ButtonEvent {
+                button: 0x110,
+                state: if pressed {
+                    ButtonState::Pressed
+                } else {
+                    ButtonState::Released
+                },
                 serial: SERIAL_COUNTER.next_serial(),
                 time: InputTime::now(),
             },
@@ -437,6 +654,105 @@ impl CliFixture {
         let viewer = self.viewer.as_mut().is_some_and(Process::exited);
         self.host.exited() && viewer
     }
+}
+
+#[path = "host_wayland_source_cli_integration.rs"]
+mod source_switching;
+
+#[test]
+#[ignore = "requires independent CLI artifact, private Unix listeners and strict GL; run dedicated script"]
+fn native_cli_managed_release_keeps_same_viewer() {
+    let mut gl = HeadlessSmithayGles::new().expect("strict headless GL required");
+    let mut f = CliFixture::new(false, 2);
+    let mut command = f.viewer_command(&mut gl, "session");
+    let stdout = f.directory.0.join("events.jsonl");
+    let output = File::create(&stdout).unwrap();
+    f.viewer = Some(Process::spawn_with_stdout(
+        command.arg("--control"),
+        output.into(),
+    ));
+    let has_event = |name, field, expected: serde_json::Value| {
+        let text = std::fs::read_to_string(&stdout).unwrap();
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|value| {
+                value["protocol"] == 1 && value["event"] == name && value[field] == expected
+            })
+    };
+    f.wait(&mut gl, "first managed presentation", |s| {
+        s.presentations > 0
+    });
+    let surface = f.surface.clone().unwrap();
+    let owner = surface.client().unwrap();
+    let keyboard = f.local.state.seat.get_keyboard().unwrap();
+    let pointer = f.local.state.seat.get_pointer().unwrap();
+    f.wait(&mut gl, "local managed input devices", |_| {
+        keyboard.client_keyboards(&owner).count() == 1
+            && pointer.client_pointers(&owner).count() == 1
+    });
+    f.local
+        .state
+        .set_keyboard_focus(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+    f.pointer(true);
+    f.wait(&mut gl, "managed JSON input is active", |_| {
+        has_event("snapshot", "wayland_input", "active".into())
+    });
+    f.key(42, true);
+    f.wait(&mut gl, "real managed Shift recipient", |s| {
+        s.received.keys == [(42, 1)]
+    });
+    let original_lease = remote_control::cli_lease_snapshot_for_test(&f.native.state).unwrap();
+    let previous_presentations = f.presentations;
+    f.configure_viewer((320, 240));
+    f.wait(&mut gl, "CLI presents the resized buffer", |s| {
+        let size =
+            smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
+                state.buffer_size()
+            })
+            .flatten();
+        size.is_some_and(|size| (size.w, size.h) == (320, 240))
+            && s.presentations > previous_presentations
+    });
+    assert_eq!(f.received.keys, [(42, 1)]);
+    assert_eq!(
+        remote_control::cli_lease_snapshot_for_test(&f.native.state),
+        Some(original_lease)
+    );
+    let send = |fixture: &mut CliFixture, request: &[u8]| {
+        fixture
+            .viewer
+            .as_mut()
+            .unwrap()
+            .child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(request)
+            .unwrap();
+    };
+    send(&mut f, b"{\"command\":\"release_input\",\"request\":1}\n");
+    f.wait(
+        &mut gl,
+        "JSON release confirmed after native cleanup",
+        |s| {
+            has_event("command_result", "accepted", true.into())
+                && has_event("snapshot", "wayland_input", "released".into())
+                && s.received.keys == [(42, 1), (42, 0)]
+                && !remote_control::active(&s.native.state)
+        },
+    );
+    assert!(!f.viewer.as_mut().unwrap().exited() && !f.host.exited());
+    assert_eq!(viewer_surface(&f.local), surface);
+    assert_eq!(remote_control::attempts_for_test(&f.native.state), 1);
+    send(&mut f, b"{\"command\":\"disconnect\",\"request\":2}\n");
+    f.wait(
+        &mut gl,
+        "both managed CLI processes exit",
+        CliFixture::exited,
+    );
+    assert!(f.viewer.as_ref().unwrap().status.unwrap().success());
+    assert!(f.host.status.unwrap().success());
+    assert!(has_event("snapshot", "state", "closed".into()));
 }
 
 #[test]

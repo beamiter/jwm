@@ -64,17 +64,19 @@ export PATH="/usr/local/lib/jwm/current/bin:$PATH"
 SSH diagnostic relay output is best-effort: it uses a supervised local `/bin/cat`
 (from coreutils) to keep a slow or undrained stderr sink from blocking host
 readiness. This helper is required for `jwm-remote ssh`; a missing helper reports
-a startup error before SSH is launched. Records are bounded to Linux `PIPE_BUF`,
-long records are visibly truncated, and a full relay pipe drops records rather
-than blocking control. When space returns, the next record reports the dropped
-count. Shutdown gives the helper 200 ms to drain, then kills and reaps it.
+a startup error before SSH is launched. A private Unix packet socket carries
+records of up to 16 KiB plus the newline. Long text records are visibly
+truncated. Telemetry JSON is forwarded whole within that limit. When the relay
+fills up, it drops records to keep control responsive and reports the drop
+count when space returns. Shutdown gives the helper 200 ms to drain, then kills
+and reaps it.
 No diagnostic output thread is detached, and the original stderr flags, shared
 file offset, and append mode are preserved. Concurrent SSH sessions share one
 helper; the last session releases it. While SSH is active, remote-module diagnostics
 (including the client and viewer) use this sink. Other CLI parsing/final error output and interactive source-selection
 prompts are not redirected. Lock contention may also drop messages; ordering is
 best-effort across threads. Forced helper termination may lose accepted records
-that have not reached stderr, so the pipe-drop count is not a delivery guarantee. Linux uninterruptible
+that have not reached stderr, so the reported drop count is not a delivery guarantee. Linux uninterruptible
 filesystem writes can still delay process reaping; this is not a hard kernel-I/O
 shutdown guarantee.
 
@@ -241,13 +243,33 @@ Start on **both** machines with:
 jwm-remote doctor
 ```
 
-This is an **offline preflight**, not a connection test. It prints the local
-protocol versions, session/display environment and key-file metadata, without
-opening X11 or a socket and without reading key contents. Missing display/key,
-unsafe key metadata (including a missing owner-read bit) or an advertised Wayland session gives a nonzero exit.
-Composite, XTEST, keyboard compatibility, monitor selection and the peer remain
-explicitly **not probed**. A metadata pass does not prove that the key is valid,
-readable or equal on both machines.
+The default preflight prints local protocol versions, build features,
+display configuration and key-file metadata. A missing display or unsafe key
+metadata returns a nonzero exit. For native Wayland, use
+`doctor --viewer-backend wayland` to check the selected socket path. To test the
+local hardware video backends, add `--probe-video`. The probes encode and decode
+synthetic frames and report their actual backends. Session negotiation reports
+the peer's capabilities and the active capture, codec and input paths.
+
+With a hardware build, `doctor --probe-gpu-import /dev/dri/renderD128` decodes an
+H.264 fixture on the selected VA-API device and tries to import its NV12
+DMA-BUF layers into EGL on that device. Live X11 H.264 viewers can also opt in
+to compatible native presentation as described below.
+[EGL DMA-BUF import specification](https://registry.khronos.org/EGL/extensions/EXT/EGL_EXT_image_dma_buf_import.txt)
+
+### Capture and viewer capabilities
+
+| Path | Build feature | Video | Input and session limits |
+| --- | --- | --- | --- |
+| X11 desktop capture and X11 viewer | `remote-x11` | JPEG tiles. With `remote-h264`, H.264 or HEVC 4:4:4 when both peers pass their hardware probes | Opt-in XTEST and clipboard. Direct connect can cycle explicitly shared sources and retry eligible transport failures. |
+| X11 single-window source | `remote-x11` | JPEG tiles | Explicit one-session grant and view-only, with a separate [native resize opt-in](remote-window-view.md#explicit-native-source-resize-experimental). |
+| Native Wayland single-surface capture | `remote-wayland` | JPEG tiles and negotiated lossless repair. With `remote-h264`, opt-in DMA-BUF to H.264 for a fixed view-only source. | View-only and managed one-shot control can switch among locally granted windows. Each scoped lease applies to one surface. |
+| Native Wayland viewer | `remote-wayland` | XRGB SHM with presentation feedback. With `remote-h264`, view-only H.264 can use hardware decode and opt-in same-device DMA-BUF presentation. | View-only and managed one-shot control support continuous local resize and explicit selection from an authorized catalog. Managed control requires a fresh input request after switching. Automatic reconnect remains unavailable. |
+| SSH convenience command | `remote-x11` | Same X11 video negotiation through a loopback SSH tunnel | Uses an X11 host and viewer. |
+
+For the individual Wayland modes see [native viewer](remote-wayland-viewer.md)
+and [source permissions](remote-wayland-source.md). Legacy peers must match the
+application and transport versions printed by `doctor`.
 
 All commands now share a default key path: absolute
 `$XDG_CONFIG_HOME/jwm/remote.key`, or `$HOME/.config/jwm/remote.key` when
@@ -451,8 +473,8 @@ transport loss, automatic reconnect, and cancellation during backoff.
 
 ### Short real-machine acceptance checklist (not run by offline tests)
 
-1. On both X11 JWM machines, run `doctor`; confirm protocol versions match,
-   metadata is private, and native/peer checks are marked not probed. A missing
+1. On both X11 JWM machines, run `doctor` and confirm protocol versions match
+   and key metadata is private. A missing
    key or a relative XDG_CONFIG_HOME should fail without creating any file.
 2. Start a view-only LAN host and connect with the short hostname/IP command.
    Confirm the first desktop appears before the connected line, and input and
@@ -495,13 +517,10 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The released `02f` baseline uses application version 29 and passed all four
-mainline CI workflows. The next candidate uses version 30; its unified-control
-PNG path passed five of six new second-round scenarios and awaits third-round
-CI for a minimal no-held-key cleanup correction (see
-[the bounded validation summary](remote-pointer-lossless-preparation.md#unified-control-plus-png-v30-candidate)). For that candidate, earlier versions are
-deliberately incompatible, so update `jwm-remote` on both machines together;
-negotiation rejects an older peer before screen or input data is exchanged.
+This checkout uses transport version 3 and application version 35. Match
+both versions on the two endpoints. Negotiation rejects an incompatible
+peer before screen or input data is exchanged. The application v29 and v30
+checks are recorded in the [historical validation summary](remote-pointer-lossless-preparation.md#unified-control-plus-png-v30-candidate).
 Version 7 introduced initial viewport and explicit stream selectors. Version 8
 adds an independently negotiated cursor plane and a video geometry epoch;
 it does not silently reinterpret v7 video or cursor selector semantics.
@@ -693,8 +712,8 @@ All handshake flights have fixed small bounds and share the existing absolute
 negotiation deadline. Wrong keys, versions, malformed flights or missing
 confirmation close the connection. There is no downgrade or v2 fallback.
 Upgrade both endpoints together. This transport update originally accompanied
-application v23; the released baseline is application v29 and the next candidate is v30 (unified-control repair rerun pending). Transport v3 and the
-native Wayland extension versions are separate version domains.
+application v23. Transport, application and native Wayland extension
+versions are separate version domains.
 
 Each record is `kind || sequence || ciphertext_len || ciphertext || tag(16)`.
 The plaintext is sealed with ChaCha20-Poly1305 under a nonce of four zero bytes
@@ -1773,6 +1792,396 @@ rather than treating every stderr line as JSON. The final partial window is
 also emitted on shutdown. Statistics contain no screen pixels, clipboard
 content, keys or input events.
 
+`connect --stats-json` emits viewer windows as `jwm_remote_viewer_stats`.
+`ssh --stats-json` enables both ends and relays the host records on the same
+stderr stream. Use the `session_id` and source epoch, geometry epoch and frame
+sequence to correlate records. Stage times use the recording process's
+monotonic clock. A host's `last_sent_frame` and a viewer's `last_frame` identify
+the last emitted and decoded frame in each window.
+
+Viewer decode timing ends when a complete image is ready. Presentation queue
+timing ends at submission, and completion timing covers submission through
+the backend's ACK condition. The first presentation stage measures from the
+authenticated first-frame wait, and source switching measures from an accepted
+`SourceChanged` to the first presentation for that epoch. The hardware stages
+measure codec calls, synchronous download, pixel conversion and RGB copy
+separately. After the first frame, viewer JSON splits the read of each
+authenticated video record into three stages. `frame_header_wait_ms` includes
+idle time until the complete header arrives. `frame_body_receive_ms` covers
+length checks and buffer preparation through the complete ciphertext and tag
+read. `frame_authentication_ms` covers authentication and record validation
+after that read. The samples use the viewer clock and complete before decoding
+or placement in the read-ahead queue. Sender queue times run from enqueue to
+dequeue, and write times cover successful authenticated write and flush. Queue
+depth and bytes are maxima among samples taken at dequeue. Each stage exposes
+its observation count, mean in milliseconds and recent-window quantiles. An
+absent observation produces a null stage mean.
+
+Viewer JSON counts reported hardware RGB materializations in
+`hardware_rgb_work`. The pool records fitting checkouts, fresh reserves,
+growth reserves, requested bytes and the added `Vec` capacity. The download
+counters distinguish initial population, reuse of the same software backing
+and replacement of populated backing. The copy counters give visible RGB
+bytes written by whole-frame and banded packing. These are logical byte and
+capacity counts at those sites. A native frame contributes when it is
+materialized as RGB for fallback. Its work may appear in a different window
+from the original decode.
+
+Detailed native X11 windows include `native_x11_stages`. They record VA
+surface wait and frame export, RGB target allocation, EGL submission and
+fence wait, plus the X11 DMA-BUF import, XRender picture setup, clean
+backing update and window submission. Window submission ends after issuing
+the ordered completion request. The existing presentation completion stage
+includes the time to consume its event.
+
+#### Experimental scheduling controls
+
+- With `JWM_REMOTE_GPU_PRESENT` on X11, set `JWM_REMOTE_X11_LAZY_PICTURE=1`
+  to create the imported frame's XRender picture only when a draw needs
+  scaling. A native-size copy can use the pixmap directly. If a resize
+  first needs scaling, the retained pixmap supplies the picture for its
+  redraw. Clear the variable to use eager picture creation. GPU storage
+  and drawn acknowledgement ordering follow the existing native path.
+- With `JWM_REMOTE_GPU_PRESENT` on X11, set `JWM_REMOTE_X11_PREFETCH_TARGET=1`
+  to allocate one fresh RGB target ahead on a worker. A late or differently
+  sized allocation leaves the synchronous path available. The worker only
+  allocates unused storage. The presenter still owns drawing, import and
+  completion.
+
+- Set `JWM_REMOTE_CURSOR_WORKER=1` on an X11 host to sample on an independent
+  X11 connection when the peer has negotiated the cursor plane. Cursor
+  samples are checked against the active source and geometry. Clear the
+  variable to use the capture-loop sampler.
+- Set `JWM_REMOTE_READ_AHEAD=1` on an ordinary X11 viewer or a native Wayland
+  `--view-only` viewer to read authenticated messages ahead of sequential
+  decoding. The FIFO holds up to two records, has a byte limit and closes
+  the session if the oldest queued record waits two seconds.
+  The queue deadline also applies while a decoder is occupied or the reader
+  is waiting for the rest of an authenticated record.
+  Source transitions and cursor records around a transition retain wire
+  order. The X11 experiment also supports XTEST sessions. Clear the variable
+  to use synchronous dispatch and decode.
+- Set `JWM_REMOTE_CLIPBOARD_BULK_KBIT` to the estimated available send rate in
+  kbit/s on the peer sending clipboard files or images. This sizes the records
+  and cumulative acknowledgement window using 25 ms and 60 ms budgets.
+  For example, `10000` selects 31,250-byte chunks and a 75,000-byte window.
+  Clear the variable to restore the 128 KiB chunks and 1 MiB window.
+  Apply the setting separately on each sending endpoint.
+- Set `JWM_REMOTE_X11_REGIONS=1` on an X11 JPEG host to try regional XDamage
+  readback. It applies to native-size overlay capture with the independent
+  cursor plane. The host uses a private RGB baseline and publishes complete
+  snapshots. Large, fragmented or concurrent updates trigger a full readback.
+  Host JSON reports regional and full frames, planned readback requests and
+  pixels under `x11_capture.regional_readback`. Clear the variable to restore
+  ordinary full readback.
+- Set `JWM_REMOTE_ADAPT_VIDEO` to `text`, `desktop` or `motion` on a host
+  using NVENC. The governor waits for consecutive reporting windows and
+  changes one rate target at a time. It reduces bitrate for sustained socket
+  write pressure and FPS for sustained capture, encode or feedback pressure.
+  A rate change starts a same-format NVENC session with an IDR. Clear the
+  variable to use the original fixed hardware settings.
+- Set `JWM_REMOTE_ADAPT_RESOLUTION=1` on an X11 NVENC host using the `desktop`
+  or `motion` policy to enable 75% and 50% resolution tiers. The percentages
+  apply to both axes after the host, viewer and decode limits. A reduced tier
+  needs a long axis of at least 320 pixels and a short axis of at least 180.
+  Sustained capture, encode or measured decode pressure can reduce the size
+  after FPS reaches the policy floor. Recovery restores bitrate, then size,
+  then FPS. If decode recovers and viewer scaling remains slow, the host can
+  restore a decode-driven size tier while keeping the slower FPS. An authorized
+  source change or a new viewer bound starts at full size within the active
+  limits. Each size transition advances the geometry epoch and starts with an
+  IDR. Clear the variable to keep rate adaptation at the ordinary capture size.
+- Set `JWM_REMOTE_ADAPT_FEEDBACK=1` on the hardware viewer to offer the
+  application v36 video-feedback profile. A host with NVENC adaptation
+  enabled can accept the offer. Its governor uses decode, presentation
+  queue and completion durations attached to drawn ACKs for the current
+  source and geometry. Repeated viewer pressure lowers FPS. Recovery needs
+  a full observation window of current feedback. The timings use durations
+  from the viewer's clock. A current helper can select v35 for fixed video
+  or JPEG. Leave the variable unset when using a v35-only host.
+- Set `JWM_REMOTE_HEVC444_LOSSLESS=1` on a `remote-h264` build of the X11
+  desktop host to try HEVC 4:4:4 NVENC with lossless tuning and constant QP 0.
+  Enable HEVC on the host with `--allow-h264 --allow-hevc444` and use a viewer
+  that offers HEVC 4:4:4. The encoder preserves YUV444 samples from RGB color
+  conversion. Start the host with `JWM_REMOTE_ADAPT_VIDEO` and
+  `JWM_REMOTE_GPU_CAPTURE` unset to use this mode.
+  Other viewer codec offers use their normal negotiation. A failed mode probe
+  or an active encode failure, including the 1 MiB access-unit limit, uses
+  JPEG on the same capture source. The active encoder log identifies
+  `NVENC, lossless constant QP 0` after the first successful picture. Clear
+  the variable or set it to `0` to restore the original rate control.
+- Set `JWM_REMOTE_PARALLEL_YUV420=1` on an NVENC host to convert RGB to
+  4:2:0 in parallel, or on a viewer to convert downloaded 4:2:0 video to
+  RGB in parallel. Each endpoint opts in separately. The conversion needs
+  at least two workers, even coded dimensions and at least 1,048,576 pixels.
+  Workers reuse scratch buffers for the rows around each band boundary.
+  The log reports `parallel 4:2:0 conversion active` when this converter
+  initializes. The viewer writes visible rows from that scratch storage
+  into the recycled RGB frame. Viewer JSON counts that work in
+  `hardware_conversion_ms` because the workers convert and pack concurrently.
+  Clear the variable to use whole-frame 4:2:0 conversion.
+- Set `JWM_REMOTE_VAAPI_DIRECT_MAP=1` on an X11 H.264 viewer using CPU RGB
+  presentation to try reading its VA-API NV12 surface directly. The viewer
+  copies the active image rows into one reusable padded NV12 frame before
+  converting to RGB. If the decoder or surface rejects mapping, the viewer
+  downloads the same decoded picture and uses downloads through that source
+  and geometry scope. Viewer JSON reports mapped and fallback frames and
+  staged bytes in `hardware_rgb_work.vaapi_map`. The
+  `hardware_direct_map_ms` stage includes synchronization, mapping, the copy
+  and unmapping. Clear the variable to use the ordinary download path.
+  The active-plane copy builds against the tested FFmpeg 4.4 and 6.1 ABIs.
+- Set `JWM_REMOTE_X11_PREPARE=1` to move CPU scaling and BGRX packing of
+  eligible full H.264 or HEVC pictures off the X11 presenter. One job keeps
+  its decoded image and the viewport version it targeted. The presenter
+  uses it only for that viewport, and a resize can draw the original RGB
+  picture through the synchronous path. A new source or frame geometry
+  takes precedence over older preparation. The X11 upload and copy
+  completion still gate each acknowledgement. The experiment covers compatible
+  24-bit BGRX32 visuals with unchanged or downscaled pictures. The detailed
+  report exposes `x11_cpu_preparation`, `x11_cpu_prepare_ms` and
+  `x11_presenter_submit_ms`.
+- Set `JWM_REMOTE_X11_DIRECT_SHM=1` on an X11 viewer to pack a full-size
+  RGB image directly into a free MIT-SHM upload buffer on compatible
+  24-bit, 32-bits-per-pixel visuals. This applies with or without black
+  borders when the image is displayed at its original pixel size. Scaled
+  and partial updates use the existing upload path. A busy upload buffer
+  ring uses the core X11 fallback. The viewer logs `direct RGB-to-MIT-SHM
+  upload active` on its first matching completion event. Clear the variable
+  to restore the intermediate XImage for these full uploads.
+- Set `JWM_REMOTE_KEEP_WINDOW=1` for direct X11 view-only sessions with
+  `--reconnect-attempts` and clipboard off. After an eligible transport drop,
+  the same window keeps the last picture and shows a disconnected title.
+  Closing it during backoff cancels recovery. Closing during authentication
+  or the first-frame wait also shuts down that retry socket. A fresh
+  authenticated connection starts from the host's initial source and the
+  viewer keeps its local size and position. Clear the variable to reopen a
+  window on retry.
+- Set `JWM_REMOTE_GPU_PRESENT` to the DRM render node used by the X11
+  screen for native H.264 presentation. The current path supports VA-API
+  NV12 with separate R8 and GR88 planes. It samples them in GLES, renders into
+  a linear XRGB8888 DMA-BUF and imports the result as an X11 DRI3 pixmap.
+  Use `jwm-remote doctor --probe-gpu-present /dev/dri/renderD128` on that
+  viewer display to check the device, render a cropped test picture and
+  compare its colors. On mixed Intel/NVIDIA X11 setups where the normal
+  scaling policy disables XRender, choose `--scaling gpu` explicitly when
+  running this experiment.
+  An unavailable path or rejected import switches to RGB. A failed GPU
+  synchronization ends the affected hardware attempt and uses the existing
+  cleanup and fallback rules. JSON reports `last_presentation_path`,
+  `native_presented` and `native_preparation_and_submit_ms`. A native
+  frame's acknowledgement still follows the X11 completion event.
+- On a native Wayland viewer, set `JWM_REMOTE_GPU_PRESENT` to the compositor's
+  DRM render node and connect in view-only mode. With negotiated H.264, the
+  client uses VA-API and GLES to draw into a linear XRGB8888 DMA-BUF at the
+  viewer's current buffer scale. The compositor must advertise that format on
+  the same device through `linux-dmabuf` feedback. A recoverable import
+  rejection switches the same window to XRGB SHM using the decoded picture.
+  Only a matching `wp_presentation.presented` earns a frame acknowledgement.
+  Viewer telemetry reports `wayland-vaapi-dmabuf` and counts hardware downloads.
+  Run `scripts/test-remote-wayland-cli.sh --gpu-viewer-4k /dev/dri/renderD128`
+  for an isolated 3840×2160 H.264 import and presentation check on the
+  intended Intel render node.
+- Set `JWM_REMOTE_GPU_CAPTURE` to the render node used by the X11 host
+  screen and run with `--allow-h264` and explicit `--capture-source root`
+  or `--capture-source overlay`. The viewer must offer H.264 and the
+  independent cursor plane. Explicit CPU scaling and static lossless mode
+  use the ordinary path. The host probes DRI3 export, same-device VA-API
+  processing and H.264 encoding with a private pixmap before selecting the
+  encoder. An unsupported startup combination uses the ordinary capture
+  and codec negotiation. A runtime failure switches to JPEG from a fresh
+  CPU capture of the same authorized source. JSON reports
+  `vaapi-resize/dri3-dmabuf` in `mode` and the
+  `hardware_encode_stages.native_dmabuf_import_ms` timing.
+- With a native Wayland source, use `JWM_REMOTE_GPU_CAPTURE=/dev/dri/renderD128`
+  and run `jwm-remote host --wayland-select --allow-h264`. The peer must
+  offer H.264 and view a fixed, authorized window. The compositor needs
+  to advertise same-device linear XRGB8888 DMA-BUF capture. The host
+  preflights capture and H.264 on that source, then submits GPU buffers
+  to VA-API without reading the pixels into CPU memory. A rejected
+  import or render uses SHM and JPEG on the same authorized window.
+  JSON reports `vaapi-resize/wayland-dmabuf` when this path is active.
+  Native Wayland viewer input and proof modes still use JPEG.
+  For an isolated GPU test, run
+  `scripts/test-remote-wayland-cli.sh --gpu-capture /dev/dri/renderD128`
+  with the intended VA-API driver and FFmpeg development files.
+
+`jwm-remote doctor --probe-gpu-encode /dev/dri/renderD128` exports a
+synthetic decoded NV12 surface, imports the DMA-BUF into a separate
+VA-API H.264 encoder frames context on that device, and checks the resulting
+IDR against four test colors.
+
+Check the separate probe output for the endpoint's encoder, decoder, import
+or presenter. `doctor` can pass the display and key checks while reporting
+that a codec or import is unavailable. Use the active capture and
+presentation paths from a real session when recording device support.
+
+#### Roll back individual remote paths
+
+Restart the affected endpoint with its original source, key and permission
+arguments. In these commands, replace `…` with those arguments and `HOST`
+with the existing peer. Replace any existing codec or retry setting when the
+command explicitly selects one.
+
+| Path to roll back | Endpoint command | Result |
+| --- | --- | --- |
+| GPU capture | `env -u JWM_REMOTE_GPU_CAPTURE jwm-remote host …` | Ordinary capture on the selected source |
+| X11 regional readback | `env -u JWM_REMOTE_X11_REGIONS jwm-remote host …` | Full readback within the selected X11 capture scope |
+| Hardware video codec | `jwm-remote connect HOST --jpeg …` | Negotiate JPEG |
+| GPU presentation | `env -u JWM_REMOTE_GPU_PRESENT jwm-remote connect HOST …` | Display decoded RGB on the same viewer backend |
+| X11 CPU presentation preparation | `env -u JWM_REMOTE_X11_PREPARE jwm-remote connect HOST …` | Prepare CPU pixels on the presenter thread |
+| Wayland RGB backing reuse | `env -u JWM_REMOTE_WAYLAND_REUSE_RGB jwm-remote connect HOST …` | Use fresh GBM backing for native presentation |
+| NVENC rate adaptation | `env -u JWM_REMOTE_ADAPT_VIDEO jwm-remote host …` | Use the fixed hardware rate |
+| NVENC resolution adaptation | `env -u JWM_REMOTE_ADAPT_RESOLUTION jwm-remote host …` | Keep the ordinary capture size |
+| Viewer feedback | `env -u JWM_REMOTE_ADAPT_FEEDBACK jwm-remote connect …` | Use the v35 application profile |
+| NVENC HEVC 4:4:4 lossless | `env -u JWM_REMOTE_HEVC444_LOSSLESS jwm-remote host …` | Use the original HEVC bitrate control |
+| Retained recovery window | `env -u JWM_REMOTE_KEEP_WINDOW jwm-remote connect HOST …` | Open a new window on an eligible retry |
+| Automatic retry | `jwm-remote connect HOST --reconnect-attempts 0 …` | Exit on transport loss |
+
+For the `remote-fast-jpeg` build feature, select the previously verified
+binary without that feature. Compare the application and transport versions
+and build features reported by `jwm-remote doctor` on both endpoints before
+starting the session again. Roll back a protocol version with a compatible
+pair of binaries and profiles supported by those builds.
+
+[X11 GPU capture and fallback](benchmarks/remote-upgrade-2026-11-20/native-x11-host-smoke.json) ·
+[Wayland GPU capture and fallback](benchmarks/remote-upgrade-2026-11-20/native-wayland-gpu-chain-smoke.json) ·
+[Wayland reused GPU backing failure](benchmarks/remote-upgrade-2026-11-20/native-wayland-gpu-reused-fence-failure.json) ·
+[X11 recovery window checks](benchmarks/remote-upgrade-2026-11-20/x11-viewer-recovery-close.json)
+
+Rust callers can start an independent X11 viewer or a native Wayland viewer
+through `jwm::remote::engine::RemoteSession`. A session snapshot carries the
+state, presented source catalog, local input state and current timing window.
+The controller accepts input requests, release, source selection and
+disconnect commands according to the session's capabilities.
+
+### Managed terminal sessions
+
+Launch `jwm-remote session HOST[:PORT]` with piped standard input and output.
+It opens its native viewer in view-only mode. On X11, `--control` enables
+click-to-grab input when the host grants permission. Moving outside the
+displayed image or using the viewer release shortcut releases the grab.
+With `--viewer-backend wayland --control`, JWM uses the host's one-shot
+30-second keyboard and pointer lease for the selected window. The host must
+grant scoped Wayland control. `--wayland-scroll` and `--wayland-horizontal-scroll`
+request separate host permissions. Managed Wayland control requires the host
+helper to acknowledge the confirmed-release input mode in the authenticated hello.
+Update the host helper along with the viewer to use this mode.
+The standard key path applies unless `--key-file` is supplied.
+
+To enable clipboard sharing on X11, pass `--clipboard` and start the host
+with `--allow-clipboard`. Consent applies independently of `--control`.
+Use `--clipboard-mode`, `--clipboard-direction` and `--clipboard-file-limit`
+to narrow the request. An outgoing grant can share the clipboard already
+selected in the viewer's X11 session. When the X11 server reserves the
+default function-key chord, `--escape-key Pause` selects Ctrl+Super+Alt+Pause
+for clipboard restriction and Ctrl+Super+Pause for input release.
+See [clipboard sharing](#clipboard-sharing).
+
+For an X11 application that owns an XEmbed socket, pass its decimal XID as
+`--x11-parent-window ID` and select its local server with `--display DISPLAY`.
+The socket controls viewport dimensions and must remain alive through viewer
+shutdown. An invalid container fails the viewer startup. The managed X11
+input-grab rules also apply to an embedded viewer.
+
+For managed X11 viewing with clipboard off, enable **Reconnect automatically**
+in the terminal panel or pass `--reconnect-attempts 3` on the command line.
+The option accepts 0–5 additional attempts and defaults to 0. After an
+eligible transport loss and clean teardown, the same X11 window keeps its
+geometry and shows the last frame with a disconnected title. While waiting,
+the helper clears its active source catalog and timing snapshot. Each retry
+reauthenticates and presents the host's default source before publishing a
+new catalog. Select a source from that catalog to continue. Disconnect,
+closing the viewer or its XEmbed container, and closing the helper's stdin
+cancel the retry. See [eligible retry conditions](#recover-deliberately).
+
+Standard output emits version 1 JSON Lines with `event` set to `snapshot`
+or `command_result`. Snapshots describe the current state, active source
+catalog, local grab and latest performance window. The catalog appears after
+a source is presented and clears during transitions. A performance window can
+span a source change. Match its session ID and latest decoded frame epoch to
+the catalog when showing information for the active source. Standard error
+carries human-readable diagnostics. Pixels, keyboard events and keys stay
+in the viewer and authenticated transport.
+
+For managed X11, `clipboard` carries the currently effective `mode`,
+host-relative `direction`, `file_limit_bytes` and optional `transfer`. It is
+`null` before negotiation and after the connection closes. `mode` and
+`direction` are `null` when negotiation leaves sharing off. The viewer's
+clipboard restriction shortcut narrows the reported scope for the session,
+including across source changes. A transfer includes `direction`, `kind`,
+`bytes_processed` and `total_bytes`. Byte counts and limits are decimal
+strings. Upload progress tracks processing credit from the receiver, which
+can include bytes discarded during cancellation. The snapshot contains no
+copied content or file names.
+
+For scoped Wayland control, `wayland_input` reports `available`, `pending`,
+`active`, `releasing`, `released`, or `unavailable`. A successful `release_input`
+request stops forwarding immediately. Losing local keyboard or pointer focus,
+or deactivating the viewer window, also stops forwarding and revokes the lease.
+`released` follows the host's native cleanup confirmation. Viewing and viewer
+resize can continue on the same source. Controlling a window again requires a
+new session and fresh host authorization.
+
+For a native Wayland host started with `--wayland-select --once
+--allow-wayland-control`, the host operator can authorize several windows
+by entering comma-separated indices. The snapshot advertises this capability
+as `wayland_source_control: true`. Selecting another window while control is
+active stops local input and waits for the host's cleanup confirmation before
+rebuilding the viewer window. After the new window presents its first frame,
+the session is view-only. If that source has an unused grant, choose
+**Request Input** and focus both devices on the viewer. Focus the authorized
+surface on the host as well. A fresh compositor presentation and another
+native lease are required before forwarding starts. Returning to a window
+whose grant was already used keeps it view-only.
+
+Use `--allow-wayland-gestures` on the host and `--wayland-gestures` with
+`session --viewer-backend wayland --control` for modifier clicks and
+in-window dragging. Both peers must confirm the gesture input selector.
+Snapshots then carry `wayland_gestures` with `ready_frame` set to the frame
+that can start a gesture, or `null` while the gate is closed. For the supported
+modifiers, layout changes and native requirements, see
+[managed compound gestures](remote-wayland-source.md#compound-gestures-in-managed-sessions).
+
+While the lease is active and the viewer retains focus, a local viewport change
+keeps the original host encoding geometry. The viewer discards coordinates and
+unfinished clicks from the previous layout. Pointer input resumes after the new
+layout has presented a matching proof and the host has marked it ready. The
+host can adapt encoding to the new viewport once the managed viewer has
+returned to read-only mode.
+
+The confirmed-release mode uses input selector 2 in the existing application
+v35 stream capabilities. It requires JPEG and one-shot combined Wayland
+control. Existing viewer modes keep input selector 1. The host answers with
+the same selector after checking its scoped control permission, and the viewer
+requires that answer before it opens the display and requests input authority.
+
+Send one command per stdin line, up to 512 bytes including the newline.
+Use a new unsigned 32-bit `request` value to correlate each result.
+
+```json
+{"command":"select_source","request":1,"selection":{"session_id":"0123456789abcdef0123456789abcdef","source_epoch":"1","source_id":2}}
+{"command":"request_input","request":2,"selection":{"session_id":"0123456789abcdef0123456789abcdef","source_epoch":"2","source_id":2}}
+{"command":"release_input","request":3}
+{"command":"disconnect","request":4}
+```
+
+Copy `session_id` and `source_epoch` from the active catalog. For selection,
+use the target's authorized `source_id`. For `request_input`, use the
+currently presented source ID and wait for `wayland_input` to be `available`.
+Session and epoch fields are strings to preserve their identity in JavaScript
+clients. An accepted command was queued. Snapshots report presentation and
+input state changes. Closing stdin also disconnects. Forge, Anvil, Ember and
+Frost use this interface from their
+**Remote Desktop** palette command. In Aether, open the **Remote Desktop**
+tab. Each terminal uses its own toolkit for session controls and leaves
+presentation to the native JWM viewer.
+
+Aether also has a terminal semantic path for its Rust-owned local PTY. It uses
+a stable session ID, acknowledged row deltas and full-snapshot reattachment.
+The semantic and desktop viewer transports have independent lifecycles.
+
+### Additional telemetry
+
 The JSON counters `backpressure_skipped` and `damage_skipped` record the
 capture attempts skipped under mailbox backpressure and the attempts that
 ran the capture path without producing a frame, respectively.
@@ -2131,9 +2540,9 @@ copy deltas in the JPEG stream profile.
 The flag grants **no input permission**: `--allow-wayland-scroll` remains a
 separate, explicitly authorized single-notch input capability.
 
-Both endpoints must use application protocol v19. Earlier peers are rejected
-at negotiation, not silently upgraded. Codec support is negotiated separately
-from keyboard, pointer, clipboard and scroll permissions.
+Application v19 introduced scroll-copy negotiation. Use matching application
+versions on both endpoints. Codec support is negotiated separately from
+keyboard, pointer, clipboard and scroll permissions.
 
 A candidate copies a full-width vertical overlap by an integral displacement
 of ±1 through ±64 encoded-image pixels, strictly less than the encoded image
@@ -2144,6 +2553,12 @@ path. Partial-column scrolling, fixed toolbars, unrelated changes and unsafe
 size changes do not qualify for that copy; ordinary tile encoding remains the
 fallback. Copy records bind to the exact previous decoded sequence and current
 source/geometry scope; stale, missing or cross-scope bases must not be applied.
+
+The detector ranks candidate displacements using sampled full-width RGB rows,
+then verifies each row in the selected overlap before encoding the copy.
+With `--stats-json`, `scroll_copy_frames` counts successfully flushed copy
+frames in a host reporting window. `last_sent_frame.scroll_copy_dy` gives
+the signed encoded row displacement when the last frame carried a copy.
 
 Copied pixels are the existing decoded pixels, not re-quantized JPEG. This does
 not guarantee lower image error than a fresh JPEG update. The experiment is

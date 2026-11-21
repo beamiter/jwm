@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "pilot_wait": "pilot-already-ended",
+  "started_after_lock_unix_ns": 1795233666476862651,
+  "finished_capture_unix_ns": 1795233672355710468,
+  "remote_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+  "test_binary_sha256": "1fa47d2c0839fb40c5a386df46a79cf149bd178682b2e54cb2d2180b3892d44b",
+  "fixture": "remote::host::wayland_viewer_integration::host_control_integration::cli_process_integration::source_switching::native_cli_source_catalog_rebuilds_wayland_roles_and_retires_old_feedback",
+  "session_id": "0dc4fb3c4397a1bdbe06812616934bf7",
+  "fixture_native_dimensions": [
+    [
+      200,
+      150
+    ],
+    [
+      240,
+      180
+    ]
+  ],
+  "native_dimensions_seen_in_frame_scopes": [
+    [
+      200,
+      150
+    ]
+  ],
+  "encoded_dimensions": [
+    120,
+    90
+  ],
+  "host_windows": [
+    {
+      "window_seconds": 4.343058193,
+      "mode": "wayland-surface/cpu-resize/shm/no-damage/no-cursor",
+      "frame_scope": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          120,
+          90
+        ],
+        "geometry_epoch": 5,
+        "sequence": 3,
+        "source_dimensions": [
+          200,
+          150
+        ],
+        "source_epoch": 3
+      },
+      "staging_growths": 2,
+      "readback_bytes": 15504000,
+      "stage_counts": {
+        "readback_ms": 127,
+        "conversion_ms": 127,
+        "resize_ms": 127
+      }
+    }
+  ],
+  "viewer_scope_by_source_epoch": {
+    "3": {
+      "codec": "JPEG",
+      "encoded_dimensions": [
+        120,
+        90
+      ],
+      "geometry_epoch": 5,
+      "sequence": 3,
+      "source_dimensions": [
+        200,
+        150
+      ],
+      "source_epoch": 3
+    }
+  },
+  "stage_observations": {
+    "readback_ms": 127,
+    "conversion_ms": 127,
+    "resize_ms": 127
+  },
+  "xrgb_staging_growth_events": 2,
+  "reuse_observed_across_capture": true,
+  "copy_scope": {
+    "observed_shm_to_cpu_readback_bytes": 15504000,
+    "calculated_xrgb_to_rgb_destination_bytes": 11628000,
+    "calculated_resize_destination_bytes": 4114800
+  },
+  "baseline_sites_estimated_for_same_stage_observations": {
+    "fresh_xrgb_reserves": 127,
+    "fresh_rgb_destination_reserves": 127,
+    "allocating_imageops_resize_calls": 127
+  },
+  "scope": "The existing private GL fixture samples both solid colors on the actual viewer buffers. Current staging growth is a product capacity-increase counter. Baseline site counts and destination byte counts are calculated from source and observed stage invocations. This is not a malloc trace, network throughput trial, or physical KMS measurement.",
+  "archive": {
+    "path": "native-wayland-cpu-reuse-smoke-raw.zip",
+    "sha256": "7e1cae723dd1a865024a1bb16e93ab83a3b122b6832466b8e6d4c47e7d71c9af",
+    "entries": {
+      "trace/result.json": "845ad1c85d69281e1212531669d558a7c374b7182fd288507289216ee3cb076d",
+      "trace/allocation-sites.json": "90b95c3b02359867b5f020739611352ec9f0dada9ad500bba020aa9dad08c3be",
+      "trace/cli-fixture.log": "8ef3b32644d85247b1c5af0da4a9bf94d5ad6ffcf1555260fe9967792b1bbe6b",
+      "trace/host.log": "5fde10577e06fdd56eada74786f2595d58a756a97b251c6458368473b7e45b3f",
+      "trace/viewer-events.jsonl": "e42bd8a590053f0689bb066ca26b5bcb92f718be20265bbf355f94567f29448b",
+      "trace/triangle-resize.log": "d1f70790f422f14bd143f60873cb00aead3ad2af63bcac11f4b872aaa88267dd",
+      "trace/xrgb-reuse.log": "7becd81370a2f6ea0c987363774f2006457ac8a074f799643cbefee28dc97f2a",
+      "fixture/README.md": "b0fba535e34a9dcfd97ee77b43b182990b3a52a50d680a6020b5ad0bb6d65236",
+      "fixture/cli-probe": "3a1d85cacb948426e7c34060220a4908ca91e02ba797f5b33d4eed97ff6c00e3",
+      "fixture/run.py": "a3dcb4d27df13fa4e724ca4e64d0ea43c226a03465c90a72274910640217754f"
+    }
+  }
+}

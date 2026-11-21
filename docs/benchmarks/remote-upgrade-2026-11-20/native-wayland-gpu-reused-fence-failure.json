@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-21",
+  "scope": "P10 native Wayland RGB DMA-BUF backing reuse and unresolved GLES wait handling on the owned Intel ARL render node.",
+  "timeout_control": {
+    "test_case": "native_wayland_fence_timeout_retires_real_surface_without_ack",
+    "test_passed": true,
+    "test_wall_seconds": 0.34,
+    "renderer": "Mesa Intel(R) Graphics (ARL)",
+    "received_frames": 2,
+    "decoded_frames": 2,
+    "replaced_frames": 0,
+    "drawn_frames": 1,
+    "acked_frames": 1,
+    "underlying_error": "GLES frame fence did not complete",
+    "rgb_fallback_commit_observed": false,
+    "successful_cleanup": true,
+    "reconnect_certified": false,
+    "injection": "Test-only override after the real successful GLES wait and glDeleteSync.",
+    "healthy_frame_oracle": {
+      "four_distinct_color_samples_per_commit": true,
+      "rgba_framebuffer_locations": [
+        [
+          16,
+          16
+        ],
+        [
+          233,
+          16
+        ],
+        [
+          16,
+          231
+        ],
+        [
+          233,
+          231
+        ]
+      ],
+      "maximum_absolute_rgb_error_threshold": 4,
+      "reference": "Independent VA-API decode and CPU conversion of the synthetic H.264 input.",
+      "feedback_order": "Read committed DMA-BUF, compare pixels, then send controlled private presentation feedback."
+    },
+    "failure_edge": {
+      "faulted_frame_reached_wayland_commit": false,
+      "faulted_frame_returned_wire_ack": false,
+      "same_exact_va_frame_held_at_renderer_teardown": true,
+      "same_egl_context_destroy_succeeded": true,
+      "both_workers_terminated": true
+    },
+    "reuse_enabled": false,
+    "successful_reuse_marker_observed": false,
+    "healthy_wire_acks": [
+      [
+        1,
+        71
+      ]
+    ],
+    "faulted_sequence": 72,
+    "nested_io_error_kind": "TimedOut",
+    "overridden_status": "GL_TIMEOUT_EXPIRED"
+  },
+  "reused_wait_failure": {
+    "test_case": "native_wayland_fence_wait_failure_retires_reused_target_without_ack",
+    "test_passed": true,
+    "test_wall_seconds": 0.35,
+    "renderer": "Mesa Intel(R) Graphics (ARL)",
+    "received_frames": 4,
+    "decoded_frames": 4,
+    "replaced_frames": 0,
+    "drawn_frames": 3,
+    "acked_frames": 3,
+    "underlying_error": "GLES frame fence wait failed",
+    "rgb_fallback_commit_observed": false,
+    "successful_cleanup": true,
+    "reconnect_certified": false,
+    "injection": "Test-only override after the real successful GLES wait and glDeleteSync.",
+    "healthy_frame_oracle": {
+      "four_distinct_color_samples_per_commit": true,
+      "rgba_framebuffer_locations": [
+        [
+          16,
+          16
+        ],
+        [
+          233,
+          16
+        ],
+        [
+          16,
+          231
+        ],
+        [
+          233,
+          231
+        ]
+      ],
+      "maximum_absolute_rgb_error_threshold": 4,
+      "reference": "Independent VA-API decode and CPU conversion of the synthetic H.264 input.",
+      "feedback_order": "Read committed DMA-BUF, compare pixels, then send controlled private presentation feedback."
+    },
+    "failure_edge": {
+      "faulted_frame_reached_wayland_commit": false,
+      "faulted_frame_returned_wire_ack": false,
+      "same_exact_va_frame_held_at_renderer_teardown": true,
+      "same_egl_context_destroy_succeeded": true,
+      "both_workers_terminated": true
+    },
+    "reuse_enabled": true,
+    "successful_reuse_marker_observed": true,
+    "healthy_wire_acks": [
+      [
+        1,
+        71
+      ],
+      [
+        1,
+        72
+      ],
+      [
+        1,
+        73
+      ]
+    ],
+    "faulted_sequence": 74,
+    "signaled_reused_draws_including_fault": 2,
+    "render_node_linux_major_minor": [
+      226,
+      128
+    ],
+    "healthy_reused_frames": 1,
+    "faulted_reused_target_not_pooled": true,
+    "nested_io_error_kind": "Other",
+    "overridden_status": "GL_WAIT_FAILED"
+  },
+  "pins": {
+    "test_binary": {
+      "name": "jwm-ed0e7f128daa1b65",
+      "sha256": "bbf10c450ea1d821b144aa09f5248fcf20de94ea6c11c16c70ca37d4c0ab9e4e",
+      "bytes": 196338320,
+      "test_artifact_file_from_cargo": true,
+      "file_metadata_stable_while_hashing": true,
+      "source_manifest_binary_build_log_test_log_chronological": true
+    },
+    "build_selected_source_sha256": {
+      "src/remote/client.rs": "c5aa6903caaa19ac59e4c6ee7f18b08b81c87183f787500c7b4e4d9238dd7382",
+      "src/remote/client_decode_queue.rs": "012ab3d4c6c8c37436d3029b478ad17b13b353bbd903a78c6c2dfa6479bb790e",
+      "src/remote/gpu_present.rs": "fad4eea8d1a5ec6c28f0894e3dbd55910aea6f47e9f36f831a2c011410563bf5",
+      "src/remote/host_wayland_gpu_fence_integration.rs": "ec4bcf9b6337a57a0361ebf8e73c70ea0be6e3cc14c2b453a78ee43c3a677c72",
+      "src/remote/wayland_viewer_gpu.rs": "8efca10d2facc1e513038ee4dd7769b6f2279679e3a949fdaf6bf341ec24beeb",
+      "scripts/test-remote-recovery-window.py": "e78b774db04113616af604a063f8e95f3ff03299076772e50b2b6b5049e809d6"
+    },
+    "archived_source": {
+      "src/remote/gpu_present.rs": {
+        "archive_path": "sources/src/remote/gpu_present.rs",
+        "original_sha256": "fad4eea8d1a5ec6c28f0894e3dbd55910aea6f47e9f36f831a2c011410563bf5",
+        "archive_sha256": "fad4eea8d1a5ec6c28f0894e3dbd55910aea6f47e9f36f831a2c011410563bf5",
+        "redacted": false,
+        "pinned_in_prebuild_manifest": true
+      },
+      "src/remote/wayland_viewer_gpu.rs": {
+        "archive_path": "sources/src/remote/wayland_viewer_gpu.rs",
+        "original_sha256": "8efca10d2facc1e513038ee4dd7769b6f2279679e3a949fdaf6bf341ec24beeb",
+        "archive_sha256": "8efca10d2facc1e513038ee4dd7769b6f2279679e3a949fdaf6bf341ec24beeb",
+        "redacted": false,
+        "pinned_in_prebuild_manifest": true
+      },
+      "src/remote/host_wayland_gpu_fence_integration.rs": {
+        "archive_path": "sources/src/remote/host_wayland_gpu_fence_integration.rs",
+        "original_sha256": "ec4bcf9b6337a57a0361ebf8e73c70ea0be6e3cc14c2b453a78ee43c3a677c72",
+        "archive_sha256": "7c4d07ed2d8da248b2bae54d03f5187edfca070b3eafccb34d29bfebcfd0405a",
+        "redacted": true,
+        "pinned_in_prebuild_manifest": true
+      },
+      "src/remote/client_native_video.rs": {
+        "archive_path": "sources/src/remote/client_native_video.rs",
+        "original_sha256": "6c07b24a4debf0b41562f5dd3591438981b4253fff8c399e2b8e142edba2334a",
+        "archive_sha256": "6c07b24a4debf0b41562f5dd3591438981b4253fff8c399e2b8e142edba2334a",
+        "redacted": false,
+        "pinned_in_prebuild_manifest": false
+      },
+      "src/remote/native-video-probe.h264": {
+        "archive_path": "sources/src/remote/native-video-probe.h264",
+        "original_sha256": "a8abec1aeb52fdd973e60b11704f6cbf58cf88ed85b026d1a780b44cb7f724d4",
+        "archive_sha256": "a8abec1aeb52fdd973e60b11704f6cbf58cf88ed85b026d1a780b44cb7f724d4",
+        "redacted": false,
+        "pinned_in_prebuild_manifest": false
+      }
+    },
+    "source_provenance": "The runner digested selected source files before compilation. The focal renderer, pool and integration-test sources were verified against that list. The archived client diagnostic and synthetic H.264 input snapshots were not separately listed in the pre-build manifest."
+  },
+  "historical_diagnostic": "The line announcing RGB is retained from this build. Disabling native decode on the unresolved branch returned a typed terminal error. The test observed no fallback commit.",
+  "qualification": "The real GLES waits signaled. Test-only code substitutes a failure status after the signaled wait to exercise retirement. The run leaves physical GPU loss, genuine noncompletion and physical latency unmeasured.",
+  "archive": {
+    "path": "native-wayland-gpu-reused-fence-failure-raw.zip",
+    "sha256": "7ade005e69b5dc4e0e14f9b8b8f056102a927caad268eab36518d4f88e06af0f",
+    "entries": {
+      "README.md": "b6a4b86ae672afbc0ea64de0444ec9e6032f58d446b5b1471bb567981ea85cec",
+      "evidence/build-selected-source-sha256.txt": "885082554d4c688f98c0de609e6a410a4b96c6cff87719dc5bb766c540260cfc",
+      "evidence/cargo-artifact.json": "32c22df416ddbc8b677a041696c5d6fcb7f0b511080a57a639d15a136aa0c886",
+      "evidence/native-fault-tests.log": "8b9e9f4a17242822ca05555a9a71829bbc0b446fe41738e064140a10256f92c7",
+      "evidence/pins.json": "7ed4b25cae9bc6c509cef0dbdea231414e8a17c0f06078eaadfc0568f13ebd11",
+      "fixture/native-test.sh": "c3952bc6ddd1f0ccfc17584083d661ef88f1171967f8d325d24f1862ea370ebb",
+      "replay.py": "236bca41f0e25529f098dc1c0498cbca5a77c761d2beaa7ffc9b0a7d46ca28f4",
+      "sources/src/remote/client_native_video.rs": "6c07b24a4debf0b41562f5dd3591438981b4253fff8c399e2b8e142edba2334a",
+      "sources/src/remote/gpu_present.rs": "fad4eea8d1a5ec6c28f0894e3dbd55910aea6f47e9f36f831a2c011410563bf5",
+      "sources/src/remote/host_wayland_gpu_fence_integration.rs": "7c4d07ed2d8da248b2bae54d03f5187edfca070b3eafccb34d29bfebcfd0405a",
+      "sources/src/remote/native-video-probe.h264": "a8abec1aeb52fdd973e60b11704f6cbf58cf88ed85b026d1a780b44cb7f724d4",
+      "sources/src/remote/wayland_viewer_gpu.rs": "8efca10d2facc1e513038ee4dd7769b6f2279679e3a949fdaf6bf341ec24beeb"
+    },
+    "original_hardware_test_log_sha256": "531c2189828d9e8e6162ef019c2f3e3e2fa81372269deec97d8cccf72ace5130",
+    "redactions": [
+      "Loopback ephemeral ports in the hardware log.",
+      "Synthetic fixture credential in the archived Rust integration source."
+    ]
+  },
+  "diagnostic_text_retest": {
+    "status": "passed",
+    "new_source_sha256": "f07bf963a242776b3e67a332d28c21b02fc8f9f4bf6d365257bb4aae4905602a",
+    "test_binary_sha256": "011977bbc4bde5f4487f9955187f2a0097e10a2338b76bba5ce4868c6528c26c",
+    "observed_messages": [
+      "jwm-remote: native wayland video disabled. Closing the session (GLES frame fence did not complete)",
+      "jwm-remote: native wayland video disabled. Closing the session (GLES frame fence wait failed)"
+    ],
+    "test_summaries": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7890 filtered out; finished in 0.43s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7890 filtered out; finished in 0.30s"
+    ]
+  }
+}

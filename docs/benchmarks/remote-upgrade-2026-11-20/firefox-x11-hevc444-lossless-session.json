@@ -1,0 +1,511 @@
+{
+  "build": {
+    "base_source_digests_verified": true,
+    "baseline_source_sha256": {
+      "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+      "Cargo.toml": "9dd243ceb81417a3781afabf9b040a105ad39eb63d18af118ac43a232d1c0ae6",
+      "src/remote/client.rs": "7631b0052ed6af88fbf0556cbe2b9c1f21dae93a6253bc24e065a4b1dd06f048",
+      "src/remote/h264.rs": "a754ce6a35a4c049ddc43497aa92a8a952fbb8aeb69cf6ce53eafc03b47edf37",
+      "src/remote/host.rs": "90753a185122a7ef83858912c204deaceb48228161a312c83c7aa424375b3bfd",
+      "src/remote/telemetry.rs": "bfd8cdb257478e09bd2b07ef68a5642838725bb59d423a76acdc74e5fa0d0f69"
+    },
+    "build_exit": 0,
+    "candidate_binary_rehashed": true,
+    "candidate_binary_sha256": "eaf11e83583a214a4f261cbf679656eeada0238ac7612e28519de279592d7a76",
+    "candidate_patch_sha256": "4f1d1367334c2293a6232aaae4569f8dcda923af926fd70d21124819991c7fca",
+    "candidate_source_digests_verified": true,
+    "candidate_source_sha256": {
+      "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+      "Cargo.toml": "9dd243ceb81417a3781afabf9b040a105ad39eb63d18af118ac43a232d1c0ae6",
+      "src/remote/client.rs": "7631b0052ed6af88fbf0556cbe2b9c1f21dae93a6253bc24e065a4b1dd06f048",
+      "src/remote/h264.rs": "a1246d13207b2e654f9f9777ff7b4ca01ca1d4dc8115d0b4a257abd5a11e67fd",
+      "src/remote/host.rs": "90753a185122a7ef83858912c204deaceb48228161a312c83c7aa424375b3bfd",
+      "src/remote/telemetry.rs": "bfd8cdb257478e09bd2b07ef68a5642838725bb59d423a76acdc74e5fa0d0f69"
+    },
+    "changed_build_sources": [
+      "src/remote/h264.rs"
+    ],
+    "controller_source_sha256": "49b4c06a78d6e2413da013fa668656d9a5a956eb4c88be43de4f51bde8e50e9f",
+    "encoder_configuration": {
+      "bitrate_target_bps": 0,
+      "encoder": "hevc_nvenc",
+      "forced_idr": true,
+      "gop_frames_at_30_fps": 60,
+      "lookahead_frames": 0,
+      "max_b_frames": 0,
+      "operator_scope": "private host-only patch, preexisting traced Ubuntu viewer",
+      "preset": "p3",
+      "profile": "rext",
+      "qp": 0,
+      "rate_control": "constqp",
+      "tune": "lossless",
+      "vbv_bits": 0
+    },
+    "mint_expected_linkage_verified": true,
+    "mint_expected_linked_ffmpeg_sonames": [
+      "libavcodec.so.60",
+      "libavutil.so.58",
+      "libswscale.so.7"
+    ],
+    "viewer_binary_sha256": "74dc2389d4925354c5ae8fb26d0781ec94e5289a7bdc7fcd839b111a01124709"
+  },
+  "controller_exit": 0,
+  "detected_fixed_diagnostics": [],
+  "fixed_cbr_reference": {
+    "comparison_design": "historical serial comparison, not randomized ABBA",
+    "report_sha256": "4d0628d10fef06af7191f7f8324591867c6b6eb000a0b8c94a7eac01c8f3ffca",
+    "scoring": {
+      "diagnostic_motion_and_static_met": false,
+      "phases": {
+        "motion": {
+          "hardware_activity": {
+            "host_hevc_encodes": 1887,
+            "host_sent": 1887,
+            "viewer_drawn": 1886,
+            "viewer_hardware_decodes": 1886
+          },
+          "host": {
+            "raster": {
+              "distinct_scroll_signatures": 2840,
+              "gap_ms": {
+                "max": 34.055197,
+                "p50": 19.812894,
+                "p95": 22.61865
+              },
+              "invalid_scroll_reads": 0,
+              "invalid_tile_reads": 0,
+              "scroll_changes_seen": 3538,
+              "unique_content_fps": 58.96666666666667,
+              "unique_tile_changes": 3538,
+              "zero_unique_bins": 0
+            }
+          },
+          "viewer": {
+            "raster": {
+              "distinct_scroll_signatures": 1679,
+              "gap_ms": {
+                "max": 249.059389,
+                "p50": 33.359383,
+                "p95": 43.951055
+              },
+              "invalid_scroll_reads": 0,
+              "invalid_tile_reads": 0,
+              "scroll_changes_seen": 1736,
+              "unique_content_fps": 28.916666666666668,
+              "unique_tile_changes": 1735,
+              "zero_unique_bins": 0
+            }
+          }
+        },
+        "static": {
+          "hardware_activity": {
+            "host_hevc_encodes": 1653,
+            "host_sent": 1653,
+            "viewer_drawn": 1651,
+            "viewer_hardware_decodes": 1651
+          },
+          "host": {
+            "raster": {
+              "distinct_scroll_signatures": 1,
+              "gap_ms": {
+                "max": 60000.0,
+                "p50": 60000.0,
+                "p95": 60000.0
+              },
+              "invalid_scroll_reads": 0,
+              "invalid_tile_reads": 0,
+              "scroll_changes_seen": 0,
+              "unique_content_fps": 0.0,
+              "unique_tile_changes": 0,
+              "zero_unique_bins": 60
+            }
+          },
+          "viewer": {
+            "raster": {
+              "distinct_scroll_signatures": 3,
+              "gap_ms": {
+                "max": 60000.0,
+                "p50": 60000.0,
+                "p95": 60000.0
+              },
+              "invalid_scroll_reads": 0,
+              "invalid_tile_reads": 0,
+              "scroll_changes_seen": 140,
+              "unique_content_fps": 0.0,
+              "unique_tile_changes": 0,
+              "zero_unique_bins": 60
+            }
+          }
+        }
+      },
+      "source_motion_fps": 58.96666666666667,
+      "source_qualified": true,
+      "static_unchanged": false,
+      "viewer_motion_fps": 28.916666666666668,
+      "viewer_motion_gate_met": true
+    },
+    "trace_alignment": {
+      "host_sent_hardware_frames": 5384,
+      "host_sent_idrs": 90,
+      "mask_changes": {
+        "idr": 14,
+        "non_idr": 47,
+        "unassignable": 79
+      },
+      "qualified_trace": true,
+      "raster_mask_field": "scroll_text",
+      "raster_samples": {
+        "copy_not_certifiably_stable": 277,
+        "sample_crosses_trace_boundary": 638,
+        "usable": 4485
+      },
+      "source_reference": {
+        "dominant_viewer_mask_matches_source": false,
+        "dominant_viewer_mask_samples": 4578,
+        "mask_transitions_from_source_exact": {
+          "non_idr": 11,
+          "unassignable": 17
+        },
+        "mask_transitions_to_source_exact": {
+          "idr": 14,
+          "unassignable": 14
+        },
+        "source_exact_observed_onsets": 28,
+        "source_exact_onset_interval_median_ms": 2055.476488,
+        "source_exact_samples": 256,
+        "valid_samples": 5400
+      }
+    }
+  },
+  "malformed_payload_free_records_skipped": 0,
+  "manifest": {
+    "diagnostic_batch": true,
+    "dimensions": [
+      1920,
+      1080
+    ],
+    "hardware_rate_policy": "pinned fixed NVENC, governor off",
+    "hardware_trace": {
+      "JWM_REMOTE_TRACE_HARDWARE_FRAMES": "1",
+      "endpoints": [
+        "host",
+        "viewer"
+      ]
+    },
+    "pins": {
+      "firefox": "ddf58d7cb36bd35e8e9dab7bc70ce31e17340ce87fc7c0fe81e495ccbd863965",
+      "fixtures": {
+        "align.py": "fe94106bf6b328976443ae3a38e6935fefc835a7c76a0d1638eb3c76f480f10d",
+        "browser-trial.html": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+        "dual_browser.py": "8af5f8c5cb0f65ca0124ee51866383b06a3223122e5c227d021216ba232564a5",
+        "firefox-profile-user.js": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+        "fixture-manifest.json": "b3ad4bac6df43044599c5399a08c47f8bffa5a0a19debf51f121ba25c3a923d7",
+        "geometry_guard.py": "18ea821549cad83ad41d4a92003be9ebcf5d120149f570429b194284ed0c22af",
+        "hevc_evidence.py": "eafc1a3883cbdf9ad4dad09073bbe11031c72285d57fe2efa64613c4eb5c1f10",
+        "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+        "run_baseline.py": "5bd348c562da0f6381ca45aca1072a1765d5e8f33b257d0647721e6e87825d46",
+        "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3"
+      },
+      "host": "eaf11e83583a214a4f261cbf679656eeada0238ac7612e28519de279592d7a76",
+      "trace_patch": "50d607ad9b2d3bcc23485aafde7e0ee506e15f00006f29cc04add6baf4a58ce0",
+      "viewer": "74dc2389d4925354c5ae8fb26d0781ec94e5289a7bdc7fcd839b111a01124709"
+    },
+    "requested_codec": "HEVC 4:4:4",
+    "requested_fps": 30,
+    "requested_trials": 1,
+    "required_runtime_path": {
+      "host": "NVENC",
+      "viewer": "NVDEC"
+    },
+    "score_seconds": 60,
+    "source": "Mint Firefox source and original X11 capture policy",
+    "target": "owned X11 viewer, HEVC 4:4:4 at 1:1",
+    "telemetry_tail_seconds": 8,
+    "transport": "dual",
+    "warm_seconds": 30,
+    "workload": {
+      "motion_visible_label_unchanged": "Motion stops after 30 s.",
+      "original_sha256": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+      "sole_trial_change": {
+        "after": "elapsed >= 105000",
+        "before": "elapsed >= 30000"
+      },
+      "source_fixture": "tests/fixtures/remote-workloads/browser.html",
+      "static_uses_inactive_motion_handler": true,
+      "trial_sha256": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c"
+    }
+  },
+  "offline_fixture_digests": {
+    "align.py": "fe94106bf6b328976443ae3a38e6935fefc835a7c76a0d1638eb3c76f480f10d",
+    "hevc_evidence.py": "eafc1a3883cbdf9ad4dad09073bbe11031c72285d57fe2efa64613c4eb5c1f10",
+    "replay.py": "4d40044cfea19b18f1868c2d777e4e1087bb8ddba6d53f0cf71fcda7c3ec1350",
+    "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3"
+  },
+  "offline_replay": {
+    "command_after_extraction": "python3 -B replay.py",
+    "output": {
+      "qualification": "qualified-diagnostic",
+      "runtime_open": "jwm-remote: private NVENC HEVC444 constqp=0 lossless opened at 1920x1080",
+      "source_exact_fraction_of_valid_samples": 1.0,
+      "static_unchanged": true,
+      "status": "verified",
+      "throughput": {
+        "motion": {
+          "mean_video_payload_mbps": 1.5016828148991208,
+          "selected_host_windows": 13,
+          "video_payload_bytes": 12213988,
+          "window_seconds": 65.068270763
+        },
+        "static": {
+          "mean_video_payload_mbps": 0.9056664809145488,
+          "selected_host_windows": 12,
+          "video_payload_bytes": 6804253,
+          "window_seconds": 60.103829773
+        }
+      },
+      "viewer_motion_fps": 28.866666666666667
+    }
+  },
+  "procedure_and_limitations": [
+    "Original 1920\u00d71080 browser and X11 observer. Each phase has 30 seconds warm-up, 60 seconds scored and an 8-second telemetry tail.",
+    "1920\u00d71080 is the visible, even-padded encoder input. This session records no internal coded SPS dimensions.",
+    "Payload throughput is selected host frame-record bytes over matching whole stats windows. SSH, TCP, auth-record fields and separate controls are outside this counter.",
+    "Source-exact fraction concerns the thresholded browser glyph ROI mask. It does not measure full RGB or YUV plane equality.",
+    "Viewer times stop at X11 drawable observations. The single serial diagnostic does not estimate physical latency, a device-wide bandwidth budget or comparative causality."
+  ],
+  "qualification": "qualified-diagnostic",
+  "raw_archive": {
+    "bytes": 1161762,
+    "file": "firefox-x11-hevc444-lossless-session-raw.zip",
+    "member_sha256": {
+      "README.txt": "4720b1d42ee4ccc533c86874f862c9f5aab6895b8d749887f19d0f5dd94ddc91",
+      "align.py": "fe94106bf6b328976443ae3a38e6935fefc835a7c76a0d1638eb3c76f480f10d",
+      "build-proof.json": "ae8fd6b583704aef5a92ca69c8f800b10910248ff7d27c3489977afccf29b1e5",
+      "expected.json": "dd190754b8942a3a59c468fe8c606549c91de653d0f14bb2ac2477712b941d93",
+      "hevc_evidence.py": "eafc1a3883cbdf9ad4dad09073bbe11031c72285d57fe2efa64613c4eb5c1f10",
+      "manifest.json": "acc7bbcfda68989a77648deaaa1d44addce4502b4ec4e9702ed39cae2283a1db",
+      "raw/geometry-guard.json": "7d79b544a9ff8bb4cfc356ac4f3a0f20f436dcb585024545032c2173bad16a98",
+      "raw/host-clocked-telemetry.jsonl": "e737e8715c313d0f32e23fd066a6ad7bf6d5efd9d4e7c3a6915e73d39b13781a",
+      "raw/host.log": "6dc88be706b2c09bd989fec41e6610140d029d95947391fac218df2cffbbe9eb",
+      "raw/identity.json": "8e534564435dcd046c7859497d5a5219c297af0974586bb6a3066026100b1d7c",
+      "raw/motion-host.jsonl": "58503e691052eb720523ee0727afafff1868e18ab1cd012d1dc9c517f773a587",
+      "raw/motion-pixels.jsonl": "ee485bf074be134b8acf01af81964f103334b2c1ce7be1304c70245d97e66dcb",
+      "raw/motion-scope.json": "6aaf952b6410e3fe67eed9b4cfcadb69036f634cc17f9dd05d083003404ba2e5",
+      "raw/shutdown.json": "5cbd6b540106c1389c977ce2b34ec0f0e23cc0f45cad206625073c495726d493",
+      "raw/static-host.jsonl": "04ee24bdcb6fdc8080aba8b195b036d18f303f1c26a7f405c37dfa9b5e18cc80",
+      "raw/static-pixels.jsonl": "1e867494843520cd8208ba63bbdcefba3e5dfd691b3fbe1ca515788bee045427",
+      "raw/static-scope.json": "d0a784bc603fd7b85a29e65775347aa7d4f8cc3d31f173bc6dd67a9554831d0f",
+      "raw/viewer/geometry-guard.json": "01999fc9ac26697b3f2487805d163d261ce7e47a6814e300940ff2cd78c2e818",
+      "raw/viewer/motion-pixels.jsonl": "61ad96e089fabc0c33ea1c6cfabaedcd308ab25c989688b6c52ad291111f34c3",
+      "raw/viewer/motion-scope.json": "6777ff0ed983045093b24902ea8991030e5882aaa64d71942c274267295c715e",
+      "raw/viewer/motion-viewer.jsonl": "dc7c3b63557ed9dd449004fa8c0d22633dd135ed4cc2e182e782ae93297d348c",
+      "raw/viewer/static-pixels.jsonl": "5d9a25d83d7d90a656228e31079a9bf0fb8dc368533444c8b4e9b7692448efd7",
+      "raw/viewer/static-scope.json": "8b61653dff48ac3295f8779721cd5dbc67fe3414e5c9d69f46642a2642dbdcd9",
+      "raw/viewer/static-viewer.jsonl": "8ab1d09ebf37cffb89c96b2b7e235842fb12acf2539bcdeaf031ac8a06a19ba9",
+      "raw/viewer/viewer-clocked-telemetry.jsonl": "ee47253c5ee08615a53446632b7d9bc09b33ab9d97ca4831cabdc6bf6a366675",
+      "raw/viewer/viewer.log": "644246049d6ef4938a77215912942a5bcc7aeaf1c7765f88d1e93fa018269593",
+      "replay.py": "4d40044cfea19b18f1868c2d777e4e1087bb8ddba6d53f0cf71fcda7c3ec1350",
+      "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3"
+    },
+    "sha256": "e3a98a450b49fbf8d06d24a9b316b75042931eebf5d391bd37f46534e025f1ab"
+  },
+  "replayable_complete_lanes": [
+    [
+      "static",
+      "host"
+    ],
+    [
+      "motion",
+      "host"
+    ],
+    [
+      "static",
+      "viewer"
+    ],
+    [
+      "motion",
+      "viewer"
+    ]
+  ],
+  "result": {
+    "runtime_lossless": {
+      "encoder_open_dimensions": [
+        [
+          256,
+          256
+        ],
+        [
+          1920,
+          1080
+        ]
+      ],
+      "probe_open_256x256": 1,
+      "runtime_marker": "jwm-remote: private NVENC HEVC444 constqp=0 lossless opened at 1920x1080",
+      "runtime_open_at_visible_size": 1
+    },
+    "score": {
+      "authenticated_session_ids": [
+        "authenticated-session-1"
+      ],
+      "codec": "HEVC 4:4:4",
+      "diagnostic_motion_and_static_met": true,
+      "diagnostic_only": true,
+      "hardware_path": {
+        "errors": [],
+        "matching_source_geometry_epoch": [
+          1,
+          2
+        ],
+        "records_examined": {
+          "host": 40,
+          "viewer": 40
+        },
+        "retained_activity": {
+          "motion": {
+            "host_hevc_encodes": 1887,
+            "host_sent": 1887,
+            "viewer_drawn": 1886,
+            "viewer_hardware_decodes": 1886
+          },
+          "static": {
+            "host_hevc_encodes": 1595,
+            "host_sent": 1595,
+            "viewer_drawn": 1593,
+            "viewer_hardware_decodes": 1593
+          }
+        },
+        "verified": true
+      },
+      "original_capture_and_presentation_scope_complete": true,
+      "scope": "diagnostic X11 raster observations on separate machines over OpenSSH",
+      "source_and_requested_viewer_dimensions": [
+        1920,
+        1080
+      ],
+      "source_motion_fps": 58.916666666666664,
+      "source_qualified": true,
+      "static_unchanged": true,
+      "telemetry_complete": true,
+      "viewer_motion_fps": 28.866666666666667,
+      "viewer_motion_gate_met": true
+    },
+    "source_exact_fraction_of_valid_samples": 1.0,
+    "throughput": {
+      "motion": {
+        "mean_video_payload_mbps": 1.5016828148991208,
+        "selected_host_windows": 13,
+        "video_payload_bytes": 12213988,
+        "window_seconds": 65.068270763
+      },
+      "static": {
+        "mean_video_payload_mbps": 0.9056664809145488,
+        "selected_host_windows": 12,
+        "video_payload_bytes": 6804253,
+        "window_seconds": 60.103829773
+      }
+    },
+    "trace_alignment": {
+      "host_sent_hardware_frames": 5266,
+      "host_sent_idrs": 88,
+      "mask_changes": {},
+      "qualified_trace": true,
+      "raster_mask_field": "scroll_text",
+      "raster_samples": {
+        "copy_not_certifiably_stable": 281,
+        "sample_crosses_trace_boundary": 591,
+        "usable": 4528
+      },
+      "source_reference": {
+        "dominant_viewer_mask_matches_source": true,
+        "dominant_viewer_mask_samples": 5400,
+        "mask_transitions_from_source_exact": {},
+        "mask_transitions_to_source_exact": {},
+        "source_exact_observed_onsets": 0,
+        "source_exact_onset_interval_median_ms": null,
+        "source_exact_samples": 5400,
+        "valid_samples": 5400
+      }
+    }
+  },
+  "runtime_lossless": {
+    "encoder_open_dimensions": [
+      [
+        256,
+        256
+      ],
+      [
+        1920,
+        1080
+      ]
+    ],
+    "probe_open_256x256": 1,
+    "runtime_marker": "jwm-remote: private NVENC HEVC444 constqp=0 lossless opened at 1920x1080",
+    "runtime_open_at_visible_size": 1
+  },
+  "schema_version": 1,
+  "scope": "one serial Mint-to-Ubuntu fixed-codec Firefox diagnostic",
+  "scoped_raster": {
+    "host": {
+      "motion": {
+        "distinct_scroll_signatures": 2837,
+        "gap_ms": {
+          "max": 34.455605,
+          "p50": 19.759417,
+          "p95": 22.633931
+        },
+        "invalid_scroll_reads": 0,
+        "invalid_tile_reads": 0,
+        "scroll_changes_seen": 3532,
+        "unique_content_fps": 58.916666666666664,
+        "unique_tile_changes": 3535,
+        "zero_unique_bins": 0
+      },
+      "static": {
+        "distinct_scroll_signatures": 1,
+        "gap_ms": {
+          "max": 60000.0,
+          "p50": 60000.0,
+          "p95": 60000.0
+        },
+        "invalid_scroll_reads": 0,
+        "invalid_tile_reads": 0,
+        "scroll_changes_seen": 0,
+        "unique_content_fps": 0.0,
+        "unique_tile_changes": 0,
+        "zero_unique_bins": 60
+      }
+    },
+    "viewer": {
+      "motion": {
+        "distinct_scroll_signatures": 1541,
+        "gap_ms": {
+          "max": 285.102558,
+          "p50": 33.363035,
+          "p95": 44.518192
+        },
+        "invalid_scroll_reads": 0,
+        "invalid_tile_reads": 0,
+        "scroll_changes_seen": 1730,
+        "unique_content_fps": 28.866666666666667,
+        "unique_tile_changes": 1732,
+        "zero_unique_bins": 0
+      },
+      "static": {
+        "distinct_scroll_signatures": 1,
+        "gap_ms": {
+          "max": 60000.0,
+          "p50": 60000.0,
+          "p95": 60000.0
+        },
+        "invalid_scroll_reads": 0,
+        "invalid_tile_reads": 0,
+        "scroll_changes_seen": 0,
+        "unique_content_fps": 0.0,
+        "unique_tile_changes": 0,
+        "zero_unique_bins": 60
+      }
+    }
+  },
+  "terminal_classification": "completed_and_replayed",
+  "trial_exit": 0
+}

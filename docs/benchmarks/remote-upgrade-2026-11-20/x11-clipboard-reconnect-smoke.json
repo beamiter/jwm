@@ -1,0 +1,34 @@
+{
+  "date": "2026-11-21",
+  "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+  "binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+  "source": "two private Xvfb displays and a controlled loopback connection proxy",
+  "command": "python3 -B scripts/test-remote-recovery-window.py /tmp/jwm-p08-p09-release/jwm-remote --scenario clipboard",
+  "checks": [
+    "A file-enabled view-only session drew an acknowledged frame and recovered after the first proxy cut.",
+    "A real XTEST Pause chord confirmed text and images only on the recovered session.",
+    "The second cut returned a transport EOF while retries were still available. The listener stayed live and no third connection was admitted.",
+    "Both endpoints reported the same two authenticated sessions with viewer frame acknowledgements."
+  ],
+  "result": {
+    "accepted_connections": 2,
+    "confirmed_clipboard": "clipboard restriction confirmed: text + images, to host",
+    "scenario": "clipboard-recovery",
+    "session_ids": [
+      "88e9d6f833458c2efd78a6b06040d6ad",
+      "dc6ed0b40af21e6aa6be62aac6270c6d"
+    ],
+    "terminal": {
+      "category": "protocol_io",
+      "cleanup": "unknown",
+      "command": "connect",
+      "io_kind": "unexpected_eof",
+      "outcome": "error",
+      "peer_close_code": null,
+      "reconnect_certified": false,
+      "schema_version": 2,
+      "stage": "session",
+      "type": "jwm_remote_command_result"
+    }
+  }
+}

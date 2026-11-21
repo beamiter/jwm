@@ -8,6 +8,7 @@ use xkbcommon::xkb;
 
 const MAX_KEYMAP: usize = 1024 * 1024;
 const MAX_EVENTS: usize = 32;
+pub(super) const FOCUS_LEFT: &str = "Wayland keyboard focus left";
 pub(super) struct KeyboardFence(pub u64);
 #[derive(Default)]
 pub(super) struct Keyboard {
@@ -32,6 +33,15 @@ pub(super) struct Keyboard {
     pub(super) fence_done: u64,
 }
 impl Keyboard {
+    pub(super) fn reset_for_new_role(&mut self) {
+        *self = Self {
+            seats: std::mem::take(&mut self.seats),
+            ambiguous: self.ambiguous,
+            fence: self.fence,
+            fence_done: self.fence_done,
+            ..Self::default()
+        };
+    }
     pub(super) fn revoke(&mut self, reason: &'static str) {
         self.revoked.get_or_insert(reason);
         self.events.clear();
@@ -60,8 +70,14 @@ impl Keyboard {
         }
         Ok(())
     }
-    pub(super) fn held_keys(&self) -> bool {
-        !self.held.is_empty()
+    pub(super) fn permits_pointer(&self, gestures: bool) -> bool {
+        self.held.is_empty()
+            || (gestures
+                && self
+                    .held
+                    .iter()
+                    .copied()
+                    .all(crate::remote_keyboard_protocol::gesture_modifier_allowed))
     }
     pub(super) fn pending_keys(&self) -> bool {
         !self.events.is_empty() || !self.held.is_empty()
@@ -179,7 +195,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
         qh: &QueueHandle<Self>,
     ) {
         let keyboard = &mut state.keyboard;
-        if keyboard.revoked.is_some() {
+        if keyboard.revoked.is_some() || keyboard.seat.as_ref() != Some(seat) {
             return;
         }
         match event {
@@ -210,15 +226,21 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
     fn event(
         state: &mut Self,
-        _: &wl_keyboard::WlKeyboard,
+        device: &wl_keyboard::WlKeyboard,
         event: wl_keyboard::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if state.keyboard.device.as_ref() != Some(device) {
+            return;
+        }
         if state.control_mode
             && matches!(&event, wl_keyboard::Event::Key { .. })
             && state.pointer.control_busy()
+            && !(state.pointer.gestures
+                && matches!(&event, wl_keyboard::Event::Key { key, .. }
+                if crate::remote_keyboard_protocol::gesture_modifier_allowed(*key)))
         {
             state
                 .keyboard
@@ -284,7 +306,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                         keyboard.map_state = Some(xkb::State::new(&map));
                     }
                 } else {
-                    keyboard.revoke("Wayland keyboard focus left");
+                    keyboard.revoke(FOCUS_LEFT);
                 }
             }
             wl_keyboard::Event::Modifiers {

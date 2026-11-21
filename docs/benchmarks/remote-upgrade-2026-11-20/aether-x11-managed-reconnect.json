@@ -1,0 +1,74 @@
+{
+  "status": "passed",
+  "aether_sha256": "44ba53a3a4c992e3ab8979491e5ef0ac76348e24eb2363f108287c113742f834",
+  "jwm_remote_sha256": "7290dbdc1fe406d97ef4216ea00a296beec9b8e1eaf1d0aacd8ee82abfcf403c",
+  "recovery": {
+    "same_embedded_child_and_parent": true,
+    "authenticated_sessions": 2,
+    "old_and_new_host_drawn_acks": [
+      2,
+      2
+    ],
+    "waiting_status_visible_in_native_app": true,
+    "waiting_cleared_session_metrics_and_input": true,
+    "explicit_disconnect_exit": 0
+  },
+  "parent_close": {
+    "reconnect_authentication_socket_closed": true,
+    "no_further_attempt": true,
+    "native_app_exit": 0,
+    "managed_helper_exit": 0,
+    "software_observed_cancellation_ms": 85.91487699595746
+  },
+  "host_exit": 0,
+  "owned_xvfb_exits": [
+    0,
+    0
+  ],
+  "scope": "Native Aether WebKitGTK and XEmbed on owned Xvfb displays with authenticated loopback TCP. One real recovery and one application-close cancellation while the next greeting was withheld. Timing measures the software event to observed proxy socket closure.",
+  "native_controller_exit": 0,
+  "typed_evidence": [
+    {
+      "viewed_session_scopes": 2,
+      "host_drawn_acks": [
+        2,
+        2
+      ],
+      "retry_state_had_no_catalog_metrics_or_input": true,
+      "managed_helper_exit": 0
+    },
+    {
+      "viewed_session_scopes": 1,
+      "host_drawn_acks": [
+        1
+      ],
+      "retry_state_had_no_catalog_metrics_or_input": true,
+      "managed_helper_exit": 0
+    }
+  ],
+  "source_sha256": {
+    "smoke.py": "6f4ef301e944d7e9104e5e20570fc11fc345613852e2ee6b9b803e59d952715e",
+    "bin/jwm-remote": "4693d2588fde3a38204af59036c80e60657fd4ed39a11f622cc9254a100d7c50",
+    "test-remote-recovery-window.py": "be7eac1dd4f9644477fd68507385789af2642bdc15f2e26f9c88a1a561c8c4e0",
+    "test-remote-viewer-e2e.py": "1359c0f7ff3cbc19c1d793f264283af595caec0f84d9ec6fc048f2aacc1fbbad",
+    "remote-fault-proxy.py": "c207d20c09ae03af71a6c3be1562319179cac882c168a3afcbf91a87c59a75b9",
+    "src-tauri/src/remote_desktop.rs": "673c6984470c1d123bda1c67e0e3e56111c5cf52a3d57a4e3869792de9222440",
+    "src-tauri/src/ipc_tests.rs": "93d35e2125222f5726584abc19fafec676d898e3e8810c88b2f4d9f9a32bf72d",
+    "src-tauri/vendor/jwm-remote/client.rs": "65012797e5154d98975c4de87fab8efb9da6bbf718442a8a3356bf0c3b6c4aba",
+    "web/index.html": "3b750162baf3986963baae3dc87d9c42351d80e50c3ac26a9ec1649b2b912046",
+    "web/remote-desktop.js": "2249b4d64618662fb5a1b2ffc8c5e7793427ce963cc66a54e0d47c66c34302ca"
+  },
+  "raw_archive_sha256": "e8506ede8428e3bc7b167c747d6eaebc4ffcc0826367ae3ed0ff33be86806865",
+  "members_sha256": {
+    "helper-recovery.jsonl": "f6ae6780d900c6d3fa4b223d0d4b2bff5def2fab60897f5d9482c2514bf2a018",
+    "recovered.png": "6a65ca8451e2b868fa57757276d1b262672d123d944067bb5ee2e7b4540f0b2e",
+    "stalled-authentication.png": "2a1f39d01fd14e6e9300da99e0593c286d69d2a3af917dc3bf1c3237df39e53d",
+    "host-draws.json": "a4cde88f2fa1651bfe8b2d052537d0acf861b91ce8bf9ad918a51614f4f1f00a",
+    "fixture/publish.py": "66d9124013a9ff57490b9ec2e31e6273254d3b62e17a244105874986fcb13f95",
+    "fixture/smoke.py": "6f4ef301e944d7e9104e5e20570fc11fc345613852e2ee6b9b803e59d952715e",
+    "fixture/bin/jwm-remote": "4693d2588fde3a38204af59036c80e60657fd4ed39a11f622cc9254a100d7c50",
+    "fixture/test-remote-recovery-window.py": "be7eac1dd4f9644477fd68507385789af2642bdc15f2e26f9c88a1a561c8c4e0",
+    "fixture/test-remote-viewer-e2e.py": "1359c0f7ff3cbc19c1d793f264283af595caec0f84d9ec6fc048f2aacc1fbbad",
+    "fixture/remote-fault-proxy.py": "c207d20c09ae03af71a6c3be1562319179cac882c168a3afcbf91a87c59a75b9"
+  }
+}

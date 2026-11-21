@@ -1,0 +1,387 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "dimensions": [
+      3840,
+      2160
+    ],
+    "route": "Ubuntu private Xvfb host, SSH forwarding over the tested Wi-Fi link, Mint private Xvfb viewer.",
+    "requested_mode": {
+      "arm": "fixed",
+      "burn_in_seconds": 60,
+      "measure_seconds": 900,
+      "sample_interval_seconds": 5,
+      "requested_encoder_fps": 30,
+      "configured_proxy_bytes_per_second": 0,
+      "socket_configuration": {},
+      "codec": "H.264 NVENC"
+    },
+    "measurement_scope": "Linux endpoint process RSS, FDs and threads, excluding private display, painter, SSH and GPU allocations. Drawn and ACK counts include repeated content. The two monotonic clocks summarize their own windows.",
+    "scope_of_qualification": "Completion, identity, size, route, measurements and shutdown. Frame uniqueness and long-term leak behavior are outside this trial."
+  },
+  "terminal": {
+    "label": "soak-fixed-4k-20261121",
+    "exit_status": 0
+  },
+  "pins": {
+    "mint_viewer_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+    "ubuntu_host_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+    "ubuntu_painter_sha256": "ac9769c3e745244b1395e18ba4124e63d149bf87fc1e52e56df4a765b890cf40",
+    "fixture_source_sha256": {
+      "source.py": "f7a762352bd1548e1ddd4405b425bfa428f93ae44fc214eb066fa1c456ab63d9",
+      "resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2",
+      "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "p09-workload.c": "771a888f3e74946ed51dd02a34e3dd04c18e0336b60a714492dc25c9efec163d"
+    },
+    "scope": "Pretrial SHA-256 manifests and the fixture source bytes; resource sampling checks the live process executable device and inode."
+  },
+  "assessment": {
+    "status": "complete",
+    "qualification": true,
+    "endpoint_close_diagnostics_observed": true,
+    "controller_confirmed_clean_shutdown": true,
+    "matching_authenticated_session": true,
+    "replayed_roles": {
+      "host": {
+        "resource": {
+          "identity": {
+            "pid": 524152,
+            "start_ticks": 6812939,
+            "exe_device": 66306,
+            "exe_inode": 13773569
+          },
+          "anchor_ns": 65230969697345,
+          "measurement_start_ns": 65290969697345,
+          "measurement_end_ns": 66190969697345,
+          "measurement_seconds": 900.0,
+          "resource_samples": 180,
+          "burn_in_samples": 12,
+          "missed_sample_slots": 0,
+          "max_gap_between_samples_or_boundary_seconds": 5.000447086,
+          "resources": {
+            "rss_kib": {
+              "min": 447196,
+              "median": 479526.0,
+              "peak": 511968,
+              "first_minute_median": 479464.0,
+              "last_minute_median": 479566.0,
+              "median_delta": 102.0
+            },
+            "threads": {
+              "min": 10,
+              "median": 10.0,
+              "peak": 10,
+              "first_minute_median": 10.0,
+              "last_minute_median": 10.0,
+              "median_delta": 0.0
+            },
+            "fds": {
+              "min": 45,
+              "median": 45.0,
+              "peak": 45,
+              "first_minute_median": 45.0,
+              "last_minute_median": 45.0,
+              "median_delta": 0.0
+            }
+          }
+        },
+        "video": {
+          "session_id": "e94b0a0e1dfd4b1f7b7178de7ff86aea",
+          "completed_telemetry_windows": 177,
+          "covered_telemetry_seconds": 896.989200731,
+          "head_coverage_gap_seconds": 0.654787578,
+          "tail_coverage_gap_seconds": 2.356068418,
+          "h264_frames": 7188,
+          "drawn_acks": 7190,
+          "zero_sent_windows": 0,
+          "outstanding_credits_at_window_end": {
+            "0": 75,
+            "1": 80,
+            "2": 22
+          },
+          "peak_reported_outstanding_credits": 2,
+          "peak_sampled_end_outstanding_credits": 2,
+          "max_window_credit_wait_p99_ms": 465.451,
+          "bytes": 1284149934
+        }
+      },
+      "viewer": {
+        "resource": {
+          "identity": {
+            "pid": 1034963,
+            "start_ticks": 6514006,
+            "exe_device": 2050,
+            "exe_inode": 8952529
+          },
+          "anchor_ns": 65148720749024,
+          "measurement_start_ns": 65208720749024,
+          "measurement_end_ns": 66108720749024,
+          "measurement_seconds": 900.0,
+          "resource_samples": 180,
+          "burn_in_samples": 12,
+          "missed_sample_slots": 0,
+          "max_gap_between_samples_or_boundary_seconds": 5.000659981,
+          "resources": {
+            "rss_kib": {
+              "min": 293052,
+              "median": 319348.0,
+              "peak": 319888,
+              "first_minute_median": 295246.0,
+              "last_minute_median": 319448.0,
+              "median_delta": 24202.0
+            },
+            "threads": {
+              "min": 6,
+              "median": 6.0,
+              "peak": 6,
+              "first_minute_median": 6.0,
+              "last_minute_median": 6.0,
+              "median_delta": 0.0
+            },
+            "fds": {
+              "min": 31,
+              "median": 31.0,
+              "peak": 31,
+              "first_minute_median": 31.0,
+              "last_minute_median": 31.0,
+              "median_delta": 0.0
+            }
+          }
+        },
+        "video": {
+          "session_id": "e94b0a0e1dfd4b1f7b7178de7ff86aea",
+          "completed_telemetry_windows": 179,
+          "covered_telemetry_seconds": 895.353104085,
+          "head_coverage_gap_seconds": 0.016117473,
+          "tail_coverage_gap_seconds": 4.63056009,
+          "received": 7174,
+          "drawn": 7174,
+          "acked": 7174,
+          "zero_drawn_windows": 0,
+          "max_decode_queue_records": 0
+        }
+      }
+    },
+    "replayed_source": {
+      "start": {
+        "type": "p09_start",
+        "role": "source",
+        "clock": "monotonic",
+        "monotonic_ns": 65221557197926,
+        "run_id": 1,
+        "width": 3840,
+        "height": 2160,
+        "fps": 60,
+        "seconds": 1025,
+        "seed": 7,
+        "window": "0x200001"
+      },
+      "end": {
+        "type": "p09_end",
+        "role": "source",
+        "monotonic_ns": 66191271049651,
+        "run_id": 1,
+        "submitted": 58168,
+        "deadline_skips": 15,
+        "first_submit_ns": 65221600829480,
+        "last_submit_ns": 66191263220572,
+        "max_render_sync_ns": 67277953,
+        "interrupted": true
+      },
+      "painter_span_seconds": 969.662391092,
+      "submitted_per_second": 59.9868578325435
+    },
+    "controller_result": {
+      "schema_version": 1,
+      "label": "soak-fixed-4k-20261121",
+      "role_results": {
+        "host": {
+          "identity": {
+            "pid": 524152,
+            "start_ticks": 6812939,
+            "exe_device": 66306,
+            "exe_inode": 13773569
+          },
+          "anchor_ns": 65230969697345,
+          "measurement_start_ns": 65290969697345,
+          "measurement_end_ns": 66190969697345,
+          "measurement_seconds": 900.0,
+          "resource_samples": 180,
+          "burn_in_samples": 12,
+          "missed_sample_slots": 0,
+          "max_gap_between_samples_or_boundary_seconds": 5.000447086,
+          "resources": {
+            "rss_kib": {
+              "min": 447196,
+              "median": 479526.0,
+              "peak": 511968,
+              "first_minute_median": 479464.0,
+              "last_minute_median": 479566.0,
+              "median_delta": 102.0
+            },
+            "threads": {
+              "min": 10,
+              "median": 10.0,
+              "peak": 10,
+              "first_minute_median": 10.0,
+              "last_minute_median": 10.0,
+              "median_delta": 0.0
+            },
+            "fds": {
+              "min": 45,
+              "median": 45.0,
+              "peak": 45,
+              "first_minute_median": 45.0,
+              "last_minute_median": 45.0,
+              "median_delta": 0.0
+            }
+          },
+          "video": {
+            "session_id": "e94b0a0e1dfd4b1f7b7178de7ff86aea",
+            "completed_telemetry_windows": 177,
+            "covered_telemetry_seconds": 896.989200731,
+            "head_coverage_gap_seconds": 0.654787578,
+            "tail_coverage_gap_seconds": 2.356068418,
+            "h264_frames": 7188,
+            "drawn_acks": 7190,
+            "zero_sent_windows": 0,
+            "outstanding_credits_at_window_end": {
+              "0": 75,
+              "1": 80,
+              "2": 22
+            },
+            "peak_reported_outstanding_credits": 2,
+            "peak_sampled_end_outstanding_credits": 2,
+            "max_window_credit_wait_p99_ms": 465.451,
+            "bytes": 1284149934
+          }
+        },
+        "viewer": {
+          "identity": {
+            "pid": 1034963,
+            "start_ticks": 6514006,
+            "exe_device": 2050,
+            "exe_inode": 8952529
+          },
+          "anchor_ns": 65148720749024,
+          "measurement_start_ns": 65208720749024,
+          "measurement_end_ns": 66108720749024,
+          "measurement_seconds": 900.0,
+          "resource_samples": 180,
+          "burn_in_samples": 12,
+          "missed_sample_slots": 0,
+          "max_gap_between_samples_or_boundary_seconds": 5.000659981,
+          "resources": {
+            "rss_kib": {
+              "min": 293052,
+              "median": 319348.0,
+              "peak": 319888,
+              "first_minute_median": 295246.0,
+              "last_minute_median": 319448.0,
+              "median_delta": 24202.0
+            },
+            "threads": {
+              "min": 6,
+              "median": 6.0,
+              "peak": 6,
+              "first_minute_median": 6.0,
+              "last_minute_median": 6.0,
+              "median_delta": 0.0
+            },
+            "fds": {
+              "min": 31,
+              "median": 31.0,
+              "peak": 31,
+              "first_minute_median": 31.0,
+              "last_minute_median": 31.0,
+              "median_delta": 0.0
+            }
+          },
+          "video": {
+            "session_id": "e94b0a0e1dfd4b1f7b7178de7ff86aea",
+            "completed_telemetry_windows": 179,
+            "covered_telemetry_seconds": 895.353104085,
+            "head_coverage_gap_seconds": 0.016117473,
+            "tail_coverage_gap_seconds": 4.63056009,
+            "received": 7174,
+            "drawn": 7174,
+            "acked": 7174,
+            "zero_drawn_windows": 0,
+            "max_decode_queue_records": 0
+          }
+        }
+      },
+      "clean_shutdown": true,
+      "codec": "H.264 NVENC",
+      "workload": "isolated X11 motion fixture",
+      "dimensions": [
+        3840,
+        2160
+      ],
+      "arm": "fixed",
+      "requested_encoder_fps": 30,
+      "burn_in_seconds": 60,
+      "measure_seconds": 900,
+      "sample_interval_seconds": 5,
+      "configured_proxy_bytes_per_second": 0,
+      "socket_configuration": {},
+      "source": {
+        "start": {
+          "type": "p09_start",
+          "role": "source",
+          "clock": "monotonic",
+          "monotonic_ns": 65221557197926,
+          "run_id": 1,
+          "width": 3840,
+          "height": 2160,
+          "fps": 60,
+          "seconds": 1025,
+          "seed": 7,
+          "window": "0x200001"
+        },
+        "end": {
+          "type": "p09_end",
+          "role": "source",
+          "monotonic_ns": 66191271049651,
+          "run_id": 1,
+          "submitted": 58168,
+          "deadline_skips": 15,
+          "first_submit_ns": 65221600829480,
+          "last_submit_ns": 66191263220572,
+          "max_render_sync_ns": 67277953,
+          "interrupted": true
+        },
+        "painter_span_seconds": 969.662391092,
+        "submitted_per_second": 59.9868578325435
+      },
+      "scope": "RSS, threads and FDs of the JWM endpoint processes. Xvfb, proxy, SSH and painter excluded. Process RSS omits GPU allocations; head/tail trend is descriptive and coverage is finite."
+    },
+    "missing_traces": [],
+    "findings": []
+  },
+  "archive": {
+    "path": "x11-nvenc-resource-soak-4k-raw.zip",
+    "sha256": "c2180e1cf67297fc4657b7d93151a91334c899d6c0edcb74925a89924ddbbff8",
+    "entries": {
+      "pins/4k-mint-pins.sha256": "b98ed66c497fbe9e7f6cae934c0aaeb83130cf426d174fe080561b9aefc56619",
+      "pins/4k-ubuntu-pins.sha256": "49bee40f380969d36424b262c927585c5481674de6bb1c92282d46f6108ae43a",
+      "pins/4k-source-pins.sha256": "cf549395815424981d27d38bb6c3b4fa9d41d9ee15ae8da3cfb5f09528a65b3e",
+      "fixture/soak.py": "98b623297b3f77362bc900c77fa5e90b99fdff4713c9406b7c5f94be53f93e37",
+      "fixture/source.py": "f7a762352bd1548e1ddd4405b425bfa428f93ae44fc214eb066fa1c456ab63d9",
+      "fixture/resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/p09-workload.c": "771a888f3e74946ed51dd02a34e3dd04c18e0336b60a714492dc25c9efec163d",
+      "fixture/archive_4k.py": "5a271aa297d86a7fcc5e6129f20e02290ed8c6986ef3568997ed273e76f8b39b",
+      "trace/host-resources.jsonl": "b4e6d43897a85287a51efa4bf7e0a1875a1a4d71a0a011eac7f417d3eac241ed",
+      "trace/viewer-resources.jsonl": "bb5063a2b40cada5bd5fb1ac9543369201e30ab7bb0735fb4da0459f5e72ca03",
+      "trace/host-telemetry.jsonl": "3123fba097c99ea13bd4f329dba3ad053aff142c27aff2123038c188b2eaea18",
+      "trace/viewer-telemetry.jsonl": "0d2c036a4c8d43eae7a3f122c075af59b413b3a0f7fde97b8fc130422e7202d5",
+      "trace/retained-host-telemetry.jsonl": "68443150ed3274bf06488c426aa91165055c7dd6c3023811bd654b05cffa2cde",
+      "trace/retained-viewer-telemetry.jsonl": "e3004634dca9875f115cfba12d63209d8a231114cd54d430db539b721bbd5332",
+      "trace/paint.jsonl": "3bf1d320031c9d7918f35d655e488c738a5db33062ab9b23920e93e6f099110d",
+      "trace/result.json": "8b2a2748e5d7b35a1114d67c520e37ce594219f8f6f6dd87de343bde22879fd8",
+      "trace/terminal-diagnostics.json": "e0b85f393ac21de96e7b7e7ede85e502f959af89a19900cf98783e580e14c99a",
+      "trace/terminal.json": "6a5ec423086efd7d9695c3c16d656ebb63caabed11877bcb54eaf323d5adf76a"
+    }
+  }
+}

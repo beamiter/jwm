@@ -1,0 +1,32 @@
+{
+  "application": "Blender 4.5.16 LTS",
+  "build_hash": "3f6797307da5",
+  "official_archive_sha256": "23432b064977908beb1ab4b7f32f024e7331105c875c187dce002aff84b10c11",
+  "machine": "Development machine, Linux Mint 22.3",
+  "environment": "Private native Wayland displays and Blender profile, real CLI processes, authenticated loopback TCP and software GL to both application and viewer",
+  "source_logical_window_size": [640, 480],
+  "viewer_size": [640, 480],
+  "application_settings": {
+    "three_button_mouse_emulation": true,
+    "continuous_grab": false
+  },
+  "assertions": {
+    "runs_passed": 3,
+    "orbit_while_button_held_radians": [0.659979, 0.659979, 0.659979],
+    "orbit_changed_viewer_pixels": [9310, 9310, 10948],
+    "view_distance_before_zoom": 17.986563,
+    "view_distance_after_zoom": 14.988802,
+    "open_shading_menu_changed_viewer_pixels": [5750, 6726, 6899],
+    "selected_shading": "WIREFRAME",
+    "host_and_viewer_exited_successfully": true
+  },
+  "native_regression": {
+    "development_combined_cases_passed": 33,
+    "ubuntu_combined_cases_passed": 33,
+    "whole_window_confinement_deferred_during_held_gesture": true,
+    "host_pointer_location_and_focus_preserved": true,
+    "pointer_lock_regional_confinement_and_confinement_outside_drag_revoked": true,
+    "continuous_grab_requested_lock_and_returned_to_viewing_before_confinement_change": true
+  },
+  "physical_input_to_display_latency_measured": false
+}

@@ -1,0 +1,93 @@
+{
+  "test": "native_cli_wayland_mixed_scale_outputs_keep_capture_and_control_window_scoped",
+  "date": "2026-11-21",
+  "launcher": "scripts/test-remote-wayland-cli.sh",
+  "environment": "Two isolated JWM/Smithay compositors, software GLES, real host and viewer executables, authenticated TCP",
+  "outputs_per_compositor": [
+    {
+      "name": "standard",
+      "logical_origin": [
+        0,
+        0
+      ],
+      "mode_pixels": [
+        800,
+        600
+      ],
+      "scale": 1
+    },
+    {
+      "name": "hidpi",
+      "logical_origin": [
+        800,
+        -120
+      ],
+      "mode_pixels": [
+        1920,
+        1440
+      ],
+      "scale": 2
+    }
+  ],
+  "viewer": {
+    "logical_size": [
+      400,
+      300
+    ],
+    "hidpi_shm_size": [
+      800,
+      600
+    ],
+    "explicit_preference_transition": [
+      2,
+      1,
+      2
+    ],
+    "same_role_on_output_move": true
+  },
+  "source": {
+    "hidpi_logical_size": [
+      240,
+      180
+    ],
+    "hidpi_shm_size": [
+      480,
+      360
+    ],
+    "delivered_click_logical": [
+      96,
+      72
+    ],
+    "physical_scene_hit_is_unshared_occluder": true,
+    "unshared_occluder_received_input": false,
+    "unshared_occluder_visible_in_viewer": false
+  },
+  "same_authenticated_connection": true,
+  "held_button_released_when_viewer_scale_changes": true,
+  "held_shift_released_on_source_switch": true,
+  "fresh_grant_required_for_second_window": true,
+  "host_and_viewer_exited_successfully": true,
+  "machines_passed": [
+    "development",
+    "ubuntu@192.168.0.78"
+  ],
+  "physical_drm_kms_exercised": false,
+  "build": {
+    "workspace_base_commit": "9b3974b31566",
+    "workspace_changes_included": true,
+    "features": [
+      "remote-wayland",
+      "backend-wayland-udev"
+    ],
+    "jwm_remote_sha256": {
+      "development": "400a725a00c96a724f01738a9f70235e7704f211c7f16c0a248e2d068b8f2844",
+      "ubuntu@192.168.0.78": "8eb9affe9627b9801e03f2d88a0c298d432e6fcf5a47d493aa6e06e37b9b39f8"
+    }
+  },
+  "regression": {
+    "development_standalone_cli_passed": 11,
+    "ubuntu_standalone_cli_passed": 11,
+    "local_viewer_unit_checks_passed": 54,
+    "ubuntu_gedit_scale_2_menu_flow_passed": true
+  }
+}

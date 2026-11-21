@@ -56,6 +56,7 @@ fn options(popups: bool, follow: bool, lossless: bool) -> host::HostOptions {
         allow_wayland_horizontal_scroll: false,
         allow_wayland_popup_pointer: false,
         allow_wayland_control: false,
+        allow_wayland_gestures: false,
         allow_resumable_control: false,
         allow_wayland_text: false,
         allow_static_lossless: lossless,
@@ -305,6 +306,7 @@ impl Harness {
         let failure_observer = Arc::clone(&client_failure);
         let client = thread::spawn(move || {
             let opts = ClientOptions {
+                stats_json: false,
                 control_duration: Default::default(),
                 viewer_backend: ViewerBackend::Wayland,
                 viewer_wayland_display: None,
@@ -314,6 +316,7 @@ impl Harness {
                 wayland_horizontal_scroll: false,
                 wayland_popup_pointer: false,
                 wayland_control: false,
+                wayland_gestures: false,
                 resumable_control: false,
                 wayland_seamless_input: false,
                 wayland_text: None,
@@ -325,6 +328,7 @@ impl Harness {
                     height: VH as u16,
                 }),
                 window_position: None,
+                x11_parent_window: None,
                 frame_limits: Default::default(),
                 address: address.to_string(),
                 peer_label: "owned readonly popup family".into(),

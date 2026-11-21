@@ -1,0 +1,1613 @@
+{
+  "archive": {
+    "file": "vaapi-vpp-packed-rgb-4k-raw.zip",
+    "members_sha256": {
+      "README.md": "f13fa7f7261cd9dd390da781f3cbc80b475476e547ed6c94a65f814ee0d3cc8a",
+      "fixtures/bgr0/compare.py": "9caa0f8b11f4396d7405ce741d67781f1787eaa7ecd24e2dfaaf7199675cbf24",
+      "fixtures/bgr0/packet.sha256": "f7527e25cb7b6ac411d558ed062036a02f80144d60c53556dbf5bb6790ead21d",
+      "fixtures/bgr0/run.sh": "0a3becd1f64b17409d421328c6f28e0a82aa40424afe591a9a0bebac332b4327",
+      "fixtures/bgr0/smptehdbars.h264": "69702756f0f14d433626899cb869e3656a791a261e8546c2c2f347e6a2168c15",
+      "fixtures/bgr0/testsrc2.h264": "05f987caf29cdc4ecb07e09472628eb10ada85528c1cdf8908420604217be36e",
+      "fixtures/bgra/compare.py": "583722ef1c2c36ff4355b9cb9837ed14c3c2a8b449d07a11d11dee8f250cd03d",
+      "fixtures/bgra/packet.sha256": "f7527e25cb7b6ac411d558ed062036a02f80144d60c53556dbf5bb6790ead21d",
+      "fixtures/bgra/run.sh": "5a212a55717342dee64277b0e4ca6354545c17141e99b0b0e27564c5e10751ac",
+      "fixtures/bgra/smptehdbars.h264": "69702756f0f14d433626899cb869e3656a791a261e8546c2c2f347e6a2168c15",
+      "fixtures/bgra/testsrc2.h264": "05f987caf29cdc4ecb07e09472628eb10ada85528c1cdf8908420604217be36e",
+      "runs/bgr0/controller.exit": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+      "runs/bgr0/device.txt": "944750ec6fa17be306dcc2985f435ed964a88fa37de60ba47268e37944e58894",
+      "runs/bgr0/ffmpeg-tools.sha256": "2045d084d3a2cfdc24a1940d5312c3b64cd80c12ea7cff15f4e22384072e9c3b",
+      "runs/bgr0/ffmpeg-version.argv": "58d707f8a32a33f184fa02f7213f77eceb16b87b55e51fd080ab1ae8444a1362",
+      "runs/bgr0/ffmpeg-version.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgr0/ffmpeg-version.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/ffmpeg-version.stdout": "5b320c97f515e79171f10a2147d875ffb6b14bd2b25681047b73c46fe0a527ee",
+      "runs/bgr0/fixture.sha256": "4042f901b7f758c9f9e69b7d45037328ac8cca665d3abba58777afcd1f083f12",
+      "runs/bgr0/packet.sha256": "f7527e25cb7b6ac411d558ed062036a02f80144d60c53556dbf5bb6790ead21d",
+      "runs/bgr0/report.json": "2f3e514c62cbe75f7213418f3b5697d460fe38627522cead7578df434b86758a",
+      "runs/bgr0/smptehdbars-bgrx.argv": "01a7c412d3396522bd74ee9db4078e5169bcb9aa1a81fe53443c8b1b6ef06573",
+      "runs/bgr0/smptehdbars-bgrx.exit": "fc68f3b1c9b809ce39d3142d79d18a22df73914008f0378eb23a487f12c895de",
+      "runs/bgr0/smptehdbars-bgrx.stderr": "6273965a82da245d2d593639eca1071fb11aa47b5db6f539d964df889a024134",
+      "runs/bgr0/smptehdbars-bgrx.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/smptehdbars-reference.argv": "118753bff29d81b3c0dfaa3d92e01626933f747064245874e2944d75877ef1c0",
+      "runs/bgr0/smptehdbars-reference.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgr0/smptehdbars-reference.stderr": "e946ac769edc3bdbfba1b698a52cbb67ef267e7dae5c4e4ca4cc7866252a914f",
+      "runs/bgr0/smptehdbars-reference.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/smptehdbars-stream.argv": "4972a952199e4cdf388b2e682f93976df28ffd757a5a4360f1244e79f68df2c4",
+      "runs/bgr0/smptehdbars-stream.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgr0/smptehdbars-stream.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/smptehdbars-stream.stdout": "eed4befc0f411ffd3466e69b622a71369d4ba1b1c73e73b41478d95140667d9e",
+      "runs/bgr0/smptehdbars.bgr0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/smptehdbars.h264": "69702756f0f14d433626899cb869e3656a791a261e8546c2c2f347e6a2168c15",
+      "runs/bgr0/smptehdbars.nv12": "ca508930c2c1f0158b759e28fa2d82747b082fcc3fd5f61f9a6f437e979bf561",
+      "runs/bgr0/smptehdbars.rgb24": "2cf83d049c5577f2381ffdda24e3322eafafe182e448d1f09a56006132c131c5",
+      "runs/bgr0/testsrc2-bgrx.argv": "fadc74edef5603d51cfe6014cc0783a6fef43e8340cdc92ced41ce11bea5b087",
+      "runs/bgr0/testsrc2-bgrx.exit": "fc68f3b1c9b809ce39d3142d79d18a22df73914008f0378eb23a487f12c895de",
+      "runs/bgr0/testsrc2-bgrx.stderr": "5f42539f86886e3af56fd93fea1a4247486123c8e968a247c511f21d9e9de982",
+      "runs/bgr0/testsrc2-bgrx.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/testsrc2-reference.argv": "fe4beff3e7f55a2be63b96c00901beaba62d79893855d5ec50dd537efd5ba0f7",
+      "runs/bgr0/testsrc2-reference.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgr0/testsrc2-reference.stderr": "8768371f97b47b2d560768a238dced3da8ecc577460ad096190db504abf90616",
+      "runs/bgr0/testsrc2-reference.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/testsrc2-stream.argv": "bca8d027062fd9acaf4b0f539b49716ad73862b0786ef1c9c2729f6d39b53dc1",
+      "runs/bgr0/testsrc2-stream.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgr0/testsrc2-stream.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/testsrc2-stream.stdout": "d7891bb9e01fd6412872e2d2c806e57cb4071d77c4d56b7ee41b9357b83201ef",
+      "runs/bgr0/testsrc2.bgr0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/testsrc2.h264": "05f987caf29cdc4ecb07e09472628eb10ada85528c1cdf8908420604217be36e",
+      "runs/bgr0/testsrc2.nv12": "601b7bda6460a98aad7d4584e212477774e2c3e6fc1f4d215bb1710344bebd6a",
+      "runs/bgr0/testsrc2.rgb24": "b4354cef99f5aa22a125e2f819adfb45fe5816e7b7251096cd42f819b5f52300",
+      "runs/bgr0/vaapi-filter.argv": "3a92a680cea6567a75b91901d14f2dc7c96bea1b9a9cec317a816d4b6c5e40af",
+      "runs/bgr0/vaapi-filter.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgr0/vaapi-filter.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgr0/vaapi-filter.stdout": "d0550522cd11ec6d242b827f65b6dfec159268369b940455db00778aad6df8c1",
+      "runs/bgra/controller.exit": "1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2",
+      "runs/bgra/device.txt": "944750ec6fa17be306dcc2985f435ed964a88fa37de60ba47268e37944e58894",
+      "runs/bgra/ffmpeg-tools.sha256": "2045d084d3a2cfdc24a1940d5312c3b64cd80c12ea7cff15f4e22384072e9c3b",
+      "runs/bgra/ffmpeg-version.argv": "58d707f8a32a33f184fa02f7213f77eceb16b87b55e51fd080ab1ae8444a1362",
+      "runs/bgra/ffmpeg-version.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgra/ffmpeg-version.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgra/ffmpeg-version.stdout": "5b320c97f515e79171f10a2147d875ffb6b14bd2b25681047b73c46fe0a527ee",
+      "runs/bgra/fixture.sha256": "67c7ed584e2307aec6d8819bfba2969ffb20686b3ca9577b64f4be2f27d85e90",
+      "runs/bgra/packet.sha256": "f7527e25cb7b6ac411d558ed062036a02f80144d60c53556dbf5bb6790ead21d",
+      "runs/bgra/report.json": "7e8e392dc395f491619768284cac086e0e2021d6ba3d08f5a70e68fc057d499a",
+      "runs/bgra/smptehdbars-bgra.argv": "7198118b451d5f03a974daa0d76dc8424e66e48174e1ae4651ae45dce4924bcc",
+      "runs/bgra/smptehdbars-bgra.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgra/smptehdbars-bgra.stderr": "31053390fc02d89e1d98b4ff5a5cf2075c0c82e1e43b5df26923f1d07dc61cef",
+      "runs/bgra/smptehdbars-bgra.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgra/smptehdbars-reference.argv": "118753bff29d81b3c0dfaa3d92e01626933f747064245874e2944d75877ef1c0",
+      "runs/bgra/smptehdbars-reference.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgra/smptehdbars-reference.stderr": "a4004c152e2d97ef43b78d3d57e4f41baf4b928d3667d669e49e094ff2e3a3ab",
+      "runs/bgra/smptehdbars-reference.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgra/smptehdbars-stream.argv": "4972a952199e4cdf388b2e682f93976df28ffd757a5a4360f1244e79f68df2c4",
+      "runs/bgra/smptehdbars-stream.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgra/smptehdbars-stream.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgra/smptehdbars-stream.stdout": "eed4befc0f411ffd3466e69b622a71369d4ba1b1c73e73b41478d95140667d9e",
+      "runs/bgra/smptehdbars.bgra": "de7715dccf7476476078914e39beca18ae008aa24cd0c6e341d2363446f76786",
+      "runs/bgra/smptehdbars.h264": "69702756f0f14d433626899cb869e3656a791a261e8546c2c2f347e6a2168c15",
+      "runs/bgra/smptehdbars.nv12": "ca508930c2c1f0158b759e28fa2d82747b082fcc3fd5f61f9a6f437e979bf561",
+      "runs/bgra/smptehdbars.rgb24": "2cf83d049c5577f2381ffdda24e3322eafafe182e448d1f09a56006132c131c5",
+      "runs/bgra/testsrc2-bgra.argv": "93ad7fc3d47369fc486957420e945edfaa5587e369a21b991fc9b4f0d33eda01",
+      "runs/bgra/testsrc2-bgra.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgra/testsrc2-bgra.stderr": "e0d236e3eac8b2a6a6ed1217482c7a7e03ba2f2993207bbcaff40e8986ea97dd",
+      "runs/bgra/testsrc2-bgra.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgra/testsrc2-reference.argv": "fe4beff3e7f55a2be63b96c00901beaba62d79893855d5ec50dd537efd5ba0f7",
+      "runs/bgra/testsrc2-reference.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgra/testsrc2-reference.stderr": "7117875eeeff3e792e029fee0f17a864af57b6873fb8276d9ef9dd1886ce57bc",
+      "runs/bgra/testsrc2-reference.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgra/testsrc2-stream.argv": "bca8d027062fd9acaf4b0f539b49716ad73862b0786ef1c9c2729f6d39b53dc1",
+      "runs/bgra/testsrc2-stream.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgra/testsrc2-stream.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgra/testsrc2-stream.stdout": "d7891bb9e01fd6412872e2d2c806e57cb4071d77c4d56b7ee41b9357b83201ef",
+      "runs/bgra/testsrc2.bgra": "6b78844660c0e1a10ca6b0765d7c044aa05a1b85600ac0d70712b21bd13c942a",
+      "runs/bgra/testsrc2.h264": "05f987caf29cdc4ecb07e09472628eb10ada85528c1cdf8908420604217be36e",
+      "runs/bgra/testsrc2.nv12": "601b7bda6460a98aad7d4584e212477774e2c3e6fc1f4d215bb1710344bebd6a",
+      "runs/bgra/testsrc2.rgb24": "b4354cef99f5aa22a125e2f819adfb45fe5816e7b7251096cd42f819b5f52300",
+      "runs/bgra/vaapi-filter.argv": "3a92a680cea6567a75b91901d14f2dc7c96bea1b9a9cec317a816d4b6c5e40af",
+      "runs/bgra/vaapi-filter.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "runs/bgra/vaapi-filter.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runs/bgra/vaapi-filter.stdout": "d0550522cd11ec6d242b827f65b6dfec159268369b940455db00778aad6df8c1",
+      "verify_pair.py": "ed6b4192e999c51ef51aef3c38ff3c363104d335b146f0eecdb3621a6240fb7a"
+    },
+    "sha256": "719556114876ba845a68c54f304de86284bf4d9b734a2ae551a3e158a94f9cab"
+  },
+  "followup_bgra": {
+    "controller_exit": 3,
+    "original_parser_case_statuses": [
+      "download_and_solid_colors_verified",
+      "verification_failure"
+    ],
+    "original_report_sha256": "7e8e392dc395f491619768284cac086e0e2021d6ba3d08f5a70e68fc057d499a",
+    "verified": {
+      "candidate_format": "bgra",
+      "cases": [
+        {
+          "candidate_active_packed_rgb": {
+            "alpha": {
+              "bytes": 8294400,
+              "fully_opaque": 8294400,
+              "fully_transparent": 0,
+              "histogram": {
+                "255": 8294400
+              },
+              "maximum": 255,
+              "minimum": 255,
+              "odd_top_left_crop_sha256": "0a79c8d27a7f451d37dc1e91eaef29f7b51594d8bc292e1edb658ca80b6e7b90",
+              "sha256": "598ddbfa658eaf70a2e0c50fa12f914c28a4496bbb150a21d6d77d73b0d8c55d"
+            },
+            "bytes": 33177600,
+            "format": "bgra",
+            "sha256": "6b78844660c0e1a10ca6b0765d7c044aa05a1b85600ac0d70712b21bd13c942a"
+          },
+          "candidate_file_bytes": 33177600,
+          "candidate_format": "bgra",
+          "commands": {
+            "bgra": {
+              "artifacts_sha256": {
+                "argv": "93ad7fc3d47369fc486957420e945edfaa5587e369a21b991fc9b4f0d33eda01",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "e0d236e3eac8b2a6a6ed1217482c7a7e03ba2f2993207bbcaff40e8986ea97dd",
+                "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              },
+              "exit_code": 0
+            },
+            "reference": {
+              "artifacts_sha256": {
+                "argv": "fe4beff3e7f55a2be63b96c00901beaba62d79893855d5ec50dd537efd5ba0f7",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "7117875eeeff3e792e029fee0f17a864af57b6873fb8276d9ef9dd1886ce57bc",
+                "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              },
+              "exit_code": 0
+            },
+            "stream": {
+              "artifacts_sha256": {
+                "argv": "bca8d027062fd9acaf4b0f539b49716ad73862b0786ef1c9c2729f6d39b53dc1",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "stdout": "d7891bb9e01fd6412872e2d2c806e57cb4071d77c4d56b7ee41b9357b83201ef"
+              },
+              "exit_code": 0
+            }
+          },
+          "decoded_observations": {
+            "bgra.bgra_download": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "gbr",
+              "color_trc": "unknown",
+              "fmt": "bgra",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "bgra.decode": {
+              "color_primaries": "unknown",
+              "color_range": "tv",
+              "color_space": "smpte170m",
+              "color_trc": "unknown",
+              "fmt": "vaapi",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "bgra.vpp": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "gbr",
+              "color_trc": "unknown",
+              "fmt": "vaapi",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.cpu_rgb": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "gbr",
+              "color_trc": "unknown",
+              "fmt": "rgb24",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.decode": {
+              "color_primaries": "unknown",
+              "color_range": "tv",
+              "color_space": "smpte170m",
+              "color_trc": "unknown",
+              "fmt": "vaapi",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.nv12_download": {
+              "color_primaries": "unknown",
+              "color_range": "tv",
+              "color_space": "smpte170m",
+              "color_trc": "unknown",
+              "fmt": "nv12",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            }
+          },
+          "explicit_candidate_format_rejection": [],
+          "interior_solid_patches": {
+            "guard_size": [
+              24,
+              24
+            ],
+            "per_channel_rounding_budget": 4,
+            "sample_size": [
+              8,
+              8
+            ],
+            "samples": [
+              {
+                "center": [
+                  132,
+                  12
+                ],
+                "max_channel_delta": 2,
+                "reference_rgb": [
+                  252,
+                  0,
+                  0
+                ],
+                "vpp_rgb_max": [
+                  254,
+                  0,
+                  0
+                ],
+                "vpp_rgb_mean": [
+                  254.0,
+                  0.0,
+                  0.0
+                ],
+                "vpp_rgb_min": [
+                  254,
+                  0,
+                  0
+                ]
+              },
+              {
+                "center": [
+                  652,
+                  12
+                ],
+                "max_channel_delta": 1,
+                "reference_rgb": [
+                  0,
+                  254,
+                  0
+                ],
+                "vpp_rgb_max": [
+                  0,
+                  255,
+                  1
+                ],
+                "vpp_rgb_mean": [
+                  0.0,
+                  255.0,
+                  1.0
+                ],
+                "vpp_rgb_min": [
+                  0,
+                  255,
+                  1
+                ]
+              },
+              {
+                "center": [
+                  1292,
+                  12
+                ],
+                "max_channel_delta": 2,
+                "reference_rgb": [
+                  253,
+                  254,
+                  0
+                ],
+                "vpp_rgb_max": [
+                  255,
+                  255,
+                  0
+                ],
+                "vpp_rgb_mean": [
+                  255.0,
+                  255.0,
+                  0.0
+                ],
+                "vpp_rgb_min": [
+                  255,
+                  255,
+                  0
+                ]
+              },
+              {
+                "center": [
+                  1932,
+                  12
+                ],
+                "max_channel_delta": 2,
+                "reference_rgb": [
+                  0,
+                  0,
+                  253
+                ],
+                "vpp_rgb_max": [
+                  0,
+                  0,
+                  255
+                ],
+                "vpp_rgb_mean": [
+                  0.0,
+                  0.0,
+                  255.0
+                ],
+                "vpp_rgb_min": [
+                  0,
+                  0,
+                  255
+                ]
+              },
+              {
+                "center": [
+                  2572,
+                  12
+                ],
+                "max_channel_delta": 2,
+                "reference_rgb": [
+                  253,
+                  0,
+                  252
+                ],
+                "vpp_rgb_max": [
+                  255,
+                  0,
+                  254
+                ],
+                "vpp_rgb_mean": [
+                  255.0,
+                  0.0,
+                  254.0
+                ],
+                "vpp_rgb_min": [
+                  255,
+                  0,
+                  254
+                ]
+              },
+              {
+                "center": [
+                  3212,
+                  12
+                ],
+                "max_channel_delta": 1,
+                "reference_rgb": [
+                  0,
+                  254,
+                  254
+                ],
+                "vpp_rgb_max": [
+                  1,
+                  255,
+                  255
+                ],
+                "vpp_rgb_mean": [
+                  1.0,
+                  255.0,
+                  255.0
+                ],
+                "vpp_rgb_min": [
+                  1,
+                  255,
+                  255
+                ]
+              }
+            ]
+          },
+          "packet_bytes": 425260,
+          "packet_sha256": "05f987caf29cdc4ecb07e09472628eb10ada85528c1cdf8908420604217be36e",
+          "pattern": "testsrc2",
+          "pixel_deltas": {
+            "full": {
+              "active_rgb_bytes_per_path": 24883200,
+              "equal_channels": 9419822,
+              "maximum_absolute_channel_delta": 239,
+              "mean_absolute_channel_delta": 1.6497415525334362,
+              "p95_absolute_channel_delta": 2,
+              "p99_absolute_channel_delta": 27,
+              "reference_rgb_sha256": "b4354cef99f5aa22a125e2f819adfb45fe5816e7b7251096cd42f819b5f52300",
+              "vpp_rgb_sha256": "41d26601a76f806b9b914f2b8eaefb3913165993a3bbe73a347a3175b2178b05"
+            },
+            "odd_top_left_crop": {
+              "active_rgb_bytes_per_path": 24865203,
+              "equal_channels": 9415327,
+              "maximum_absolute_channel_delta": 239,
+              "mean_absolute_channel_delta": 1.6501934048155569,
+              "p95_absolute_channel_delta": 2,
+              "p99_absolute_channel_delta": 27,
+              "reference_rgb_sha256": "b507b13811a8ac6e2c726afe562c4437446249a85043a0fa860d335eb9625924",
+              "vpp_rgb_sha256": "b5cbad8b33c712169e9cfca2bece7fea6c7d015bf20bf0e03888a1d898907ef5"
+            },
+            "odd_top_left_crop_size": [
+              3839,
+              2159
+            ]
+          },
+          "reference_active_nv12": {
+            "matches_earlier_standalone_probe": true,
+            "sha256": "601b7bda6460a98aad7d4584e212477774e2c3e6fc1f4d215bb1710344bebd6a",
+            "uv_adler32": "a6efb58e",
+            "uv_bytes": 4147200,
+            "y_adler32": "8848632d",
+            "y_bytes": 8294400
+          },
+          "status": "download_and_solid_colors_verified",
+          "stream_metadata": {
+            "chroma_location": "left",
+            "codec_name": "h264",
+            "coded_height": 2160,
+            "coded_width": 3840,
+            "color_range": "tv",
+            "color_space": "smpte170m",
+            "height": 2160,
+            "pix_fmt": "yuv420p",
+            "profile": "Constrained Baseline",
+            "width": 3840
+          }
+        },
+        {
+          "candidate_active_packed_rgb": {
+            "alpha": {
+              "bytes": 8294400,
+              "fully_opaque": 8294400,
+              "fully_transparent": 0,
+              "histogram": {
+                "255": 8294400
+              },
+              "maximum": 255,
+              "minimum": 255,
+              "odd_top_left_crop_sha256": "0a79c8d27a7f451d37dc1e91eaef29f7b51594d8bc292e1edb658ca80b6e7b90",
+              "sha256": "598ddbfa658eaf70a2e0c50fa12f914c28a4496bbb150a21d6d77d73b0d8c55d"
+            },
+            "bytes": 33177600,
+            "format": "bgra",
+            "sha256": "de7715dccf7476476078914e39beca18ae008aa24cd0c6e341d2363446f76786"
+          },
+          "candidate_file_bytes": 33177600,
+          "candidate_format": "bgra",
+          "commands": {
+            "bgra": {
+              "artifacts_sha256": {
+                "argv": "7198118b451d5f03a974daa0d76dc8424e66e48174e1ae4651ae45dce4924bcc",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "31053390fc02d89e1d98b4ff5a5cf2075c0c82e1e43b5df26923f1d07dc61cef",
+                "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              },
+              "exit_code": 0
+            },
+            "reference": {
+              "artifacts_sha256": {
+                "argv": "118753bff29d81b3c0dfaa3d92e01626933f747064245874e2944d75877ef1c0",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "a4004c152e2d97ef43b78d3d57e4f41baf4b928d3667d669e49e094ff2e3a3ab",
+                "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              },
+              "exit_code": 0
+            },
+            "stream": {
+              "artifacts_sha256": {
+                "argv": "4972a952199e4cdf388b2e682f93976df28ffd757a5a4360f1244e79f68df2c4",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "stdout": "eed4befc0f411ffd3466e69b622a71369d4ba1b1c73e73b41478d95140667d9e"
+              },
+              "exit_code": 0
+            }
+          },
+          "decoded_observations": {
+            "bgra.bgra_download": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "gbr",
+              "color_trc": "unknown",
+              "fmt": "bgra",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "bgra.decode": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "bt709",
+              "color_trc": "unknown",
+              "fmt": "vaapi",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "bgra.vpp": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "gbr",
+              "color_trc": "unknown",
+              "fmt": "vaapi",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.cpu_rgb": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "gbr",
+              "color_trc": "unknown",
+              "fmt": "rgb24",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.decode": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "bt709",
+              "color_trc": "unknown",
+              "fmt": "vaapi",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.nv12_download": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "bt709",
+              "color_trc": "unknown",
+              "fmt": "nv12",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            }
+          },
+          "explicit_candidate_format_rejection": [],
+          "interior_solid_patches": {
+            "guard_size": [
+              24,
+              24
+            ],
+            "per_channel_rounding_budget": 4,
+            "sample_size": [
+              8,
+              8
+            ],
+            "samples": [
+              {
+                "center": [
+                  12,
+                  12
+                ],
+                "max_channel_delta": 2,
+                "reference_rgb": [
+                  104,
+                  104,
+                  104
+                ],
+                "vpp_rgb_max": [
+                  102,
+                  102,
+                  102
+                ],
+                "vpp_rgb_mean": [
+                  102.0,
+                  102.0,
+                  102.0
+                ],
+                "vpp_rgb_min": [
+                  102,
+                  102,
+                  102
+                ]
+              },
+              {
+                "center": [
+                  492,
+                  12
+                ],
+                "max_channel_delta": 11,
+                "reference_rgb": [
+                  180,
+                  180,
+                  180
+                ],
+                "vpp_rgb_max": [
+                  191,
+                  191,
+                  191
+                ],
+                "vpp_rgb_mean": [
+                  191.0,
+                  191.0,
+                  191.0
+                ],
+                "vpp_rgb_min": [
+                  191,
+                  191,
+                  191
+                ]
+              },
+              {
+                "center": [
+                  932,
+                  12
+                ],
+                "max_channel_delta": 24,
+                "reference_rgb": [
+                  181,
+                  179,
+                  12
+                ],
+                "vpp_rgb_max": [
+                  190,
+                  203,
+                  7
+                ],
+                "vpp_rgb_mean": [
+                  190.0,
+                  203.0,
+                  7.0
+                ],
+                "vpp_rgb_min": [
+                  190,
+                  203,
+                  7
+                ]
+              },
+              {
+                "center": [
+                  1332,
+                  12
+                ],
+                "max_channel_delta": 31,
+                "reference_rgb": [
+                  13,
+                  180,
+                  180
+                ],
+                "vpp_rgb_max": [
+                  16,
+                  211,
+                  189
+                ],
+                "vpp_rgb_mean": [
+                  16.0,
+                  211.0,
+                  189.0
+                ],
+                "vpp_rgb_min": [
+                  16,
+                  211,
+                  189
+                ]
+              },
+              {
+                "center": [
+                  1732,
+                  12
+                ],
+                "max_channel_delta": 43,
+                "reference_rgb": [
+                  13,
+                  180,
+                  12
+                ],
+                "vpp_rgb_max": [
+                  15,
+                  223,
+                  5
+                ],
+                "vpp_rgb_mean": [
+                  15.0,
+                  223.0,
+                  5.0
+                ],
+                "vpp_rgb_min": [
+                  15,
+                  223,
+                  5
+                ]
+              },
+              {
+                "center": [
+                  2172,
+                  12
+                ],
+                "max_channel_delta": 14,
+                "reference_rgb": [
+                  183,
+                  14,
+                  184
+                ],
+                "vpp_rgb_max": [
+                  176,
+                  0,
+                  186
+                ],
+                "vpp_rgb_mean": [
+                  176.0,
+                  0.0,
+                  186.0
+                ],
+                "vpp_rgb_min": [
+                  176,
+                  0,
+                  186
+                ]
+              },
+              {
+                "center": [
+                  2572,
+                  12
+                ],
+                "max_channel_delta": 14,
+                "reference_rgb": [
+                  183,
+                  14,
+                  16
+                ],
+                "vpp_rgb_max": [
+                  175,
+                  0,
+                  2
+                ],
+                "vpp_rgb_mean": [
+                  175.0,
+                  0.0,
+                  2.0
+                ],
+                "vpp_rgb_min": [
+                  175,
+                  0,
+                  2
+                ]
+              },
+              {
+                "center": [
+                  2972,
+                  12
+                ],
+                "max_channel_delta": 15,
+                "reference_rgb": [
+                  15,
+                  15,
+                  184
+                ],
+                "vpp_rgb_max": [
+                  1,
+                  0,
+                  183
+                ],
+                "vpp_rgb_mean": [
+                  1.0,
+                  0.0,
+                  183.0
+                ],
+                "vpp_rgb_min": [
+                  1,
+                  0,
+                  183
+                ]
+              },
+              {
+                "center": [
+                  12,
+                  1292
+                ],
+                "max_channel_delta": 20,
+                "reference_rgb": [
+                  12,
+                  235,
+                  236
+                ],
+                "vpp_rgb_max": [
+                  22,
+                  255,
+                  253
+                ],
+                "vpp_rgb_mean": [
+                  22.0,
+                  255.0,
+                  253.0
+                ],
+                "vpp_rgb_min": [
+                  22,
+                  255,
+                  253
+                ]
+              },
+              {
+                "center": [
+                  492,
+                  1292
+                ],
+                "max_channel_delta": 8,
+                "reference_rgb": [
+                  8,
+                  65,
+                  109
+                ],
+                "vpp_rgb_max": [
+                  0,
+                  62,
+                  104
+                ],
+                "vpp_rgb_mean": [
+                  0.0,
+                  62.0,
+                  104.0
+                ],
+                "vpp_rgb_min": [
+                  0,
+                  62,
+                  104
+                ]
+              },
+              {
+                "center": [
+                  3412,
+                  1292
+                ],
+                "max_channel_delta": 15,
+                "reference_rgb": [
+                  16,
+                  15,
+                  240
+                ],
+                "vpp_rgb_max": [
+                  3,
+                  0,
+                  245
+                ],
+                "vpp_rgb_mean": [
+                  3.0,
+                  0.0,
+                  245.0
+                ],
+                "vpp_rgb_min": [
+                  3,
+                  0,
+                  245
+                ]
+              },
+              {
+                "center": [
+                  12,
+                  1492
+                ],
+                "max_channel_delta": 20,
+                "reference_rgb": [
+                  235,
+                  235,
+                  11
+                ],
+                "vpp_rgb_max": [
+                  252,
+                  255,
+                  10
+                ],
+                "vpp_rgb_mean": [
+                  252.0,
+                  255.0,
+                  10.0
+                ],
+                "vpp_rgb_min": [
+                  252,
+                  255,
+                  10
+                ]
+              },
+              {
+                "center": [
+                  492,
+                  1492
+                ],
+                "max_channel_delta": 26,
+                "reference_rgb": [
+                  74,
+                  26,
+                  124
+                ],
+                "vpp_rgb_max": [
+                  63,
+                  0,
+                  119
+                ],
+                "vpp_rgb_mean": [
+                  63.0,
+                  0.0,
+                  119.0
+                ],
+                "vpp_rgb_min": [
+                  63,
+                  0,
+                  119
+                ]
+              },
+              {
+                "center": [
+                  3412,
+                  1492
+                ],
+                "max_channel_delta": 14,
+                "reference_rgb": [
+                  239,
+                  14,
+                  15
+                ],
+                "vpp_rgb_max": [
+                  233,
+                  0,
+                  2
+                ],
+                "vpp_rgb_mean": [
+                  233.0,
+                  0.0,
+                  2.0
+                ],
+                "vpp_rgb_min": [
+                  233,
+                  0,
+                  2
+                ]
+              },
+              {
+                "center": [
+                  12,
+                  1652
+                ],
+                "max_channel_delta": 11,
+                "reference_rgb": [
+                  49,
+                  49,
+                  49
+                ],
+                "vpp_rgb_max": [
+                  38,
+                  38,
+                  38
+                ],
+                "vpp_rgb_mean": [
+                  38.0,
+                  38.0,
+                  38.0
+                ],
+                "vpp_rgb_min": [
+                  38,
+                  38,
+                  38
+                ]
+              },
+              {
+                "center": [
+                  492,
+                  1652
+                ],
+                "max_channel_delta": 16,
+                "reference_rgb": [
+                  16,
+                  16,
+                  16
+                ],
+                "vpp_rgb_max": [
+                  0,
+                  0,
+                  0
+                ],
+                "vpp_rgb_mean": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "vpp_rgb_min": [
+                  0,
+                  0,
+                  0
+                ]
+              },
+              {
+                "center": [
+                  1132,
+                  1652
+                ],
+                "max_channel_delta": 20,
+                "reference_rgb": [
+                  235,
+                  235,
+                  235
+                ],
+                "vpp_rgb_max": [
+                  255,
+                  255,
+                  255
+                ],
+                "vpp_rgb_mean": [
+                  255.0,
+                  255.0,
+                  255.0
+                ],
+                "vpp_rgb_min": [
+                  255,
+                  255,
+                  255
+                ]
+              },
+              {
+                "center": [
+                  2292,
+                  1652
+                ],
+                "max_channel_delta": 12,
+                "reference_rgb": [
+                  12,
+                  12,
+                  12
+                ],
+                "vpp_rgb_max": [
+                  0,
+                  0,
+                  0
+                ],
+                "vpp_rgb_mean": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "vpp_rgb_min": [
+                  0,
+                  0,
+                  0
+                ]
+              },
+              {
+                "center": [
+                  2572,
+                  1652
+                ],
+                "max_channel_delta": 15,
+                "reference_rgb": [
+                  20,
+                  20,
+                  20
+                ],
+                "vpp_rgb_max": [
+                  5,
+                  5,
+                  5
+                ],
+                "vpp_rgb_mean": [
+                  5.0,
+                  5.0,
+                  5.0
+                ],
+                "vpp_rgb_min": [
+                  5,
+                  5,
+                  5
+                ]
+              },
+              {
+                "center": [
+                  2852,
+                  1652
+                ],
+                "max_channel_delta": 14,
+                "reference_rgb": [
+                  25,
+                  25,
+                  25
+                ],
+                "vpp_rgb_max": [
+                  11,
+                  11,
+                  11
+                ],
+                "vpp_rgb_mean": [
+                  11.0,
+                  11.0,
+                  11.0
+                ],
+                "vpp_rgb_min": [
+                  11,
+                  11,
+                  11
+                ]
+              }
+            ]
+          },
+          "packet_bytes": 27687,
+          "packet_sha256": "69702756f0f14d433626899cb869e3656a791a261e8546c2c2f347e6a2168c15",
+          "pattern": "smptehdbars",
+          "pixel_deltas": {
+            "full": {
+              "active_rgb_bytes_per_path": 24883200,
+              "equal_channels": 41897,
+              "maximum_absolute_channel_delta": 169,
+              "mean_absolute_channel_delta": 11.307723363554526,
+              "p95_absolute_channel_delta": 24,
+              "p99_absolute_channel_delta": 43,
+              "reference_rgb_sha256": "2cf83d049c5577f2381ffdda24e3322eafafe182e448d1f09a56006132c131c5",
+              "vpp_rgb_sha256": "76a8f256514923c169ce47d7f0211ac5d298fcd905f639c138cf2d29afa9d912"
+            },
+            "odd_top_left_crop": {
+              "active_rgb_bytes_per_path": 24865203,
+              "equal_channels": 41895,
+              "maximum_absolute_channel_delta": 169,
+              "mean_absolute_channel_delta": 11.307273662716527,
+              "p95_absolute_channel_delta": 24,
+              "p99_absolute_channel_delta": 43,
+              "reference_rgb_sha256": "f892bd55ffd50de0475a69c70d0b5ccd14f5182d0ac1ce8e9879a52eed82a791",
+              "vpp_rgb_sha256": "dcfe92773fc6c17ed3baa4ebce91abda9e07f70e69c4ad427f025e5af787857c"
+            },
+            "odd_top_left_crop_size": [
+              3839,
+              2159
+            ]
+          },
+          "reason": "interior solid colors exceeded smoke rounding budget",
+          "reference_active_nv12": {
+            "matches_earlier_standalone_probe": true,
+            "sha256": "ca508930c2c1f0158b759e28fa2d82747b082fcc3fd5f61f9a6f437e979bf561",
+            "uv_adler32": "5406062a",
+            "uv_bytes": 4147200,
+            "y_adler32": "e8aa1721",
+            "y_bytes": 8294400
+          },
+          "status": "verification_failure",
+          "stream_metadata": {
+            "chroma_location": "left",
+            "codec_name": "h264",
+            "coded_height": 2160,
+            "coded_width": 3840,
+            "color_range": "pc",
+            "color_space": "bt709",
+            "height": 2160,
+            "pix_fmt": "yuvj420p",
+            "profile": "Constrained Baseline",
+            "width": 3840
+          }
+        }
+      ],
+      "device": {
+        "device": "0x7d67",
+        "driver": "i915",
+        "revision": "0x06",
+        "vendor": "0x8086"
+      },
+      "exact_decoded_size": [
+        3840,
+        2160
+      ],
+      "ffmpeg_artifacts_sha256": {
+        "ffmpeg-tools.sha256": "2045d084d3a2cfdc24a1940d5312c3b64cd80c12ea7cff15f4e22384072e9c3b",
+        "ffmpeg-version.stdout": "5b320c97f515e79171f10a2147d875ffb6b14bd2b25681047b73c46fe0a527ee",
+        "fixture.sha256": "67c7ed584e2307aec6d8819bfba2969ffb20686b3ca9577b64f4be2f27d85e90",
+        "packet.sha256": "f7527e25cb7b6ac411d558ed062036a02f80144d60c53556dbf5bb6790ead21d",
+        "vaapi-filter.stdout": "d0550522cd11ec6d242b827f65b6dfec159268369b940455db00778aad6df8c1"
+      },
+      "limitations": [
+        "Separate FFmpeg executions independently decode the same pinned packet. Only single-IDR compatibility is tested.",
+        "The top-left 3839x2159 crop is computed offline from that same downloaded 3840x2160 output. The filter itself performs no scaling or odd-sized allocation.",
+        "Raw files contain active samples only. Surface padding, GPU/CPU timing, X11 presentation, and product support are outside this fixture.",
+        "BGRA alpha is reported separately from RGB. A later XRGB display must independently check depth, byte order and composition semantics.",
+        "Color range/matrix reflect stream and actual frame logs. Chroma interpolation and numerical rounding may differ between VPP and libswscale."
+      ],
+      "performance_measured": false,
+      "schema_version": 1,
+      "scope": "Stock FFmpeg VA-API SDR H.264 decode / VPP packed RGB download compatibility on Intel i915",
+      "status": "unqualified"
+    }
+  },
+  "full_range_neutral_swatch_observations": [
+    {
+      "center": [
+        12,
+        12
+      ],
+      "maximum_difference_from_prediction": 0.0,
+      "observed_vpp_rgb_mean": [
+        102.0,
+        102.0,
+        102.0
+      ],
+      "predicted_if_nominal_limited_range_expansion": 102,
+      "reference_rgb": [
+        104,
+        104,
+        104
+      ]
+    },
+    {
+      "center": [
+        492,
+        12
+      ],
+      "maximum_difference_from_prediction": 0.0,
+      "observed_vpp_rgb_mean": [
+        191.0,
+        191.0,
+        191.0
+      ],
+      "predicted_if_nominal_limited_range_expansion": 191,
+      "reference_rgb": [
+        180,
+        180,
+        180
+      ]
+    },
+    {
+      "center": [
+        12,
+        1652
+      ],
+      "maximum_difference_from_prediction": 0.0,
+      "observed_vpp_rgb_mean": [
+        38.0,
+        38.0,
+        38.0
+      ],
+      "predicted_if_nominal_limited_range_expansion": 38,
+      "reference_rgb": [
+        49,
+        49,
+        49
+      ]
+    },
+    {
+      "center": [
+        492,
+        1652
+      ],
+      "maximum_difference_from_prediction": 0.0,
+      "observed_vpp_rgb_mean": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "predicted_if_nominal_limited_range_expansion": 0,
+      "reference_rgb": [
+        16,
+        16,
+        16
+      ]
+    },
+    {
+      "center": [
+        1132,
+        1652
+      ],
+      "maximum_difference_from_prediction": 0.0,
+      "observed_vpp_rgb_mean": [
+        255.0,
+        255.0,
+        255.0
+      ],
+      "predicted_if_nominal_limited_range_expansion": 255,
+      "reference_rgb": [
+        235,
+        235,
+        235
+      ]
+    },
+    {
+      "center": [
+        2292,
+        1652
+      ],
+      "maximum_difference_from_prediction": 0.0,
+      "observed_vpp_rgb_mean": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "predicted_if_nominal_limited_range_expansion": 0,
+      "reference_rgb": [
+        12,
+        12,
+        12
+      ]
+    },
+    {
+      "center": [
+        2572,
+        1652
+      ],
+      "maximum_difference_from_prediction": 0.0,
+      "observed_vpp_rgb_mean": [
+        5.0,
+        5.0,
+        5.0
+      ],
+      "predicted_if_nominal_limited_range_expansion": 5,
+      "reference_rgb": [
+        20,
+        20,
+        20
+      ]
+    },
+    {
+      "center": [
+        2852,
+        1652
+      ],
+      "maximum_difference_from_prediction": 1.0,
+      "observed_vpp_rgb_mean": [
+        11.0,
+        11.0,
+        11.0
+      ],
+      "predicted_if_nominal_limited_range_expansion": 10,
+      "reference_rgb": [
+        25,
+        25,
+        25
+      ]
+    }
+  ],
+  "initial_bgr0": {
+    "controller_exit": 3,
+    "original_parser_case_statuses": [
+      "candidate_run_failed",
+      "candidate_run_failed"
+    ],
+    "original_report_sha256": "2f3e514c62cbe75f7213418f3b5697d460fe38627522cead7578df434b86758a",
+    "verified": {
+      "candidate_format": "bgr0",
+      "cases": [
+        {
+          "candidate_file_bytes": 0,
+          "candidate_format": "bgr0",
+          "commands": {
+            "bgrx": {
+              "artifacts_sha256": {
+                "argv": "fadc74edef5603d51cfe6014cc0783a6fef43e8340cdc92ced41ce11bea5b087",
+                "exit": "fc68f3b1c9b809ce39d3142d79d18a22df73914008f0378eb23a487f12c895de",
+                "stderr": "5f42539f86886e3af56fd93fea1a4247486123c8e968a247c511f21d9e9de982",
+                "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              },
+              "exit_code": 234
+            },
+            "reference": {
+              "artifacts_sha256": {
+                "argv": "fe4beff3e7f55a2be63b96c00901beaba62d79893855d5ec50dd537efd5ba0f7",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "8768371f97b47b2d560768a238dced3da8ecc577460ad096190db504abf90616",
+                "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              },
+              "exit_code": 0
+            },
+            "stream": {
+              "artifacts_sha256": {
+                "argv": "bca8d027062fd9acaf4b0f539b49716ad73862b0786ef1c9c2729f6d39b53dc1",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "stdout": "d7891bb9e01fd6412872e2d2c806e57cb4071d77c4d56b7ee41b9357b83201ef"
+              },
+              "exit_code": 0
+            }
+          },
+          "decoded_observations": {
+            "reference.cpu_rgb": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "gbr",
+              "color_trc": "unknown",
+              "fmt": "rgb24",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.decode": {
+              "color_primaries": "unknown",
+              "color_range": "tv",
+              "color_space": "smpte170m",
+              "color_trc": "unknown",
+              "fmt": "vaapi",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.nv12_download": {
+              "color_primaries": "unknown",
+              "color_range": "tv",
+              "color_space": "smpte170m",
+              "color_trc": "unknown",
+              "fmt": "nv12",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            }
+          },
+          "explicit_candidate_format_rejection": [
+            "[Parsed_scale_vaapi_1 @ 0x604fe4e56900] Hardware does not support output format bgr0."
+          ],
+          "packet_bytes": 425260,
+          "packet_sha256": "05f987caf29cdc4ecb07e09472628eb10ada85528c1cdf8908420604217be36e",
+          "pattern": "testsrc2",
+          "reference_active_nv12": {
+            "matches_earlier_standalone_probe": true,
+            "sha256": "601b7bda6460a98aad7d4584e212477774e2c3e6fc1f4d215bb1710344bebd6a",
+            "uv_adler32": "a6efb58e",
+            "uv_bytes": 4147200,
+            "y_adler32": "8848632d",
+            "y_bytes": 8294400
+          },
+          "status": "explicit_format_rejection",
+          "stream_metadata": {
+            "chroma_location": "left",
+            "codec_name": "h264",
+            "coded_height": 2160,
+            "coded_width": 3840,
+            "color_range": "tv",
+            "color_space": "smpte170m",
+            "height": 2160,
+            "pix_fmt": "yuv420p",
+            "profile": "Constrained Baseline",
+            "width": 3840
+          }
+        },
+        {
+          "candidate_file_bytes": 0,
+          "candidate_format": "bgr0",
+          "commands": {
+            "bgrx": {
+              "artifacts_sha256": {
+                "argv": "01a7c412d3396522bd74ee9db4078e5169bcb9aa1a81fe53443c8b1b6ef06573",
+                "exit": "fc68f3b1c9b809ce39d3142d79d18a22df73914008f0378eb23a487f12c895de",
+                "stderr": "6273965a82da245d2d593639eca1071fb11aa47b5db6f539d964df889a024134",
+                "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              },
+              "exit_code": 234
+            },
+            "reference": {
+              "artifacts_sha256": {
+                "argv": "118753bff29d81b3c0dfaa3d92e01626933f747064245874e2944d75877ef1c0",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "e946ac769edc3bdbfba1b698a52cbb67ef267e7dae5c4e4ca4cc7866252a914f",
+                "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+              },
+              "exit_code": 0
+            },
+            "stream": {
+              "artifacts_sha256": {
+                "argv": "4972a952199e4cdf388b2e682f93976df28ffd757a5a4360f1244e79f68df2c4",
+                "exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+                "stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "stdout": "eed4befc0f411ffd3466e69b622a71369d4ba1b1c73e73b41478d95140667d9e"
+              },
+              "exit_code": 0
+            }
+          },
+          "decoded_observations": {
+            "reference.cpu_rgb": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "gbr",
+              "color_trc": "unknown",
+              "fmt": "rgb24",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.decode": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "bt709",
+              "color_trc": "unknown",
+              "fmt": "vaapi",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            },
+            "reference.nv12_download": {
+              "color_primaries": "unknown",
+              "color_range": "pc",
+              "color_space": "bt709",
+              "color_trc": "unknown",
+              "fmt": "nv12",
+              "iskey": "1",
+              "s": "3840x2160",
+              "type": "I"
+            }
+          },
+          "explicit_candidate_format_rejection": [
+            "[Parsed_scale_vaapi_1 @ 0x5b224acdc600] Hardware does not support output format bgr0."
+          ],
+          "packet_bytes": 27687,
+          "packet_sha256": "69702756f0f14d433626899cb869e3656a791a261e8546c2c2f347e6a2168c15",
+          "pattern": "smptehdbars",
+          "reference_active_nv12": {
+            "matches_earlier_standalone_probe": true,
+            "sha256": "ca508930c2c1f0158b759e28fa2d82747b082fcc3fd5f61f9a6f437e979bf561",
+            "uv_adler32": "5406062a",
+            "uv_bytes": 4147200,
+            "y_adler32": "e8aa1721",
+            "y_bytes": 8294400
+          },
+          "status": "explicit_format_rejection",
+          "stream_metadata": {
+            "chroma_location": "left",
+            "codec_name": "h264",
+            "coded_height": 2160,
+            "coded_width": 3840,
+            "color_range": "pc",
+            "color_space": "bt709",
+            "height": 2160,
+            "pix_fmt": "yuvj420p",
+            "profile": "Constrained Baseline",
+            "width": 3840
+          }
+        }
+      ],
+      "device": {
+        "device": "0x7d67",
+        "driver": "i915",
+        "revision": "0x06",
+        "vendor": "0x8086"
+      },
+      "exact_decoded_size": [
+        3840,
+        2160
+      ],
+      "ffmpeg_artifacts_sha256": {
+        "ffmpeg-tools.sha256": "2045d084d3a2cfdc24a1940d5312c3b64cd80c12ea7cff15f4e22384072e9c3b",
+        "ffmpeg-version.stdout": "5b320c97f515e79171f10a2147d875ffb6b14bd2b25681047b73c46fe0a527ee",
+        "fixture.sha256": "4042f901b7f758c9f9e69b7d45037328ac8cca665d3abba58777afcd1f083f12",
+        "packet.sha256": "f7527e25cb7b6ac411d558ed062036a02f80144d60c53556dbf5bb6790ead21d",
+        "vaapi-filter.stdout": "d0550522cd11ec6d242b827f65b6dfec159268369b940455db00778aad6df8c1"
+      },
+      "limitations": [
+        "Separate FFmpeg executions independently decode the same pinned packet. Only single-IDR compatibility is tested.",
+        "The top-left 3839x2159 crop is computed offline from that same downloaded 3840x2160 output. The filter itself performs no scaling or odd-sized allocation.",
+        "Raw files contain active samples only. Surface padding, GPU/CPU timing, X11 presentation, and product support are outside this fixture.",
+        "BGRA alpha is reported separately from RGB. A later XRGB display must independently check depth, byte order and composition semantics.",
+        "Color range/matrix reflect stream and actual frame logs. Chroma interpolation and numerical rounding may differ between VPP and libswscale."
+      ],
+      "performance_measured": false,
+      "schema_version": 1,
+      "scope": "Stock FFmpeg VA-API SDR H.264 decode / VPP packed RGB download compatibility on Intel i915",
+      "status": "unqualified"
+    }
+  },
+  "notes": [
+    "The initial parser missed the driver phrase \u201cdoes not support output format\u201d. The original report and parser are preserved and replayed; the paired verifier classifies the exact retained stderr.",
+    "The neutral swatch comparison applies a nominal limited-to-full luma mapping to the CPU reference. It is evidence of compatible behavior and does not identify the cause or explain the full color differences.",
+    "Each attempt uses independently decoded inputs. A BGR0 rejection and any BGRA result apply to the tested FFmpeg and Intel runtime. No surface padding, timing, X11 present result or product route is established."
+  ],
+  "performance_measured": false,
+  "references_across_attempts": {
+    "smptehdbars": {
+      "nv12": {
+        "bgr0_run_sha256": "ca508930c2c1f0158b759e28fa2d82747b082fcc3fd5f61f9a6f437e979bf561",
+        "bgra_run_sha256": "ca508930c2c1f0158b759e28fa2d82747b082fcc3fd5f61f9a6f437e979bf561",
+        "equal": true
+      },
+      "rgb24": {
+        "bgr0_run_sha256": "2cf83d049c5577f2381ffdda24e3322eafafe182e448d1f09a56006132c131c5",
+        "bgra_run_sha256": "2cf83d049c5577f2381ffdda24e3322eafafe182e448d1f09a56006132c131c5",
+        "equal": true
+      }
+    },
+    "testsrc2": {
+      "nv12": {
+        "bgr0_run_sha256": "601b7bda6460a98aad7d4584e212477774e2c3e6fc1f4d215bb1710344bebd6a",
+        "bgra_run_sha256": "601b7bda6460a98aad7d4584e212477774e2c3e6fc1f4d215bb1710344bebd6a",
+        "equal": true
+      },
+      "rgb24": {
+        "bgr0_run_sha256": "b4354cef99f5aa22a125e2f819adfb45fe5816e7b7251096cd42f819b5f52300",
+        "bgra_run_sha256": "b4354cef99f5aa22a125e2f819adfb45fe5816e7b7251096cd42f819b5f52300",
+        "equal": true
+      }
+    }
+  },
+  "schema_version": 1,
+  "scope": "Independent stock FFmpeg VA-API VPP packed RGB compatibility attempts on Intel i915"
+}

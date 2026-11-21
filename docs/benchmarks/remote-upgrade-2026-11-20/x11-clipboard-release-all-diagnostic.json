@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "experiment": "P07 explicit X11 ReleaseAll during a viewer-to-host clipboard file upload",
+  "terminal_statuses": {
+    "controller": 0,
+    "fixture": 0,
+    "original_offline_replay": 0
+  },
+  "binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+  "fixture_sha256": {
+    "p07-release.py": "dab4ada395c0758e21209e1d6eda32b50e062e1231788c0bf5aaf9d5dff04d4e",
+    "remote-fault-proxy.py": "c207d20c09ae03af71a6c3be1562319179cac882c168a3afcbf91a87c59a75b9",
+    "test-remote-viewer-e2e.py": "1359c0f7ff3cbc19c1d793f264283af595caec0f84d9ec6fc048f2aacc1fbbad"
+  },
+  "source_and_four_received_sha256": "a3488dab8b1c0ff96d44b771d8d89a705b62625fbe9594b7c243079d042aedbb",
+  "scope": {
+    "samples": 4,
+    "samples_per_profile": 2,
+    "order": [
+      "default",
+      "rate-6000",
+      "rate-6000",
+      "default"
+    ],
+    "both_endpoints": "one machine, two private Xvfb displays, authenticated loopback TCP",
+    "network": "1,250,000 B/s nominal user-space client-to-host proxy. Reverse direction unshaped. No added delay or injected fault.",
+    "direction": "viewer uploads the source file to the host",
+    "bulk_budget": {
+      "default": {
+        "rate_kbit_per_second": null,
+        "chunk_bytes": 131072,
+        "window_bytes": 1048576
+      },
+      "rate-6000": {
+        "rate_kbit_per_second": 6000,
+        "chunk_bytes": 18750,
+        "window_bytes": 45000
+      }
+    },
+    "viewer_route": "static 1280\u00d7800 root downscaled to 640\u00d7400 JPEG, 15 FPS capture scheduling",
+    "input_measurement": "same-clock monotonic time from viewer XTEST issue of the Ctrl+Super+F12 final down edge to observation of the host window F10 key-up",
+    "file_payload": "deterministic synthetic 12 MiB fixture"
+  },
+  "proof": {
+    "real_host_key_down_before_chord": 4,
+    "source_keys_clear_before_viewer_physical_key_up": 4,
+    "viewer_keyboard_and_pointer_grabs_available_before_viewer_physical_key_up": 4,
+    "exact_source_edge_sequence_including_reverse_modifier_unwind": 4,
+    "fresh_balanced_key_after_click_reacquisition": 4,
+    "same_auth_session_across_release": 4,
+    "same_stage_identity_and_exact_sha256_and_clipboard_uri": 4,
+    "forwards_the_escape_key": 0
+  },
+  "limitations": [
+    "Four proof samples fill the combined ReleaseAll and active clipboard upload check, with no percentile inference.",
+    "The proxy intentionally shapes the same TCP direction as input. This is a shaped software diagnostic. It gives no normal-network p95 or physical input-to-display result.",
+    "The recording does not identify every internal contributor to the shortcut-to-key-up time."
+  ],
+  "trials": [
+    {
+      "trial": 1,
+      "profile": "default",
+      "shortcut_to_host_key_up_ms": 910.80486,
+      "file_throughput_mbit_s": 9.161081133876452,
+      "partial_bytes_before_and_after_release": [
+        1441748,
+        2490324
+      ],
+      "staged_file_bytes": 12582912,
+      "staged_file_sha256": "a3488dab8b1c0ff96d44b771d8d89a705b62625fbe9594b7c243079d042aedbb",
+      "passed": true
+    },
+    {
+      "trial": 1,
+      "profile": "rate-6000",
+      "shortcut_to_host_key_up_ms": 58.195679,
+      "file_throughput_mbit_s": 6.308174294514824,
+      "partial_bytes_before_and_after_release": [
+        314956,
+        359956
+      ],
+      "staged_file_bytes": 12582912,
+      "staged_file_sha256": "a3488dab8b1c0ff96d44b771d8d89a705b62625fbe9594b7c243079d042aedbb",
+      "passed": true
+    },
+    {
+      "trial": 2,
+      "profile": "rate-6000",
+      "shortcut_to_host_key_up_ms": 57.225505,
+      "file_throughput_mbit_s": 6.287954848269616,
+      "partial_bytes_before_and_after_release": [
+        314956,
+        359956
+      ],
+      "staged_file_bytes": 12582912,
+      "staged_file_sha256": "a3488dab8b1c0ff96d44b771d8d89a705b62625fbe9594b7c243079d042aedbb",
+      "passed": true
+    },
+    {
+      "trial": 2,
+      "profile": "default",
+      "shortcut_to_host_key_up_ms": 911.057705,
+      "file_throughput_mbit_s": 9.189702565912233,
+      "partial_bytes_before_and_after_release": [
+        1441748,
+        2490324
+      ],
+      "staged_file_bytes": 12582912,
+      "staged_file_sha256": "a3488dab8b1c0ff96d44b771d8d89a705b62625fbe9594b7c243079d042aedbb",
+      "passed": true
+    }
+  ],
+  "archive": {
+    "name": "x11-clipboard-release-all-diagnostic-raw.zip",
+    "sha256": "4cef0515a2c86cb17dad568ea978eb2dad629968ee1b13d1212181c0cdce123a",
+    "members_sha256": {
+      "fixture/offline-check.py": "49ebb29fa2ea2bca5cec642ad82fd1a7d32a2f9c61278083d506052a58fdd2bd",
+      "fixture/p07-release.py": "dab4ada395c0758e21209e1d6eda32b50e062e1231788c0bf5aaf9d5dff04d4e",
+      "fixture/pins.sha256": "1f880ae8b7ccd4b98dafc2a16f34156e05acdb0fdc0e0a72e4cb329dcfd89f67",
+      "fixture/remote-fault-proxy.py": "c207d20c09ae03af71a6c3be1562319179cac882c168a3afcbf91a87c59a75b9",
+      "fixture/test-remote-viewer-e2e.py": "1359c0f7ff3cbc19c1d793f264283af595caec0f84d9ec6fc048f2aacc1fbbad",
+      "fixture/verify-release.py": "4274ace659ed4aa573ff82956db12e93a3b2d6d05dbe651d568582681930c0cd",
+      "original-replay-result.json": "2ceeb250c148b7c3acd34c054140b50a5fd80153f23cf6bed6f4f780ebdc2cd0",
+      "replay.py": "c99946dc0b303c5ad6641f6d5472dcf831e28fe859907d41bfb4c4c041b370bb",
+      "trials/1-release-default/endpoint-evidence.json": "5348ecd8d514cea5008adf85064a39c6f3c72c219ae57182be120e1ef29a48e5",
+      "trials/1-release-default/host.log": "6a0d166a65be67988697d28c350c063758b48b3fd1118cc1b0cca2b939fa10fc",
+      "trials/1-release-default/release-trace.json": "d4651c4ff9d1d26e4d6599f98a80d5106c76510537fab2fd761c4b24faa0b351",
+      "trials/1-release-default/viewer.log": "941c567a82047c34562659ffb8a6e904000cd95da4012f3a464ec66ed412c96a",
+      "trials/1-release-rate-6000/endpoint-evidence.json": "3c58985cdb449d9ed495fab6c4f2c5aab92c6ab9f31340d009301635f36c9100",
+      "trials/1-release-rate-6000/host.log": "6e8ae184b47020fd1d3071d6aad01efab0637aec9f7506064373f1ab70f49298",
+      "trials/1-release-rate-6000/release-trace.json": "26035be6628327b5b6d2319a52d634f2eae4e9cb224324626421fb29481e0218",
+      "trials/1-release-rate-6000/viewer.log": "5e6fcec3cf45c8a82d96fb8c1867bcf3814f0f8f76e90fdde3c3f4f8cf5b99f3",
+      "trials/2-release-default/endpoint-evidence.json": "c2b0a7c62d2befb11ff8909e89cc2597e93bd85ba19951789de1e2f09392a943",
+      "trials/2-release-default/host.log": "6a0d166a65be67988697d28c350c063758b48b3fd1118cc1b0cca2b939fa10fc",
+      "trials/2-release-default/release-trace.json": "f09ecec97826a894702819ca3955e241e03dccbc1bd7ad0f5d91fc7bf040fd01",
+      "trials/2-release-default/viewer.log": "fa15e9a466d4cb1fa872ab33dcdad9e6d5bc8059119c328d2f29e710bbd02c03",
+      "trials/2-release-rate-6000/endpoint-evidence.json": "f3c0e90dede32dd748ae449dafd611744ed6a2ca7f63ec101f17197cf2c846d7",
+      "trials/2-release-rate-6000/host.log": "3c7103a31db4aad4d73b4aa0186a23ad8c82d09d2d9dd04c10227386460af7ce",
+      "trials/2-release-rate-6000/release-trace.json": "c97c06d3bfa9569f83cd91d68b472f0733a4a00e70b81a0c67e0953f4fcb9a1e",
+      "trials/2-release-rate-6000/viewer.log": "39359a5c85f147992e4ae69ac10eed734fee35e279377124c15e2ad7db7319a9",
+      "trials/result.json": "93ffbcf83208072729697f1fe220c68c818c219907320109204b09940f563f09"
+    },
+    "offline_replay": "python3 -B replay.py from the extracted archive"
+  },
+  "privacy": [
+    "All per-trial event times use the original clipboard offer as relative monotonic zero. Timing differences and order are unchanged.",
+    "Opaque aliases preserve in-trial session equality and staging-file identity. Original session identifiers, filesystem device/inode numbers, UIDs, display names, and socket addresses were omitted.",
+    "Endpoint lines are an allowlist of protocol and transfer witnesses. Initial idle input samples, unneeded statistics, full raw runtime logs, credentials, paths, and file bytes were omitted. Preserved raw input is synthetic probe keys and buttons only.",
+    "The publisher independently read the original source and four retained received file digests. The archive replays those recorded hash and size comparisons without requiring the staged files."
+  ]
+}
