@@ -5,7 +5,7 @@
 //! pointer bindings, and the same thin accent line under a control that
 //! reports progress.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
@@ -18,7 +18,7 @@ use gtk4::{
 };
 use xbar_core::controls::ControlSpec;
 use xbar_core::presentation::{
-    NetworkTextMetrics, NodeId, PercentTextMetrics, PointerAction, Rgba,
+    NetworkTextMetrics, NodeId, NumericClockMetrics, PercentTextMetrics, PointerAction, Rgba,
 };
 use xbar_core::{BarEdge, ControlScroll, ScrollDelta, ScrollPhase, ShellRoute, UserAction};
 
@@ -65,6 +65,7 @@ pub struct Pill {
     network_labels: Option<NetworkLabels>,
     percent_labels: Option<PercentLabels>,
     sidebar_metric: Option<SidebarMetric>,
+    clock_metrics: OnceCell<NumericClockMetrics>,
     font: FontDescription,
     vertical: bool,
     minimum_height: i32,
@@ -497,6 +498,7 @@ impl Pill {
             network_labels,
             percent_labels,
             sidebar_metric,
+            clock_metrics: OnceCell::new(),
             font: font.clone(),
             vertical: edge.is_vertical(),
             minimum_height,
@@ -556,7 +558,20 @@ impl Pill {
                     let width = if text.is_empty() {
                         -1
                     } else {
-                        text_width(&self.label, &self.font, &text)
+                        let measure = |text: &str| text_width(&self.label, &self.font, text);
+                        let natural = measure(&text);
+                        let reserved = if spec.id == NodeId::Clock {
+                            NumericClockMetrics::width(
+                                &self.clock_metrics,
+                                &spec.value,
+                                &spec.icon,
+                                |text| measure(text) as f32,
+                            )
+                            .map_or(0, |width| width.ceil() as i32)
+                        } else {
+                            0
+                        };
+                        natural.max(reserved)
                     };
                     self.label.set_size_request(width, -1);
                 }
@@ -761,6 +776,150 @@ impl PillRow {
             let pill = Pill::new(spec, &self.style, self.dispatch.clone());
             self.container.append(pill.widget());
             pills.push(pill);
+        }
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use xbar_core::controls::{ControlState, InputBindings};
+    use xbar_core::presentation::PresentationConfig;
+
+    #[test]
+    #[ignore = "requires an X11 display and the osifont family; run under Xvfb in CI"]
+    fn native_numeric_clock_ticks_keep_allocated_buttons_still() {
+        gtk4::init().expect("start GTK on the isolated display");
+        let config = PresentationConfig {
+            font_size: 22.0,
+            ..PresentationConfig::default()
+        };
+        let mut font = FontDescription::from_string("osifont");
+        font.set_absolute_size(f64::from(config.font_size) * f64::from(gtk4::pango::SCALE));
+        let probe = Label::new(None);
+        let provider = gtk4::CssProvider::new();
+        let css = crate::theme::font_rules("osifont", config.font_size);
+        provider.load_from_data(&format!("label {{ {css} }}"));
+        gtk4::style_context_add_provider_for_display(
+            &probe.display(),
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+
+        let control = |id, icon: &str, value: &str, bindings| ControlSpec {
+            id,
+            icon: icon.into(),
+            value: value.into(),
+            tone: None,
+            volume_level: None,
+            progress: None,
+            available: true,
+            state: ControlState {
+                enabled: true,
+                ..ControlState::default()
+            },
+            bindings,
+        };
+        let clock_action = UserAction::OpenShellHub(ShellRoute::Calendar);
+        for edge in [BarEdge::Top, BarEdge::Bottom] {
+            let dispatched = Rc::new(RefCell::new(Vec::new()));
+            let row = PillRow::new(
+                PillStyle {
+                    edge,
+                    scroll: Rc::new(RefCell::new(ControlScroll::default())),
+                    metrics: Metrics::from_config(&config),
+                    accent: Rgba::new(0.0, 0.0, 1.0, 1.0),
+                    font: font.clone(),
+                    network_icons: [String::new(), String::new()],
+                    metric_icons: std::array::from_fn(|i| {
+                        (
+                            [
+                                NodeId::Audio,
+                                NodeId::Battery,
+                                NodeId::Brightness,
+                                NodeId::Cpu,
+                                NodeId::Memory,
+                            ][i],
+                            Vec::new(),
+                        )
+                    }),
+                },
+                {
+                    let dispatched = dispatched.clone();
+                    Rc::new(move |action, _| dispatched.borrow_mut().push(action))
+                },
+            );
+            let window = gtk4::Window::new();
+            window.set_child(Some(row.widget()));
+            for (first, second) in [
+                ("2026-11-21 11:18:11", "2026-11-21 11:18:18"),
+                ("11:18:11", "11:18:18"),
+            ] {
+                let first = control(
+                    NodeId::Clock,
+                    "",
+                    first,
+                    InputBindings {
+                        primary: Some(clock_action),
+                        secondary: Some(UserAction::ToggleSeconds),
+                        ..InputBindings::default()
+                    },
+                );
+                let second = ControlSpec {
+                    value: second.into(),
+                    ..first.clone()
+                };
+                // Do not accidentally prove stability with fallback,
+                // tabular digits or a tick that has no natural width change.
+                assert_ne!(
+                    text_width(&probe, &font, &first.text()),
+                    text_width(&probe, &font, &second.text())
+                );
+                let audio = control(NodeId::Audio, "", "50%", InputBindings::default());
+                let network = control(
+                    NodeId::Network,
+                    "",
+                    "↓1 KiB ↑2 KiB",
+                    InputBindings::default(),
+                );
+                let sample = |clock: &ControlSpec, width| {
+                    row.sync(&[audio.clone(), clock.clone(), network.clone()]);
+                    row.widget().allocate(width, 42, -1, None);
+                    assert_eq!(row.widget().width(), width);
+                    let pills = row.pills.borrow();
+                    assert_eq!(pills[1].label.text().as_str(), clock.text().as_str());
+                    assert!(!pills[1].label.layout().is_ellipsized());
+                    assert_eq!(
+                        pills[1].button.tooltip_text().as_deref(),
+                        Some(clock.tooltip_text().as_str())
+                    );
+                    assert_eq!(
+                        pills[1].bindings.borrow().action(PointerAction::Secondary),
+                        Some(UserAction::ToggleSeconds)
+                    );
+                    let bounds: Vec<_> = pills
+                        .iter()
+                        .map(|pill| {
+                            let rect = pill
+                                .widget()
+                                .compute_bounds(row.widget())
+                                .expect("allocated control");
+                            assert!(rect.width() > 0.0 && rect.height() > 0.0);
+                            [rect.x(), rect.y(), rect.width(), rect.height()]
+                        })
+                        .collect();
+                    (pills[1].button.clone(), bounds)
+                };
+                for width in [680, 960] {
+                    let (first_button, first_bounds) = sample(&first, width);
+                    first_button.emit_clicked();
+                    let (second_button, second_bounds) = sample(&second, width);
+                    second_button.emit_clicked();
+                    assert_eq!(first_button, second_button, "clock was recreated");
+                    assert_eq!(first_bounds, second_bounds, "{edge:?} at {width}px");
+                }
+            }
+            assert_eq!(*dispatched.borrow(), vec![clock_action; 8]);
         }
     }
 }

@@ -375,6 +375,20 @@ jobs:
         if: ${{ matrix.name == 'gtk4' }}
         run: cargo test --manifest-path bars/gtk_bar/Cargo.toml -p xbar_gtk --lib
 
+      - name: Verify the native GTK clock allocation under Xvfb
+        if: ${{ matrix.name == 'gtk4' }}
+        env:
+          GDK_BACKEND: x11
+          GTK_A11Y: none
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends xvfb xauth fonts-osifont
+          xvfb-run -a cargo test --manifest-path bars/gtk_bar/Cargo.toml -p xbar_gtk --lib \
+            pill::clock_tests::native_numeric_clock_ticks_keep_allocated_buttons_still -- --ignored --exact \
+            | tee "$RUNNER_TEMP/gtk-clock-test.log"
+          grep -F 'test pill::clock_tests::native_numeric_clock_ticks_keep_allocated_buttons_still ... ok' \
+            "$RUNNER_TEMP/gtk-clock-test.log"
+
   git-toolkits:
     name: Moving git toolkit (${{ matrix.name }})
     runs-on: ubuntu-latest
