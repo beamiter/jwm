@@ -35,9 +35,10 @@ has its own one-shot lease. A switch waits for the host to release the old
 lease. The next window starts view-only and requires an explicit input request
 after presentation. When a geometry change races that request, the host waits
 for an acknowledged frame at the current geometry before starting the new
-native input proof for that window. Use a single window for other scoped
-input modes, resumable control, popup capture, resize-follow or lossless
-sessions.
+native input proof for that window. Update both helpers to
+`195a30f6` or later for this recovery path. Use a single window for other
+scoped input modes, resumable control, popup capture, resize-follow or
+lossless sessions.
 
 `--key-stdin` cannot be combined with local selection: they would compete for
 stdin. Use a key file without putting key contents in logs or command history.

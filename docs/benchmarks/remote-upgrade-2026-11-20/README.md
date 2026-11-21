@@ -1498,6 +1498,9 @@ A later read-only device check found the Ubuntu Ethernet port
 `enp2s0` down with carrier 0. Its active `wlp3s0` interface had carrier 1.
 The dual-machine runs used this Wi-Fi route.
 
+The Ubuntu integrated camera's V4L2 capture modes advertised at most
+30 FPS, or 33.3 ms per frame.
+
 ## Wayland viewer KMS completion in a guest
 
 An isolated KVM guest ran production `jwm --backend wayland-udev` on a
