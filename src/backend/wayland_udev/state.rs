@@ -6654,7 +6654,7 @@ mod xwayland_moveresize_tests {
     #[test]
     fn xwayland_moveresize_stubs_feed_the_shared_drag_pipeline() {
         const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production = SOURCE.split_once("\n#[cfg(test)]").unwrap().0;
         assert!(
             production.contains("fn xwm_resize_edge_direction"),
             "XWayland resize must map edges onto _NET_WM_MOVERESIZE codes"
@@ -6674,7 +6674,7 @@ mod xwayland_moveresize_tests {
     #[test]
     fn xdg_moveresize_requests_feed_the_shared_drag_pipeline() {
         const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production = SOURCE.split_once("\n#[cfg(test)]").unwrap().0;
         assert!(
             production.contains("fn xdg_resize_edge_direction")
                 && production.contains("fn xdg_seat_has_interactive_grab"),
@@ -6753,7 +6753,7 @@ mod smithay_feature_follow_tests {
     #[test]
     fn property_notify_forwards_motif_hints() {
         const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        let production = SOURCE.split_once("\n#[cfg(test)]").unwrap().0;
         assert!(
             production.contains("WmWindowProperty::MotifHints")
                 && production.contains("PropertyKind::MotifHints"),
@@ -6922,7 +6922,7 @@ mod xwayland_legacy_assoc_tests {
     #[test]
     fn unmanaged_pacing_has_no_periodic_barrier_tree_scan() {
         let state = include_str!("state.rs");
-        let production = state.split_once("#[cfg(test)]").unwrap().0;
+        let production = state.split_once("\n#[cfg(test)]").unwrap().0;
         assert!(production.contains("CommitTimingManagerState::unmanaged"));
         assert!(production.contains("FifoManagerState::unmanaged"));
         assert!(!production.contains("pub fn signal_due_commit_timing_barriers"));
@@ -6936,7 +6936,7 @@ mod xwayland_legacy_assoc_tests {
     #[test]
     fn initial_configure_fallback_is_per_toplevel_and_one_shot() {
         let state = include_str!("state.rs");
-        let production = state.split_once("#[cfg(test)]").unwrap().0;
+        let production = state.split_once("\n#[cfg(test)]").unwrap().0;
         let arm = format!("Timer::from_duration({})", "INITIAL_CONFIGURE_TIMEOUT");
         assert_eq!(
             production.matches(&arm).count(),
@@ -7793,7 +7793,7 @@ mod protocol_hardening_tests {
     #[test]
     fn xwayland_configure_request_no_longer_self_publishes_geometry() {
         const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        let production = SOURCE.split_once("\n#[cfg(test)]").expect("test split").0;
         let body = production
             .split_once("    fn configure_request(\n")
             .expect("XwmHandler::configure_request")
@@ -9370,7 +9370,7 @@ mod protocol_hardening_tests {
     #[test]
     fn every_window_retirement_stops_its_capture_sessions() {
         const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        let production = SOURCE.split_once("\n#[cfg(test)]").expect("test split").0;
         // The helper is the only place a window's geometry, the liveness key
         // of its capture sessions, is dropped.
         assert_eq!(
@@ -9399,7 +9399,7 @@ mod protocol_hardening_tests {
     #[test]
     fn workspaces_follow_the_configured_tag_count() {
         const SOURCE: &str = include_str!("state.rs");
-        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        let production = SOURCE.split_once("\n#[cfg(test)]").expect("test split").0;
         let call = production
             .split_once("init_workspace_protocol(")
             .expect("ext-workspace is initialised")

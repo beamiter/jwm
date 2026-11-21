@@ -1340,11 +1340,11 @@ fn output_management_is_advertised_only_where_output_configure_is_serviced() {
     }
 }
 
-/// `source` with everything from its first `#[cfg(test)]` on removed, so a
-/// pin cannot be satisfied by a test's own needle.
+/// Exclude top-level test items so a pin cannot match its own assertion.
+/// A conditional field or statement within production code is not a cut-off.
 fn production(source: &str) -> &str {
     source
-        .split_once("#[cfg(test)]")
+        .split_once("\n#[cfg(test)]")
         .map_or(source, |(code, _)| code)
 }
 

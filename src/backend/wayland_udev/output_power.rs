@@ -28,7 +28,9 @@ struct OutputPower {
 }
 
 pub(crate) struct OutputPowerRequest {
+    #[cfg(any(feature = "backend-wayland-udev", test))]
     pub(crate) output: WeakOutput,
+    #[cfg(any(feature = "backend-wayland-udev", test))]
     control: Weak<ZwlrOutputPowerV1>,
 }
 
@@ -41,6 +43,7 @@ pub(crate) struct OutputPowerState {
     pub(crate) pending: VecDeque<OutputPowerRequest>,
 }
 
+#[cfg(any(feature = "backend-wayland-udev", test))]
 impl OutputPowerState {
     pub(crate) fn sync(&mut self, modes: impl IntoIterator<Item = (Output, bool)>) -> bool {
         #[allow(
@@ -118,6 +121,7 @@ fn protocol_mode(on: bool) -> zwlr_output_power_v1::Mode {
     }
 }
 
+#[cfg(any(feature = "backend-wayland-udev", test))]
 fn publish_mode(power: &mut OutputPower, on: bool) -> bool {
     if power.on == on {
         return false;
@@ -249,7 +253,9 @@ impl Dispatch<ZwlrOutputPowerV1, OutputPowerData> for JwmWaylandState {
         let output_name = output.name();
         info!("[udev/wayland] DPMS on={on} requested for {output_name}");
         state.output_power.pending.push_back(OutputPowerRequest {
+            #[cfg(any(feature = "backend-wayland-udev", test))]
             output: output.downgrade(),
+            #[cfg(any(feature = "backend-wayland-udev", test))]
             control,
         });
         state.push_event(BackendEvent::OutputPowerSet { output_name, on });
