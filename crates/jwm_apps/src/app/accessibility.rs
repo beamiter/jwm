@@ -9,6 +9,7 @@ const SEARCH: NodeId = NodeId(1);
 const EDITOR: NodeId = NodeId(2);
 const RESULTS: NodeId = NodeId(3);
 const MODAL: NodeId = NodeId(4);
+const REFRESH: NodeId = NodeId(5);
 
 pub(crate) struct Semantics {
     rows: HashMap<PathBuf, NodeId>,
@@ -22,7 +23,7 @@ impl Default for Semantics {
         Self {
             rows: HashMap::new(),
             row_generation: None,
-            next_id: 5,
+            next_id: 6,
             previous: None,
         }
     }
@@ -63,6 +64,17 @@ impl Semantics {
                 }
                 children.extend([SEARCH, RESULTS]);
                 nodes.push((SEARCH, search));
+                if let Some(hit) = app
+                    .hits
+                    .iter()
+                    .find(|hit| hit.action == Action::RefreshNotebook)
+                {
+                    let mut refresh = named(Role::Button, &hit.label);
+                    refresh.add_action(Request::Click);
+                    refresh.set_bounds(bounds(hit.rect, scale));
+                    children.push(REFRESH);
+                    nodes.push((REFRESH, refresh));
+                }
                 if app.focus == Focus::Search {
                     focus = SEARCH;
                 }
@@ -149,6 +161,7 @@ impl Semantics {
         let action = match (request.target_node, request.action) {
             (SEARCH, Request::Focus) if notes.managed => Action::Search,
             (EDITOR, Request::Focus) => Action::Edit,
+            (REFRESH, Request::Click) if notes.managed => Action::RefreshNotebook,
             (id, Request::Click) if notes.managed => {
                 let Some(generation) = notes.current_rows() else {
                     return false;
