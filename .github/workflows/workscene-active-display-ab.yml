@@ -123,8 +123,10 @@ jobs:
           test "$line" -gt 0
           grep -F "src/jwm/features/workscenes.rs:$line:" evidence/a-test.log
           for arm in a b; do
-            binary=$(find "target-$arm/debug/deps" -maxdepth 1 -type f -executable -name 'jwm-*')
+            binary=$(sed -nE 's@^ +Running unittests src/lib\.rs \(([^)]+)\)$@\1@p' "evidence/$arm-test.log")
             test -x "$binary"
+            binary=$(realpath "$binary")
+            [[ "$binary" == "$GITHUB_WORKSPACE/target-$arm/"* ]]
             sha256sum "$binary"
           done > evidence/independent-test-binaries.sha256
           test "$(cut -d' ' -f1 evidence/independent-test-binaries.sha256 | sort -u | wc -l)" -eq 2
