@@ -1,0 +1,169 @@
+name: Winit Notes search software frame evidence
+on:
+  pull_request:
+    branches: ['dot/winit-notebook-frames-base']
+    types: [opened, synchronize, reopened, converted_to_draft]
+    paths:
+      - '.github/workflows/winit-notebook-frames.yml'
+      - 'scripts/winit-notebook-frames.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winit-notebook-frames-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  A: 5851dcd83e5de41384ad26ede9c42e6db458ed94
+  B: 0f516083f1deebc0de2601ffc534e2e3d9238eed
+  B_TREE: 28b3ef67cddc3c62d5386dd5d70288a3cc780219
+
+jobs:
+  evidence:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'dot/winit-notebook-frames-base' &&
+      github.event.pull_request.head.ref == 'dot/winit-notebook-frames-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Initialize always-retained evidence
+        run: mkdir -m 700 evidence
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: fixture
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: beamiter/jwm
+          ref: ${{ env.B }}
+          fetch-depth: 3
+          path: source-b
+          persist-credentials: false
+      - name: Verify exact pins and validation-only scope
+        timeout-minutes: 3
+        env:
+          EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$EVENT_BASE" = "$B"
+          test "$(git -C fixture rev-parse HEAD)" = "$EVENT_HEAD"
+          git -C fixture merge-base --is-ancestor "$B" HEAD
+          git -C fixture diff --exit-code "$B" HEAD -- . ':!.github/workflows/winit-notebook-frames.yml' ':!scripts/winit-notebook-frames.py'
+          test "$(git -C source-b rev-parse HEAD)" = "$B"
+          test "$(git -C source-b rev-parse 'HEAD^{tree}')" = "$B_TREE"
+          test "$(git -C source-b rev-parse 'HEAD^1')" = "$A"
+          expected_paths=$(printf '%s\n' scripts/test-native-apps.py)
+          test "$(git -C source-b diff --name-only "$A" HEAD)" = "$expected_paths"
+          for d in fixture source-b; do
+            test -z "$(git -C "$d" -c core.fsmonitor=false status --porcelain --untracked-files=all)"
+            git -C "$d" rev-parse HEAD 'HEAD^{tree}' > "evidence/${d}-revision.txt"
+          done
+          sha256sum fixture/scripts/winit-notebook-frames.py > evidence/fixture.sha256
+          /usr/bin/python3 -I -m py_compile fixture/scripts/winit-notebook-frames.py
+      - name: Install signed graphics, Xvfb and Pinyin dependencies as in #156
+        timeout-minutes: 12
+        env:
+          JWM_CI_PREFETCH_CJK: "1"
+        run: |
+          set -euo pipefail
+          unset JWM_CI_APT_SOURCES
+          bash source-b/scripts/ci-install-deps.sh build-essential pkg-config libglib2.0-dev libcairo2-dev libpango1.0-dev \
+            libasound2-dev libdbus-1-dev libudev-dev libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcb1-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxrender-dev \
+            xvfb xauth xdotool x11-utils xwayland imagemagick dbus-x11 fonts-noto-cjk \
+            fcitx5 fcitx5-pinyin fcitx5-modules 2>&1 | tee evidence/dependency-install.log
+          dpkg-query -W 'fcitx5*' xvfb xdotool libgl1-mesa-dri fonts-noto-cjk > evidence/dependencies.txt
+          fcitx5 --version >> evidence/dependencies.txt 2>&1
+          dpkg-query -L fcitx5-modules | grep -E "(classicui|waylandim)\.(conf|so)$" >> evidence/dependencies.txt
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        timeout-minutes: 6
+        with:
+          toolchain: stable
+      - name: Cold exact release JWM and Notes builds
+        timeout-minutes: 53
+        run: |
+          set -euo pipefail
+          toolbin="$(dirname "$(rustup which cargo)")"
+          mkdir -m 700 build-home build-cargo build-config
+          "$toolbin/cargo" --version --verbose > evidence/cargo.txt
+          "$toolbin/rustc" --version --verbose > evidence/rustc.txt
+          sha256sum "$toolbin/cargo" "$toolbin/rustc" /usr/bin/python3 > evidence/tools.sha256
+          build() {
+            local origin="$1" expected="$2" log="$3" bound="$4"
+            shift 4
+            (
+              cd "$origin"
+              test -z "$(git -c core.fsmonitor=false status --porcelain --untracked-files=all)"
+              test "$(git rev-parse HEAD)" = "$expected"
+              env -i PATH="$toolbin:/usr/bin:/bin" HOME="$GITHUB_WORKSPACE/build-home" \
+                CARGO_HOME="$GITHUB_WORKSPACE/build-cargo" XDG_CONFIG_HOME="$GITHUB_WORKSPACE/build-config" \
+                RUSTC="$toolbin/rustc" CARGO_BUILD_JOBS=2 LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+                GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+                timeout -k 15s "$bound" "$toolbin/cargo" "$@"
+              test -z "$(git -c core.fsmonitor=false status --porcelain --untracked-files=all)"
+              test "$(git rev-parse HEAD)" = "$expected"
+            ) 2>&1 | tee "$log"
+          }
+          test ! -e source-b/target
+          build source-b "$B" evidence/jwm-build.log 25m build --locked --release --no-default-features --features backend-wayland-nested --bin jwm
+          build source-b "$B" evidence/notes-build.log 23m build --locked --release --manifest-path crates/jwm_apps/Cargo.toml --bin jwm-notes --target-dir target/fcitx-notes
+          sha256sum source-b/target/release/jwm source-b/target/fcitx-notes/release/jwm-notes > evidence/binaries.sha256
+      - name: Run balanced 40 and 1,000 note search trials
+        timeout-minutes: 22
+        run: |
+          set -euo pipefail
+          unset DISPLAY XAUTHORITY WAYLAND_DISPLAY WAYLAND_SOCKET DBUS_SESSION_BUS_ADDRESS DBUS_SYSTEM_BUS_ADDRESS
+          sha256sum -c evidence/binaries.sha256
+          sha256sum -c evidence/fixture.sha256
+          response=0
+          for trial in 1 2 3 4; do
+            if (( trial % 2 )); then
+              cases=(ascii:40 multilingual:1000 multilingual:40 ascii:1000)
+            else
+              cases=(ascii:1000 multilingual:40 multilingual:1000 ascii:40)
+            fi
+            for case in "${cases[@]}"; do
+              corpus=${case%:*}
+              count=${case#*:}
+              mode="$trial-$corpus-$count"
+              scope=$(mktemp -d)
+              install -d -m 700 "$scope"/{config,run}
+              if env -i PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+                HOME="$scope" XDG_CONFIG_HOME="$scope/config" XDG_RUNTIME_DIR="$scope/run" \
+                JWM_FCITX_ISOLATED=1 GSETTINGS_BACKEND=memory \
+                timeout -k 15s 150s dbus-run-session -- \
+                /usr/bin/python3 -I fixture/scripts/winit-notebook-frames.py \
+                  --role B --source "$B" --jwm "$PWD/source-b/target/release/jwm" \
+                  --notes "$PWD/source-b/target/fcitx-notes/release/jwm-notes" \
+                  --out "$PWD/evidence/$mode" --note-count "$count" --corpus "$corpus" 2>&1 | tee "evidence/$mode.log"; then
+                printf 'success\n' > "evidence/$mode.exit"
+              else
+                rc=$?
+                printf '%s\n' "$rc" > "evidence/$mode.exit"
+                response=1
+              fi
+              rm -rf -- "$scope"
+            done
+          done
+          exit "$response"
+      - name: Retain PNG, protocol, source pins and failed-case evidence
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: winit-notebook-frames-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
