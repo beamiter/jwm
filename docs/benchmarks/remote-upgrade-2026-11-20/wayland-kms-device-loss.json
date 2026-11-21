@@ -1,0 +1,236 @@
+{
+  "scope": "Whole virtio GPU PCI removal in an isolated QEMU guest with a native read-only Wayland JPEG session",
+  "date_utc": "2026-11-21",
+  "guest": {
+    "qemu_version": "8.2.2",
+    "kernel_release": "6.17.0-35-generic",
+    "acceleration": "KVM + VirGL",
+    "build_features": [
+      "remote-wayland",
+      "backend-wayland-udev"
+    ],
+    "pci_function": "0000:00:01.0",
+    "input_sha256": {
+      "qemu-system-x86_64": "8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854",
+      "vmlinuz": "8438f7568ffd15cac15838187e65ff8864fe44461b48fd779dce2c42a88666c5",
+      "initramfs": "603307e83527fb60deb7e8881f07791c61aa52961b3a650689efd30c1e8bb507",
+      "observer": "509e5209a942820a6c88198a1fc7bcfe260e6be2d03deb0644a560d66e1d9fad",
+      "framebuffer_sampler": "429c9e38dc5f49af0ad1c762f009a005b7a9a1024c9d391efc5fed48ed806d47"
+    }
+  },
+  "baseline": {
+    "source_commit": "4cbeff1d131c43e721ce279bed7ba3edcab40052",
+    "binary_sha256": {
+      "jwm": "258c5d1abd8fc47bd6fec2528739559758bdb0d4fb20494aabb90e747f50a9d3",
+      "jwm-remote": "5f085158159828ddc9c458aa572681cb19fcc8da888ac8d56e4ea28d4692f96c"
+    },
+    "observer_failed_as_expected": true,
+    "viewer_failure_category": "unknown",
+    "kernel_remove_events": [
+      {
+        "path": "/devices/pci0000:00/0000:00:01.0/drm/card0/card0-Virtual-1",
+        "kernel_monotonic_ns": 9017679000
+      },
+      {
+        "path": "/devices/pci0000:00/0000:00:01.0/drm/card0/card0-Virtual-2",
+        "kernel_monotonic_ns": 9019905000
+      },
+      {
+        "path": "/devices/pci0000:00/0000:00:01.0/drm/card0",
+        "kernel_monotonic_ns": 9019941000
+      },
+      {
+        "path": "/devices/pci0000:00/0000:00:01.0/drm/renderD128",
+        "kernel_monotonic_ns": 9019978000
+      }
+    ]
+  },
+  "candidate": {
+    "source_commit": "3832a8da5ee25c5ce9090aaf56acdd72817f9afa",
+    "binary_sha256": {
+      "jwm": "817a3637eb33c21bf051b93ad404e6562c6f6c890e61e6de007d55c521948eff",
+      "jwm-remote": "35075a6b405f3cd8f6a27dd7d4b57f5dc84f7ae50e1f86749664eb0a1de82a24"
+    },
+    "observer": {
+      "output": "Virtual-1",
+      "drawn_acks": 2,
+      "phases": [
+        {
+          "expected_rgb": [
+            [
+              204,
+              34,
+              68
+            ],
+            [
+              48,
+              176,
+              80
+            ],
+            [
+              48,
+              176,
+              80
+            ],
+            [
+              204,
+              34,
+              68
+            ]
+          ],
+          "output": {
+            "size": [
+              1024,
+              768
+            ],
+            "rgb": [
+              [
+                204,
+                35,
+                68
+              ],
+              [
+                48,
+                176,
+                81
+              ],
+              [
+                48,
+                176,
+                81
+              ],
+              [
+                204,
+                35,
+                68
+              ]
+            ]
+          },
+          "matching_flip": {
+            "output_name": "Virtual-1",
+            "submission": 163,
+            "monotonic_ns": 4014989000,
+            "sequence": 0,
+            "flags": 0,
+            "buffer_scale": 1,
+            "feedback_request": 1,
+            "composited": {
+              "visible_rect": [
+                19,
+                71,
+                980,
+                672
+              ],
+              "output_visible_rect": [
+                19,
+                71,
+                980,
+                672
+              ],
+              "overlapping_cursor_elements": 0
+            }
+          },
+          "virtio_primary": {
+            "connector": "Virtual-1",
+            "connector_id": 38,
+            "crtc_id": 37,
+            "plane_id": 33,
+            "framebuffer_id": 51,
+            "width": 1024,
+            "height": 768,
+            "format": "XRGB8888",
+            "modifier": "0x0000000000000000",
+            "pitch": 4096,
+            "offset": 0,
+            "host_transfer": true,
+            "samples": [
+              {
+                "x": 384,
+                "y": 256,
+                "rgb": [
+                  204,
+                  35,
+                  68
+                ]
+              },
+              {
+                "x": 640,
+                "y": 256,
+                "rgb": [
+                  48,
+                  176,
+                  81
+                ]
+              },
+              {
+                "x": 384,
+                "y": 512,
+                "rgb": [
+                  48,
+                  176,
+                  81
+                ]
+              },
+              {
+                "x": 640,
+                "y": 512,
+                "rgb": [
+                  204,
+                  35,
+                  68
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "device_loss": {
+        "card": "card0",
+        "connector": "card0-Virtual-1",
+        "armed_ns": 7953386322,
+        "device_gone_observed_ns": 8003668580,
+        "viewer_exit": 1,
+        "host_exit": 1,
+        "failure": {
+          "category": "wayland_presentation_timeout",
+          "cleanup": "unknown",
+          "io_kind": null,
+          "peer_close_code": null,
+          "reconnect_certified": false,
+          "stage": "session"
+        },
+        "drawn_acks_before": 2,
+        "drawn_acks_after": 2,
+        "presented_after_arming": 0,
+        "post_removal_frames_sent": 2,
+        "post_removal_feedback_requests": 1,
+        "discarded_feedback": 0
+      }
+    },
+    "compositor_alive_after_session": true,
+    "kernel_remove_events": [
+      {
+        "path": "/devices/pci0000:00/0000:00:01.0/drm/card0/card0-Virtual-1",
+        "kernel_monotonic_ns": 7997917000
+      },
+      {
+        "path": "/devices/pci0000:00/0000:00:01.0/drm/card0/card0-Virtual-2",
+        "kernel_monotonic_ns": 8002880000
+      },
+      {
+        "path": "/devices/pci0000:00/0000:00:01.0/drm/card0",
+        "kernel_monotonic_ns": 8002932000
+      },
+      {
+        "path": "/devices/pci0000:00/0000:00:01.0/drm/renderD128",
+        "kernel_monotonic_ns": 8002978000
+      }
+    ],
+    "initial_kernel_flip": {
+      "crtc_index": 0,
+      "kernel_monotonic_ns": 4014991000,
+      "difference_from_reported_flip_ns": 2000
+    }
+  },
+  "sanitized_serial_and_fixture_archive_sha256": "d22e8089e0a4695a40f88ff64bab47f784533397c0f6b424f2e5eac6d4ba69e5"
+}
