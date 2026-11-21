@@ -1292,6 +1292,7 @@ struct LayoutPass<'a, M> {
     config: &'a PresentationConfig,
     measurer: &'a M,
     network_metrics: std::cell::OnceCell<NetworkTextMetrics>,
+    widest_clock_digits: std::cell::OnceCell<[char; 10]>,
     percent_metrics: [std::cell::OnceCell<PercentTextMetrics>; 5],
 }
 
@@ -1675,6 +1676,7 @@ pub(crate) fn build_scene<M: TextMeasurer>(
         config,
         measurer,
         network_metrics: std::cell::OnceCell::new(),
+        widest_clock_digits: std::cell::OnceCell::new(),
         percent_metrics: std::array::from_fn(|_| std::cell::OnceCell::new()),
     }
     .build(view, viewport, interaction)
@@ -1962,6 +1964,56 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
         }))
     }
 
+    fn numeric_clock_width(&self, value: &str, icon: &str) -> Option<f32> {
+        // In these four ASCII clock shapes a digit sets the upper bound for
+        // that position. E.g. minutes and seconds cannot begin with 6–9.
+        // Other formats keep the ordinary measured text.
+        const SHAPES: [&str; 4] = [
+            "29:59",
+            "29:59:59",
+            "9999-19-39 29:59",
+            "9999-19-39 29:59:59",
+        ];
+        let shape = SHAPES.into_iter().find(|shape| {
+            shape.len() == value.len()
+                && shape.bytes().zip(value.bytes()).all(|(slot, byte)| {
+                    if slot.is_ascii_digit() {
+                        byte.is_ascii_digit() && byte <= slot
+                    } else {
+                        slot == byte
+                    }
+                })
+        })?;
+        let measure =
+            |text: &str| finite_non_negative(self.measurer.measure(text, self.font_size()).width);
+        let widest = self.widest_clock_digits.get_or_init(|| {
+            let mut widest = ('0', 0.0_f32);
+            std::array::from_fn(|index| {
+                let digit = char::from(b'0' + index as u8);
+                let width = measure(digit.encode_utf8(&mut [0; 4]));
+                if width > widest.1 {
+                    widest = (digit, width);
+                }
+                widest.0
+            })
+        });
+        // Shape the whole exemplar so rounding/ink overhang is not added
+        // separately for each glyph. Do not pad the displayed string itself.
+        let mut sample = String::with_capacity(icon.len() + 2 + shape.len());
+        if !icon.is_empty() {
+            sample.push_str(icon);
+            sample.push_str("  ");
+        }
+        sample.extend(shape.bytes().map(|byte| {
+            if byte.is_ascii_digit() {
+                widest[usize::from(byte - b'0')]
+            } else {
+                char::from(byte)
+            }
+        }));
+        Some(measure(&sample))
+    }
+
     fn control_extent(&self, control: &ControlSpec, compact: bool) -> f32 {
         if self.config.edge.is_vertical() {
             let lines = self.percent_text_metrics(control.id).map_or_else(
@@ -2025,7 +2077,19 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
             } else {
                 self.horizontal_text_padding()
             };
-            (self.measurer.measure(&text, self.font_size()).width + padding * 2.0)
+            let width = if control.id == NodeId::Clock {
+                let (value, icon) = if compact {
+                    (text.as_str(), "")
+                } else {
+                    (control.value.as_str(), control.icon.as_str())
+                };
+                self.numeric_clock_width(value, icon)
+            } else {
+                None
+            }
+            .unwrap_or_default()
+            .max(self.measurer.measure(&text, self.font_size()).width);
+            (width + padding * 2.0)
                 .max(self.minimum_target_extent())
                 .min(240.0)
         }
@@ -3476,6 +3540,85 @@ mod tests {
             system_details: &SYSTEM_DETAILS,
             brightness: BrightnessState::new(Some(percent(70))),
             battery: BatteryState::present(Some(percent(80)), false),
+        }
+    }
+
+    #[test]
+    fn numeric_clock_ticks_keep_horizontal_hit_targets_and_neighbours_still() {
+        struct ProportionalDigits;
+        impl TextMeasurer for ProportionalDigits {
+            fn measure(&self, text: &str, size: f32) -> Size {
+                let width = text
+                    .chars()
+                    .map(|ch| match ch {
+                        '1' => 0.32,
+                        '8' => 0.76,
+                        _ => 0.55,
+                    })
+                    .sum::<f32>()
+                    * size;
+                Size::new(width, size)
+            }
+        }
+        let a = "2026-11-21 11:18:11";
+        let b = "2026-11-21 11:18:18";
+        assert!(
+            ProportionalDigits.measure(a, 13.0).width < ProportionalDigits.measure(b, 13.0).width
+        );
+        for edge in [crate::BarEdge::Top, crate::BarEdge::Bottom] {
+            for desktop_header in [false, true] {
+                let config = PresentationConfig {
+                    edge,
+                    desktop_header,
+                    ..Default::default()
+                };
+                let engine = LayoutEngine::new(config, ProportionalDigits);
+                let make = |width, time| {
+                    let mut bar = view(&[], "");
+                    bar.time = time;
+                    bar.show_seconds = true;
+                    engine.build(bar, Size::new(width, 38.0), &InteractionState::default())
+                };
+                for (width, full) in [(1700.0, true), (600.0, false)] {
+                    let left = make(width, a);
+                    let right = make(width, b);
+                    for scene in [&left, &right] {
+                        assert!(scene.hits.iter().any(|hit| hit.id == NodeId::Audio));
+                        assert!(scene.hits.iter().any(|hit| hit.id == NodeId::Clock));
+                    }
+                    assert_eq!(left.hits, right.hits, "{edge:?} {desktop_header} {width}");
+                    for (scene, expected) in [(&left, a), (&right, b)] {
+                        let expected = if full {
+                            expected
+                        } else {
+                            expected.split_once(' ').unwrap().1
+                        };
+                        assert!(scene.nodes_for(NodeId::Clock).any(|node| {
+                            matches!(node, SceneNode::Text { text, .. } if text.ends_with(expected))
+                        }), "{edge:?} {desktop_header} {width}: clock lost {expected}");
+                    }
+                    let neighbours = |scene: &Scene| {
+                        scene
+                            .nodes
+                            .iter()
+                            .filter(|node| node.id() != NodeId::Clock)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(neighbours(&left), neighbours(&right));
+                }
+                let before = make(1700.0, "Sat 11:18:11");
+                let after = make(1700.0, "Saturday 11:18:11");
+                let clock_bounds = |scene: &Scene| {
+                    scene
+                        .hits
+                        .iter()
+                        .find(|hit| hit.id == NodeId::Clock)
+                        .unwrap()
+                        .bounds
+                };
+                assert!(clock_bounds(&before).width < clock_bounds(&after).width);
+            }
         }
     }
 
