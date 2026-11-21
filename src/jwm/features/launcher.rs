@@ -469,6 +469,7 @@ pub struct AgentEntry {
     pub pane_id: String,
     pub status: String,
     pub revision: u64,
+    pub(crate) association_token: Option<String>,
     pub monitor_token: String,
     pub monitor: Option<i32>,
     pub tag_mask: u64,
@@ -510,6 +511,13 @@ impl AgentEntry {
                     pane_id: text("pane_id"),
                     status: text("status"),
                     revision: entry.get("revision")?.as_u64()?,
+                    association_token: entry
+                        .get("association_token")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|token| {
+                            token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                        .map(str::to_owned),
                     monitor_token: text("monitor_token"),
                     monitor: entry
                         .get("monitor")

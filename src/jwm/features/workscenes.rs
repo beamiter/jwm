@@ -332,7 +332,7 @@ impl Jwm {
                 .and_then(|index| index.parse::<usize>().ok())
             {
                 let entry = plan.sessions.get(index).ok_or("Session preview expired")?;
-                self.activate_agent_session(backend, &entry.session_id, entry.revision)?;
+                self.activate_scene_agent_session(backend, entry)?;
             } else if let Some(index) = action
                 .strip_prefix("application:")
                 .and_then(|index| index.parse::<usize>().ok())

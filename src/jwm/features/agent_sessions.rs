@@ -29,6 +29,18 @@ pub(crate) struct AgentSession {
     pub revision: u64,
 }
 impl AgentSession {
+    fn association_token(&self) -> String {
+        // Keep the existing snapshot identity: revisions need not increase
+        // across provider incarnations.
+        jwm_eva_core::protocol::digest(&json!({
+            "session_id": self.session_id,
+            "host_incarnation": self.host_incarnation,
+            "pane_id": self.pane_id,
+            "window_token": self.window_token,
+            "revision": self.revision,
+        }))
+    }
+
     fn validate(&self) -> Result<(), String> {
         for value in [
             &self.session_id,
@@ -149,6 +161,22 @@ impl AgentSessions {
         }
         gone
     }
+    fn active_associated(
+        &self,
+        id: &str,
+        revision: u64,
+        now: Instant,
+        expected: Option<(&str, &str)>,
+    ) -> Result<AgentSession, String> {
+        let session = self.active(id, revision, now)?;
+        if expected.is_some_and(|(host, token)| {
+            session.host_id != host || session.association_token() != token
+        }) {
+            return Err("Terminal session changed; open the scene again".into());
+        }
+        Ok(session)
+    }
+
     fn active(&self, id: &str, revision: u64, now: Instant) -> Result<AgentSession, String> {
         let entry = self.entries.get(id).ok_or("agent_session_gone")?;
         if entry.session.revision != revision {
@@ -360,7 +388,7 @@ impl AgentSessions {
                 let mut value = json!(entry.session);
                 let digest=jwm_eva_core::protocol::digest(&json!({"session_id":entry.session.session_id,"host_incarnation":entry.session.host_incarnation}));
                 value["session_ref"]=json!(format!("s{}",&digest[..31]));
-                value["association_token"] = json!(jwm_eva_core::protocol::digest(&json!({"session_id":entry.session.session_id,"host_incarnation":entry.session.host_incarnation,"pane_id":entry.session.pane_id,"window_token":entry.session.window_token,"revision":entry.session.revision})));
+                value["association_token"] = json!(entry.session.association_token());
                 let window = context["windows"].as_array().and_then(|windows| {
                     windows
                         .iter()
@@ -574,11 +602,43 @@ impl Jwm {
         id: &str,
         revision: u64,
     ) -> Result<Value, String> {
+        self.activate_agent_session_checked(backend, id, revision, None)
+    }
+
+    pub(crate) fn activate_scene_agent_session(
+        &mut self,
+        backend: &mut dyn Backend,
+        preview: &super::launcher::AgentEntry,
+    ) -> Result<Value, String> {
+        let association = preview
+            .association_token
+            .as_deref()
+            .ok_or("Session preview expired; open the scene again")?;
+        self.activate_agent_session_checked(
+            backend,
+            &preview.session_id,
+            preview.revision,
+            Some((&preview.host_id, association)),
+        )
+    }
+
+    fn activate_agent_session_checked(
+        &mut self,
+        backend: &mut dyn Backend,
+        id: &str,
+        revision: u64,
+        expected_association: Option<(&str, &str)>,
+    ) -> Result<Value, String> {
         if self.features.system_ui.is_locked() || !self.features.monitor_lock.is_empty() {
             return Err("session_locked".into());
         }
         let now = Instant::now();
-        let session = self.features.agent_sessions.active(id, revision, now)?;
+        let session = self.features.agent_sessions.active_associated(
+            id,
+            revision,
+            now,
+            expected_association,
+        )?;
         let context = self.eva_execution_context();
         let window = context["windows"]
             .as_array()
@@ -777,6 +837,79 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn scene_association_requires_the_current_pane_even_at_the_same_revision() {
+        let now = Instant::now();
+        let original = session();
+        let mut registry = AgentSessions::default();
+        registry.register(original.clone(), now).unwrap();
+        let old = original.association_token();
+        let advertised = registry.snapshot(&json!({
+            "windows": [{"target_token": original.window_token}],
+        }));
+        let preview = super::super::launcher::AgentEntry::from_snapshot(&advertised);
+        assert_eq!(preview[0].association_token.as_deref(), Some(old.as_str()));
+        assert!(preview[0].can_reveal);
+        assert!(
+            registry
+                .active_associated(
+                    &original.session_id,
+                    original.revision,
+                    now,
+                    Some((&original.host_id, &old))
+                )
+                .is_ok()
+        );
+
+        let later = now + LEASE + Duration::from_secs(1);
+        let mut current = original.clone();
+        current.host_incarnation = "boot:next".into();
+        current.pane_id = "pane:next".into();
+        current.window_token = "wm:w:1000002".into();
+        registry.register(current.clone(), later).unwrap();
+        assert!(
+            registry
+                .active_associated(
+                    &original.session_id,
+                    original.revision,
+                    later,
+                    Some((&original.host_id, &old))
+                )
+                .unwrap_err()
+                .contains("Terminal session changed")
+        );
+        assert!(registry.requests.is_empty());
+        let new = current.association_token();
+        assert_ne!(new, old);
+        let live = registry
+            .active_associated(
+                &current.session_id,
+                current.revision,
+                later,
+                Some((&current.host_id, &new)),
+            )
+            .unwrap();
+        assert_eq!(live.window_token, current.window_token);
+        assert_eq!(live.pane_id, current.pane_id);
+        // A different host may use the same incarnation and pane labels.
+        let last = later + LEASE + Duration::from_secs(1);
+        let mut other_host = current.clone();
+        other_host.host_id = "other-host".into();
+        registry.register(other_host.clone(), last).unwrap();
+        assert_eq!(other_host.association_token(), new);
+        assert!(
+            registry
+                .active_associated(
+                    &current.session_id,
+                    current.revision,
+                    last,
+                    Some((&current.host_id, &new))
+                )
+                .is_err()
+        );
+        assert!(registry.requests.is_empty());
+    }
+
     #[test]
     fn summary_only_counts_current_window_lifetimes_and_distinguishes_unknown_results() {
         let now = Instant::now();
