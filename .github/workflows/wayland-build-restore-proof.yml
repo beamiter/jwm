@@ -24,11 +24,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: a2aa7091fcaba6af37d3f403245d806729187bed
+          ref: 52145849b020cdeff252b86217cf3069c2d0027f
       - name: Verify exact product source
         run: |
-          test "$(git rev-parse HEAD)" = "a2aa7091fcaba6af37d3f403245d806729187bed"
-          test "$(git rev-parse HEAD^{tree})" = "d093dda0cea4429e76f69d3f322cb9a9e08d67c0"
+          test "$(git rev-parse HEAD)" = "52145849b020cdeff252b86217cf3069c2d0027f"
+          test "$(git rev-parse HEAD^{tree})" = "074be1f866c50070e0290cd1804d2edbd74d37af"
       - name: Install native build and software renderer dependencies
         timeout-minutes: 10
         run: |

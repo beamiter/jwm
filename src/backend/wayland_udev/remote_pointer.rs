@@ -223,6 +223,7 @@ struct HitSurface {
 pub(crate) struct WindowInputLayout(Vec<HitSurface>);
 
 impl WindowInputLayout {
+    #[cfg(feature = "backend-wayland-udev")]
     pub(super) fn surface_count(&self) -> usize {
         self.0.len()
     }

@@ -9176,7 +9176,7 @@ mod udev_backend_selection_tests {
         );
 
         let state = include_str!("state.rs");
-        let state_production = state.split_once("#[cfg(test)]").unwrap().0;
+        let state_production = state.split_once("\n#[cfg(test)]").unwrap().0;
         assert!(state_production.contains("session_lock_epoch = self.session_lock_epoch"));
         assert!(state_production.contains("BackendEvent::KeyPress { .. }"));
     }
