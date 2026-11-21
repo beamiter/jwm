@@ -1,0 +1,141 @@
+name: Workscene two-output focus A/B
+on:
+  pull_request:
+    branches: ['dot/workscene-active-display-ab-base']
+    types: [opened, synchronize, reopened, converted_to_draft]
+    paths: ['.github/workflows/workscene-active-display-ab.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workscene-active-display-ab-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  A: 97b9e342d6951363bcec6ded67c8cf2d2e3b091f
+  A_TREE: 95da12b40a791773016623cd5dbd987e31a95b92
+  B: ebe4d525c55f0aa71382f0831a651c23f2533c6a
+  B_TREE: ce374ffeffdfb25ff1b826f869223f05a0f1d47a
+  CASE: jwm::features::workscenes::tests::scene_layout_keeps_the_active_screen_and_uses_its_visible_fallback
+
+jobs:
+  evidence:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'dot/workscene-active-display-ab-base' &&
+      github.event.pull_request.head.ref == 'dot/workscene-active-display-ab-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Initialize retained evidence
+        run: mkdir -m 700 evidence
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: fixture
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.B }}
+          fetch-depth: 2
+          path: source-b
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.A }}
+          fetch-depth: 2
+          path: source-a
+          persist-credentials: false
+      - name: Verify exact pins and attach only the regression test to the control
+        env:
+          EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$EVENT_BASE" = "$A"
+          test "$(git -C fixture rev-parse HEAD)" = "$EVENT_HEAD"
+          git -C fixture merge-base --is-ancestor "$A" HEAD
+          test "$(git -C source-b rev-parse 'HEAD^')" = "$A"
+          git -C fixture diff --exit-code "$A" HEAD -- . ':!.github/workflows/workscene-active-display-ab.yml'
+          for arm in a b; do
+            git -C "source-$arm" rev-parse HEAD 'HEAD^{tree}' > "evidence/source-$arm.txt"
+            test -z "$(git -C "source-$arm" status --porcelain --untracked-files=all)"
+          done
+          diff -u <(printf '%s\n' "$A" "$A_TREE") evidence/source-a.txt
+          diff -u <(printf '%s\n' "$B" "$B_TREE") evidence/source-b.txt
+          /usr/bin/python3 - <<'PY'
+          from pathlib import Path
+          relative = "src/jwm/features/workscenes.rs"
+          a, b = [Path(f"source-{arm}/{relative}") for arm in "ab"]
+          text = b.read_bytes()
+          begin = b"    #[test]\n    fn scene_layout_keeps_the_active_screen_and_uses_its_visible_fallback()"
+          end = b"    #[test]\n    fn scene_rechecks_the_exact_application_id_at_activation()"
+          assert text.count(begin) == text.count(end) == 1
+          test = text[text.index(begin):text.index(end)]
+          original = a.read_bytes()
+          assert original.count(end) == 1 and begin not in original
+          control = original.replace(end, test + end)
+          assert control.replace(test, b"") == original
+          a.write_bytes(control)
+          Path("evidence/identical-test.rs").write_bytes(test)
+          PY
+          test "$(git -C source-a diff --name-only)" = src/jwm/features/workscenes.rs
+          git -C source-a diff --check
+          git -C source-a diff > evidence/only-control-instrumentation.patch
+      - name: Install signed X11 build dependencies
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          unset JWM_CI_APT_SOURCES
+          bash source-b/scripts/ci-install-deps.sh build-essential pkg-config libglib2.0-dev             libcairo2-dev libpango1.0-dev libasound2-dev libdbus-1-dev libudev-dev libinput-dev             libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev             libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcb1-dev libxcb-composite0-dev             libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev             libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxrender-dev             2>&1 | tee evidence/dependencies.log
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        timeout-minutes: 6
+        with:
+          toolchain: stable
+      - name: Assert exact control fails at selected monitor and candidate passes
+        timeout-minutes: 29
+        run: |
+          set -euo pipefail
+          toolbin="$(dirname "$(rustup which cargo)")"
+          mkdir -m 700 build-home build-cargo build-config build-runtime
+          cargo_test() {
+            local arm="$1"
+            (cd "source-$arm" && env -i               HOME="$GITHUB_WORKSPACE/build-home" PATH="$toolbin:/usr/bin:/bin"               CARGO_HOME="$GITHUB_WORKSPACE/build-cargo" CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-$arm"               XDG_CONFIG_HOME="$GITHUB_WORKSPACE/build-config" XDG_RUNTIME_DIR="$GITHUB_WORKSPACE/build-runtime"               RUSTC="$toolbin/rustc" CARGO_BUILD_JOBS=2 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null LANG=C.UTF-8               "$toolbin/cargo" test --locked --no-default-features --features backend-x11rb --lib "$CASE" -- --exact --nocapture               ) 2>&1 | tee "evidence/$arm-test.log"
+          }
+          # A shared target can reuse a binary for the other checkout: Cargo's
+          # fingerprint includes target-relative paths and mtimes, not an A/B ID.
+          test ! -e target-a && test ! -e target-b
+          cargo_test b
+          grep -F "test $CASE ... ok" evidence/b-test.log
+          control=0
+          cargo_test a || control=$?
+          test "$control" -eq 101
+          grep -F "test $CASE ... FAILED" evidence/a-test.log
+          grep -E "assertion .*left .*right.* failed" evidence/a-test.log
+          line="$(grep -nF 'assert_eq!(jwm.state.sel_mon, Some(active));' source-a/src/jwm/features/workscenes.rs | cut -d: -f1)"
+          test "$line" -gt 0
+          grep -F "src/jwm/features/workscenes.rs:$line:" evidence/a-test.log
+          for arm in a b; do
+            binary=$(sed -nE 's@^ +Running unittests src/lib\.rs \(([^)]+)\)$@\1@p' "evidence/$arm-test.log")
+            test -x "$binary"
+            binary=$(realpath "$binary")
+            [[ "$binary" == "$GITHUB_WORKSPACE/target-$arm/"* ]]
+            sha256sum "$binary"
+          done > evidence/independent-test-binaries.sha256
+          test "$(cut -d' ' -f1 evidence/independent-test-binaries.sha256 | sort -u | wc -l)" -eq 2
+          test -z "$(git -C source-b status --porcelain --untracked-files=all)"
+      - name: Retain two-output test and evidence
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: workscene-active-display-ab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
