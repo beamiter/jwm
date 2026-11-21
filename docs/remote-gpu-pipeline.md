@@ -149,7 +149,12 @@ NVENC probes failed because `libcuda.so.1` was absent; no DRM render nodes were
 visible, so VAAPI probes were not attempted. This is not evidence about the
 user's RTX 5080. No device installation or driver-setting change was attempted.
 
-## Remaining native Wayland milestones
+## Native Wayland extension checklist from the initial audit
+
+This checklist records the extension work proposed in the initial copy audit.
+The current acceptance record tracks the tested Intel capture and presentation
+paths, guest KMS recovery, and the outstanding physical display and GPU tests.
+[Current plan acceptance](benchmarks/remote-upgrade-2026-11-20/README.md#plan-acceptance-status)
 
 ### A. Capture reuse and further formats
 
