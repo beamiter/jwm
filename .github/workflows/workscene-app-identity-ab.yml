@@ -15,10 +15,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  A: 167870e776223f1b6bcc050909a872cc2a9ca6d8
-  A_TREE: 03736f33b0a69083c5afcd63c5fc6119b787e7c1
-  B: 6461035f2aa633fd53d444e6e1a28c2f0afd77cb
-  B_TREE: f1343b676677bb15abf37ec7ce7f0a7cfc0696ed
+  MASTER: 167870e776223f1b6bcc050909a872cc2a9ca6d8
+  MASTER_TREE: 03736f33b0a69083c5afcd63c5fc6119b787e7c1
+  # This control has the same scene wiring as the candidate, but lacks
+  # the class/desktop-ID matcher. Stock master cannot show a scene at all.
+  A: 92fb09fd7802cc2d1250efdae5c790d9713ccc46
+  A_TREE: 88aabbe6b70cb8b247fc89d2c3bec5d47d6de420
+  B: f8050ca42421132793d2f3f4e4eb3424198bbb1b
+  B_TREE: afcf35515bca92f440a5fed1b0bc6c1027f4e044
 
 jobs:
   evidence:
@@ -63,15 +67,23 @@ jobs:
           EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          test "$EVENT_BASE" = "$A"
+          test "$EVENT_BASE" = "$MASTER"
           test "$(git -C fixture rev-parse HEAD)" = "$EVENT_HEAD"
-          git -C fixture merge-base --is-ancestor "$A" HEAD
-          git -C fixture diff --exit-code "$A" HEAD -- . ':!.github/workflows/workscene-app-identity-ab.yml' ':!scripts/test-workscene-app-identity.py'
+          git -C fixture merge-base --is-ancestor "$MASTER" HEAD
+          git -C fixture diff --exit-code "$MASTER" HEAD -- . ':!.github/workflows/workscene-app-identity-ab.yml' ':!scripts/test-workscene-app-identity.py'
           test "$(git -C source-a rev-parse HEAD)" = "$A"
           test "$(git -C source-a rev-parse 'HEAD^{tree}')" = "$A_TREE"
           test "$(git -C source-b rev-parse HEAD)" = "$B"
           test "$(git -C source-b rev-parse 'HEAD^{tree}')" = "$B_TREE"
-          test "$(git -C source-b rev-parse 'HEAD^1')" = "$A"
+          test "$(git -C fixture rev-parse "$MASTER^{tree}")" = "$MASTER_TREE"
+          test "$(git -C source-a rev-parse 'HEAD^1')" = "$MASTER"
+          test "$(git -C source-b rev-parse 'HEAD~2')" = "$MASTER"
+          # Cross-arm comparison: only the identity parser and matching
+          # should differ after giving the control the same launcher path.
+          git -C source-b fetch --no-tags --depth=1 ../source-a "$A"
+          test "$(git -C source-a diff --name-only "$MASTER" "$A")" = "$(printf '%s\n' src/jwm/features/system_ui.rs src/jwm/features/toggles.rs)"
+          git -C source-b diff --exit-code "$A" HEAD -- src/jwm/features/toggles.rs
+          printf '%s\n' "$MASTER" "$MASTER_TREE" > evidence/master-reference.txt
           expected_paths=$(printf '%s\n' src/jwm/features/system_ui.rs src/jwm/features/workscenes.rs)
           test "$(git -C source-b diff --name-only "$A" HEAD)" = "$expected_paths"
           for d in fixture source-a source-b; do
