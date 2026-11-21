@@ -1,0 +1,71 @@
+{
+  "scope": "Private Xvfb displays and authenticated IPv4 loopback transport. The real Aether UI used WebKitGTK and XEmbed. Forge, Anvil, Ember and Frost checks compiled the native integration.",
+  "binary_sha256": "7290dbdc1fe406d97ef4216ea00a296beec9b8e1eaf1d0aacd8ee82abfcf403c",
+  "source_sha256": {
+    "src/remote/client.rs": "3ff4c253f456df494d4867be27eeb6e8ce3920acd0e563ec2af70eeb810e1242",
+    "src/remote/engine.rs": "96e4f5083f0fe755cfcd861b492d18263c41ecbde3cbcd2fc04ed8f00ecef524",
+    "tools/jwm_remote_session.rs": "a3823b2f4313a872e40ee5d29924d29d153f700847cca25e33db7662325098a4",
+    "scripts/test-remote-recovery-window.py": "be7eac1dd4f9644477fd68507385789af2642bdc15f2e26f9c88a1a561c8c4e0"
+  },
+  "cli_tests_passed": 74,
+  "combined_x11_wayland_hardware_codec_check_exit": 0,
+  "direct_recovery_cases_passed": 4,
+  "managed_recovery_cases": {
+    "managed-window": {
+      "connections": 2,
+      "terminal": "closed",
+      "failure": null
+    },
+    "managed-xembed": {
+      "connections": 3,
+      "terminal": "closed",
+      "failure": null
+    },
+    "managed-disconnect": {
+      "connections": 2,
+      "terminal": "closed",
+      "failure": null
+    },
+    "managed-stdin-close": {
+      "connections": 1,
+      "terminal": "closed",
+      "failure": null
+    },
+    "managed-default": {
+      "connections": 1,
+      "terminal": "failed",
+      "failure": {
+        "category": "transport_loss",
+        "cleanup": "complete",
+        "io_kind": "unexpected_eof",
+        "peer_close_code": null,
+        "reconnect_certified": true,
+        "stage": "session"
+      }
+    }
+  },
+  "recovery_fixture_exit": 0,
+  "recovery_transcript_sha256": "692e6354dfa8f2aaa6a4814568b807e6c0291d14bd4c6a0c43e969b1213172b6",
+  "terminal_adapters": {
+    "forge": {
+      "cargo_check_exit": 0,
+      "log_sha256": "486abdcae56da44f99f9c65ce51e1613707795bc7b4389fddb709a8b7fb17379"
+    },
+    "anvil": {
+      "cargo_check_exit": 0,
+      "log_sha256": "8a4ae68eae24484141a792846deb5986a3f987dfe70718c27490b7b0e4dcfa5b"
+    },
+    "ember": {
+      "cargo_check_exit": 0,
+      "log_sha256": "63be4323cc86ea28cdf368a48b35569346634b1b341326e6e83649a105525a5c"
+    },
+    "frost": {
+      "cargo_check_exit": 0,
+      "log_sha256": "3d6ae7b41d0b7284636eca8accad0d99a9f2fbd5b5394e8995814910b575a6d3"
+    }
+  },
+  "aether_native_report": {
+    "path": "aether-x11-managed-reconnect.json",
+    "sha256": "785037a8fca8a32f0cce709a5e8bdfffe2473204175e0d259685859fd3569e55"
+  }
+}

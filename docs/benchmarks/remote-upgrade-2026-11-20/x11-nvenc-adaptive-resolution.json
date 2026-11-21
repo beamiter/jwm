@@ -1,0 +1,1813 @@
+{
+  "cases": [
+    {
+      "arm": "ladder",
+      "marks": [
+        {
+          "label": "initial",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 80,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 82,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 80,
+          "host_drawn_acks_window": 81,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                238,
+                33,
+                54
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                33,
+                216,
+                231
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "75% under pressure",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              960,
+              600
+            ],
+            "geometry_epoch": 3,
+            "sequence": 750,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              960,
+              600
+            ],
+            "geometry_epoch": 3,
+            "sequence": 752,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 66,
+          "host_drawn_acks_window": 65,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                235,
+                35,
+                58
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                38,
+                215,
+                228
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "50% under pressure",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              640,
+              400
+            ],
+            "geometry_epoch": 4,
+            "sequence": 1088,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              640,
+              400
+            ],
+            "geometry_epoch": 4,
+            "sequence": 1088,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 92,
+          "host_drawn_acks_window": 92,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                237,
+                36,
+                48
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                31,
+                214,
+                229
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "75% recovered",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              960,
+              600
+            ],
+            "geometry_epoch": 5,
+            "sequence": 1726,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              960,
+              600
+            ],
+            "geometry_epoch": 5,
+            "sequence": 1723,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 92,
+          "host_drawn_acks_window": 93,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                239,
+                40,
+                62
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                29,
+                209,
+                238
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "100% recovered",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 6,
+            "sequence": 2361,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 6,
+            "sequence": 2356,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 117,
+          "host_drawn_acks_window": 112,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                235,
+                37,
+                53
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                32,
+                212,
+                237
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        }
+      ],
+      "pointer_observations": [
+        {
+          "label": "host input on half raster",
+          "viewer_xy": [
+            700,
+            446
+          ],
+          "expected_root_xy": [
+            700,
+            446
+          ],
+          "x11_root_xy": [
+            700,
+            446
+          ]
+        }
+      ],
+      "rate_changes": [
+        [
+          "24",
+          "100",
+          "Viewer"
+        ],
+        [
+          "28",
+          "100",
+          "Clear"
+        ],
+        [
+          "30",
+          "100",
+          "Clear"
+        ]
+      ],
+      "size_changes": [
+        [
+          "75",
+          "Viewer"
+        ],
+        [
+          "50",
+          "Viewer"
+        ],
+        [
+          "75",
+          "ViewerRecovery"
+        ],
+        [
+          "100",
+          "ViewerRecovery"
+        ]
+      ],
+      "viewer_feedback": [
+        [
+          81.0,
+          57.97,
+          0.23,
+          5.79
+        ],
+        [
+          86.0,
+          57.41,
+          0.11,
+          5.56
+        ],
+        [
+          87.0,
+          57.54,
+          0.14,
+          5.58
+        ],
+        [
+          87.0,
+          57.63,
+          0.11,
+          5.66
+        ],
+        [
+          83.0,
+          57.33,
+          0.11,
+          5.53
+        ],
+        [
+          87.0,
+          57.79,
+          0.14,
+          5.73
+        ],
+        [
+          87.0,
+          57.31,
+          0.13,
+          5.44
+        ],
+        [
+          88.0,
+          56.77,
+          0.12,
+          5.3
+        ],
+        [
+          64.0,
+          50.15,
+          3.56,
+          66.8
+        ],
+        [
+          89.0,
+          49.69,
+          2.33,
+          41.6
+        ],
+        [
+          85.0,
+          49.46,
+          2.66,
+          45.62
+        ],
+        [
+          71.0,
+          49.87,
+          2.32,
+          66.37
+        ],
+        [
+          90.0,
+          47.88,
+          0.76,
+          43.73
+        ],
+        [
+          106.0,
+          5.04,
+          7.8,
+          54.98
+        ],
+        [
+          112.0,
+          3.02,
+          4.6,
+          39.22
+        ],
+        [
+          106.0,
+          2.5,
+          10.22,
+          68.4
+        ],
+        [
+          114.0,
+          2.4,
+          3.92,
+          39.06
+        ],
+        [
+          105.0,
+          2.46,
+          8.62,
+          58.88
+        ],
+        [
+          91.0,
+          4.3,
+          10.97,
+          65.73
+        ],
+        [
+          107.0,
+          3.71,
+          4.57,
+          42.06
+        ],
+        [
+          106.0,
+          4.02,
+          8.64,
+          49.1
+        ],
+        [
+          93.0,
+          4.26,
+          12.7,
+          72.91
+        ],
+        [
+          110.0,
+          3.81,
+          5.08,
+          42.4
+        ],
+        [
+          104.0,
+          4.0,
+          8.38,
+          50.23
+        ],
+        [
+          111.0,
+          12.27,
+          0.14,
+          5.37
+        ],
+        [
+          118.0,
+          12.29,
+          0.1,
+          6.13
+        ],
+        [
+          119.0,
+          12.18,
+          0.11,
+          6.7
+        ],
+        [
+          118.0,
+          10.29,
+          0.11,
+          5.45
+        ],
+        [
+          118.0,
+          11.78,
+          0.1,
+          6.16
+        ],
+        [
+          118.0,
+          12.21,
+          0.13,
+          5.89
+        ],
+        [
+          129.0,
+          11.25,
+          0.12,
+          5.35
+        ],
+        [
+          137.0,
+          12.13,
+          0.11,
+          5.49
+        ],
+        [
+          138.0,
+          12.2,
+          0.13,
+          5.53
+        ],
+        [
+          137.0,
+          11.95,
+          0.11,
+          6.54
+        ],
+        [
+          137.0,
+          11.67,
+          0.12,
+          6.15
+        ],
+        [
+          138.0,
+          11.72,
+          0.11,
+          5.99
+        ]
+      ],
+      "host_drawn_acks": 3763,
+      "viewer_sent_drawn_acks": 3763,
+      "host_exit": 0,
+      "viewer_exit": 0
+    },
+    {
+      "arm": "scope-changes",
+      "marks": [
+        {
+          "label": "initial",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 79,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 81,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 80,
+          "host_drawn_acks_window": 80,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                242,
+                37,
+                58
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                25,
+                214,
+                236
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "75% under pressure",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              960,
+              600
+            ],
+            "geometry_epoch": 3,
+            "sequence": 771,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              960,
+              600
+            ],
+            "geometry_epoch": 3,
+            "sequence": 774,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 81,
+          "host_drawn_acks_window": 82,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                233,
+                34,
+                56
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                26,
+                208,
+                233
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "ordinary size after viewport request",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1120,
+              700
+            ],
+            "geometry_epoch": 4,
+            "sequence": 857,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1120,
+              700
+            ],
+            "geometry_epoch": 4,
+            "sequence": 860,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 87,
+          "host_drawn_acks_window": 86,
+          "pixels": [
+            {
+              "viewer_xy": [
+                112,
+                102
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                236,
+                39,
+                48
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                388,
+                242
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                32,
+                212,
+                229
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "75% of new viewport",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              840,
+              525
+            ],
+            "geometry_epoch": 5,
+            "sequence": 1218,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              840,
+              525
+            ],
+            "geometry_epoch": 5,
+            "sequence": 1221,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 89,
+          "host_drawn_acks_window": 89,
+          "pixels": [
+            {
+              "viewer_xy": [
+                112,
+                102
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                243,
+                37,
+                52
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                388,
+                242
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                32,
+                213,
+                234
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "full size of authorized region",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              896,
+              560
+            ],
+            "geometry_epoch": 6,
+            "sequence": 1334,
+            "source_dimensions": [
+              896,
+              560
+            ],
+            "source_epoch": 2
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              896,
+              560
+            ],
+            "geometry_epoch": 6,
+            "sequence": 1335,
+            "source_dimensions": [
+              896,
+              560
+            ],
+            "source_epoch": 2
+          },
+          "viewer_acked_window": 113,
+          "host_drawn_acks_window": 113,
+          "pixels": [
+            {
+              "viewer_xy": [
+                195,
+                132
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                25,
+                215,
+                230
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        }
+      ],
+      "pointer_observations": [
+        {
+          "label": "host input includes region origin",
+          "viewer_xy": [
+            590,
+            388
+          ],
+          "expected_root_xy": [
+            760,
+            480
+          ],
+          "x11_root_xy": [
+            759,
+            480
+          ]
+        }
+      ],
+      "rate_changes": [
+        [
+          "24",
+          "100",
+          "Viewer"
+        ]
+      ],
+      "size_changes": [
+        [
+          "75",
+          "Viewer"
+        ],
+        [
+          "75",
+          "Viewer"
+        ]
+      ],
+      "viewer_feedback": [
+        [
+          80.0,
+          57.93,
+          0.22,
+          6.25
+        ],
+        [
+          90.0,
+          55.89,
+          0.11,
+          5.86
+        ],
+        [
+          86.0,
+          57.78,
+          0.12,
+          5.7
+        ],
+        [
+          86.0,
+          57.82,
+          0.15,
+          5.75
+        ],
+        [
+          88.0,
+          55.14,
+          0.1,
+          5.36
+        ],
+        [
+          88.0,
+          56.8,
+          0.11,
+          6.47
+        ],
+        [
+          86.0,
+          57.37,
+          0.12,
+          6.7
+        ],
+        [
+          87.0,
+          57.9,
+          0.15,
+          5.76
+        ],
+        [
+          81.0,
+          52.61,
+          1.43,
+          34.18
+        ],
+        [
+          84.0,
+          55.54,
+          0.1,
+          4.38
+        ],
+        [
+          91.0,
+          54.95,
+          0.15,
+          4.28
+        ],
+        [
+          90.0,
+          54.98,
+          0.14,
+          4.34
+        ],
+        [
+          91.0,
+          55.11,
+          0.11,
+          4.49
+        ],
+        [
+          87.0,
+          52.14,
+          0.13,
+          23.9
+        ],
+        [
+          112.0,
+          3.96,
+          1.67,
+          31.06
+        ]
+      ],
+      "host_drawn_acks": 1384,
+      "viewer_sent_drawn_acks": 1384,
+      "host_exit": 0,
+      "viewer_exit": 0,
+      "post_switch_drawable_samples": 78
+    },
+    {
+      "arm": "tiers-disabled",
+      "marks": [
+        {
+          "label": "initial",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 80,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 82,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 81,
+          "host_drawn_acks_window": 81,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                240,
+                35,
+                56
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                26,
+                215,
+                237
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "still at ordinary size",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 684,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 687,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 87,
+          "host_drawn_acks_window": 86,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                233,
+                35,
+                52
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                31,
+                214,
+                231
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        }
+      ],
+      "pointer_observations": [],
+      "rate_changes": [
+        [
+          "24",
+          "100",
+          "Viewer"
+        ]
+      ],
+      "size_changes": [],
+      "viewer_feedback": [
+        [
+          81.0,
+          57.89,
+          0.26,
+          5.85
+        ],
+        [
+          87.0,
+          57.48,
+          0.14,
+          5.7
+        ],
+        [
+          88.0,
+          56.73,
+          0.12,
+          6.21
+        ],
+        [
+          87.0,
+          56.93,
+          0.11,
+          6.57
+        ],
+        [
+          84.0,
+          56.1,
+          0.15,
+          4.96
+        ],
+        [
+          86.0,
+          57.62,
+          0.13,
+          5.68
+        ],
+        [
+          87.0,
+          57.72,
+          0.1,
+          5.7
+        ],
+        [
+          86.0,
+          57.61,
+          0.13,
+          5.63
+        ]
+      ],
+      "host_drawn_acks": 686,
+      "viewer_sent_drawn_acks": 686,
+      "host_exit": 0,
+      "viewer_exit": 0
+    },
+    {
+      "arm": "fallback",
+      "marks": [
+        {
+          "label": "initial",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 78,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 2,
+            "sequence": 80,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 79,
+          "host_drawn_acks_window": 79,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                239,
+                34,
+                55
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                28,
+                216,
+                232
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "75% under pressure",
+          "viewer": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              960,
+              600
+            ],
+            "geometry_epoch": 3,
+            "sequence": 778,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              960,
+              600
+            ],
+            "geometry_epoch": 3,
+            "sequence": 780,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 84,
+          "host_drawn_acks_window": 84,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                235,
+                34,
+                58
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                28,
+                216,
+                237
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        },
+        {
+          "label": "full source following NVENC fallback",
+          "viewer": {
+            "codec": "JPEG",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 4,
+            "sequence": 919,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "host": {
+            "codec": "JPEG",
+            "encoded_dimensions": [
+              1280,
+              800
+            ],
+            "geometry_epoch": 4,
+            "sequence": 921,
+            "source_dimensions": [
+              1280,
+              800
+            ],
+            "source_epoch": 1
+          },
+          "viewer_acked_window": 142,
+          "host_drawn_acks_window": 143,
+          "pixels": [
+            {
+              "viewer_xy": [
+                128,
+                116
+              ],
+              "source_xy": [
+                128,
+                116
+              ],
+              "rgb": [
+                239,
+                37,
+                53
+              ],
+              "expected": [
+                239,
+                36,
+                52
+              ]
+            },
+            {
+              "viewer_xy": [
+                444,
+                276
+              ],
+              "source_xy": [
+                444,
+                276
+              ],
+              "rgb": [
+                33,
+                214,
+                233
+              ],
+              "expected": [
+                32,
+                214,
+                232
+              ]
+            }
+          ]
+        }
+      ],
+      "pointer_observations": [
+        {
+          "label": "host input after full-raster fallback",
+          "viewer_xy": [
+            700,
+            446
+          ],
+          "expected_root_xy": [
+            700,
+            446
+          ],
+          "x11_root_xy": [
+            700,
+            446
+          ]
+        }
+      ],
+      "rate_changes": [
+        [
+          "24",
+          "100",
+          "Viewer"
+        ]
+      ],
+      "size_changes": [
+        [
+          "75",
+          "Viewer"
+        ]
+      ],
+      "viewer_feedback": [
+        [
+          79.0,
+          58.2,
+          0.22,
+          5.88
+        ],
+        [
+          87.0,
+          57.9,
+          0.16,
+          5.89
+        ],
+        [
+          86.0,
+          57.6,
+          0.1,
+          5.68
+        ],
+        [
+          87.0,
+          57.72,
+          0.14,
+          5.7
+        ],
+        [
+          85.0,
+          56.71,
+          0.1,
+          6.44
+        ],
+        [
+          90.0,
+          54.79,
+          0.11,
+          5.24
+        ],
+        [
+          92.0,
+          54.48,
+          0.12,
+          4.98
+        ],
+        [
+          89.0,
+          56.04,
+          0.11,
+          5.83
+        ],
+        [
+          82.0,
+          49.38,
+          1.74,
+          39.24
+        ]
+      ],
+      "host_drawn_acks": 926,
+      "viewer_sent_drawn_acks": 926,
+      "host_exit": 0,
+      "viewer_exit": 0
+    }
+  ],
+  "binary_sha256": "b1a21b01f937331ede0df7a42eee0e923de21d8e3333fc9b040e8da8757b987b",
+  "manifest": {
+    "head": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "source_sha256": {
+      "src/remote/adaptive_video.rs": "44d308509b801b4431b61d98a9fc58e0f8d5fd8857557288baa40c99c83bf999",
+      "src/remote/host.rs": "0f762e71b8ca0bdb54ddd525b37b18281c9fe0a9e0d2ce6b70d4aa8aac142d7f",
+      "src/remote/x11_capture.rs": "43cb7c504e3fd8f2451fbe4ee361129c0e94268b5264829967972c0db065b8e1",
+      "src/remote/messages.rs": "064fced6a2255dba9c7b400504d6509c13df258b098e92b2673add80342e4447",
+      "src/remote/client.rs": "61da159aa52c6986c5e1dd2d06dbe6c0a36781bdf3d71a75a189da1a0b1330ce",
+      "src/remote/sender.rs": "0fcd1be70680bd2728f316c5cdee3604732b43da75dcb6a499055c2ae5e00989",
+      "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec"
+    },
+    "fixture_sha256": {
+      "smoke.py": "20a80133c05e61b154b5f1edf4bbdc9ae0d3bc34137ac7088802f3b46f84601e",
+      "slow-rgb.c": "d698f6f4e13ceecfb852f00cae53aba4ecfe82148af52038098836efe795c8e3",
+      "slow-rgb.so": "8b157d1ef24d55627bf0fa37d9a83fd4d1556f1a1644cdd72dddcd7b9138dac2",
+      "fail-encode.c": "f88a7f5d3d8fdfc7c918ff1ea37ea91f5c5ceb4807d4f6ffd3bd722cf50e3cda",
+      "fail-encode.so": "8da2963836c986fd64568555a79e583fccffc104bb244012a73ef261b738c53e",
+      "observer": "d981ba7314b92529941e9a24a6d90f36f738e9679bc5abd2f417c6d0df672416"
+    },
+    "cpu": "Intel(R) Core(TM) Ultra 7 270K Plus",
+    "nvidia_device_and_driver": "NVIDIA GeForce RTX 5080, 595.71.05",
+    "kernel": "6.17.0-35-generic",
+    "xvfb_package": "xvfb\t2:21.1.12-1ubuntu1.8",
+    "profile": "release --no-default-features --features remote-x11,remote-wayland,remote-h264",
+    "regressions": {
+      "remote_library": {
+        "passed": 1142,
+        "ignored": 35
+      },
+      "command_line": {
+        "passed": 74,
+        "ignored": 0
+      }
+    },
+    "network": "authenticated IPv4 loopback TCP on one machine",
+    "displays": "owned 1280\u00d7800 Xvfb source and viewer, CPU RGB viewer scaling",
+    "pressure": "viewer-only sws_scale interposer adds 45 ms while gate file exists",
+    "scope": "functional H.264 NVENC tiers, source/geometry retirement, drawable pixels and XTEST coordinates"
+  },
+  "initial_cpu_upscale_diagnostic": {
+    "binary_sha256": "fa018405d86af46713c76bb92d8b5080bb5959d0f8cc57700a509118d148ac92",
+    "controller_exit": 1,
+    "reason": "viewer presentation stayed above the recovery threshold after decode recovered",
+    "recovered_decode_windows": [
+      [
+        112.0,
+        3.96,
+        4.82,
+        40.21
+      ],
+      [
+        115.0,
+        2.41,
+        1.95,
+        32.63
+      ],
+      [
+        113.0,
+        3.23,
+        1.92,
+        29.0
+      ],
+      [
+        106.0,
+        2.45,
+        7.23,
+        53.89
+      ],
+      [
+        100.0,
+        2.53,
+        12.48,
+        71.62
+      ],
+      [
+        108.0,
+        2.41,
+        6.72,
+        48.6
+      ],
+      [
+        102.0,
+        2.49,
+        10.19,
+        60.57
+      ]
+    ]
+  },
+  "archive": {
+    "sha256": "79198b467ca8469e68e6cbf227d95755087bb67d8c5d1fbc0e45a10e2b67b60b",
+    "members": {
+      "run.json": "fbb5221f0952d8a2f0940c0a5c5315181d7bfb3a1679c5ac012ab8b344044031",
+      "initial-diagnostic/host.log": "8547c8a1df4175e68ae156c23eb13b5e1e5173ac82b3d5b437371de701f71486",
+      "initial-diagnostic/viewer.log": "4ba377329b00aaf904cd8018f58cad58a49954e84390e99170a2bcfe6e622fdf",
+      "initial-diagnostic/controller.log": "a00e9f1d321f03a50c68e2ae54a60dc2e187490aafae9633b7277bd7088abebd",
+      "initial-diagnostic/source.sha256": "b52e35e7f69658621f2db918e61b7be520424a0a06710508dd571713e7edee12",
+      "observations/ladder/host.log": "e13f33b26ababb701800b9394022f10216533126545aff1fad17753d78e49a53",
+      "observations/ladder/viewer.log": "6cdad70f4e6d26fb9d7980a9aabaaceefc062e37faeea2e7d376d871972b0404",
+      "observations/ladder/viewer.stdout": "7d3c04d286a72f1f595027e0376963e366ee6af836d9ba15b448ca3044a19818",
+      "observations/ladder/painter.stdout": "27a350ad79bac66d3a0a2feb86adb9a15f51dadf7ae4300bd6078c6b4f9ab33e",
+      "observations/ladder/painter.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "observations/scope-changes/host.log": "c7f8db6e58537d6789bae11b143c629146c2dfc95b481c4da517110c2389a3fc",
+      "observations/scope-changes/viewer.log": "e5dfd789ec6cb6bea8fb05f385ba346f0454f56bd2ba29c126fe31edc813983c",
+      "observations/scope-changes/viewer.stdout": "4f79af69af9219417e48a50f82366e4474e93f702f8ac043aa4ac0d02984731d",
+      "observations/scope-changes/painter.stdout": "02ee85adc330a8c0caeec89612ff6b5d61a5660237304bcc7ff413be5e862b9a",
+      "observations/scope-changes/painter.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "observations/tiers-disabled/host.log": "257f2241ea001398642e94d08cd2f2fe65cb0116d92ae0046824f383202895d0",
+      "observations/tiers-disabled/viewer.log": "a6bfb3538b9cb3b569e441d25b59c5cd692e8fea67c75e0f23a48375ca3a657e",
+      "observations/tiers-disabled/viewer.stdout": "6f3c11329aee1c54b491061bfaa1dee85c42654278790f566d3f7bb0d17ff0e3",
+      "observations/tiers-disabled/painter.stdout": "072c848185b418a85d6d654a647b815b4db5ed2a018669846ac95b002d6ba002",
+      "observations/tiers-disabled/painter.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "observations/fallback/host.log": "d0636ea93e652c14ffa88ac4e29d536503a5e0f30b72cd2b3808de4a8c560319",
+      "observations/fallback/viewer.log": "793b95d2fe980d941a92ced5ec0f74a301f2778c8c763dcb7e8e100c0e1591a2",
+      "observations/fallback/viewer.stdout": "999d474d6c53b6ea85696a49f1ae427b9c8298040fc4a09f93a30c108057db3a",
+      "observations/fallback/painter.stdout": "070a56e0ed1b05fa9a0aca43076cb912277a51cfdd1f62eb7f224152ef9a86a8",
+      "observations/fallback/painter.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "observations/scope-changes/post-switch-pixels.json": "416a490c4a95252235fd3aec75510c2218251c5f2094ba95a0032018efc39086",
+      "fixture/smoke.py": "20a80133c05e61b154b5f1edf4bbdc9ae0d3bc34137ac7088802f3b46f84601e",
+      "fixture/slow-rgb.c": "d698f6f4e13ceecfb852f00cae53aba4ecfe82148af52038098836efe795c8e3",
+      "fixture/fail-encode.c": "f88a7f5d3d8fdfc7c918ff1ea37ea91f5c5ceb4807d4f6ffd3bd722cf50e3cda",
+      "fixture/check-build.sh": "481c3076862dcaeb2be774c6e30505b0f91f26fea5f91117ff5c5d3fda17088c",
+      "fixture/publish.py": "56e860f097c7e8b7e4458c0bf19f3d6e631efccb0e7251aa7bd4edd52b1f0371",
+      "fixture/p09-workload.c": "771a888f3e74946ed51dd02a34e3dd04c18e0336b60a714492dc25c9efec163d"
+    }
+  }
+}

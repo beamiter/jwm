@@ -36,6 +36,8 @@ use super::cursor::{CursorPosition, CursorShape};
 use super::frame::{DamageRegions, DecodedFrame, FrameDamage, RecyclableDecodedFrame};
 use super::pacing::EventPollBudget;
 use super::scaling::{ScalingPolicy, nvidia_driver};
+#[cfg(feature = "remote-h264")]
+use super::telemetry::{NativeStage, NativeStageTimes};
 use super::triangle_patch::TrianglePatch;
 use super::usability::viewer_title;
 use super::viewer_backend::SeamlessInput;
@@ -55,6 +57,8 @@ const RENDER_CLIENT_VERSION: (u32, u32) = (0, 11);
 const RENDER_MIN_VERSION: (u32, u32) = (0, 10);
 const XFIXED_ONE: i32 = 1 << 16;
 const RENDER_FILTER_BILINEAR: &[u8] = b"bilinear";
+const CPU_PREPARATION_MAX_AXIS: u32 = 4096;
+const CPU_PREPARATION_MAX_PIXELS: u32 = 4096 * 2160;
 
 /// One local viewer operation for the remote-control client to send upstream.
 ///
@@ -77,6 +81,15 @@ pub enum ViewerEvent {
         pressed: bool,
     },
     WaylandPointerRevoke,
+    WaylandDragMotion {
+        frame_sequence: u64,
+        geometry_epoch: u64,
+        x: u16,
+        y: u16,
+    },
+    WaylandDragRelease {
+        cancelled: bool,
+    },
     CycleSource,
     NarrowClipboard,
     Close,
@@ -146,6 +159,66 @@ struct StoredFrame {
 enum StoredImage {
     Owned(RgbImage),
     Recyclable(RecyclableDecodedFrame),
+    #[cfg(feature = "remote-h264")]
+    Native(NativePixmap),
+}
+
+#[cfg(feature = "remote-h264")]
+struct NativePixmap {
+    conn: Arc<RustConnection>,
+    pixmap: Pixmap,
+    picture: Option<Picture>,
+    dimensions: (u16, u16),
+}
+
+#[cfg(feature = "remote-h264")]
+impl NativePixmap {
+    fn prepare_picture(&mut self, format: Pictformat) -> RemoteResult<()> {
+        if self.picture.is_some() {
+            return Ok(());
+        }
+        let picture = self.conn.generate_id()?;
+        render::create_picture(
+            &self.conn,
+            picture,
+            self.pixmap,
+            format,
+            &CreatePictureAux::new().repeat(Repeat::PAD),
+        )?
+        .check()?;
+        let filter = (|| -> RemoteResult<()> {
+            render::set_picture_filter(&self.conn, picture, RENDER_FILTER_BILINEAR, &[])?
+                .check()?;
+            Ok(())
+        })();
+        if let Err(error) = filter {
+            free_render_picture_unchecked(&self.conn, picture);
+            return Err(error);
+        }
+        self.picture = Some(picture);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "remote-h264")]
+impl std::fmt::Debug for NativePixmap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativePixmap")
+            .field("pixmap", &self.pixmap)
+            .field("dimensions", &self.dimensions)
+            .finish()
+    }
+}
+
+#[cfg(feature = "remote-h264")]
+impl Drop for NativePixmap {
+    fn drop(&mut self) {
+        if let Some(picture) = self.picture {
+            free_render_picture_unchecked(&self.conn, picture);
+        }
+        free_render_pixmap_unchecked(&self.conn, self.pixmap);
+    }
 }
 
 impl StoredFrame {
@@ -173,6 +246,11 @@ impl StoredFrame {
         match &self.image {
             StoredImage::Owned(image) => image.dimensions(),
             StoredImage::Recyclable(frame) => frame.dimensions(),
+            #[cfg(feature = "remote-h264")]
+            StoredImage::Native(native) => (
+                u32::from(native.dimensions.0),
+                u32::from(native.dimensions.1),
+            ),
         }
     }
 
@@ -180,6 +258,8 @@ impl StoredFrame {
         match &self.image {
             StoredImage::Owned(_) => None,
             StoredImage::Recyclable(frame) => frame.damage(),
+            #[cfg(feature = "remote-h264")]
+            StoredImage::Native(_) => None,
         }
     }
 
@@ -187,6 +267,8 @@ impl StoredFrame {
         match &self.image {
             StoredImage::Owned(image) => image,
             StoredImage::Recyclable(frame) => frame.image(),
+            #[cfg(feature = "remote-h264")]
+            StoredImage::Native(_) => unreachable!("native pixels are read through the X11 pixmap"),
         }
     }
 }
@@ -620,8 +702,9 @@ fn cursor_transform(placement: &CursorPlacement) -> RemoteResult<Transform> {
 
 /// Plain X11 window that displays decoded remote frames and collects input.
 pub struct Viewer {
-    conn: RustConnection,
+    conn: Arc<RustConnection>,
     window: Window,
+    embedded_parent: Option<Window>,
     gc: Gcontext,
     backing: Pixmap,
     blank_cursor: Cursor,
@@ -642,13 +725,17 @@ pub struct Viewer {
     native_patch: Option<XImage<'static>>,
     triangle_patch: TrianglePatch,
     shm_upload: ShmUpload,
+    direct_shm: bool,
     presentation_atom: Atom,
     presentations: VecDeque<PendingPresentation>,
     recovery: Option<AccelerationRecovery>,
     presentation_serial: u64,
     render_upscale: RenderUpscale,
+    #[cfg(feature = "remote-h264")]
+    lazy_native_picture: bool,
     width: u16,
     height: u16,
+    viewport_revision: u64,
     backing_valid: bool,
     pending_resize: bool,
     pending_redraw: bool,
@@ -667,6 +754,8 @@ pub struct Viewer {
     cleanup_started: bool,
     cleanup_had_grab: bool,
     cleanup_failed: bool,
+    keep_window: bool,
+    disconnected: bool,
     forward_input: bool,
     source_switching: bool,
     source_cycle_enabled: bool,
@@ -917,6 +1006,27 @@ pub(crate) fn initial_viewport_with_position(
     Ok((target.bounds.2, target.bounds.3))
 }
 
+pub(super) fn initial_embedded_viewport(
+    display: Option<&str>,
+    parent: std::num::NonZeroU32,
+) -> RemoteResult<(u16, u16)> {
+    let (conn, screen_num) = xbar_core::x11_connection::connect(display)?;
+    embedded_viewport(&conn, conn.setup().roots[screen_num].root, parent.get())
+}
+
+fn embedded_viewport(
+    conn: &RustConnection,
+    root: Window,
+    parent: Window,
+) -> RemoteResult<(u16, u16)> {
+    let attributes = conn.get_window_attributes(parent)?.reply()?;
+    let geometry = conn.get_geometry(parent)?.reply()?;
+    if parent == root || geometry.root != root || attributes.class != WindowClass::INPUT_OUTPUT {
+        return Err(invalid_data("XEmbed requires a container on the selected X11 screen").into());
+    }
+    configured_viewer_dimensions(geometry.width, geometry.height)
+}
+
 fn position_hints(origin: (i16, i16), accepted: bool) -> Option<x11rb::properties::WmSizeHints> {
     accepted.then(|| {
         let mut hints = x11rb::properties::WmSizeHints::new();
@@ -977,6 +1087,7 @@ impl Viewer {
             initial_height,
             window_size,
             None,
+            None,
             scaling,
             pointer_enabled,
             forward_keyboard,
@@ -987,13 +1098,15 @@ impl Viewer {
         )
     }
 
-    /// Explicit startup geometry is advisory; the window manager remains authoritative.
+    /// An embedded viewer takes its size from the container. The window
+    /// manager remains authoritative for standalone geometry.
     pub(crate) fn connect_with_window_geometry(
         display: Option<&str>,
         initial_width: u16,
         initial_height: u16,
         window_size: Option<super::window_size::WindowSize>,
         window_position: Option<super::window_position::WindowPosition>,
+        embedded_parent: Option<std::num::NonZeroU32>,
         scaling: ScalingPolicy,
         pointer_enabled: bool,
         forward_keyboard: bool,
@@ -1060,13 +1173,18 @@ impl Viewer {
             || placement_monitor(&conn, root, screen_size),
             |target| target.bounds,
         );
-        let (initial_width, initial_height) = startup_window_size(
-            (initial_width, initial_height),
-            (monitor.2, monitor.3),
-            window_size,
-        );
+        let embedded_parent = embedded_parent.map(std::num::NonZeroU32::get);
+        let (initial_width, initial_height) = match embedded_parent {
+            Some(parent) => embedded_viewport(&conn, root, parent)?,
+            None => startup_window_size(
+                (initial_width, initial_height),
+                (monitor.2, monitor.3),
+                window_size,
+            ),
+        };
         validate_viewer_dimensions(u32::from(initial_width), u32::from(initial_height))?;
         let ((window_x, window_y), accepted_position) = match (window_position, target) {
+            _ if embedded_parent.is_some() => ((0, 0), false),
             (Some(position), Some(target)) => {
                 let placement = super::window_position::place(
                     target,
@@ -1196,6 +1314,14 @@ impl Viewer {
         if let Some(hints) = position_hints((window_x, window_y), accepted_position) {
             hints.set_normal_hints(&conn, window)?.check()?;
         }
+        if let Some(parent) = embedded_parent {
+            let info = intern_atom(&conn, b"_XEMBED_INFO")?;
+            // Publish the mapped flag before GTK receives ReparentNotify. The
+            // viewer never maps under the root and has no detached fallback.
+            conn.change_property32(PropMode::REPLACE, window, info, info, &[0, 1])?
+                .check()?;
+            conn.reparent_window(window, parent, 0, 0)?.check()?;
+        }
         conn.map_window(window)?.check()?;
         conn.flush()?;
 
@@ -1209,8 +1335,9 @@ impl Viewer {
             .into());
         }
         Ok(Self {
-            conn,
+            conn: Arc::new(conn),
             window,
+            embedded_parent,
             gc,
             backing,
             blank_cursor,
@@ -1230,13 +1357,19 @@ impl Viewer {
             native_patch: None,
             triangle_patch: TrianglePatch::default(),
             shm_upload,
+            direct_shm: std::env::var_os("JWM_REMOTE_X11_DIRECT_SHM").as_deref()
+                == Some("1".as_ref()),
             presentation_atom,
             presentations: VecDeque::new(),
             recovery: None,
             presentation_serial: 0,
             render_upscale,
+            #[cfg(feature = "remote-h264")]
+            lazy_native_picture: std::env::var_os("JWM_REMOTE_X11_LAZY_PICTURE").as_deref()
+                == Some("1".as_ref()),
             width: initial_width,
             height: initial_height,
+            viewport_revision: 0,
             backing_valid: false,
             pending_resize: false,
             pending_redraw: false,
@@ -1265,6 +1398,8 @@ impl Viewer {
             cleanup_started: false,
             cleanup_had_grab: false,
             cleanup_failed: false,
+            keep_window: false,
+            disconnected: false,
             escape_keycodes,
             escape_keysym,
             toggle_keycodes: None,
@@ -1290,6 +1425,19 @@ impl Viewer {
     pub(super) fn request_close(&mut self) {
         self.user_close_requested = true;
         self.closed = true;
+    }
+
+    pub(super) fn managed_input_grab(&self) -> Option<bool> {
+        (self.grab_input && self.forward_input).then_some(self.grabbed)
+    }
+
+    pub(super) fn release_managed_input(
+        &mut self,
+        events: &mut Vec<ViewerEvent>,
+    ) -> RemoteResult<()> {
+        self.user_released_grab = true;
+        self.seamless_suspended = true;
+        self.release_for_close(events)
     }
 
     pub(super) fn enable_toggle_shortcut(&mut self) -> RemoteResult<()> {
@@ -1347,6 +1495,79 @@ impl Viewer {
         ))
     }
 
+    pub(super) fn keep_window_on_retry(&mut self) {
+        self.keep_window = true;
+    }
+
+    pub(super) fn freeze_disconnected_window(&mut self) -> RemoteResult<()> {
+        debug_assert!(self.cleanup_started && !self.pointer_enabled && !self.forward_keyboard);
+        self.disconnected = true;
+        self.presented_geometry = None;
+        self.source_cycle_enabled = false;
+        self.clipboard_enabled = false;
+        self.clipboard_narrowing_enabled = false;
+        self.clipboard_activity = None;
+        self.switching_label = None;
+        self.conn
+            .change_window_attributes(
+                self.window,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().cursor(x11rb::NONE),
+            )?
+            .check()?;
+        self.try_update_title()
+    }
+
+    pub(super) fn poll_disconnected_window(&mut self) -> RemoteResult<bool> {
+        self.poll_cleanup_intent()?;
+        if self.closed {
+            return Ok(false);
+        }
+        // Old platform work retires on its actual fences. It has no current
+        // network session to acknowledge.
+        self.take_presented_sequences()?;
+        self.refresh_pending_redraw()?;
+        Ok(true)
+    }
+
+    pub(super) fn resume_disconnected_window(&mut self, source: String) -> RemoteResult<bool> {
+        let deadline = Instant::now() + PRESENTATION_TIMEOUT;
+        loop {
+            if !self.poll_disconnected_window()? {
+                return Ok(false);
+            }
+            if self.presentations.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "old X11 presentation did not retire",
+                )
+                .into());
+            }
+            super::x11_capture::wait_readable(self.connection_fd(), Duration::from_millis(10))?;
+        }
+        self.invalidate_source(source)?;
+        if let Some(render) = self.cursor_plane.render.take() {
+            render::free_picture(&self.conn, render.target)?;
+            self.conn
+                .change_window_attributes(
+                    self.window,
+                    &x11rb::protocol::xproto::ChangeWindowAttributesAux::new().cursor(x11rb::NONE),
+                )?
+                .check()?;
+        }
+        self.cursor_plane.enabled = false;
+        self.disconnected = false;
+        self.cleanup_started = false;
+        self.cleanup_had_grab = false;
+        self.cleanup_failed = false;
+        self.source_switching = false;
+        self.switching_label = None;
+        self.try_update_title()?;
+        Ok(true)
+    }
+
     fn poll_cleanup_intent(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
         let result = self.poll_cleanup_intent_inner();
         self.cleanup_failed |= result.is_err();
@@ -1364,7 +1585,23 @@ impl Viewer {
             } else {
                 break;
             };
+            if self.keep_window && self.consume_presentation_event(&event)? {
+                continue;
+            }
             match event {
+                Event::ConfigureNotify(event)
+                    if self.disconnected && event.window == self.window =>
+                {
+                    let dimensions = configured_viewer_dimensions(event.width, event.height)?;
+                    if dimensions != (self.width, self.height) {
+                        (self.width, self.height) = dimensions;
+                        self.pending_resize = true;
+                        self.pending_redraw = true;
+                    }
+                }
+                Event::Expose(event) if self.disconnected && event.window == self.window => {
+                    self.pending_redraw = true;
+                }
                 Event::ClientMessage(event)
                     if event.window == self.window
                         && event.format == 32
@@ -1378,6 +1615,15 @@ impl Viewer {
                 Event::DestroyNotify(event) if event.window == self.window => {
                     self.user_close_requested = true;
                     self.closed = true;
+                    result.push(ViewerEvent::Close);
+                }
+                Event::ReparentNotify(event)
+                    if event.window == self.window
+                        && self
+                            .embedded_parent
+                            .is_some_and(|parent| event.parent != parent) =>
+                {
+                    self.request_close();
                     result.push(ViewerEvent::Close);
                 }
                 Event::KeyPress(event) if self.is_toggle_press(&event, KeyButMask::MOD4) => {
@@ -1594,8 +1840,8 @@ impl Viewer {
             y,
             self.width,
             self.height,
-            frame.image().width() as u16,
-            frame.image().height() as u16,
+            frame.dimensions().0 as u16,
+            frame.dimensions().1 as u16,
             frame.source_width,
             frame.source_height,
         ) else {
@@ -1680,6 +1926,10 @@ impl Viewer {
                             self.release_all_input(&mut result);
                             self.seamless_suspended = true;
                         }
+                        self.viewport_revision = self
+                            .viewport_revision
+                            .checked_add(1)
+                            .ok_or_else(|| invalid_data("X11 viewport revision exhausted"))?;
                         self.width = new_width;
                         self.height = new_height;
                         redraw = true;
@@ -1699,6 +1949,16 @@ impl Viewer {
                 Event::DestroyNotify(event) if event.window == self.window => {
                     self.user_close_requested = true;
                     self.closed = true;
+                    self.report_close(&mut result)?;
+                    break;
+                }
+                Event::ReparentNotify(event)
+                    if event.window == self.window
+                        && self
+                            .embedded_parent
+                            .is_some_and(|parent| event.parent != parent) =>
+                {
+                    self.request_close();
                     self.report_close(&mut result)?;
                     break;
                 }
@@ -2055,6 +2315,10 @@ impl Viewer {
         Ok(())
     }
 
+    pub(super) fn can_refresh_while_preparing(&self) -> bool {
+        self.backing_valid && !self.pending_resize
+    }
+
     /// Flush requests that can cause X11 events before the caller blocks on
     /// the connection file descriptor.
     pub fn prepare_wait(&self) -> RemoteResult<()> {
@@ -2129,6 +2393,9 @@ impl Viewer {
     }
 
     pub(super) fn request_activation(&self) -> RemoteResult<()> {
+        if self.embedded_parent.is_some() {
+            return Ok(());
+        }
         let root = self.conn.setup().roots[self.cursor_screen].root;
         request_window_activation(&self.conn, root, self.window)
     }
@@ -2344,7 +2611,7 @@ impl Viewer {
     /// Input/window events remain queued for the next poll_events call. The
     /// internal client uses draw_recyclable for nonblocking presentation instead.
     pub fn draw(&mut self, frame: DecodedFrame) -> RemoteResult<bool> {
-        if !self.draw_stored(StoredFrame::from_decoded(frame))? {
+        if !self.draw_stored(StoredFrame::from_decoded(frame), None)? {
             return Ok(false);
         }
         let deadline = Instant::now() + PRESENTATION_TIMEOUT;
@@ -2410,10 +2677,132 @@ impl Viewer {
         {
             frame.reuse_canvas_from(previous);
         }
-        self.draw_stored(StoredFrame::from_recyclable(frame))
+        self.draw_stored(StoredFrame::from_recyclable(frame), None)
     }
 
-    fn draw_stored(&mut self, frame: StoredFrame) -> RemoteResult<bool> {
+    pub(super) fn cpu_preparation(&self, frame: &RecyclableDecodedFrame) -> Option<CpuPreparation> {
+        if self.closed
+            || self.direct_shm
+            || self.native_pixel_writer != NativePixelWriter::Bgrx32
+            || frame.has_tile_snapshot()
+            || frame.damage().is_some()
+        {
+            return None;
+        }
+        CpuPreparation::new(
+            self.viewport_revision(),
+            self.viewport(),
+            frame.dimensions(),
+        )
+    }
+
+    pub(super) fn draw_prepared(
+        &mut self,
+        frame: RecyclableDecodedFrame,
+        plan: CpuPreparation,
+        pixels: &[u8],
+    ) -> RemoteResult<(bool, bool)> {
+        if self.cpu_preparation(&frame) != Some(plan) || pixels.len() != plan.byte_len() {
+            return self.draw_recyclable(frame).map(|drawn| (drawn, false));
+        }
+
+        let image = XImage::new(
+            plan.geometry.width,
+            plan.geometry.height,
+            ScanlinePad::Pad32,
+            24,
+            BitsPerPixel::B32,
+            ImageOrder::LsbFirst,
+            Cow::Borrowed(pixels),
+        )?;
+        let drawn = self.draw_stored(
+            StoredFrame::from_recyclable(frame),
+            Some((plan.geometry, image)),
+        )?;
+        Ok((drawn, drawn))
+    }
+
+    #[cfg(feature = "remote-h264")]
+    pub(super) fn draw_native(
+        &mut self,
+        buffer: super::gpu_present::RgbBuffer,
+        sequence: u64,
+        geometry_epoch: u64,
+        source_size: (u16, u16),
+        mut timings: Option<&mut NativeStageTimes>,
+    ) -> RemoteResult<Option<bool>> {
+        if self.closed {
+            return Ok(Some(false));
+        }
+        if !self.can_submit_frame() {
+            return Err(invalid_data("X11 presentation queue is full").into());
+        }
+        self.apply_pending_resize()?;
+        let prepare = (|| -> RemoteResult<NativePixmap> {
+            if let RenderUpscale::Enabled(render) = &self.render_upscale {
+                let size = buffer.dimensions();
+                let pixmap = {
+                    let _timer = timings
+                        .as_deref_mut()
+                        .map(|times| times.start(NativeStage::X11DmabufImport));
+                    buffer.import(&self.conn, self.window)?
+                };
+                let mut native = NativePixmap {
+                    conn: Arc::clone(&self.conn),
+                    pixmap,
+                    picture: None,
+                    dimensions: size,
+                };
+                if !self.lazy_native_picture
+                    || native_picture_required((self.width, self.height), size)
+                {
+                    let _timer = timings
+                        .as_deref_mut()
+                        .map(|times| times.start(NativeStage::X11PictureSetup));
+                    native.prepare_picture(render.format)?;
+                }
+                let _timer = timings
+                    .as_deref_mut()
+                    .map(|times| times.start(NativeStage::X11BackingPopulate));
+                self.populate_native_backing(&native)?;
+                Ok(native)
+            } else {
+                Err("X11 visual does not support native pixmap scaling".into())
+            }
+        })();
+        let native = match prepare {
+            Ok(native) => native,
+            Err(error) => {
+                self.backing_valid = false;
+                self.backing_letterbox = None;
+                eprintln!("jwm-remote: importing the native X11 frame failed: {error}");
+                return Ok(None);
+            }
+        };
+        replace_stored_frame(
+            &mut self.last_frame,
+            StoredFrame {
+                sequence,
+                geometry_epoch,
+                source_width: source_size.0,
+                source_height: source_size.1,
+                image: StoredImage::Native(native),
+            },
+        );
+        let _timer = timings.map(|times| times.start(NativeStage::X11WindowSubmit));
+        self.copy_backing()?;
+        self.pending_redraw = false;
+        if !self.closed {
+            self.queue_presentation(Some(sequence))?;
+        }
+        Ok(Some(!self.closed))
+    }
+
+    fn draw_stored(
+        &mut self,
+        frame: StoredFrame,
+        prepared: Option<(Letterbox, XImage<'_>)>,
+    ) -> RemoteResult<bool> {
         if self.closed {
             clear_stored_frame(&mut self.last_frame);
             return Ok(false);
@@ -2427,12 +2816,18 @@ impl Viewer {
         // A mailbox can skip decoded snapshots. Only apply damage when its
         // exact predecessor is already displayed; otherwise the full image
         // includes every missed delta and safely restores convergence.
-        let incremental = self.try_incremental_frame(&frame)?;
+        let incremental = prepared.is_none() && self.try_incremental_frame(&frame)?;
         replace_stored_frame(&mut self.last_frame, frame);
         if !incremental {
             self.backing_valid = false;
         }
-        if let Err(error) = self.redraw() {
+        let draw = match prepared {
+            Some((geometry, image)) if !self.closed => self
+                .populate_prepared_backing(geometry, &image)
+                .and_then(|()| self.copy_backing()),
+            _ => self.redraw(),
+        };
+        if let Err(error) = draw {
             clear_stored_frame(&mut self.last_frame);
             return Err(error);
         }
@@ -2587,6 +2982,10 @@ impl Viewer {
         (self.width, self.height)
     }
 
+    pub(super) fn viewport_revision(&self) -> u64 {
+        self.viewport_revision
+    }
+
     /// Keep the visible label tied to the negotiated clipboard capability.
     pub fn set_clipboard_status(&mut self, enabled: bool) {
         self.clipboard_enabled = enabled;
@@ -2652,6 +3051,9 @@ impl Viewer {
             self.source_label.as_deref(),
             self.switching_label.as_deref(),
         );
+        if self.disconnected {
+            title.push_str("; disconnected");
+        }
         self.conn
             .change_property8(
                 PropMode::REPLACE,
@@ -2938,15 +3340,15 @@ impl Viewer {
 
     fn image_letterbox(&self) -> Option<Letterbox> {
         let frame = self.last_frame.as_ref()?;
-        let width = u16::try_from(frame.image().width()).ok()?;
-        let height = u16::try_from(frame.image().height()).ok()?;
+        let width = u16::try_from(frame.dimensions().0).ok()?;
+        let height = u16::try_from(frame.dimensions().1).ok()?;
         letterbox(self.width, self.height, width, height)
     }
 
     fn map_pointer(&self, x: i16, y: i16) -> Option<(u16, u16)> {
         let frame = self.last_frame.as_ref()?;
-        let image_width = u16::try_from(frame.image().width()).ok()?;
-        let image_height = u16::try_from(frame.image().height()).ok()?;
+        let image_width = u16::try_from(frame.dimensions().0).ok()?;
+        let image_height = u16::try_from(frame.dimensions().1).ok()?;
         map_pointer_to_source(
             x,
             y,
@@ -3003,7 +3405,56 @@ impl Viewer {
         self.copy_backing()
     }
 
+    fn populate_prepared_backing(
+        &mut self,
+        geometry: Letterbox,
+        image: &XImage<'_>,
+    ) -> RemoteResult<()> {
+        let dst_x = i16::try_from(geometry.x)
+            .map_err(|_| invalid_data("letterbox X offset exceeds the X11 coordinate range"))?;
+        let dst_y = i16::try_from(geometry.y)
+            .map_err(|_| invalid_data("letterbox Y offset exceeds the X11 coordinate range"))?;
+        clear_backing_if_moved(
+            &self.conn,
+            self.backing,
+            self.gc,
+            self.width,
+            self.height,
+            &mut self.backing_letterbox,
+            geometry,
+        )?;
+        self.shm_upload.upload_or_core(
+            &self.conn,
+            image,
+            self.backing,
+            self.gc,
+            dst_x,
+            dst_y,
+            &mut self.deferred_events,
+        )?;
+        self.conn.flush()?;
+        self.backing_valid = true;
+        Ok(())
+    }
+
     fn populate_backing(&mut self) -> RemoteResult<()> {
+        #[cfg(feature = "remote-h264")]
+        if let Some(StoredFrame {
+            image: StoredImage::Native(native),
+            ..
+        }) = self.last_frame.as_mut()
+        {
+            if native.picture.is_none()
+                && native_picture_required((self.width, self.height), native.dimensions)
+                && let RenderUpscale::Enabled(render) = &self.render_upscale
+            {
+                // Resize may be the first operation that needs to scale this
+                // retained pixmap. Its source stays alive through the redraw.
+                native.prepare_picture(render.format)?;
+            }
+            let (pixmap, picture, size) = (native.pixmap, native.picture, native.dimensions);
+            return self.populate_native(pixmap, picture, size);
+        }
         if let Some(frame) = self.last_frame.as_ref() {
             let image_width = u16::try_from(frame.image().width())
                 .map_err(|_| invalid_data("decoded frame width exceeds the X11 protocol range"))?;
@@ -3078,29 +3529,8 @@ impl Viewer {
                 }
             }
 
-            let resized = if (geometry.width, geometry.height) == (image_width, image_height) {
-                Cow::Borrowed(frame.image())
-            } else {
-                Cow::Owned(image::imageops::resize(
-                    frame.image(),
-                    u32::from(geometry.width),
-                    u32::from(geometry.height),
-                    image::imageops::FilterType::Triangle,
-                ))
-            };
-            let image = ensure_native_image(
-                &mut self.native_image,
-                geometry.width,
-                geometry.height,
-                self.depth,
-                self.conn.setup(),
-            )?;
-            write_native_pixels(
-                image,
-                resized.as_ref(),
-                self.pixel_layout,
-                self.native_pixel_writer,
-            )?;
+            let same_size = (geometry.width, geometry.height) == (image_width, image_height);
+            let resized = resize_for_letterbox(frame.image(), geometry);
             let dst_x = i16::try_from(geometry.x)
                 .map_err(|_| invalid_data("letterbox X offset exceeds the X11 coordinate range"))?;
             let dst_y = i16::try_from(geometry.y)
@@ -3114,15 +3544,57 @@ impl Viewer {
                 &mut self.backing_letterbox,
                 geometry,
             )?;
-            let cpu_result = self.shm_upload.upload_or_core(
-                &self.conn,
-                image,
-                self.backing,
-                self.gc,
-                dst_x,
-                dst_y,
-                &mut self.deferred_events,
-            );
+            let direct = self.direct_shm
+                && same_size
+                && self.native_pixel_writer == NativePixelWriter::Bgrx32;
+            let direct_attempt = if direct {
+                self.shm_upload.upload_rgb(
+                    &self.conn,
+                    resized.as_ref(),
+                    ShmDestination {
+                        drawable: self.backing,
+                        gc: self.gc,
+                        x: dst_x,
+                        y: dst_y,
+                    },
+                )
+            } else {
+                None
+            };
+            let cpu_result = match direct_attempt {
+                Some(ShmUploadAttempt::Uploaded) => Ok(()),
+                Some(ShmUploadAttempt::Fatal(error)) => Err(error),
+                recoverable => {
+                    let image = ensure_native_image(
+                        &mut self.native_image,
+                        geometry.width,
+                        geometry.height,
+                        self.depth,
+                        self.conn.setup(),
+                    )?;
+                    write_native_pixels(
+                        image,
+                        resized.as_ref(),
+                        self.pixel_layout,
+                        self.native_pixel_writer,
+                    )?;
+                    if direct {
+                        self.shm_upload.finish_upload(&self.conn, recoverable, || {
+                            core_upload(&self.conn, image, self.backing, self.gc, dst_x, dst_y)
+                        })
+                    } else {
+                        self.shm_upload.upload_or_core(
+                            &self.conn,
+                            image,
+                            self.backing,
+                            self.gc,
+                            dst_x,
+                            dst_y,
+                            &mut self.deferred_events,
+                        )
+                    }
+                }
+            };
             // Commit the same-frame CPU fallback before disabling Render. If
             // core presentation fails, preserve Render state and report the
             // core error instead of misdiagnosing the connection.
@@ -3136,6 +3608,69 @@ impl Viewer {
         // Upload and CopyArea requests share one ordered connection. Errors
         // are handled before the presentation fence, so failed frames cannot ACK.
         self.conn.flush()?;
+        self.backing_valid = true;
+        Ok(())
+    }
+
+    #[cfg(feature = "remote-h264")]
+    fn populate_native_backing(&mut self, native: &NativePixmap) -> RemoteResult<()> {
+        self.populate_native(native.pixmap, native.picture, native.dimensions)
+    }
+
+    #[cfg(feature = "remote-h264")]
+    fn populate_native(
+        &mut self,
+        pixmap: Pixmap,
+        source_picture: Option<Picture>,
+        size: (u16, u16),
+    ) -> RemoteResult<()> {
+        let geometry = letterbox(self.width, self.height, size.0, size.1)
+            .ok_or_else(|| invalid_data("invalid native frame dimensions"))?;
+        clear_backing_if_moved(
+            &self.conn,
+            self.backing,
+            self.gc,
+            self.width,
+            self.height,
+            &mut self.backing_letterbox,
+            geometry,
+        )?;
+        let x = i16::try_from(geometry.x)?;
+        let y = i16::try_from(geometry.y)?;
+        if (geometry.width, geometry.height) == size {
+            self.conn
+                .copy_area(pixmap, self.backing, self.gc, 0, 0, x, y, size.0, size.1)?
+                .check()?;
+        } else {
+            let target = match &self.render_upscale {
+                RenderUpscale::Enabled(render) => render.target,
+                RenderUpscale::Disabled => None,
+            }
+            .ok_or("missing native XRender target")?;
+            let source = source_picture.ok_or("missing imported XRender picture")?;
+            render::set_picture_transform(
+                &self.conn,
+                source,
+                scale_transform(size.0, size.1, geometry.width, geometry.height)?,
+            )?
+            .check()?;
+            render::composite(
+                &self.conn,
+                PictOp::SRC,
+                source,
+                x11rb::NONE,
+                target,
+                0,
+                0,
+                0,
+                0,
+                x,
+                y,
+                geometry.width,
+                geometry.height,
+            )?
+            .check()?;
+        }
         self.backing_valid = true;
         Ok(())
     }
@@ -3986,6 +4521,13 @@ enum ShmUpload {
     Enabled(EnabledShmUpload),
 }
 
+struct ShmDestination {
+    drawable: Pixmap,
+    gc: Gcontext,
+    x: i16,
+    y: i16,
+}
+
 impl ShmUpload {
     fn reject(&mut self, error: &X11Error) -> bool {
         if let Self::Enabled(upload) = self {
@@ -4008,6 +4550,10 @@ impl ShmUpload {
                     .is_some_and(|key| is_matching_shm_completion(event, key))
                 {
                     slot.completion = None;
+                    if slot.direct_rgb && !upload.reported_direct {
+                        eprintln!("jwm-remote: direct RGB-to-MIT-SHM upload active");
+                        upload.reported_direct = true;
+                    }
                     break;
                 }
             }
@@ -4075,7 +4621,48 @@ impl ShmUpload {
             major_opcode: extension.major_opcode,
             slots: Vec::new(),
             reported_active: false,
+            reported_direct: false,
         }))
+    }
+
+    fn upload_rgb(
+        &mut self,
+        conn: &RustConnection,
+        rgb: &RgbImage,
+        destination: ShmDestination,
+    ) -> Option<ShmUploadAttempt<RemoteError>> {
+        let Self::Enabled(upload) = self else {
+            return None;
+        };
+        if !is_bgrx32_format(upload.format) || upload.image_byte_order != ImageOrder::LsbFirst {
+            return None;
+        }
+        let (width, height) = rgb.dimensions();
+        if let Err(error) = validate_viewer_dimensions(width, height) {
+            return Some(ShmUploadAttempt::Recoverable(error));
+        }
+        let (width, height) = (width as u16, height as u16);
+        let image_size = match native_buffer_size(width, height, upload.format) {
+            Ok(size) => size,
+            Err(error) => return Some(ShmUploadAttempt::Recoverable(error)),
+        };
+        upload.fill_and_submit(
+            conn,
+            destination,
+            (width, height),
+            image_size,
+            true,
+            |pixels| {
+                if write_bgrx32_pixels(rgb, pixels)? {
+                    Ok(())
+                } else {
+                    Err(
+                        invalid_data("direct SHM RGB image does not match its native stride")
+                            .into(),
+                    )
+                }
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4087,17 +4674,44 @@ impl ShmUpload {
         gc: Gcontext,
         dst_x: i16,
         dst_y: i16,
-        deferred_events: &mut VecDeque<Event>,
+        _deferred_events: &mut VecDeque<Event>,
     ) -> RemoteResult<()> {
         let shm_attempt = match self {
             Self::Disabled => None,
             Self::Enabled(upload) => {
-                Some(upload.upload(conn, image, drawable, gc, dst_x, dst_y, deferred_events))
+                match validate_native_upload(image, upload.format, upload.image_byte_order) {
+                    Ok(image_size) => upload.fill_and_submit(
+                        conn,
+                        ShmDestination {
+                            drawable,
+                            gc,
+                            x: dst_x,
+                            y: dst_y,
+                        },
+                        (image.width(), image.height()),
+                        image_size,
+                        false,
+                        |pixels| {
+                            pixels.copy_from_slice(image.data());
+                            Ok(())
+                        },
+                    ),
+                    Err(error) => Some(ShmUploadAttempt::Recoverable(error)),
+                }
             }
         };
-        match resolve_upload(shm_attempt, || {
+        self.finish_upload(conn, shm_attempt, || {
             core_upload(conn, image, drawable, gc, dst_x, dst_y)
-        }) {
+        })
+    }
+
+    fn finish_upload(
+        &mut self,
+        conn: &RustConnection,
+        shm_attempt: Option<ShmUploadAttempt<RemoteError>>,
+        core: impl FnOnce() -> RemoteResult<()>,
+    ) -> RemoteResult<()> {
+        match resolve_upload(shm_attempt, core) {
             UploadOutcome::Uploaded => Ok(()),
             UploadOutcome::CoreFallback { shm_error } => {
                 self.disable(conn);
@@ -4128,61 +4742,52 @@ struct EnabledShmUpload {
     major_opcode: u8,
     slots: Vec<ShmSlot>,
     reported_active: bool,
+    reported_direct: bool,
 }
 
 struct ShmSlot {
     segment: ShmSegment,
     completion: Option<ShmCompletionKey>,
+    direct_rgb: bool,
 }
 
 impl EnabledShmUpload {
-    #[allow(clippy::too_many_arguments)]
-    fn upload(
+    fn fill_and_submit(
         &mut self,
         conn: &RustConnection,
-        image: &XImage<'_>,
-        drawable: Pixmap,
-        gc: Gcontext,
-        dst_x: i16,
-        dst_y: i16,
-        _deferred_events: &mut VecDeque<Event>,
-    ) -> ShmUploadAttempt<RemoteError> {
-        let image_size = match validate_native_upload(image, self.format, self.image_byte_order) {
-            Ok(size) => size,
-            Err(error) => return ShmUploadAttempt::Recoverable(error),
-        };
+        destination: ShmDestination,
+        (width, height): (u16, u16),
+        image_size: usize,
+        direct_rgb: bool,
+        fill: impl FnOnce(&mut [u8]) -> RemoteResult<()>,
+    ) -> Option<ShmUploadAttempt<RemoteError>> {
         let slot = match self.available_slot(conn, image_size) {
             Ok(Some(slot)) => slot,
             // All mappings remain owned by the server. Core upload is safe and
             // bounded and must not disable or detach the outstanding SHM pool.
-            Ok(None) => {
-                return match core_upload(conn, image, drawable, gc, dst_x, dst_y) {
-                    Ok(()) => ShmUploadAttempt::Uploaded,
-                    Err(error) => ShmUploadAttempt::Fatal(error),
-                };
-            }
-            Err(error) => return ShmUploadAttempt::Recoverable(error),
+            Ok(None) => return None,
+            Err(error) => return Some(ShmUploadAttempt::Recoverable(error)),
         };
         let segment = &mut self.slots[slot].segment;
-        if let Err(error) = segment.mapping.copy_from(image.data()) {
-            return ShmUploadAttempt::Recoverable(error.into());
+        if let Err(error) = (|| fill(segment.mapping.bytes_mut(image_size)?))() {
+            return Some(ShmUploadAttempt::Recoverable(error));
         }
         let segment_id = segment.id;
         let capacity = segment.mapping.len();
 
         let cookie = match shm::put_image(
             conn,
-            drawable,
-            gc,
-            image.width(),
-            image.height(),
+            destination.drawable,
+            destination.gc,
+            width,
+            height,
             0,
             0,
-            image.width(),
-            image.height(),
-            dst_x,
-            dst_y,
-            image.depth(),
+            width,
+            height,
+            destination.x,
+            destination.y,
+            self.format.depth,
             u8::from(ImageFormat::Z_PIXMAP),
             true,
             segment_id,
@@ -4192,17 +4797,18 @@ impl EnabledShmUpload {
             // A transport failure does not establish whether the request is
             // outstanding. Do not overwrite or detach the mapping and do not
             // attempt another upload on this connection.
-            Err(error) => return ShmUploadAttempt::Fatal(error.into()),
+            Err(error) => return Some(ShmUploadAttempt::Fatal(error.into())),
         };
         let completion = ShmCompletionKey {
             sequence: cookie.sequence_number() as u16,
-            drawable,
+            drawable: destination.drawable,
             minor_event: u16::from(shm::PUT_IMAGE_REQUEST),
             major_event: self.major_opcode,
             segment: segment_id,
             offset: 0,
         };
         self.slots[slot].completion = Some(completion);
+        self.slots[slot].direct_rgb = direct_rgb;
         // Dropping (not ignore_error) sends protocol failures to the event loop.
         // Never overwrite this slot until its exact completion is consumed.
         drop(cookie);
@@ -4213,7 +4819,7 @@ impl EnabledShmUpload {
             );
             self.reported_active = true;
         }
-        ShmUploadAttempt::Uploaded
+        Some(ShmUploadAttempt::Uploaded)
     }
 
     fn available_slot(
@@ -4236,6 +4842,7 @@ impl EnabledShmUpload {
         self.slots.push(ShmSlot {
             segment,
             completion: None,
+            direct_rgb: false,
         });
         Ok(Some(self.slots.len() - 1))
     }
@@ -4398,21 +5005,17 @@ impl MappedRegion {
         self.length
     }
 
-    fn copy_from(&mut self, source: &[u8]) -> io::Result<()> {
-        if source.len() > self.length {
+    fn bytes_mut(&mut self, length: usize) -> io::Result<&mut [u8]> {
+        if length > self.length {
             return Err(invalid_data(format!(
                 "MIT-SHM upload exceeds its mapping: {} > {}",
-                source.len(),
-                self.length
+                length, self.length
             )));
         }
         // SAFETY: &mut self provides exclusive access, the mapping is valid
         // for `self.length`, and the previous matching Completion was consumed
         // before this method can be called again.
-        let destination =
-            unsafe { std::slice::from_raw_parts_mut(self.address.as_ptr(), source.len()) };
-        destination.copy_from_slice(source);
-        Ok(())
+        Ok(unsafe { std::slice::from_raw_parts_mut(self.address.as_ptr(), length) })
     }
 }
 
@@ -4612,9 +5215,6 @@ fn select_native_pixel_writer_from_format(
     format: Option<Format>,
     image_byte_order: X11ImageOrder,
 ) -> NativePixelWriter {
-    let standard_format = format.is_some_and(|format| {
-        format.depth == 24 && format.bits_per_pixel == 32 && format.scanline_pad == 32
-    });
     if depth == 24
         && visual.class == VisualClass::TRUE_COLOR
         && visual.bits_per_rgb_value == 8
@@ -4622,13 +5222,17 @@ fn select_native_pixel_writer_from_format(
         && visual.red_mask == 0x00ff_0000
         && visual.green_mask == 0x0000_ff00
         && visual.blue_mask == 0x0000_00ff
-        && standard_format
+        && format.is_some_and(is_bgrx32_format)
         && image_byte_order == X11ImageOrder::LSB_FIRST
     {
         NativePixelWriter::Bgrx32
     } else {
         NativePixelWriter::Generic
     }
+}
+
+fn is_bgrx32_format(format: Format) -> bool {
+    format.depth == 24 && format.bits_per_pixel == 32 && format.scanline_pad == 32
 }
 
 fn ensure_native_image<'a>(
@@ -4723,9 +5327,7 @@ fn write_native_region(
             let start = (usize::from(y) + row) * source_stride + usize::from(x) * 3;
             let source = &rgb.as_raw()[start..start + usize::from(width) * 3];
             let target = &mut image.data_mut()[row * target_stride..(row + 1) * target_stride];
-            for (rgb, bgrx) in source.chunks_exact(3).zip(target.chunks_exact_mut(4)) {
-                bgrx.copy_from_slice(&[rgb[2], rgb[1], rgb[0], 0]);
-            }
+            pack_bgrx32(source, target);
         }
     } else {
         for row in 0..height {
@@ -4770,28 +5372,9 @@ fn write_native_pixels(
         && image.bits_per_pixel() == BitsPerPixel::B32
         && image.scanline_pad() == ScanlinePad::Pad32
         && image.byte_order() == ImageOrder::LsbFirst
+        && write_bgrx32_pixels(rgb, image.data_mut())?
     {
-        let source = rgb.as_raw();
-        let expected_source = usize::from(width)
-            .checked_mul(usize::from(height))
-            .and_then(|pixels| pixels.checked_mul(3))
-            .ok_or_else(|| invalid_data("viewer RGB buffer size overflow"))?;
-        let expected_native = usize::from(width)
-            .checked_mul(usize::from(height))
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| invalid_data("viewer native buffer size overflow"))?;
-        if source.len() == expected_source && image.data().len() == expected_native {
-            for (source, destination) in source
-                .chunks_exact(3)
-                .zip(image.data_mut().chunks_exact_mut(4))
-            {
-                destination[0] = source[2];
-                destination[1] = source[1];
-                destination[2] = source[0];
-                destination[3] = 0;
-            }
-            return Ok(());
-        }
+        return Ok(());
     }
 
     for (x, y, rgb) in rgb.enumerate_pixels() {
@@ -4805,12 +5388,109 @@ fn write_native_pixels(
     Ok(())
 }
 
+fn write_bgrx32_pixels(rgb: &RgbImage, destination: &mut [u8]) -> RemoteResult<bool> {
+    let (width, height) = rgb.dimensions();
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| invalid_data("viewer pixel count overflow"))?;
+    let rgb_bytes = pixels
+        .checked_mul(3)
+        .ok_or_else(|| invalid_data("viewer RGB buffer size overflow"))?;
+    let bgrx_bytes = pixels
+        .checked_mul(4)
+        .ok_or_else(|| invalid_data("viewer native buffer size overflow"))?;
+    if rgb.as_raw().len() != rgb_bytes || destination.len() != bgrx_bytes {
+        return Ok(false);
+    }
+    pack_bgrx32(rgb.as_raw(), destination);
+    Ok(true)
+}
+
+fn pack_bgrx32(source: &[u8], destination: &mut [u8]) {
+    debug_assert_eq!(source.len() % 3, 0);
+    debug_assert_eq!(destination.len(), source.len() / 3 * 4);
+    for (rgb, bgrx) in source.chunks_exact(3).zip(destination.chunks_exact_mut(4)) {
+        bgrx[0] = rgb[2];
+        bgrx[1] = rgb[1];
+        bgrx[2] = rgb[0];
+        bgrx[3] = 0;
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Letterbox {
     x: u16,
     y: u16,
     width: u16,
     height: u16,
+}
+
+/// The CPU work for one full-frame upload using an observed X11 viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CpuPreparation {
+    viewport_revision: u64,
+    input: (u32, u32),
+    geometry: Letterbox,
+}
+
+impl CpuPreparation {
+    pub(super) fn viewport_revision(self) -> u64 {
+        self.viewport_revision
+    }
+
+    pub(super) fn new(
+        viewport_revision: u64,
+        viewport: (u16, u16),
+        input: (u32, u32),
+    ) -> Option<Self> {
+        if input.0 > CPU_PREPARATION_MAX_AXIS
+            || input.1 > CPU_PREPARATION_MAX_AXIS
+            || input.0 * input.1 > CPU_PREPARATION_MAX_PIXELS
+        {
+            return None;
+        }
+        let geometry = letterbox(viewport.0, viewport.1, input.0 as u16, input.1 as u16)?;
+        if u32::from(geometry.width) > input.0 || u32::from(geometry.height) > input.1 {
+            return None;
+        }
+        Some(Self {
+            viewport_revision,
+            input,
+            geometry,
+        })
+    }
+
+    fn byte_len(self) -> usize {
+        usize::from(self.geometry.width) * usize::from(self.geometry.height) * 4
+    }
+
+    pub(super) fn prepare(self, image: &RgbImage, pixels: &mut Vec<u8>) -> RemoteResult<()> {
+        if self.input != image.dimensions() {
+            return Err(invalid_data("RGB image does not match the preparation plan").into());
+        }
+        let resized = resize_for_letterbox(image, self.geometry);
+        let len = self.byte_len();
+        pixels.try_reserve_exact(len.saturating_sub(pixels.len()))?;
+        pixels.resize(len, 0);
+        if !write_bgrx32_pixels(resized.as_ref(), pixels)? {
+            return Err(invalid_data("RGB image does not match its prepared BGRX buffer").into());
+        }
+        Ok(())
+    }
+}
+
+fn resize_for_letterbox(image: &RgbImage, geometry: Letterbox) -> Cow<'_, RgbImage> {
+    let size = (u32::from(geometry.width), u32::from(geometry.height));
+    if image.dimensions() == size {
+        Cow::Borrowed(image)
+    } else {
+        Cow::Owned(image::imageops::resize(
+            image,
+            size.0,
+            size.1,
+            image::imageops::FilterType::Triangle,
+        ))
+    }
 }
 
 fn pointer_inside_letterbox(x: i16, y: i16, geometry: Letterbox) -> bool {
@@ -4828,6 +5508,12 @@ fn pointer_inside_letterbox_margin(x: i16, y: i16, geometry: Letterbox, margin: 
 
 fn should_use_render_upscale(geometry: Letterbox, image_width: u16, image_height: u16) -> bool {
     geometry.width > image_width && geometry.height > image_height
+}
+
+#[cfg(feature = "remote-h264")]
+fn native_picture_required(viewport: (u16, u16), source: (u16, u16)) -> bool {
+    letterbox(viewport.0, viewport.1, source.0, source.1)
+        .is_some_and(|geometry| (geometry.width, geometry.height) != source)
 }
 
 fn letterbox(
@@ -5226,7 +5912,8 @@ fn validate_frame(frame: &StoredFrame) -> RemoteResult<()> {
         u32::from(frame.source_width),
         u32::from(frame.source_height),
     )?;
-    validate_viewer_dimensions(frame.image().width(), frame.image().height())
+    let (width, height) = frame.dimensions();
+    validate_viewer_dimensions(width, height)
 }
 
 fn replace_stored_frame(slot: &mut Option<StoredFrame>, next: StoredFrame) {
@@ -5356,7 +6043,7 @@ mod tests {
                 < connect.find("xbar_core::x11_connection::connect(").unwrap()
         );
         let startup = connect
-            .split("let (initial_width, initial_height) = startup_window_size(")
+            .split("let (initial_width, initial_height) = match embedded_parent {")
             .nth(1)
             .unwrap();
         assert!(
@@ -5373,7 +6060,7 @@ mod tests {
             native.find("validate_viewer_dimensions(").unwrap()
                 < native.find("XImage::allocate_native(").unwrap()
         );
-        let draw = source.split("fn draw_stored(&mut self").nth(1).unwrap();
+        let draw = source.split("fn draw_stored(").nth(1).unwrap();
         assert!(
             draw.find("validate_frame(&frame)").unwrap()
                 < draw.find("self.apply_pending_resize()").unwrap()
@@ -5462,6 +6149,7 @@ mod tests {
             1,
             Some(size),
             Some(position),
+            None,
             ScalingPolicy::Auto,
             false,
             false,
@@ -5508,6 +6196,7 @@ mod tests {
             1,
             Some(size),
             Some(outside),
+            None,
             ScalingPolicy::Auto,
             false,
             false,
@@ -6696,7 +7385,62 @@ mod tests {
 
         assert_eq!(fast.data(), generic.data());
         assert_eq!(&fast.data()[8..12], &[51, 34, 17, 0]);
+
+        let mut mapping = [0xaa; 28];
+        assert!(!write_bgrx32_pixels(&rgb, &mut mapping).unwrap());
+        assert_eq!(mapping, [0xaa; 28]);
+        assert!(write_bgrx32_pixels(&rgb, &mut mapping[..24]).unwrap());
+        assert_eq!(&mapping[..24], generic.data());
+        assert_eq!(&mapping[24..], &[0xaa; 4]);
         assert_eq!(&fast.data()[12..16], &[240, 1, 99, 0]);
+    }
+
+    #[test]
+    fn cpu_preparation_matches_native_upload_and_tracks_viewport_generation() {
+        let rgb = RgbImage::from_fn(7, 5, |x, y| {
+            image::Rgb([(x * 31) as u8, (y * 53) as u8, ((x + y) * 17) as u8])
+        });
+        let layout = PixelLayout::from_visual_type(standard_visual()).unwrap();
+        let mut prepared = Vec::new();
+
+        for viewport in [(7, 5), (9, 5), (5, 4), (4, 5)] {
+            let plan = CpuPreparation::new(3, viewport, rgb.dimensions()).unwrap();
+            assert_ne!(
+                plan,
+                CpuPreparation::new(5, viewport, rgb.dimensions()).unwrap()
+            );
+            plan.prepare(&rgb, &mut prepared).unwrap();
+            let Letterbox { width, height, .. } = plan.geometry;
+            let reference = image::imageops::resize(
+                &rgb,
+                u32::from(width),
+                u32::from(height),
+                image::imageops::FilterType::Triangle,
+            );
+            let mut expected = XImage::allocate(
+                width,
+                height,
+                ScanlinePad::Pad32,
+                24,
+                BitsPerPixel::B32,
+                ImageOrder::LsbFirst,
+            );
+            write_native_pixels(
+                &mut expected,
+                &reference,
+                layout,
+                NativePixelWriter::Generic,
+            )
+            .unwrap();
+            assert_eq!(prepared.as_slice(), expected.data());
+        }
+
+        assert!(CpuPreparation::new(1, (14, 10), rgb.dimensions()).is_none());
+        assert!(CpuPreparation::new(1, (640, 480), (4096, 2161)).is_none());
+        assert!(CpuPreparation::new(1, (5, 4), (0, 0)).is_none());
+        assert!(CpuPreparation::new(1, (3840, 2160), (3840, 2160)).is_some());
+        let plan = CpuPreparation::new(1, (5, 4), rgb.dimensions()).unwrap();
+        assert!(plan.prepare(&RgbImage::new(5, 4), &mut prepared).is_err());
     }
 
     #[test]
@@ -8152,7 +8896,7 @@ mod tests {
         }
         match &viewer.last_frame.as_ref().unwrap().image {
             StoredImage::Recyclable(frame) => assert_eq!(frame.source_epoch(), 2),
-            StoredImage::Owned(_) => panic!("new source lost its scoped frame"),
+            _ => panic!("new source lost its scoped CPU frame"),
         }
         // Mirror the client's ACK-after-completion step, not mere decode/submit.
         viewer.source_presented(1);
@@ -8166,6 +8910,304 @@ mod tests {
     #[test]
     #[ignore = "requires a dedicated JWM_TEST_X11_DISPLAY Xvfb server"]
     fn asynchronous_shm_frames_complete_in_order_on_x11() {
+        check_asynchronous_shm_frames_on_x11(false);
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn direct_shm_frames_complete_in_order_on_x11() {
+        check_asynchronous_shm_frames_on_x11(true);
+    }
+
+    #[cfg(feature = "remote-h264")]
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn native_picture_is_created_on_the_first_scaled_redraw_on_x11() {
+        use x11rb::protocol::xproto::ConfigureWindowAux;
+
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        let source = (321, 241);
+        let mut viewer = Viewer::connect_with_window_size(
+            Some(&display),
+            source.0,
+            source.1,
+            Some(super::super::window_size::WindowSize {
+                width: source.0,
+                height: source.1,
+            }),
+            ScalingPolicy::Gpu,
+            false,
+            false,
+            None,
+            false,
+            "F12",
+            "deferred XRender picture test",
+        )
+        .unwrap();
+        assert!(matches!(viewer.render_upscale, RenderUpscale::Enabled(_)));
+        assert_eq!(viewer.depth, 24);
+        let conn = Arc::clone(&viewer.conn);
+        let pixmap = conn.generate_id().unwrap();
+        conn.create_pixmap(viewer.depth, pixmap, viewer.window, source.0, source.1)
+            .unwrap()
+            .check()
+            .unwrap();
+        let painted = conn.generate_id().unwrap();
+        conn.create_gc(painted, pixmap, &CreateGCAux::new().foreground(0xd24217))
+            .unwrap()
+            .check()
+            .unwrap();
+        conn.poly_fill_rectangle(
+            pixmap,
+            painted,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: source.0,
+                height: source.1,
+            }],
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        conn.free_gc(painted).unwrap().check().unwrap();
+        viewer.last_frame = Some(StoredFrame {
+            sequence: 1,
+            geometry_epoch: 1,
+            source_width: source.0,
+            source_height: source.1,
+            image: StoredImage::Native(NativePixmap {
+                conn: Arc::clone(&conn),
+                pixmap,
+                picture: None,
+                dimensions: source,
+            }),
+        });
+        let check_pixel = |viewer: &Viewer, x, y, expected| {
+            let image = conn
+                .get_image(ImageFormat::Z_PIXMAP, viewer.window, x, y, 1, 1, u32::MAX)
+                .unwrap()
+                .reply()
+                .unwrap();
+            assert_eq!(&image.data[..3], expected);
+        };
+        let native_picture = |viewer: &Viewer| match &viewer.last_frame.as_ref().unwrap().image {
+            StoredImage::Native(native) => native.picture,
+            _ => panic!("the retained native pixmap was replaced"),
+        };
+        viewer.redraw().unwrap();
+        assert!(native_picture(&viewer).is_none());
+        check_pixel(&viewer, 160, 120, &[0x17, 0x42, 0xd2]);
+
+        let scale_size = (258, 190);
+        conn.configure_window(
+            viewer.window,
+            &ConfigureWindowAux::new()
+                .width(scale_size.0)
+                .height(scale_size.1),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while viewer.viewport() != (258, 190) {
+            viewer.poll_events().unwrap();
+            assert!(Instant::now() < deadline, "ConfigureNotify timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        viewer.refresh_pending_redraw().unwrap();
+        assert!(native_picture(&viewer).is_some());
+        check_pixel(&viewer, 129, 95, &[0x17, 0x42, 0xd2]);
+        check_pixel(&viewer, 0, 95, &[0, 0, 0]);
+    }
+
+    #[test]
+    #[ignore = "requires a dedicated owned JWM_TEST_X11_DISPLAY Xvfb server"]
+    fn prepared_cpu_rgb_matches_visible_shm_pixels_and_rejects_aba_on_x11() {
+        use x11rb::protocol::xproto;
+
+        assert_eq!(
+            std::env::var("JWM_REMOTE_TEST_VIEWER_OWNED").as_deref(),
+            Ok("1")
+        );
+        let display = std::env::var("JWM_TEST_X11_DISPLAY").unwrap();
+        assert!(display.starts_with(':'));
+        let (driver, _) = x11rb::connect(Some(&display)).unwrap();
+        let native_viewport = (326, 241);
+        let small_viewport = (258, 190);
+        let source = (321, 241);
+        let mut viewer = Viewer::connect_with_window_size(
+            Some(&display),
+            source.0,
+            source.1,
+            Some(super::super::window_size::WindowSize {
+                width: native_viewport.0,
+                height: native_viewport.1,
+            }),
+            ScalingPolicy::Cpu,
+            false,
+            false,
+            None,
+            false,
+            "F12",
+            "prepared CPU RGB SHM test",
+        )
+        .unwrap();
+        viewer.direct_shm = false;
+        assert!(matches!(viewer.shm_upload, ShmUpload::Enabled(_)));
+
+        let pool = super::super::frame::new_decode_buffer_pool();
+        let decoded = RgbImage::from_fn(u32::from(source.0), u32::from(source.1), |x, y| {
+            image::Rgb([
+                ((x * 13 + y * 3) % 251 + 1) as u8,
+                ((x * 5 + y * 17) % 251 + 1) as u8,
+                ((x * 7 + y * 19) % 251 + 1) as u8,
+            ])
+        });
+        let sentinel = RgbImage::from_pixel(
+            u32::from(source.0),
+            u32::from(source.1),
+            image::Rgb([7, 19, 73]),
+        );
+        let frame = |sequence, image: &RgbImage| {
+            RecyclableDecodedFrame::new(
+                sequence,
+                source.0,
+                source.1,
+                image.clone(),
+                Arc::clone(&pool),
+            )
+            .with_source_epoch(1)
+            .with_geometry_epoch(1)
+        };
+        let resize = |viewer: &mut Viewer, (width, height): (u16, u16)| {
+            let revision = viewer.viewport_revision();
+            assert_ne!(viewer.viewport(), (width, height));
+            driver
+                .configure_window(
+                    viewer.window,
+                    &xproto::ConfigureWindowAux::new()
+                        .width(u32::from(width))
+                        .height(u32::from(height)),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while viewer.viewport() != (width, height) {
+                viewer.poll_events().unwrap();
+                assert!(Instant::now() < deadline, "ConfigureNotify timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(viewer.viewport_revision(), revision + 1);
+        };
+        let complete = |viewer: &mut Viewer, sequence| {
+            assert_eq!(viewer.shm_upload.pending_keys().len(), 1);
+            assert!(viewer.take_presented_sequences().unwrap().is_empty());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut completed = Vec::new();
+            while !viewer.presentations.is_empty() {
+                viewer.poll_events().unwrap();
+                completed.extend(viewer.take_presented_sequences().unwrap());
+                assert!(Instant::now() < deadline, "X11 presentation timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(completed, [sequence]);
+            assert!(viewer.shm_upload.pending_keys().is_empty());
+        };
+        let read_window = |viewer: &Viewer| {
+            let (width, height) = viewer.viewport();
+            XImage::get(&driver, viewer.window, 0, 0, width, height)
+                .unwrap()
+                .0
+        };
+
+        let mut packed = Vec::new();
+        for (viewport, content_width, sequence) in
+            [(native_viewport, 321, 1), (small_viewport, 253, 4)]
+        {
+            if viewer.viewport() != viewport {
+                resize(&mut viewer, viewport);
+            }
+            assert!(viewer.draw_recyclable(frame(sequence, &decoded)).unwrap());
+            complete(&mut viewer, sequence);
+            let reference = read_window(&viewer);
+
+            let candidate = frame(sequence + 2, &decoded);
+            let plan = viewer.cpu_preparation(&candidate).unwrap();
+            assert_eq!(
+                plan.geometry,
+                Letterbox {
+                    x: 2,
+                    y: 0,
+                    width: content_width,
+                    height: viewport.1,
+                }
+            );
+            let row = viewport.1 / 2;
+            assert!((0..2).all(|x| reference.get_pixel(x, row) == 0));
+            assert!((content_width + 2..viewport.0).all(|x| reference.get_pixel(x, row) == 0));
+            assert_ne!(reference.get_pixel(2, row), 0);
+
+            assert!(
+                viewer
+                    .draw_recyclable(frame(sequence + 1, &sentinel))
+                    .unwrap()
+            );
+            complete(&mut viewer, sequence + 1);
+            assert_ne!(read_window(&viewer).data(), reference.data());
+            plan.prepare(candidate.image(), &mut packed).unwrap();
+            let sentinel_native = viewer.native_image.as_ref().unwrap().data().to_vec();
+            assert_ne!(sentinel_native.as_slice(), packed.as_slice());
+            assert_eq!(
+                viewer.draw_prepared(candidate, plan, &packed).unwrap(),
+                (true, true)
+            );
+            complete(&mut viewer, sequence + 2);
+            assert_eq!(read_window(&viewer).data(), reference.data());
+            assert_eq!(
+                viewer.native_image.as_ref().unwrap().data(),
+                sentinel_native.as_slice()
+            );
+        }
+
+        let downscaled_reference = read_window(&viewer);
+        let candidate = frame(8, &decoded);
+        let obsolete = viewer.cpu_preparation(&candidate).unwrap();
+        obsolete.prepare(candidate.image(), &mut packed).unwrap();
+        assert!(viewer.draw_recyclable(frame(7, &sentinel)).unwrap());
+        complete(&mut viewer, 7);
+        assert_ne!(read_window(&viewer).data(), downscaled_reference.data());
+        assert_ne!(
+            viewer.native_image.as_ref().unwrap().data(),
+            packed.as_slice()
+        );
+
+        resize(&mut viewer, native_viewport);
+        resize(&mut viewer, small_viewport);
+        let current = viewer.cpu_preparation(&candidate).unwrap();
+        assert_eq!(current.geometry, obsolete.geometry);
+        assert_eq!(
+            current.viewport_revision(),
+            obsolete.viewport_revision() + 2
+        );
+        assert_eq!(
+            viewer.draw_prepared(candidate, obsolete, &packed).unwrap(),
+            (true, false)
+        );
+        complete(&mut viewer, 8);
+        assert_eq!(read_window(&viewer).data(), downscaled_reference.data());
+        assert_eq!(
+            viewer.native_image.as_ref().unwrap().data(),
+            packed.as_slice()
+        );
+    }
+
+    fn check_asynchronous_shm_frames_on_x11(direct: bool) {
         let display = std::env::var("JWM_TEST_X11_DISPLAY")
             .expect("set JWM_TEST_X11_DISPLAY to an isolated Xvfb server");
         let mut viewer = Viewer::connect(
@@ -8180,6 +9222,7 @@ mod tests {
             "async SHM test",
         )
         .unwrap();
+        viewer.direct_shm = direct;
         assert!(
             matches!(viewer.shm_upload, ShmUpload::Enabled(_)),
             "this regression requires MIT-SHM FD support"
@@ -8196,22 +9239,53 @@ mod tests {
                 })
                 .unwrap()
         );
+        let ShmUpload::Enabled(upload) = &viewer.shm_upload else {
+            panic!("first frame disabled SHM");
+        };
+        assert_eq!(upload.reported_direct, direct);
+        assert_eq!(viewer.native_image.is_none(), direct);
         for sequence in 1..=3 {
             assert!(viewer.can_submit_frame());
             assert!(
                 viewer
-                    .draw_stored(StoredFrame::from_decoded(DecodedFrame {
-                        sequence,
-                        source_width: 640,
-                        source_height: 480,
-                        image: RgbImage::from_pixel(640, 480, image::Rgb([sequence as u8, 40, 70])),
-                    }))
+                    .draw_stored(
+                        StoredFrame::from_decoded(DecodedFrame {
+                            sequence,
+                            source_width: 640,
+                            source_height: 480,
+                            image: RgbImage::from_pixel(
+                                640,
+                                480,
+                                image::Rgb([sequence as u8, 40, 70])
+                            ),
+                        }),
+                        None,
+                    )
                     .unwrap()
             );
         }
         assert!(!viewer.can_submit_frame());
         assert_eq!(viewer.shm_upload.pending_keys().len(), SHM_UPLOAD_SLOTS);
         assert!(viewer.take_presented_sequences().unwrap().is_empty());
+        if direct {
+            let pending = viewer.shm_upload.pending_keys();
+            assert!(
+                viewer
+                    .shm_upload
+                    .upload_rgb(
+                        &viewer.conn,
+                        &RgbImage::from_pixel(640, 480, image::Rgb([220, 15, 90])),
+                        ShmDestination {
+                            drawable: viewer.backing,
+                            gc: viewer.gc,
+                            x: 0,
+                            y: 0
+                        },
+                    )
+                    .is_none()
+            );
+            assert_eq!(viewer.shm_upload.pending_keys(), pending);
+        }
         // Input must still be serviced while all three upload slots are owned
         // by X11. Put this before completions in the local event FIFO.
         viewer.deferred_events.push_front(Event::MotionNotify(
@@ -8242,6 +9316,11 @@ mod tests {
         assert_eq!(completed, [1, 2, 3]);
         assert!(viewer.can_submit_frame());
         assert!(viewer.shm_upload.pending_keys().is_empty());
+        let (visible, _) = XImage::get(&viewer.conn, viewer.window, 100, 100, 1, 1).unwrap();
+        assert_eq!(
+            visible.get_pixel(0, 0),
+            viewer.pixel_layout.encode((3 * 257, 40 * 257, 70 * 257))
+        );
         // Resize invalidates the retained backing but never frees a busy SHM
         // mapping. A fourth frame exercises reusable pool slots and redraw.
         viewer.width = 800;
@@ -8249,12 +9328,15 @@ mod tests {
         viewer.pending_resize = true;
         assert!(
             viewer
-                .draw_stored(StoredFrame::from_decoded(DecodedFrame {
-                    sequence: 4,
-                    source_width: 640,
-                    source_height: 480,
-                    image: RgbImage::from_pixel(640, 480, image::Rgb([80, 90, 100])),
-                }))
+                .draw_stored(
+                    StoredFrame::from_decoded(DecodedFrame {
+                        sequence: 4,
+                        source_width: 640,
+                        source_height: 480,
+                        image: RgbImage::from_pixel(640, 480, image::Rgb([80, 90, 100])),
+                    }),
+                    None,
+                )
                 .unwrap()
         );
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -8286,18 +9368,34 @@ mod tests {
         // A real server rejection has no SHM completion. It must retire only
         // that request and repaint through CPU/core, not strand the ring or ACK
         // an Expose-only repaint as a new network frame.
-        viewer
-            .shm_upload
-            .upload_or_core(
-                &viewer.conn,
-                viewer.native_image.as_ref().unwrap(),
-                viewer.backing,
-                x11rb::NONE,
-                0,
-                0,
-                &mut viewer.deferred_events,
-            )
-            .unwrap();
+        if direct {
+            assert!(matches!(
+                viewer.shm_upload.upload_rgb(
+                    &viewer.conn,
+                    viewer.last_frame.as_ref().unwrap().image(),
+                    ShmDestination {
+                        drawable: viewer.backing,
+                        gc: x11rb::NONE,
+                        x: 0,
+                        y: 0
+                    },
+                ),
+                Some(ShmUploadAttempt::Uploaded)
+            ));
+        } else {
+            viewer
+                .shm_upload
+                .upload_or_core(
+                    &viewer.conn,
+                    viewer.native_image.as_ref().unwrap(),
+                    viewer.backing,
+                    x11rb::NONE,
+                    0,
+                    0,
+                    &mut viewer.deferred_events,
+                )
+                .unwrap();
+        }
         viewer.queue_presentation(None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !viewer.presentations.is_empty() {

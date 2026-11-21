@@ -1,0 +1,562 @@
+{
+  "schema_version": 1,
+  "scope": "local software X11 Firefox DOM dialog with private Xvfb source and viewer",
+  "fixture_sha256": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+  "release_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+  "firefox_application_ini": {
+    "Version": "152.0.5",
+    "BuildID": "20260706120035"
+  },
+  "test_preference_overrides": {
+    "datareporting.policy.dataSubmissionEnabled": false
+  },
+  "codec": "fixed JPEG 85",
+  "dimensions": [
+    960,
+    640
+  ],
+  "cycles": 3,
+  "paired_transitions": 6,
+  "capture_rectangles": {
+    "scored": [
+      384,
+      298,
+      192,
+      44
+    ],
+    "context": [
+      208,
+      236,
+      544,
+      168
+    ]
+  },
+  "replay": {
+    "observations": 136,
+    "button_spans": [
+      [
+        13,
+        207
+      ],
+      [
+        219,
+        320
+      ],
+      [
+        372,
+        429
+      ]
+    ],
+    "click": [
+      269,
+      18
+    ],
+    "transitions": [
+      {
+        "phase": "cycle-01-open",
+        "cycle": 1,
+        "target": "open",
+        "viewer_minus_source_observations_ms": 41.658909,
+        "endpoints": {
+          "source": {
+            "first_end_monotonic_ns": 51352769,
+            "launch_to_first_ms": 51.352769,
+            "previous_end_monotonic_ns": 41377975,
+            "raster": {
+              "before": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              }
+            }
+          },
+          "viewer": {
+            "first_end_monotonic_ns": 93011678,
+            "launch_to_first_ms": 93.011678,
+            "previous_end_monotonic_ns": 82643541,
+            "raster": {
+              "before": {
+                "state": "closed",
+                "bright_fraction": 0.022727272727272728,
+                "dark_pixels": 1972,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              }
+            }
+          }
+        }
+      },
+      {
+        "phase": "cycle-01-closed",
+        "cycle": 1,
+        "target": "closed",
+        "viewer_minus_source_observations_ms": 40.791386,
+        "endpoints": {
+          "source": {
+            "first_end_monotonic_ns": 725819004,
+            "launch_to_first_ms": 111.29828,
+            "previous_end_monotonic_ns": 715925861,
+            "raster": {
+              "before": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              }
+            }
+          },
+          "viewer": {
+            "first_end_monotonic_ns": 766610390,
+            "launch_to_first_ms": 152.089666,
+            "previous_end_monotonic_ns": 756901543,
+            "raster": {
+              "before": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "closed",
+                "bright_fraction": 0.019412878787878788,
+                "dark_pixels": 1983,
+                "changed_fraction_from_closed": 0.026988636363636364,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "closed",
+                "bright_fraction": 0.019412878787878788,
+                "dark_pixels": 1983,
+                "changed_fraction_from_closed": 0.026988636363636364,
+                "sampled_pixels": 2112
+              }
+            }
+          }
+        }
+      },
+      {
+        "phase": "cycle-02-open",
+        "cycle": 2,
+        "target": "open",
+        "viewer_minus_source_observations_ms": 93.370266,
+        "endpoints": {
+          "source": {
+            "first_end_monotonic_ns": 1315832771,
+            "launch_to_first_ms": 31.437488,
+            "previous_end_monotonic_ns": 1305621834,
+            "raster": {
+              "before": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              }
+            }
+          },
+          "viewer": {
+            "first_end_monotonic_ns": 1409203037,
+            "launch_to_first_ms": 124.807754,
+            "previous_end_monotonic_ns": 1398883506,
+            "raster": {
+              "before": {
+                "state": "closed",
+                "bright_fraction": 0.019412878787878788,
+                "dark_pixels": 1983,
+                "changed_fraction_from_closed": 0.026988636363636364,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              }
+            }
+          }
+        }
+      },
+      {
+        "phase": "cycle-02-closed",
+        "cycle": 2,
+        "target": "closed",
+        "viewer_minus_source_observations_ms": 52.988773,
+        "endpoints": {
+          "source": {
+            "first_end_monotonic_ns": 1958635358,
+            "launch_to_first_ms": 22.192052,
+            "previous_end_monotonic_ns": 1948618742,
+            "raster": {
+              "before": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              }
+            }
+          },
+          "viewer": {
+            "first_end_monotonic_ns": 2011624131,
+            "launch_to_first_ms": 75.180825,
+            "previous_end_monotonic_ns": 2001622230,
+            "raster": {
+              "before": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "closed",
+                "bright_fraction": 0.019412878787878788,
+                "dark_pixels": 1983,
+                "changed_fraction_from_closed": 0.026988636363636364,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "closed",
+                "bright_fraction": 0.019412878787878788,
+                "dark_pixels": 1983,
+                "changed_fraction_from_closed": 0.026988636363636364,
+                "sampled_pixels": 2112
+              }
+            }
+          }
+        }
+      },
+      {
+        "phase": "cycle-03-open",
+        "cycle": 3,
+        "target": "open",
+        "viewer_minus_source_observations_ms": 31.22693,
+        "endpoints": {
+          "source": {
+            "first_end_monotonic_ns": 2556040171,
+            "launch_to_first_ms": 21.268538,
+            "previous_end_monotonic_ns": 2546038169,
+            "raster": {
+              "before": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              }
+            }
+          },
+          "viewer": {
+            "first_end_monotonic_ns": 2587267101,
+            "launch_to_first_ms": 52.495468,
+            "previous_end_monotonic_ns": 2577151641,
+            "raster": {
+              "before": {
+                "state": "closed",
+                "bright_fraction": 0.019412878787878788,
+                "dark_pixels": 1983,
+                "changed_fraction_from_closed": 0.026988636363636364,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              }
+            }
+          }
+        }
+      },
+      {
+        "phase": "cycle-03-closed",
+        "cycle": 3,
+        "target": "closed",
+        "viewer_minus_source_observations_ms": 63.087729,
+        "endpoints": {
+          "source": {
+            "first_end_monotonic_ns": 3130512864,
+            "launch_to_first_ms": 22.050688,
+            "previous_end_monotonic_ns": 3120747543,
+            "raster": {
+              "before": {
+                "state": "open",
+                "bright_fraction": 0.9142992424242424,
+                "dark_pixels": 54,
+                "changed_fraction_from_closed": 0.9976325757575758,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "closed",
+                "bright_fraction": 0.021780303030303032,
+                "dark_pixels": 1984,
+                "changed_fraction_from_closed": 0.0,
+                "sampled_pixels": 2112
+              }
+            }
+          },
+          "viewer": {
+            "first_end_monotonic_ns": 3193600593,
+            "launch_to_first_ms": 85.138417,
+            "previous_end_monotonic_ns": 3183747202,
+            "raster": {
+              "before": {
+                "state": "open",
+                "bright_fraction": 0.9147727272727273,
+                "dark_pixels": 56,
+                "changed_fraction_from_closed": 0.993844696969697,
+                "sampled_pixels": 2112
+              },
+              "first": {
+                "state": "closed",
+                "bright_fraction": 0.019412878787878788,
+                "dark_pixels": 1983,
+                "changed_fraction_from_closed": 0.026988636363636364,
+                "sampled_pixels": 2112
+              },
+              "last": {
+                "state": "closed",
+                "bright_fraction": 0.019412878787878788,
+                "dark_pixels": 1983,
+                "changed_fraction_from_closed": 0.026988636363636364,
+                "sampled_pixels": 2112
+              }
+            }
+          }
+        }
+      }
+    ],
+    "viewer_minus_source_observations_ms": {
+      "open": {
+        "samples": 3,
+        "min_ms": 31.22693,
+        "median_ms": 41.658909,
+        "max_ms": 93.370266
+      },
+      "closed": {
+        "samples": 3,
+        "min_ms": 40.791386,
+        "median_ms": 52.988773,
+        "max_ms": 63.087729
+      }
+    }
+  },
+  "verified_telemetry": {
+    "host": {
+      "routes": [
+        "root/xrender/shm/no-damage/cursor-events"
+      ],
+      "typed_windows": 1,
+      "last_frame_sequence": 20,
+      "drawn_ack_count": 21
+    },
+    "viewer": {
+      "routes": [
+        "rgb"
+      ],
+      "typed_windows": 1,
+      "last_frame_sequence": 20,
+      "drawn_ack_count": 21
+    },
+    "session_stable": true,
+    "session_alias": "modal-session-1",
+    "source_geometry_epoch": [
+      1,
+      2
+    ],
+    "owned_drawable_dimensions": [
+      960,
+      640
+    ],
+    "software_webrender_verified": true
+  },
+  "timing_scope": "One local monotonic clock. Deltas compare software raster observations under the 100 Hz poll ceiling. The first matching read was confirmed by the next read. Xdotool launch includes process and X11 dispatch.",
+  "archive": {
+    "path": "firefox-x11-modal-diagnostic-raw.zip",
+    "sha256": "e82f7abc8d3a3d15c59470d25e912f1a59cdf64988ee66af1cef0a7c534026ba",
+    "entries": {
+      "README.md": "782efc3940a97132575bf09f7d3f46638c6ae5bc224d4e70c96e8eb535fda553",
+      "fixture/browser.html": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+      "fixture/firefox-profile-user.js": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/replay_modal.py": "2ca65f15d2dbe04781996f52e16d26e4c8dfa8b1255747da1ad2f9af85bb474f",
+      "fixture/run_modal.py": "342aef454adf5e6481c5654c4546a535d50734e4931164fddb2ea6983cc20f31",
+      "fixture/x11_pixels.py": "27a2d6d28202c0cafab59553e3be77d55aedb73e4aeef1aa86bf5be7e197da2c",
+      "trace/button-placement.json": "727b94eb84e503f6cbb9f0412daaa5f704e4f9cadf1477a6c913f9c827d71948",
+      "trace/center-reads.jsonl": "a466533a4d6e6f2012f97005fb2f41a5d4f735d9567f49b36347cb5f727ec57f",
+      "trace/cycle-01-closed-source-before.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-01-closed-source-dialog-area.ppm": "397d255af78d7fb8763de9844c9e840e0135eef3ba07dbd10ae1d3ff73852218",
+      "trace/cycle-01-closed-source-first.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-01-closed-source-last.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-01-closed-viewer-before.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-01-closed-viewer-dialog-area.ppm": "57d01918d986f196cafb0e0706bb6a81256e411adf9b358ab851584276a2890d",
+      "trace/cycle-01-closed-viewer-first.ppm": "17f9a7d980a4f2c52ad8b25372afce1d19cff9bbbbae89e80d15a85ca4e56cd2",
+      "trace/cycle-01-closed-viewer-last.ppm": "17f9a7d980a4f2c52ad8b25372afce1d19cff9bbbbae89e80d15a85ca4e56cd2",
+      "trace/cycle-01-closed.json": "75b3305b3b055f0801e09fa7efd935f8ec26b6f16197499e086974400dd512ab",
+      "trace/cycle-01-open-source-before.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-01-open-source-dialog-area.ppm": "ed811c7d5c0399f17e67e34c9af2c60fb830c699604fc8446660eb6eef0d0801",
+      "trace/cycle-01-open-source-first.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-01-open-source-last.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-01-open-viewer-before.ppm": "35df7b540ecb067a1dafa550908eca5538de01937cffc011fe3e6ef796322c45",
+      "trace/cycle-01-open-viewer-dialog-area.ppm": "78ca8701c3508be344d8a7938ac7bfa4dd3ada7636058a22de1e213a1b2a0122",
+      "trace/cycle-01-open-viewer-first.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-01-open-viewer-last.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-01-open.json": "300a086592cc72755054531c7434048ddcd42a57e5f5fb2923e85560b45bef71",
+      "trace/cycle-02-closed-source-before.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-02-closed-source-dialog-area.ppm": "397d255af78d7fb8763de9844c9e840e0135eef3ba07dbd10ae1d3ff73852218",
+      "trace/cycle-02-closed-source-first.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-02-closed-source-last.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-02-closed-viewer-before.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-02-closed-viewer-dialog-area.ppm": "57d01918d986f196cafb0e0706bb6a81256e411adf9b358ab851584276a2890d",
+      "trace/cycle-02-closed-viewer-first.ppm": "17f9a7d980a4f2c52ad8b25372afce1d19cff9bbbbae89e80d15a85ca4e56cd2",
+      "trace/cycle-02-closed-viewer-last.ppm": "17f9a7d980a4f2c52ad8b25372afce1d19cff9bbbbae89e80d15a85ca4e56cd2",
+      "trace/cycle-02-closed.json": "abe06bb589d160e63216ed4912c3b488ed134900afca6401acda7da07064c8c7",
+      "trace/cycle-02-open-source-before.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-02-open-source-dialog-area.ppm": "ed811c7d5c0399f17e67e34c9af2c60fb830c699604fc8446660eb6eef0d0801",
+      "trace/cycle-02-open-source-first.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-02-open-source-last.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-02-open-viewer-before.ppm": "17f9a7d980a4f2c52ad8b25372afce1d19cff9bbbbae89e80d15a85ca4e56cd2",
+      "trace/cycle-02-open-viewer-dialog-area.ppm": "78ca8701c3508be344d8a7938ac7bfa4dd3ada7636058a22de1e213a1b2a0122",
+      "trace/cycle-02-open-viewer-first.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-02-open-viewer-last.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-02-open.json": "0203a5fc48db411fc6745bfcfe235aed294f4104b48f83460d5ad0da30c4d84d",
+      "trace/cycle-03-closed-source-before.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-03-closed-source-dialog-area.ppm": "397d255af78d7fb8763de9844c9e840e0135eef3ba07dbd10ae1d3ff73852218",
+      "trace/cycle-03-closed-source-first.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-03-closed-source-last.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-03-closed-viewer-before.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-03-closed-viewer-dialog-area.ppm": "57d01918d986f196cafb0e0706bb6a81256e411adf9b358ab851584276a2890d",
+      "trace/cycle-03-closed-viewer-first.ppm": "17f9a7d980a4f2c52ad8b25372afce1d19cff9bbbbae89e80d15a85ca4e56cd2",
+      "trace/cycle-03-closed-viewer-last.ppm": "17f9a7d980a4f2c52ad8b25372afce1d19cff9bbbbae89e80d15a85ca4e56cd2",
+      "trace/cycle-03-closed.json": "85b95dbe2bbe4f4c451eeecdc3622049857c112081fc27186a87dd5b2d4cbfb6",
+      "trace/cycle-03-open-source-before.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/cycle-03-open-source-dialog-area.ppm": "ed811c7d5c0399f17e67e34c9af2c60fb830c699604fc8446660eb6eef0d0801",
+      "trace/cycle-03-open-source-first.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-03-open-source-last.ppm": "2adacaa589c0dfa364dabdf71049c2621416a00e58e6f8f5260116df5535df55",
+      "trace/cycle-03-open-viewer-before.ppm": "17f9a7d980a4f2c52ad8b25372afce1d19cff9bbbbae89e80d15a85ca4e56cd2",
+      "trace/cycle-03-open-viewer-dialog-area.ppm": "78ca8701c3508be344d8a7938ac7bfa4dd3ada7636058a22de1e213a1b2a0122",
+      "trace/cycle-03-open-viewer-first.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-03-open-viewer-last.ppm": "b582feb4660fe0bb604d6e7399333be7c81276701782c436b9ad7b00492a016c",
+      "trace/cycle-03-open.json": "e7c97e81d298d68e9e2453fd3c4f11815b5780a547804f3ea62f7713e8ee3f8a",
+      "trace/host-telemetry.jsonl": "df9477f8fb3ceb49337413b4f38e0dcb37c4851e5707f949ecf691ce6c12cd65",
+      "trace/result.json": "4351468ce939796f9fa9dbdf5e68e0d102e30535518a7f7de299ceb0bca9a596",
+      "trace/source-closed-reference.ppm": "8de80809594e9b4ce5b8ac0f146fa41e89f5e9e4f71d7d516af74b79e382087f",
+      "trace/source-initial.ppm": "04556f84d5f7826214b942461fa706476a43ed04e6835c70f6541e19d08a32c6",
+      "trace/viewer-closed-reference.ppm": "35df7b540ecb067a1dafa550908eca5538de01937cffc011fe3e6ef796322c45",
+      "trace/viewer-initial.ppm": "284d7014a9ef0b153e9248884abfaa12bb2982455755298d51e2331ea61f5f0b",
+      "trace/viewer-telemetry.jsonl": "408e1c981ea26ca777fcb8fad9275fa6ebcf892eae511b19a338bd55d0026288"
+    },
+    "normalization": "Original PPM bytes, rebased monotonic clocks, and a shared session alias."
+  }
+}

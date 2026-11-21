@@ -55,33 +55,44 @@ enum Phase {
 /// Immutable grants from explicit host configuration, never a peer catalog.
 /// No API expands permissions or restores grants from an earlier connection.
 #[derive(Debug)]
-pub struct SourceSession {
-    grants: BTreeMap<SourceId, CaptureArea>,
+pub struct SourceSession<T = CaptureArea> {
+    grants: BTreeMap<SourceId, T>,
     current: SourceVersion,
     phase: Phase,
     last_frame: Option<u64>,
 }
 
-impl SourceSession {
+impl SourceSession<CaptureArea> {
     /// Every connection starts at epoch 1 and requires a presented keyframe.
     pub fn new(
         grants: impl IntoIterator<Item = (SourceId, CaptureArea)>,
         initial: SourceId,
     ) -> Result<Self, SourceError> {
+        let grants: Vec<_> = grants.into_iter().take(MAX_GRANTED_SOURCES + 1).collect();
+        if !grants.iter().all(|(_, area)| match area {
+            CaptureArea::Root => true,
+            CaptureArea::Window(id) => *id != 0,
+            CaptureArea::Monitor(name) => {
+                !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
+            }
+            CaptureArea::Region(region) => region.width != 0 && region.height != 0,
+        }) {
+            return Err(SourceError::InvalidGrants);
+        }
+        Self::from_validated_grants(grants, initial)
+    }
+}
+
+impl<T> SourceSession<T> {
+    pub(super) fn from_validated_grants(
+        grants: impl IntoIterator<Item = (SourceId, T)>,
+        initial: SourceId,
+    ) -> Result<Self, SourceError> {
         let mut granted = BTreeMap::new();
-        for (id, area) in grants {
-            let valid = match &area {
-                CaptureArea::Root => true,
-                CaptureArea::Window(id) => *id != 0,
-                CaptureArea::Monitor(name) => {
-                    !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
-                }
-                CaptureArea::Region(region) => region.width != 0 && region.height != 0,
-            };
+        for (id, target) in grants {
             if id.0 == 0
                 || granted.len() == MAX_GRANTED_SOURCES
-                || !valid
-                || granted.insert(id, area).is_some()
+                || granted.insert(id, target).is_some()
             {
                 return Err(SourceError::InvalidGrants);
             }
@@ -106,7 +117,7 @@ impl SourceSession {
     }
 
     #[must_use]
-    pub fn selected_area(&self) -> &CaptureArea {
+    pub fn selected_area(&self) -> &T {
         &self.grants[&self.current.source]
     }
 
@@ -145,7 +156,7 @@ impl SourceSession {
     pub fn finish_switch<E>(
         &mut self,
         version: SourceVersion,
-        quiesce_and_install: impl FnOnce(&CaptureArea) -> Result<(), E>,
+        quiesce_and_install: impl FnOnce(&T) -> Result<(), E>,
     ) -> Result<Result<(), E>, SourceError> {
         self.check_version(version)?;
         if self.phase != Phase::Quiescing {

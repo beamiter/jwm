@@ -19,6 +19,9 @@ use smithay::reexports::{
     },
     wayland_server::{
         Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, Weak,
+        backend::{
+            Backend, ClientData, ClientId, GlobalHandler, GlobalId, Handle, ObjectData, ObjectId,
+        },
         protocol::{wl_seat::WlSeat, wl_surface::WlSurface},
     },
 };
@@ -29,7 +32,12 @@ use smithay::{
     wayland::shell::xdg::PopupSurface,
 };
 use std::{
-    sync::{Arc, atomic::Ordering},
+    io::{ErrorKind, Read, Write},
+    os::unix::net::UnixStream,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 const TTL: Duration = Duration::from_secs(30);
@@ -328,8 +336,64 @@ fn proof(
     }
     Some((serial, at, proof))
 }
+struct RegistryFilterProbe(AtomicBool);
+impl GlobalHandler<()> for RegistryFilterProbe {
+    fn can_view(&self, _: ClientId, _: &Arc<dyn ClientData>, _: GlobalId) -> bool {
+        self.0.store(true, Ordering::Relaxed);
+        false
+    }
+
+    fn bind(
+        self: Arc<Self>,
+        _: &Handle,
+        _: &mut (),
+        _: ClientId,
+        _: GlobalId,
+        _: ObjectId,
+    ) -> Arc<dyn ObjectData<()>> {
+        unreachable!("the private registry probe does not send any bind requests")
+    }
+}
+
+fn probe_dynamic_global_filter() -> Option<bool> {
+    let mut backend = Backend::<()>::new().ok()?;
+    let mut handle = backend.handle();
+    let (server, mut client) = UnixStream::pair().ok()?;
+    handle.insert_client(server, Arc::new(())).ok()?;
+    // wl_display.get_registry(new_id = 2) on an otherwise empty private display.
+    let mut request = [0; 12];
+    request[..4].copy_from_slice(&1u32.to_ne_bytes());
+    request[4..8].copy_from_slice(&((12u32 << 16) | 1).to_ne_bytes());
+    request[8..].copy_from_slice(&2u32.to_ne_bytes());
+    client.write_all(&request).ok()?;
+    backend.dispatch_all_clients(&mut ()).ok()?;
+
+    let filter = Arc::new(RegistryFilterProbe(AtomicBool::new(false)));
+    let hidden = handle.create_global::<()>(WlSeat::interface(), 1, filter.clone());
+    let creation_consulted_filter = filter.0.load(Ordering::Relaxed);
+    handle.remove_global::<()>(hidden);
+    backend.flush(None).ok()?;
+    client.set_nonblocking(true).ok()?;
+    let unread = client.read(&mut [0]);
+    Some(
+        creation_consulted_filter
+            && unread.is_err_and(|error| error.kind() == ErrorKind::WouldBlock),
+    )
+}
+
+fn dynamic_global_filter_supported() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| probe_dynamic_global_filter().unwrap_or(false))
+}
+
 pub(crate) fn init(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, JwmRemotePopupManagerV1, _>(2, ManagerData);
+    if dynamic_global_filter_supported() {
+        dh.create_global::<JwmWaylandState, JwmRemotePopupManagerV1, _>(2, ManagerData);
+    } else {
+        log::warn!(
+            "remote popup input unavailable: Wayland runtime did not filter dynamic globals"
+        );
+    }
 }
 impl GlobalDispatch<JwmRemotePopupManagerV1, ManagerData> for JwmWaylandState {
     fn bind(

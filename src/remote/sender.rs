@@ -50,6 +50,27 @@ impl<W: io::Write> RecordWriter for SessionWriter<W> {
 struct Record {
     kind: MessageKind,
     payload: Vec<u8>,
+    queued_at: Instant,
+}
+
+impl Record {
+    fn new(kind: MessageKind, payload: Vec<u8>) -> Self {
+        Self {
+            kind,
+            payload,
+            queued_at: Instant::now(),
+        }
+    }
+}
+
+pub(super) struct SendTiming {
+    pub(super) queue_wait: Duration,
+    pub(super) write_elapsed: Duration,
+    pub(super) control_records: usize,
+    pub(super) bulk_records: usize,
+    pub(super) control_bytes: usize,
+    pub(super) bulk_bytes: usize,
+    pub(super) oldest_queued: Duration,
 }
 
 /// Test-only provenance of the actual first sender worker socket failure.
@@ -148,10 +169,7 @@ impl Queue {
             self.clipboard_barrier = None;
             self.control_bytes = payload.len();
             self.bulk_bytes = 0;
-            self.control.push_back(Record {
-                kind,
-                payload: payload.to_vec(),
-            });
+            self.control.push_back(Record::new(kind, payload.to_vec()));
             self.popup_terminal = Some(PopupTerminal::Queued);
             return Ok(());
         }
@@ -164,18 +182,11 @@ impl Queue {
                 )
                 .into());
             }
-            self.clipboard_barrier = Some((
-                Record {
-                    kind,
-                    payload: payload.to_vec(),
-                },
-                self.bulk.len(),
-            ));
+            self.clipboard_barrier = Some((Record::new(kind, payload.to_vec()), self.bulk.len()));
             return Ok(());
         }
         let expected = match kind {
             MessageKind::Heartbeat => Some(0),
-            MessageKind::FrameAck => Some(16),
             MessageKind::Viewport => Some(4),
             MessageKind::WindowResizeRequest => Some(28),
             MessageKind::WaylandKeyboardRequest => Some(56),
@@ -189,7 +200,13 @@ impl Queue {
             MessageKind::WaylandControlRevoke => Some(8),
             _ => None,
         };
-        if expected.is_some_and(|length| payload.len() != length) {
+        if expected.is_some_and(|length| payload.len() != length)
+            || (kind == MessageKind::FrameAck
+                && !matches!(
+                    payload.len(),
+                    16 | super::messages::ViewerFrameFeedback::ACK_LEN
+                ))
+        {
             return Err(
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid control record size").into(),
             );
@@ -242,8 +259,13 @@ impl Queue {
             MessageKind::FrameAck | MessageKind::Viewport | MessageKind::Heartbeat
         ) && let Some(record) = self.control.iter_mut().find(|r| r.kind == kind)
         {
-            self.control_bytes = self.control_bytes - record.payload.len() + payload.len();
+            let new_bytes = self.control_bytes - record.payload.len() + payload.len();
+            if new_bytes > CONTROL_BYTES {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "remote send queue overloaded; ending session to preserve input and clipboard ordering").into());
+            }
+            self.control_bytes = new_bytes;
             record.payload = payload.to_vec();
+            record.queued_at = Instant::now();
             return Ok(());
         }
         let bulk = matches!(
@@ -269,10 +291,7 @@ impl Queue {
             return Err(io::Error::new(io::ErrorKind::WouldBlock, "remote send queue overloaded; ending session to preserve input and clipboard ordering").into());
         }
         *bytes += payload.len();
-        queue.push_back(Record {
-            kind,
-            payload: payload.to_vec(),
-        });
+        queue.push_back(Record::new(kind, payload.to_vec()));
         Ok(())
     }
 
@@ -300,15 +319,11 @@ impl Queue {
             )
             .expect("a single release is a valid input batch");
             self.control_bytes = release.len();
-            self.control.push_back(Record {
-                kind: MessageKind::InputBatch,
-                payload: release,
-            });
+            self.control
+                .push_back(Record::new(MessageKind::InputBatch, release));
         }
-        self.control.push_back(Record {
-            kind: MessageKind::Close,
-            payload: Vec::new(),
-        });
+        self.control
+            .push_back(Record::new(MessageKind::Close, Vec::new()));
         self.closing = true;
     }
 
@@ -340,6 +355,34 @@ impl Queue {
             Some(record)
         } else {
             None
+        }
+    }
+
+    fn timing_at_dequeue(&self, record: &Record, now: Instant) -> SendTiming {
+        let barrier = self.clipboard_barrier.as_ref().map(|(record, _)| record);
+        let oldest = self
+            .control
+            .iter()
+            .chain(self.bulk.iter())
+            .chain(barrier)
+            .map(|item| item.queued_at)
+            .fold(record.queued_at, Instant::min);
+        let is_bulk = matches!(
+            record.kind,
+            MessageKind::Clipboard | MessageKind::ClipboardTransfer
+        );
+        SendTiming {
+            queue_wait: now.saturating_duration_since(record.queued_at),
+            write_elapsed: Duration::ZERO,
+            control_records: self.control.len()
+                + usize::from(!is_bulk)
+                + usize::from(barrier.is_some()),
+            bulk_records: self.bulk.len() + usize::from(is_bulk),
+            control_bytes: self.control_bytes
+                + if is_bulk { 0 } else { record.payload.len() }
+                + barrier.map_or(0, |item| item.payload.len()),
+            bulk_bytes: self.bulk_bytes + if is_bulk { record.payload.len() } else { 0 },
+            oldest_queued: now.saturating_duration_since(oldest),
         }
     }
 }
@@ -459,7 +502,8 @@ impl Sender {
     pub(super) fn spawn(
         mut writer: SessionWriter<TcpStream>,
         input_enabled: bool,
-        on_written: impl Fn(MessageKind) + Send + 'static,
+        measure: bool,
+        on_written: impl Fn(MessageKind, Option<SendTiming>) + Send + 'static,
     ) -> io::Result<Self> {
         let control = writer.get_ref().try_clone()?;
         let shared = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
@@ -515,7 +559,7 @@ impl Sender {
                         }
                         let mut clipboard_gate = OutboundGate::default();
                         loop {
-                            let (record, clipboard_policy) = {
+                            let (record, clipboard_policy, mut timing) = {
                                 let (lock, wake) = &*worker_shared;
                                 let mut queue = lock.lock().unwrap_or_else(|p| p.into_inner());
                                 loop {
@@ -523,9 +567,12 @@ impl Sender {
                                         return Ok(());
                                     }
                                     if let Some(record) = queue.pop() {
-                                        queue.writing_since = Some(Instant::now());
+                                        let now = Instant::now();
+                                        queue.writing_since = Some(now);
                                         wake.notify_all();
-                                        break (record, queue.clipboard_policy.clone());
+                                        let timing =
+                                            measure.then(|| queue.timing_at_dequeue(&record, now));
+                                        break (record, queue.clipboard_policy.clone(), timing);
                                     }
                                     queue = wake.wait(queue).unwrap_or_else(|p| p.into_inner());
                                 }
@@ -539,7 +586,12 @@ impl Sender {
                                 None => Some(record.payload),
                             };
                             if let Some(payload) = &payload {
+                                let write_started = timing.as_ref().map(|_| Instant::now());
                                 write_and_flush_record(&mut writer, record.kind, payload)?;
+                                if let (Some(timing), Some(started)) = (&mut timing, write_started)
+                                {
+                                    timing.write_elapsed = started.elapsed();
+                                }
                             }
                             {
                                 let mut queue =
@@ -551,7 +603,7 @@ impl Sender {
                             }
                             worker_shared.1.notify_all();
                             if payload.is_some() {
-                                on_written(record.kind);
+                                on_written(record.kind, timing);
                             }
                             if matches!(
                                 record.kind,
@@ -1085,14 +1137,19 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
-        let mut sender = Sender::spawn(SessionWriter::new(socket, key), false, move |kind| {
-            if kind == MessageKind::Heartbeat {
-                entered_tx.send(()).unwrap();
-                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            } else if kind == MessageKind::ClipboardRestrict {
-                barrier_tx.send(()).unwrap();
-            }
-        })
+        let mut sender = Sender::spawn(
+            SessionWriter::new(socket, key),
+            false,
+            false,
+            move |kind, _| {
+                if kind == MessageKind::Heartbeat {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                } else if kind == MessageKind::ClipboardRestrict {
+                    barrier_tx.send(()).unwrap();
+                }
+            },
+        )
         .unwrap();
         let policy = Arc::new(AtomicU8::new(7));
         sender.set_clipboard_policy(Arc::clone(&policy)).unwrap();
@@ -1157,12 +1214,17 @@ mod tests {
         let key = [42; 32];
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (gate_tx, gate_rx) = mpsc::sync_channel(1);
-        let mut sender = Sender::spawn(SessionWriter::new(socket, key), true, move |kind| {
-            if kind == MessageKind::Heartbeat {
-                entered_tx.send(()).unwrap();
-                gate_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            }
-        })
+        let mut sender = Sender::spawn(
+            SessionWriter::new(socket, key),
+            true,
+            false,
+            move |kind, _| {
+                if kind == MessageKind::Heartbeat {
+                    entered_tx.send(()).unwrap();
+                    gate_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            },
+        )
         .unwrap();
         sender.write_message(MessageKind::Heartbeat, &[]).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1212,10 +1274,15 @@ mod tests {
         let (_peer, _) = listener.accept().unwrap();
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let mut sender = Sender::spawn(SessionWriter::new(socket, [42; 32]), false, move |_| {
-            entered_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-        })
+        let mut sender = Sender::spawn(
+            SessionWriter::new(socket, [42; 32]),
+            false,
+            false,
+            move |_, _| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            },
+        )
         .unwrap();
         sender.write_message(MessageKind::Heartbeat, &[]).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1282,9 +1349,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (_peer, _) = listener.accept().unwrap();
-        let mut sender = Sender::spawn(SessionWriter::new(socket, [42; 32]), false, |_| {
-            panic!("fixture")
-        })
+        let mut sender = Sender::spawn(
+            SessionWriter::new(socket, [42; 32]),
+            false,
+            false,
+            |_, _| panic!("fixture"),
+        )
         .unwrap();
         sender.write_message(MessageKind::Heartbeat, &[]).unwrap();
         sender.done.recv_timeout(Duration::from_secs(2)).unwrap();

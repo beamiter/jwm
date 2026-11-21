@@ -122,10 +122,21 @@ fn wait_exact(
             let feedback = take_feedback(&surface);
             if !feedback.is_empty() {
                 assert_eq!(feedback.len(), 1);
-                let seq = h.frames.lock().unwrap().0.unwrap();
+                let (committed, presented) = *h.frames.lock().unwrap();
+                let seq = committed.unwrap();
+                if Some(seq) == last {
+                    // A view-only resize may redraw the already acknowledged
+                    // picture while waiting for the first frame at the new
+                    // geometry. Drive its callback without using it as new
+                    // evidence of wire delivery or lossless recovery.
+                    assert_eq!(presented, Some(seq));
+                    present(&mut h.local, feedback);
+                    assert!(Instant::now() < until, "still redrawing in phase {phase}");
+                    continue;
+                }
                 assert!(
                     last.is_none_or(|old| seq > old),
-                    "each committed feedback belongs to a fresh frame"
+                    "fresh wire sequences must increase"
                 );
                 last = Some(seq);
                 let dimensions = smithay::wayland::shm::with_buffer_contents(

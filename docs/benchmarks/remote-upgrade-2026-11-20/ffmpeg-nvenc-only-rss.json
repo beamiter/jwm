@@ -1,0 +1,982 @@
+{
+  "measurement_seconds": 240.0,
+  "burn_in_seconds": 60,
+  "retained_resources_slots": 48,
+  "scored_progress_delta_frames": 7196,
+  "encoded_fps_from_progress": 29.983333333333334,
+  "terminal_progress_frames": 9210,
+  "resources": {
+    "rss_kib": {
+      "first": 205332,
+      "last_5s_sample": 205444,
+      "retained_end": 205448,
+      "min": 205332,
+      "max": 205444,
+      "slope_per_minute": 28.661013382047727,
+      "slope_bytes_per_encoded_frame": 16.302771826110593
+    },
+    "rss_anon_kib": {
+      "first": 46000,
+      "last_5s_sample": 46112,
+      "retained_end": 46116,
+      "min": 46000,
+      "max": 46112,
+      "slope_per_minute": 28.661013382047727,
+      "slope_bytes_per_encoded_frame": 16.302771826110593
+    },
+    "rss_file_kib": {
+      "first": 138180,
+      "last_5s_sample": 138180,
+      "retained_end": 138180,
+      "min": 138180,
+      "max": 138180,
+      "slope_per_minute": 0.0,
+      "slope_bytes_per_encoded_frame": 0.0
+    },
+    "rss_shmem_kib": {
+      "first": 21152,
+      "last_5s_sample": 21152,
+      "retained_end": 21152,
+      "min": 21152,
+      "max": 21152,
+      "slope_per_minute": 0.0,
+      "slope_bytes_per_encoded_frame": 0.0
+    },
+    "threads": {
+      "first": 46,
+      "last_5s_sample": 46,
+      "retained_end": 46,
+      "min": 46,
+      "max": 46,
+      "slope_per_minute": 0.0
+    },
+    "fds": {
+      "first": 39,
+      "last_5s_sample": 39,
+      "retained_end": 39,
+      "min": 39,
+      "max": 39,
+      "slope_per_minute": 0.0
+    }
+  },
+  "vma_boundary": {
+    "vma-start": {
+      "sample_start_offset_ms": 0.630307,
+      "sample_duration_ms": 9.75286,
+      "availability": {
+        "smaps_rollup": {
+          "availability": "captured"
+        },
+        "smaps": {
+          "availability": "captured"
+        }
+      },
+      "rollup_kib": {
+        "Rss": 205332,
+        "Pss": 190904,
+        "Pss_Anon": 46000,
+        "Pss_File": 123752,
+        "Pss_Shmem": 21152,
+        "Shared_Clean": 16164,
+        "Shared_Dirty": 0,
+        "Private_Clean": 114808,
+        "Private_Dirty": 74360,
+        "Anonymous": 46000,
+        "Swap": 0
+      },
+      "vma_kib_by_category": {
+        "anonymous_private": {
+          "mappings": 192,
+          "Size_kib": 13532156,
+          "Rss_kib": 10212,
+          "Pss_kib": 10212,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 10212,
+          "Anonymous_kib": 10212,
+          "Swap_kib": 0
+        },
+        "file_backed_other": {
+          "mappings": 1120,
+          "Size_kib": 233752,
+          "Rss_kib": 61352,
+          "Pss_kib": 46823,
+          "Shared_Clean_kib": 16156,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 17232,
+          "Private_Dirty_kib": 27964,
+          "Anonymous_kib": 6812,
+          "Swap_kib": 0
+        },
+        "nvidia_device": {
+          "mappings": 72,
+          "Size_kib": 85408,
+          "Rss_kib": 83160,
+          "Pss_kib": 83157,
+          "Shared_Clean_kib": 4,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 75948,
+          "Private_Dirty_kib": 7208,
+          "Anonymous_kib": 0,
+          "Swap_kib": 0
+        },
+        "process_heap": {
+          "mappings": 1,
+          "Size_kib": 32504,
+          "Rss_kib": 26884,
+          "Pss_kib": 26884,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 26884,
+          "Anonymous_kib": 26884,
+          "Swap_kib": 0
+        },
+        "nvidia_user_space_library": {
+          "mappings": 12,
+          "Size_kib": 94316,
+          "Rss_kib": 17336,
+          "Pss_kib": 17336,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 16068,
+          "Private_Dirty_kib": 1268,
+          "Anonymous_kib": 1268,
+          "Swap_kib": 0
+        },
+        "ffmpeg_user_space_library": {
+          "mappings": 22,
+          "Size_kib": 18492,
+          "Rss_kib": 6348,
+          "Pss_kib": 6348,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 5560,
+          "Private_Dirty_kib": 788,
+          "Anonymous_kib": 788,
+          "Swap_kib": 0
+        },
+        "process_stack": {
+          "mappings": 1,
+          "Size_kib": 132,
+          "Rss_kib": 36,
+          "Pss_kib": 36,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 36,
+          "Anonymous_kib": 36,
+          "Swap_kib": 0
+        },
+        "special_kernel": {
+          "mappings": 3,
+          "Size_kib": 28,
+          "Rss_kib": 4,
+          "Pss_kib": 0,
+          "Shared_Clean_kib": 4,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 0,
+          "Anonymous_kib": 0,
+          "Swap_kib": 0
+        }
+      }
+    },
+    "vma-end": {
+      "sample_start_offset_ms": 0.544868,
+      "sample_duration_ms": 9.341239,
+      "availability": {
+        "smaps_rollup": {
+          "availability": "captured"
+        },
+        "smaps": {
+          "availability": "captured"
+        }
+      },
+      "rollup_kib": {
+        "Rss": 205448,
+        "Pss": 191014,
+        "Pss_Anon": 46116,
+        "Pss_File": 123746,
+        "Pss_Shmem": 21152,
+        "Shared_Clean": 16164,
+        "Shared_Dirty": 0,
+        "Private_Clean": 113008,
+        "Private_Dirty": 76276,
+        "Anonymous": 46116,
+        "Swap": 0
+      },
+      "vma_kib_by_category": {
+        "anonymous_private": {
+          "mappings": 192,
+          "Size_kib": 13532156,
+          "Rss_kib": 10324,
+          "Pss_kib": 10324,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 10324,
+          "Anonymous_kib": 10324,
+          "Swap_kib": 0
+        },
+        "file_backed_other": {
+          "mappings": 1120,
+          "Size_kib": 233752,
+          "Rss_kib": 61352,
+          "Pss_kib": 46792,
+          "Shared_Clean_kib": 16164,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 17224,
+          "Private_Dirty_kib": 27964,
+          "Anonymous_kib": 6812,
+          "Swap_kib": 0
+        },
+        "nvidia_device": {
+          "mappings": 72,
+          "Size_kib": 85408,
+          "Rss_kib": 83160,
+          "Pss_kib": 83157,
+          "Shared_Clean_kib": 4,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 74148,
+          "Private_Dirty_kib": 9008,
+          "Anonymous_kib": 0,
+          "Swap_kib": 0
+        },
+        "process_heap": {
+          "mappings": 1,
+          "Size_kib": 32504,
+          "Rss_kib": 26888,
+          "Pss_kib": 26888,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 26888,
+          "Anonymous_kib": 26888,
+          "Swap_kib": 0
+        },
+        "nvidia_user_space_library": {
+          "mappings": 12,
+          "Size_kib": 94316,
+          "Rss_kib": 17336,
+          "Pss_kib": 17336,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 16068,
+          "Private_Dirty_kib": 1268,
+          "Anonymous_kib": 1268,
+          "Swap_kib": 0
+        },
+        "ffmpeg_user_space_library": {
+          "mappings": 22,
+          "Size_kib": 18492,
+          "Rss_kib": 6348,
+          "Pss_kib": 6348,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 5560,
+          "Private_Dirty_kib": 788,
+          "Anonymous_kib": 788,
+          "Swap_kib": 0
+        },
+        "process_stack": {
+          "mappings": 1,
+          "Size_kib": 132,
+          "Rss_kib": 36,
+          "Pss_kib": 36,
+          "Shared_Clean_kib": 0,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 36,
+          "Anonymous_kib": 36,
+          "Swap_kib": 0
+        },
+        "special_kernel": {
+          "mappings": 3,
+          "Size_kib": 28,
+          "Rss_kib": 4,
+          "Pss_kib": 0,
+          "Shared_Clean_kib": 4,
+          "Shared_Dirty_kib": 0,
+          "Private_Clean_kib": 0,
+          "Private_Dirty_kib": 0,
+          "Anonymous_kib": 0,
+          "Swap_kib": 0
+        }
+      }
+    }
+  },
+  "vma_changes": {
+    "maps_start": 1423,
+    "maps_end": 1423,
+    "added_ranges": 0,
+    "removed_ranges": 0,
+    "matched_ranges_with_rss_or_anonymous_change": 2,
+    "largest_changes_in_matched_ranges": [
+      {
+        "category": "anonymous_private",
+        "size_kib": 2496,
+        "rss_start_kib": 1104,
+        "rss_end_kib": 1216,
+        "rss_delta_kib": 112,
+        "anonymous_delta_kib": 112
+      },
+      {
+        "category": "process_heap",
+        "size_kib": 32504,
+        "rss_start_kib": 26884,
+        "rss_end_kib": 26888,
+        "rss_delta_kib": 4,
+        "anonymous_delta_kib": 4
+      }
+    ]
+  },
+  "samples": [
+    {
+      "elapsed_seconds": 0.011018262,
+      "phase": "measured",
+      "encoded_frames": 1872,
+      "rss_kib": 205332,
+      "rss_anon_kib": 46000,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 5.000768291,
+      "phase": "measured",
+      "encoded_frames": 2024,
+      "rss_kib": 205332,
+      "rss_anon_kib": 46000,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 10.000793607,
+      "phase": "measured",
+      "encoded_frames": 2176,
+      "rss_kib": 205336,
+      "rss_anon_kib": 46004,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 15.000856438,
+      "phase": "measured",
+      "encoded_frames": 2327,
+      "rss_kib": 205340,
+      "rss_anon_kib": 46008,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 20.000757332,
+      "phase": "measured",
+      "encoded_frames": 2479,
+      "rss_kib": 205340,
+      "rss_anon_kib": 46008,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 25.000777965,
+      "phase": "measured",
+      "encoded_frames": 2631,
+      "rss_kib": 205348,
+      "rss_anon_kib": 46016,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 30.000887245,
+      "phase": "measured",
+      "encoded_frames": 2768,
+      "rss_kib": 205348,
+      "rss_anon_kib": 46016,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 35.000802228,
+      "phase": "measured",
+      "encoded_frames": 2919,
+      "rss_kib": 205352,
+      "rss_anon_kib": 46020,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 40.00078879,
+      "phase": "measured",
+      "encoded_frames": 3071,
+      "rss_kib": 205356,
+      "rss_anon_kib": 46024,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 45.000788844,
+      "phase": "measured",
+      "encoded_frames": 3223,
+      "rss_kib": 205356,
+      "rss_anon_kib": 46024,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 50.000794283,
+      "phase": "measured",
+      "encoded_frames": 3375,
+      "rss_kib": 205360,
+      "rss_anon_kib": 46028,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 55.000771633,
+      "phase": "measured",
+      "encoded_frames": 3527,
+      "rss_kib": 205360,
+      "rss_anon_kib": 46028,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 60.000794378,
+      "phase": "measured",
+      "encoded_frames": 3678,
+      "rss_kib": 205364,
+      "rss_anon_kib": 46032,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 65.000844751,
+      "phase": "measured",
+      "encoded_frames": 3830,
+      "rss_kib": 205364,
+      "rss_anon_kib": 46032,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 70.000765648,
+      "phase": "measured",
+      "encoded_frames": 3982,
+      "rss_kib": 205368,
+      "rss_anon_kib": 46036,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 75.000785665,
+      "phase": "measured",
+      "encoded_frames": 4119,
+      "rss_kib": 205372,
+      "rss_anon_kib": 46040,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 80.000883439,
+      "phase": "measured",
+      "encoded_frames": 4271,
+      "rss_kib": 205372,
+      "rss_anon_kib": 46040,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 85.000842021,
+      "phase": "measured",
+      "encoded_frames": 4423,
+      "rss_kib": 205376,
+      "rss_anon_kib": 46044,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 90.000769532,
+      "phase": "measured",
+      "encoded_frames": 4575,
+      "rss_kib": 205376,
+      "rss_anon_kib": 46044,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 95.000766414,
+      "phase": "measured",
+      "encoded_frames": 4727,
+      "rss_kib": 205380,
+      "rss_anon_kib": 46048,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 100.000810774,
+      "phase": "measured",
+      "encoded_frames": 4878,
+      "rss_kib": 205384,
+      "rss_anon_kib": 46052,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 105.000761671,
+      "phase": "measured",
+      "encoded_frames": 5030,
+      "rss_kib": 205384,
+      "rss_anon_kib": 46052,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 110.000758597,
+      "phase": "measured",
+      "encoded_frames": 5182,
+      "rss_kib": 205388,
+      "rss_anon_kib": 46056,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 115.000750158,
+      "phase": "measured",
+      "encoded_frames": 5318,
+      "rss_kib": 205388,
+      "rss_anon_kib": 46056,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 120.000773203,
+      "phase": "measured",
+      "encoded_frames": 5470,
+      "rss_kib": 205392,
+      "rss_anon_kib": 46060,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 125.000786035,
+      "phase": "measured",
+      "encoded_frames": 5622,
+      "rss_kib": 205396,
+      "rss_anon_kib": 46064,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 130.000943055,
+      "phase": "measured",
+      "encoded_frames": 5774,
+      "rss_kib": 205396,
+      "rss_anon_kib": 46064,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 135.001208761,
+      "phase": "measured",
+      "encoded_frames": 5925,
+      "rss_kib": 205400,
+      "rss_anon_kib": 46068,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 140.000778744,
+      "phase": "measured",
+      "encoded_frames": 6077,
+      "rss_kib": 205400,
+      "rss_anon_kib": 46068,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 145.000855067,
+      "phase": "measured",
+      "encoded_frames": 6229,
+      "rss_kib": 205404,
+      "rss_anon_kib": 46072,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 150.001266389,
+      "phase": "measured",
+      "encoded_frames": 6380,
+      "rss_kib": 205404,
+      "rss_anon_kib": 46072,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 155.00089869,
+      "phase": "measured",
+      "encoded_frames": 6532,
+      "rss_kib": 205408,
+      "rss_anon_kib": 46076,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 160.000780911,
+      "phase": "measured",
+      "encoded_frames": 6668,
+      "rss_kib": 205412,
+      "rss_anon_kib": 46080,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 165.001172781,
+      "phase": "measured",
+      "encoded_frames": 6820,
+      "rss_kib": 205412,
+      "rss_anon_kib": 46080,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 170.000968113,
+      "phase": "measured",
+      "encoded_frames": 6972,
+      "rss_kib": 205416,
+      "rss_anon_kib": 46084,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 175.000785818,
+      "phase": "measured",
+      "encoded_frames": 7124,
+      "rss_kib": 205416,
+      "rss_anon_kib": 46084,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 180.000782215,
+      "phase": "measured",
+      "encoded_frames": 7276,
+      "rss_kib": 205420,
+      "rss_anon_kib": 46088,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 185.00087191,
+      "phase": "measured",
+      "encoded_frames": 7428,
+      "rss_kib": 205424,
+      "rss_anon_kib": 46092,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 190.000742491,
+      "phase": "measured",
+      "encoded_frames": 7580,
+      "rss_kib": 205424,
+      "rss_anon_kib": 46092,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 195.00077774,
+      "phase": "measured",
+      "encoded_frames": 7731,
+      "rss_kib": 205428,
+      "rss_anon_kib": 46096,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 200.000837504,
+      "phase": "measured",
+      "encoded_frames": 7868,
+      "rss_kib": 205428,
+      "rss_anon_kib": 46096,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 205.000775773,
+      "phase": "measured",
+      "encoded_frames": 8020,
+      "rss_kib": 205432,
+      "rss_anon_kib": 46100,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 210.000810662,
+      "phase": "measured",
+      "encoded_frames": 8171,
+      "rss_kib": 205432,
+      "rss_anon_kib": 46100,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 215.000827949,
+      "phase": "measured",
+      "encoded_frames": 8323,
+      "rss_kib": 205436,
+      "rss_anon_kib": 46104,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 220.000808316,
+      "phase": "measured",
+      "encoded_frames": 8475,
+      "rss_kib": 205440,
+      "rss_anon_kib": 46108,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 225.000872229,
+      "phase": "measured",
+      "encoded_frames": 8627,
+      "rss_kib": 205440,
+      "rss_anon_kib": 46108,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 230.000841897,
+      "phase": "measured",
+      "encoded_frames": 8779,
+      "rss_kib": 205444,
+      "rss_anon_kib": 46112,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 235.000760178,
+      "phase": "measured",
+      "encoded_frames": 8931,
+      "rss_kib": 205444,
+      "rss_anon_kib": 46112,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    },
+    {
+      "elapsed_seconds": 240.010432477,
+      "phase": "retained_end",
+      "encoded_frames": 9068,
+      "rss_kib": 205448,
+      "rss_anon_kib": 46116,
+      "rss_file_kib": 138180,
+      "rss_shmem_kib": 21152,
+      "threads": 46,
+      "fds": 39
+    }
+  ],
+  "encoder_setup_lines": [
+    "  Stream #0:0: Video: rawvideo (I420 / 0x30323449), yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], 30 tbr, 30 tbn, 30 tbc",
+    "  Stream #0:0 -> #0:0 (rawvideo (native) -> h264 (h264_nvenc))",
+    "  Stream #0:0: Video: h264 (Main), yuv420p(progressive), 1920x1080 [SAR 1:1 DAR 16:9], q=2-31, 6000 kb/s, 30 fps, 30 tbn",
+    "      cpb: bitrate max/min/avg: 6000000/0/6000000 buffer size: 400000 vbv_delay: N/A"
+  ],
+  "status": "complete",
+  "ffmpeg_exit": 0,
+  "ffmpeg_sha256": "36d94a605d612e4090d1b8aec889d0c0801c6eafb1593c90f5c0dfd2e2966a45",
+  "command": [
+    "/usr/bin/ffmpeg",
+    "-hide_banner",
+    "-nostdin",
+    "-nostats",
+    "-progress",
+    "pipe:1",
+    "-re",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc2=size=1920x1080:rate=30",
+    "-t",
+    "307",
+    "-an",
+    "-c:v",
+    "h264_nvenc",
+    "-pix_fmt",
+    "yuv420p",
+    "-preset",
+    "p1",
+    "-tune",
+    "ull",
+    "-rc",
+    "cbr",
+    "-b:v",
+    "6000000",
+    "-maxrate",
+    "6000000",
+    "-bufsize",
+    "400000",
+    "-g",
+    "60",
+    "-bf",
+    "0",
+    "-rc-lookahead",
+    "0",
+    "-delay",
+    "0",
+    "-zerolatency",
+    "1",
+    "-forced-idr",
+    "1",
+    "-flags",
+    "+low_delay",
+    "-f",
+    "null",
+    "/dev/null"
+  ],
+  "ffmpeg_version": "ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000-2021 the FFmpeg developers",
+  "protected_vma_sha256": "ba29509f366650854d5d179df5fd571a6ccb997ff930d492816db27049650e18",
+  "loaded_library_file_identities_and_sha256": {
+    "libcuda.so.580.178.04": {
+      "file_identity": [
+        259,
+        2,
+        19007721
+      ],
+      "path": "/usr/lib/x86_64-linux-gnu/libcuda.so.580.178.04",
+      "sha256": "dcdf334aeb177c95b3385b797c9b871d03a287895713c6d107f79096b0985aa9"
+    },
+    "libnvidia-encode.so.580.178.04": {
+      "file_identity": [
+        259,
+        2,
+        19007674
+      ],
+      "path": "/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.580.178.04",
+      "sha256": "2a860b7fda50bb9eef572c5ea1495c5040d0741c1113e833f7881103d3c32bb3"
+    },
+    "libavcodec.so.58.134.100": {
+      "file_identity": [
+        259,
+        2,
+        19008743
+      ],
+      "path": "/usr/lib/x86_64-linux-gnu/libavcodec.so.58.134.100",
+      "sha256": "388b47f40685028998a161ebc9a541ff38146203bab60319b716e65670ee30b4"
+    },
+    "libavutil.so.56.70.100": {
+      "file_identity": [
+        259,
+        2,
+        19025587
+      ],
+      "path": "/usr/lib/x86_64-linux-gnu/libavutil.so.56.70.100",
+      "sha256": "578d0772a3bd7a6d2bfcc44e989eb51044bff540e5ffa6cc2d074507dfb257e4"
+    }
+  },
+  "source_digests": {
+    "encode_only.py": "7085c3c806e03d9aa578993b68e8bbdad06acbc6df0226b46e7ff06d6ff5bc61",
+    "inspect_rss.py": "6283d9b318d3a822de594c13f7b660c07d795caf923424090a4bf10ffac29d10",
+    "resources.py": "492cf9701b7a9f9ebe58b168587b17cc65e57fb87446ee41974b7d85968a48e2",
+    "protected-library-identities.json": "a53d9bc512adc3ae77507233aeabb18ce781dd061290009ad9883b32cd496c11"
+  },
+  "vma_replayer_sha256": "82acf2cb3829c9fb3d56c2184d2a9c6a14d2af8bfb3cc7631bae597681266542",
+  "scope": "One 240-second retained owned-process diagnostic after 60 seconds of burn-in. Synthetic 1920\u00d71080 YUV420P input goes directly to FFmpeg H.264 NVENC and its null muxer. The same on-device file identities and pinned bytes for libavcodec, libavutil, CUDA and NVENC were verified against the captured production mapping and at both CLI boundaries. The CLI has a different source, driver call cadence, send/receive loop and output sink. Linux process RSS and VMA accounting do not measure GPU memory."
+}

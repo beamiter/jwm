@@ -56,7 +56,7 @@ impl ControlPeer {
                         match input.recv_timeout(Duration::from_secs(12))? {
                             Request::Enable(scroll) => {
                                 output.send(Answer::Enabled(
-                                    viewer.enable_wayland_control(scroll, false)?,
+                                    viewer.enable_wayland_control(scroll, false, false, false)?,
                                 ))?;
                             }
                             Request::Draw(seq) => {

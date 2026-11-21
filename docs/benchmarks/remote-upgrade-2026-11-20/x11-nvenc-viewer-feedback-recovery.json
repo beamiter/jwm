@@ -1,0 +1,189 @@
+{
+  "binary_sha256": "8ec3b688dfa5b11c737f84df986fdf34606ccc03238d601da4a681ff9ba4c8a1",
+  "cases": [
+    {
+      "profile": "standard_v35",
+      "adaptation": true,
+      "viewer_offered": false,
+      "viewer_timing_windows": [],
+      "rate_changes": [],
+      "drawn_acks": 143,
+      "h264_frames": 144,
+      "host_exit": 0,
+      "viewer_exit": 0,
+      "arm": "viewer-off"
+    },
+    {
+      "profile": "standard_v35",
+      "adaptation": false,
+      "viewer_offered": true,
+      "viewer_timing_windows": [],
+      "rate_changes": [],
+      "drawn_acks": 143,
+      "h264_frames": 144,
+      "host_exit": 0,
+      "viewer_exit": 0,
+      "arm": "host-off"
+    },
+    {
+      "profile": "video_feedback_v36",
+      "adaptation": true,
+      "viewer_offered": true,
+      "viewer_timing_windows": [
+        [
+          81.0,
+          57.76,
+          0.24,
+          7.0
+        ],
+        [
+          87.0,
+          57.2,
+          0.1,
+          6.71
+        ],
+        [
+          87.0,
+          57.19,
+          0.1,
+          6.71
+        ],
+        [
+          87.0,
+          57.28,
+          0.1,
+          6.76
+        ],
+        [
+          113.0,
+          13.35,
+          0.07,
+          5.99
+        ],
+        [
+          118.0,
+          12.26,
+          0.11,
+          6.78
+        ],
+        [
+          118.0,
+          12.27,
+          0.11,
+          6.73
+        ],
+        [
+          119.0,
+          12.2,
+          0.11,
+          6.71
+        ],
+        [
+          118.0,
+          12.18,
+          0.11,
+          6.57
+        ],
+        [
+          119.0,
+          12.16,
+          0.08,
+          5.51
+        ],
+        [
+          130.0,
+          11.81,
+          0.09,
+          5.92
+        ],
+        [
+          137.0,
+          12.24,
+          0.13,
+          5.88
+        ],
+        [
+          137.0,
+          12.24,
+          0.15,
+          5.92
+        ],
+        [
+          137.0,
+          12.19,
+          0.1,
+          6.72
+        ],
+        [
+          138.0,
+          12.08,
+          0.11,
+          6.66
+        ],
+        [
+          137.0,
+          12.11,
+          0.11,
+          6.64
+        ]
+      ],
+      "rate_changes": [
+        [
+          "24",
+          "100",
+          "Viewer"
+        ],
+        [
+          "28",
+          "100",
+          "Clear"
+        ],
+        [
+          "30",
+          "100",
+          "Clear"
+        ]
+      ],
+      "drawn_acks": 1866,
+      "h264_frames": 1867,
+      "host_exit": 0,
+      "viewer_exit": 0,
+      "arm": "viewer-pressure"
+    }
+  ],
+  "terminal_exit": 0,
+  "source_sha256": {
+    "src/remote/client.rs": "61da159aa52c6986c5e1dd2d06dbe6c0a36781bdf3d71a75a189da1a0b1330ce",
+    "src/remote/host.rs": "2067df721b73a9ed6ad89461d4500c8581bc763714036be9275b093d48a3518f",
+    "src/remote/messages.rs": "064fced6a2255dba9c7b400504d6509c13df258b098e92b2673add80342e4447",
+    "src/remote/sender.rs": "0fcd1be70680bd2728f316c5cdee3604732b43da75dcb6a499055c2ae5e00989",
+    "src/remote/adaptive_video.rs": "43b355bd1182860321fc7e37c45c996de86d88e2d294253ffff7e563303094ef",
+    "src/remote/scroll_copy_transport_tests.rs": "63714bcae639b3ab385a632c630f728e11d077467a4e959abee39b331c8161f1",
+    "Cargo.toml": "9dd243ceb81417a3781afabf9b040a105ad39eb63d18af118ac43a232d1c0ae6",
+    "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec"
+  },
+  "cargo_tests": {
+    "library": {
+      "passed": 1,
+      "ignored": 0
+    },
+    "cli": {
+      "passed": 74,
+      "ignored": 0
+    }
+  },
+  "painter_sha256": "d981ba7314b92529941e9a24a6d90f36f738e9679bc5abd2f417c6d0df672416",
+  "scope": "One-machine authenticated IPv4 loopback, private Xvfb source/viewer at 1280\u00d7800, hardware H.264 NVENC at nominal 30 FPS, and a removable 45 ms delay in the viewer-only RGB conversion shim. Functional rate-transition evidence.",
+  "archive": {
+    "sha256": "d2552357e280c0cc15c7195cecdaba6eae398c6645e2c54b15a972da430efc9e",
+    "members": {
+      "run.json": "49290cb863749710810f18859ff4281422a17cf37205e8cb185505054eb40c4c",
+      "fixture/smoke.py": "5b96e26f66c0c6a9019575b3f22a34d19f0124328c14abaf61803df0d47e8163",
+      "fixture/slow-rgb.c": "d698f6f4e13ceecfb852f00cae53aba4ecfe82148af52038098836efe795c8e3",
+      "fixture/publish.py": "d5bca6c94dd3c179dbcc679608035cad6709b630e4888c1fbb95a9379098e993",
+      "observations/viewer-off.json": "823ac56eec782294aa5688adc67f9f6f9d2c42a48d727d4bb53368ed4056f846",
+      "observations/host-off.json": "2c0f4cd3274d01b829acbec45752ba979af921b43b57e7a5e78be3057b988bc3",
+      "observations/viewer-pressure.json": "1db2d23ca2260371932d806f95feeb70b3350d0afc0d134b58a76fb25efa2a5d"
+    }
+  }
+}

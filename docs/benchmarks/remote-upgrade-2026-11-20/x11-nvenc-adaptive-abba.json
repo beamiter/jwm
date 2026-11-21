@@ -1,0 +1,1997 @@
+{
+  "status": "completed",
+  "date": "2026-11-21",
+  "design": {
+    "profiles": [
+      "uncapped",
+      "write-pressure through 400000 B/s proxy and 8192-byte effective host send / proxy receive socket buffers"
+    ],
+    "trial_order_in_each_profile": [
+      "fixed",
+      "adaptive",
+      "adaptive",
+      "fixed",
+      "fixed",
+      "adaptive",
+      "adaptive",
+      "fixed"
+    ],
+    "warmup_s_min": 30,
+    "measured_s_min": 60,
+    "observer_gate": "Exact half-open 60 s interval after 30 s on the viewer monotonic clock. Gaps include leading and trailing waits.",
+    "only_treatment_difference": "empty governor setting vs JWM_REMOTE_ADAPT_VIDEO=desktop on the same host build"
+  },
+  "build": {
+    "features": [
+      "remote-x11",
+      "remote-wayland",
+      "remote-h264"
+    ],
+    "profile": "release, locked, no default features",
+    "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+    "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5"
+  },
+  "fixture": {
+    "capture": "private Xvfb X11 root source and exact-size CPU scaling",
+    "presentation": "private Xvfb X11 view-only viewer and cropped XDamage-driven RGB readback of its drawable",
+    "transport": "authenticated TCP over SSH with a host-loopback forward-only pacing proxy",
+    "observed_network_route": "Ubuntu wlp3s0 Wi-Fi, viewer eno1 Ethernet",
+    "governor": "JWM_REMOTE_ADAPT_VIDEO=desktop",
+    "source_scene": "synthetic changing scene, 60 Hz source repaint target, per-frame checksum marker",
+    "pacer_scope": "400000 bytes/s configured on host to viewer only. The configured cap excludes sleep overhead.",
+    "socket_scope": "Test-only send buffer on the host accepted loopback socket. Write-pressure lane also reduces the proxy upstream receive buffer. Uncapped lane uses default buffers.",
+    "scoring": "Two full ABBA blocks per condition. Zero-frame windows and presentation stalls stay in the measured interval.",
+    "source_workload_sha256": "47f6fd3ad8606673e78680846dad7b749598238153e9abddf328d2cdea89e06e"
+  },
+  "retained_diagnostics": [
+    {
+      "label": "abba-write-1080p-02-adaptive",
+      "observation": "One regular host window had zero H.264 frames and no last frame scope. H.264 packet flow resumed on the same session and geometry. The 60 s viewer interval includes a 3.56 s presentation gap.",
+      "handling": "The initial analysis required a frame in every host window. Reanalysis kept the original complete run and counted the empty window. Its automatic retry is supplementary.",
+      "pipeline_observations": {
+        "last_flushed_sequence_before_wait": 535,
+        "outstanding_at_previous_host_window": 2,
+        "empty_host_window": {
+          "captures": 37,
+          "mailbox_replacements": 36,
+          "sent": 0,
+          "credit_wait_sample_ms": 6696.594,
+          "send_to_ack_sample_ms": 6898.222
+        },
+        "viewer_marker_gaps_ms": [
+          3563.452,
+          3276.998
+        ],
+        "between_gaps_viewer_sequence": 535,
+        "encoder_order": "The sender awaited video credit before opening the new NVENC target. The target opened after the stall.",
+        "remaining_attribution": "The precise location of delay in the forward delivery, receiver progress or reverse ACK path is unresolved."
+      },
+      "supplementary_retry": {
+        "observer_window_seconds": 60.0,
+        "observer_unique_frames_per_second": 9.116666666666667,
+        "observer_gap_ms": {
+          "median": 104.04244,
+          "p95": 143.080839,
+          "max": 494.062699
+        },
+        "host_payload_mbps": 2.833156805707786,
+        "adaptive_bitrate_step_applied": true,
+        "adaptive_fps_step_applied": true
+      }
+    }
+  ],
+  "results_by_condition": {
+    "write": {
+      "status": "completed",
+      "summary": {
+        "fixed": {
+          "count": 4,
+          "observed_frames_per_second": {
+            "min": 8.5,
+            "median": 9.241666666666667,
+            "max": 9.283333333333333
+          },
+          "median_gap_ms": {
+            "min": 100.837547,
+            "median": 102.994889,
+            "max": 126.607728
+          },
+          "p95_gap_ms": {
+            "min": 139.528288,
+            "median": 142.66990149999998,
+            "max": 143.027485
+          },
+          "longest_gap_ms": {
+            "min": 237.633757,
+            "median": 292.6567685,
+            "max": 395.353969
+          },
+          "payload_mbps": {
+            "min": 2.6451873749914268,
+            "median": 2.8843567663987697,
+            "max": 2.896792370039619
+          },
+          "zero_frame_host_windows": 0,
+          "incidents_over_one_second": 0,
+          "uncapped_27_fps_passes": 0,
+          "verified_live_bitrate_adaptations": 0,
+          "verified_live_fps_adaptations": 0
+        },
+        "adaptive": {
+          "count": 4,
+          "observed_frames_per_second": {
+            "min": 8.166666666666666,
+            "median": 9.116666666666667,
+            "max": 9.15
+          },
+          "median_gap_ms": {
+            "min": 101.067762,
+            "median": 101.385283,
+            "max": 103.453168
+          },
+          "p95_gap_ms": {
+            "min": 142.535772,
+            "median": 143.0890255,
+            "max": 143.81655
+          },
+          "longest_gap_ms": {
+            "min": 465.264589,
+            "median": 510.72072449999996,
+            "max": 3563.452091
+          },
+          "payload_mbps": {
+            "min": 2.5508846969782173,
+            "median": 2.839344749843269,
+            "max": 2.845548320345472
+          },
+          "zero_frame_host_windows": 1,
+          "incidents_over_one_second": 1,
+          "uncapped_27_fps_passes": 0,
+          "verified_live_bitrate_adaptations": 4,
+          "verified_live_fps_adaptations": 4
+        }
+      },
+      "scored_trials": [
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-01-fixed",
+          "result": {
+            "arm": "fixed",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "f937cfb5c820e626166b1891c4d4f840",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.066834396000004,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 512,
+            "host_drawn_acks": 513,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 510,
+            "observer_unique_source_frames": 510,
+            "observer_unique_frames_per_second": 8.5,
+            "observer_gap_ms": {
+              "median": 126.607728,
+              "p95": 139.528288,
+              "max": 307.6472
+            },
+            "host_payload_mbps": 2.6451873749914268,
+            "host_write_mean_ms_max_window": 108.43999376744185,
+            "host_credit_wait_mean_ms_max_window": 14.557417564102565,
+            "source_observed_submit_fps": 60.00530543640518,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 45515855278332,
+              "run_id": 1,
+              "submitted": 6592,
+              "deadline_skips": 0,
+              "first_submit_ns": 45406013436286,
+              "last_submit_ns": 45515853723775,
+              "max_render_sync_ns": 11048821,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 45433221524917,
+              "run_id": 1,
+              "reads": 896,
+              "unique": 891,
+              "duplicates": 2,
+              "invalid": 3,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 896,
+              "max_read_ns": 527384,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 45358220705363,
+            "viewer_observer_end_ns": 45418220705363,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "write/abba-write-1080p-01-fixed/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-02-adaptive",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "f8a0188abf9214e78d806dd0d51c4569",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.083684763,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 494,
+            "host_drawn_acks": 493,
+            "host_zero_frame_windows": 1,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 493,
+            "observer_unique_source_frames": 490,
+            "observer_unique_frames_per_second": 8.166666666666666,
+            "observer_gap_ms": {
+              "median": 101.067762,
+              "p95": 142.994636,
+              "max": 3563.452091
+            },
+            "host_payload_mbps": 2.5508846969782173,
+            "host_write_mean_ms_max_window": 98.42059604545453,
+            "host_credit_wait_mean_ms_max_window": 6696.593629999999,
+            "source_observed_submit_fps": 60.0072380656426,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 45625591773335,
+              "run_id": 2,
+              "submitted": 6477,
+              "deadline_skips": 0,
+              "first_submit_ns": 45517662127226,
+              "last_submit_ns": 45625582441654,
+              "max_render_sync_ns": 14328386,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 45543026677512,
+              "run_id": 2,
+              "reads": 906,
+              "unique": 902,
+              "duplicates": 0,
+              "invalid": 4,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 906,
+              "max_read_ns": 577799,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [
+              {
+                "fps": 30,
+                "percent": 85,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 70,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 24,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 19,
+                "percent": 55,
+                "pressure": "Write"
+              }
+            ],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              },
+              {
+                "fps": 30,
+                "percent": 85
+              },
+              {
+                "fps": 30,
+                "percent": 70
+              },
+              {
+                "fps": 30,
+                "percent": 55
+              },
+              {
+                "fps": 24,
+                "percent": 55
+              },
+              {
+                "fps": 19,
+                "percent": 55
+              }
+            ],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 45468026183454,
+            "viewer_observer_end_ns": 45528026183454,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": true,
+            "adaptive_fps_step_applied": true
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "initial_scoring_diagnostic": "the measured windows did not keep the fixed H.264 codec",
+          "raw_path": "write/abba-write-1080p-02-adaptive/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-03-adaptive",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "b329b4ccdcd06df8e26b402e08e3f069",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.07626677,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 550,
+            "host_drawn_acks": 549,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 549,
+            "observer_unique_source_frames": 549,
+            "observer_unique_frames_per_second": 9.15,
+            "observer_gap_ms": {
+              "median": 103.453168,
+              "p95": 143.183415,
+              "max": 517.026932
+            },
+            "host_payload_mbps": 2.845548320345472,
+            "host_write_mean_ms_max_window": 101.25864797560975,
+            "host_credit_wait_mean_ms_max_window": 12.168924268292683,
+            "source_observed_submit_fps": 60.00897970059882,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 45842705221427,
+              "run_id": 3,
+              "submitted": 6430,
+              "deadline_skips": 0,
+              "first_submit_ns": 45735568629322,
+              "last_submit_ns": 45842702595473,
+              "max_render_sync_ns": 17294948,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 45760085160495,
+              "run_id": 3,
+              "reads": 960,
+              "unique": 955,
+              "duplicates": 1,
+              "invalid": 4,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 960,
+              "max_read_ns": 1625656,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [
+              {
+                "fps": 30,
+                "percent": 85,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 70,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 24,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 19,
+                "percent": 55,
+                "pressure": "Write"
+              }
+            ],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              },
+              {
+                "fps": 30,
+                "percent": 85
+              },
+              {
+                "fps": 30,
+                "percent": 70
+              },
+              {
+                "fps": 30,
+                "percent": 55
+              },
+              {
+                "fps": 24,
+                "percent": 55
+              },
+              {
+                "fps": 19,
+                "percent": 55
+              }
+            ],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 45685084865091,
+            "viewer_observer_end_ns": 45745084865091,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": true,
+            "adaptive_fps_step_applied": true
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "write/abba-write-1080p-03-adaptive/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-04-fixed",
+          "result": {
+            "arm": "fixed",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "205ec89ac3d76a80617b84fe4b475610",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.101505997000004,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 561,
+            "host_drawn_acks": 561,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 560,
+            "observer_unique_source_frames": 554,
+            "observer_unique_frames_per_second": 9.233333333333333,
+            "observer_gap_ms": {
+              "median": 104.414252,
+              "p95": 142.697768,
+              "max": 237.633757
+            },
+            "host_payload_mbps": 2.896792370039619,
+            "host_write_mean_ms_max_window": 97.84665565957445,
+            "host_credit_wait_mean_ms_max_window": 9.0680485,
+            "source_observed_submit_fps": 60.00519443827831,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 45951323363683,
+              "run_id": 4,
+              "submitted": 6430,
+              "deadline_skips": 0,
+              "first_submit_ns": 45844182639211,
+              "last_submit_ns": 45951323363613,
+              "max_render_sync_ns": 10890635,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 45868667133830,
+              "run_id": 4,
+              "reads": 974,
+              "unique": 963,
+              "duplicates": 2,
+              "invalid": 9,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 974,
+              "max_read_ns": 530634,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 45793666665474,
+            "viewer_observer_end_ns": 45853666665474,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "write/abba-write-1080p-04-fixed/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-05-fixed",
+          "result": {
+            "arm": "fixed",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "dd1630b16d59cefda98c9cd71a236df0",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.095899722,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 559,
+            "host_drawn_acks": 559,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 557,
+            "observer_unique_source_frames": 557,
+            "observer_unique_frames_per_second": 9.283333333333333,
+            "observer_gap_ms": {
+              "median": 101.575526,
+              "p95": 142.642035,
+              "max": 395.353969
+            },
+            "host_payload_mbps": 2.887013736421117,
+            "host_write_mean_ms_max_window": 97.314312,
+            "host_credit_wait_mean_ms_max_window": 24.05266817948718,
+            "source_observed_submit_fps": 60.00588810577561,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46059940368584,
+              "run_id": 5,
+              "submitted": 6429,
+              "deadline_skips": 0,
+              "first_submit_ns": 45952802561621,
+              "last_submit_ns": 46059925382446,
+              "max_render_sync_ns": 12006929,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 45977374120626,
+              "run_id": 5,
+              "reads": 980,
+              "unique": 978,
+              "duplicates": 1,
+              "invalid": 1,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 980,
+              "max_read_ns": 1563841,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 45902373310259,
+            "viewer_observer_end_ns": 45962373310259,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "write/abba-write-1080p-05-fixed/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-06-adaptive",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "b4d468c714053192be8acc62e8022648",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.107209014,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 548,
+            "host_drawn_acks": 548,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 547,
+            "observer_unique_source_frames": 545,
+            "observer_unique_frames_per_second": 9.083333333333334,
+            "observer_gap_ms": {
+              "median": 101.12523,
+              "p95": 143.81655,
+              "max": 465.264589
+            },
+            "host_payload_mbps": 2.8339193716401825,
+            "host_write_mean_ms_max_window": 97.71649699999999,
+            "host_credit_wait_mean_ms_max_window": 25.793020358974356,
+            "source_observed_submit_fps": 60.005320779145876,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46168480741380,
+              "run_id": 6,
+              "submitted": 6429,
+              "deadline_skips": 0,
+              "first_submit_ns": 46061345704903,
+              "last_submit_ns": 46168469538532,
+              "max_render_sync_ns": 11094479,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46085956954258,
+              "run_id": 6,
+              "reads": 958,
+              "unique": 955,
+              "duplicates": 0,
+              "invalid": 3,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 958,
+              "max_read_ns": 513891,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [
+              {
+                "fps": 30,
+                "percent": 85,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 70,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 24,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 19,
+                "percent": 55,
+                "pressure": "Write"
+              }
+            ],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              },
+              {
+                "fps": 30,
+                "percent": 85
+              },
+              {
+                "fps": 30,
+                "percent": 70
+              },
+              {
+                "fps": 30,
+                "percent": 55
+              },
+              {
+                "fps": 24,
+                "percent": 55
+              },
+              {
+                "fps": 19,
+                "percent": 55
+              }
+            ],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 46010956252511,
+            "viewer_observer_end_ns": 46070956252511,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": true,
+            "adaptive_fps_step_applied": true
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "write/abba-write-1080p-06-adaptive/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-07-adaptive",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "2e267a34eb1a367d6fc6a3d257e5e3d7",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.106469171,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 549,
+            "host_drawn_acks": 550,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 549,
+            "observer_unique_source_frames": 549,
+            "observer_unique_frames_per_second": 9.15,
+            "observer_gap_ms": {
+              "median": 101.645336,
+              "p95": 142.535772,
+              "max": 504.414517
+            },
+            "host_payload_mbps": 2.8447701280463553,
+            "host_write_mean_ms_max_window": 100.90102764285714,
+            "host_credit_wait_mean_ms_max_window": 14.636240190476192,
+            "source_observed_submit_fps": 60.00545599832705,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46277108582128,
+              "run_id": 7,
+              "submitted": 6429,
+              "deadline_skips": 0,
+              "first_submit_ns": 46169971681412,
+              "last_submit_ns": 46277095273643,
+              "max_render_sync_ns": 10926534,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46194478337653,
+              "run_id": 7,
+              "reads": 956,
+              "unique": 951,
+              "duplicates": 1,
+              "invalid": 4,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 956,
+              "max_read_ns": 1480736,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [
+              {
+                "fps": 30,
+                "percent": 85,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 70,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 24,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 19,
+                "percent": 55,
+                "pressure": "Write"
+              }
+            ],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              },
+              {
+                "fps": 30,
+                "percent": 85
+              },
+              {
+                "fps": 30,
+                "percent": 70
+              },
+              {
+                "fps": 30,
+                "percent": 55
+              },
+              {
+                "fps": 24,
+                "percent": 55
+              },
+              {
+                "fps": 19,
+                "percent": 55
+              }
+            ],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 46119477410727,
+            "viewer_observer_end_ns": 46179477410727,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": true,
+            "adaptive_fps_step_applied": true
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "write/abba-write-1080p-07-adaptive/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-08-fixed",
+          "result": {
+            "arm": "fixed",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "75265bbbca1a4b75afb42efdf36aa25b",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.100647617,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 558,
+            "host_drawn_acks": 557,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 557,
+            "observer_unique_source_frames": 555,
+            "observer_unique_frames_per_second": 9.25,
+            "observer_gap_ms": {
+              "median": 100.837547,
+              "p95": 143.027485,
+              "max": 277.666337
+            },
+            "host_payload_mbps": 2.8816997963764224,
+            "host_write_mean_ms_max_window": 99.1834395652174,
+            "host_credit_wait_mean_ms_max_window": 22.428696425000002,
+            "source_observed_submit_fps": 60.00708736288461,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46385650522301,
+              "run_id": 8,
+              "submitted": 6430,
+              "deadline_skips": 0,
+              "first_submit_ns": 46278501991822,
+              "last_submit_ns": 46385639336468,
+              "max_render_sync_ns": 14100901,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46303054450950,
+              "run_id": 8,
+              "reads": 972,
+              "unique": 969,
+              "duplicates": 1,
+              "invalid": 2,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 972,
+              "max_read_ns": 1287557,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 46228054117144,
+            "viewer_observer_end_ns": 46288054117144,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "write/abba-write-1080p-08-fixed/"
+        }
+      ],
+      "supplementary_attempts": [
+        {
+          "state": "scored",
+          "label": "abba-write-1080p-02-adaptive-retry",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 400000,
+            "send_buffer_bytes_requested": 4096,
+            "pilot": false,
+            "session_id": "e4302167034ecc604ef8390c32f2fc6f",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.10252862,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 548,
+            "host_drawn_acks": 549,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 550,
+            "observer_unique_source_frames": 547,
+            "observer_unique_frames_per_second": 9.116666666666667,
+            "observer_gap_ms": {
+              "median": 104.04244,
+              "p95": 143.080839,
+              "max": 494.062699
+            },
+            "host_payload_mbps": 2.833156805707786,
+            "host_write_mean_ms_max_window": 103.08491106666666,
+            "host_credit_wait_mean_ms_max_window": 19.21215995,
+            "source_observed_submit_fps": 60.00531964899635,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 45734087410815,
+              "run_id": 2,
+              "submitted": 6424,
+              "deadline_skips": 0,
+              "first_submit_ns": 45627033782478,
+              "last_submit_ns": 45734074292179,
+              "max_render_sync_ns": 10986320,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 45651535926058,
+              "run_id": 2,
+              "reads": 950,
+              "unique": 947,
+              "duplicates": 1,
+              "invalid": 2,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 950,
+              "max_read_ns": 1293715,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [
+              {
+                "fps": 30,
+                "percent": 85,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 70,
+                "pressure": "Write"
+              },
+              {
+                "fps": 30,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 24,
+                "percent": 55,
+                "pressure": "Write"
+              },
+              {
+                "fps": 19,
+                "percent": 55,
+                "pressure": "Write"
+              }
+            ],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              },
+              {
+                "fps": 30,
+                "percent": 85
+              },
+              {
+                "fps": 30,
+                "percent": 70
+              },
+              {
+                "fps": 30,
+                "percent": 55
+              },
+              {
+                "fps": 24,
+                "percent": 55
+              },
+              {
+                "fps": 19,
+                "percent": 55
+              }
+            ],
+            "host_send_buffer_diagnostics": [
+              "P09_SOCKET_BUFFER requested=4096 effective=8192"
+            ],
+            "viewer_observer_start_ns": 45576534972835,
+            "viewer_observer_end_ns": 45636534972835,
+            "host_send_buffer_effective_bytes": 8192,
+            "proxy_upstream_buffer_bytes_requested": 4096,
+            "proxy_upstream_buffer_effective_bytes": 8192,
+            "uncapped_unique_fps_gate_met": null,
+            "adaptive_bitrate_step_applied": true,
+            "adaptive_fps_step_applied": true
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "write/abba-write-1080p-02-adaptive-retry/"
+        }
+      ],
+      "failed_attempts": [],
+      "pending_or_unscored_slots": [],
+      "network_rtt_observations": {
+        "before": [
+          "PING 192.168.0.78 (192.168.0.78) 56(84) bytes of data.",
+          "",
+          "--- 192.168.0.78 ping statistics ---",
+          "8 packets transmitted, 8 received, 0% packet loss, time 1757ms",
+          "rtt min/avg/max/mdev = 1.265/49.906/107.615/39.930 ms"
+        ],
+        "after": [
+          "PING 192.168.0.78 (192.168.0.78) 56(84) bytes of data.",
+          "",
+          "--- 192.168.0.78 ping statistics ---",
+          "8 packets transmitted, 8 received, 0% packet loss, time 1757ms",
+          "rtt min/avg/max/mdev = 1.378/14.472/100.425/32.489 ms"
+        ]
+      }
+    },
+    "clear": {
+      "status": "completed",
+      "summary": {
+        "fixed": {
+          "count": 4,
+          "observed_frames_per_second": {
+            "min": 11.883333333333333,
+            "median": 22.641666666666666,
+            "max": 28.75
+          },
+          "median_gap_ms": {
+            "min": 33.838942,
+            "median": 40.620774999999995,
+            "max": 59.191733
+          },
+          "p95_gap_ms": {
+            "min": 41.549988,
+            "median": 90.928863,
+            "max": 247.155915
+          },
+          "longest_gap_ms": {
+            "min": 153.506974,
+            "median": 384.71184400000004,
+            "max": 1193.370425
+          },
+          "payload_mbps": {
+            "min": 3.7077130900223434,
+            "median": 7.03618844138271,
+            "max": 8.921460008235739
+          },
+          "zero_frame_host_windows": 0,
+          "incidents_over_one_second": 1,
+          "uncapped_27_fps_passes": 2,
+          "verified_live_bitrate_adaptations": 0,
+          "verified_live_fps_adaptations": 0
+        },
+        "adaptive": {
+          "count": 4,
+          "observed_frames_per_second": {
+            "min": 11.3,
+            "median": 20.15833333333333,
+            "max": 28.75
+          },
+          "median_gap_ms": {
+            "min": 33.952323,
+            "median": 50.1414175,
+            "max": 67.557399
+          },
+          "p95_gap_ms": {
+            "min": 39.935786,
+            "median": 137.73389400000002,
+            "max": 292.199935
+          },
+          "longest_gap_ms": {
+            "min": 244.263336,
+            "median": 485.9373475,
+            "max": 689.972662
+          },
+          "payload_mbps": {
+            "min": 4.196800621912213,
+            "median": 6.592322060641061,
+            "max": 8.915930201669106
+          },
+          "zero_frame_host_windows": 0,
+          "incidents_over_one_second": 0,
+          "uncapped_27_fps_passes": 2,
+          "verified_live_bitrate_adaptations": 0,
+          "verified_live_fps_adaptations": 2
+        }
+      },
+      "scored_trials": [
+        {
+          "state": "scored",
+          "label": "abba-clear-1080p-01-fixed",
+          "result": {
+            "arm": "fixed",
+            "configured_cap_bytes_per_second": 0,
+            "send_buffer_bytes_requested": 0,
+            "pilot": false,
+            "session_id": "388777bb027869b3c073a508be0c7021",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.091907729,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 1725,
+            "host_drawn_acks": 1726,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 1723,
+            "observer_unique_source_frames": 1723,
+            "observer_unique_frames_per_second": 28.716666666666665,
+            "observer_gap_ms": {
+              "median": 33.940417,
+              "p95": 41.549988,
+              "max": 232.990431
+            },
+            "host_payload_mbps": 8.89910119698074,
+            "host_write_mean_ms_max_window": 0.11442915646258502,
+            "host_credit_wait_mean_ms_max_window": 22.619024018518516,
+            "source_observed_submit_fps": 60.00534999909145,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46497919409734,
+              "run_id": 1,
+              "submitted": 6424,
+              "deadline_skips": 0,
+              "first_submit_ns": 46390876976385,
+              "last_submit_ns": 46497917431946,
+              "max_render_sync_ns": 10872908,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46415383192489,
+              "run_id": 1,
+              "reads": 3003,
+              "unique": 3000,
+              "duplicates": 2,
+              "invalid": 1,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 3003,
+              "max_read_ns": 607932,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [],
+            "host_send_buffer_diagnostics": [],
+            "viewer_observer_start_ns": 46340382141260,
+            "viewer_observer_end_ns": 46400382141260,
+            "uncapped_unique_fps_gate_met": true,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "clear/abba-clear-1080p-01-fixed/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-clear-1080p-02-adaptive",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 0,
+            "send_buffer_bytes_requested": 0,
+            "pilot": false,
+            "session_id": "469356e744ed9c6c9bdf54f9a714fd00",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.077159058999996,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 1722,
+            "host_drawn_acks": 1722,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 1720,
+            "observer_unique_source_frames": 1719,
+            "observer_unique_frames_per_second": 28.65,
+            "observer_gap_ms": {
+              "median": 34.11057,
+              "p95": 41.227069,
+              "max": 297.008131
+            },
+            "host_payload_mbps": 8.886987207162505,
+            "host_write_mean_ms_max_window": 0.11348787074829932,
+            "host_credit_wait_mean_ms_max_window": 20.535257401960784,
+            "source_observed_submit_fps": 60.00753239276971,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46606568413764,
+              "run_id": 2,
+              "submitted": 6436,
+              "deadline_skips": 0,
+              "first_submit_ns": 46499329080007,
+              "last_submit_ns": 46606565617545,
+              "max_render_sync_ns": 14843935,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46523720695377,
+              "run_id": 2,
+              "reads": 3044,
+              "unique": 3041,
+              "duplicates": 1,
+              "invalid": 2,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 3044,
+              "max_read_ns": 1534378,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              }
+            ],
+            "host_send_buffer_diagnostics": [],
+            "viewer_observer_start_ns": 46448720297703,
+            "viewer_observer_end_ns": 46508720297703,
+            "uncapped_unique_fps_gate_met": true,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "clear/abba-clear-1080p-02-adaptive/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-clear-1080p-03-adaptive",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 0,
+            "send_buffer_bytes_requested": 0,
+            "pilot": false,
+            "session_id": "f6ee92f843ad11690e316c834eef0ead",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.083549768,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 1728,
+            "host_drawn_acks": 1727,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 1726,
+            "observer_unique_source_frames": 1725,
+            "observer_unique_frames_per_second": 28.75,
+            "observer_gap_ms": {
+              "median": 33.952323,
+              "p95": 39.935786,
+              "max": 244.263336
+            },
+            "host_payload_mbps": 8.915930201669106,
+            "host_write_mean_ms_max_window": 0.11694457407407409,
+            "host_credit_wait_mean_ms_max_window": 23.286249694444447,
+            "source_observed_submit_fps": 60.005364433659324,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46715067890240,
+              "run_id": 3,
+              "submitted": 6430,
+              "deadline_skips": 0,
+              "first_submit_ns": 46607927469293,
+              "last_submit_ns": 46715067890165,
+              "max_render_sync_ns": 10890892,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46632305587504,
+              "run_id": 3,
+              "reads": 3006,
+              "unique": 3003,
+              "duplicates": 0,
+              "invalid": 3,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 3006,
+              "max_read_ns": 602908,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              }
+            ],
+            "host_send_buffer_diagnostics": [],
+            "viewer_observer_start_ns": 46557304752459,
+            "viewer_observer_end_ns": 46617304752459,
+            "uncapped_unique_fps_gate_met": true,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "clear/abba-clear-1080p-03-adaptive/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-clear-1080p-04-fixed",
+          "result": {
+            "arm": "fixed",
+            "configured_cap_bytes_per_second": 0,
+            "send_buffer_bytes_requested": 0,
+            "pilot": false,
+            "session_id": "7246e875fed0cdd18b99bace0bc542a4",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.082799845000004,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 1729,
+            "host_drawn_acks": 1729,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 1728,
+            "observer_unique_source_frames": 1725,
+            "observer_unique_frames_per_second": 28.75,
+            "observer_gap_ms": {
+              "median": 33.838942,
+              "p95": 42.3376,
+              "max": 153.506974
+            },
+            "host_payload_mbps": 8.921460008235739,
+            "host_write_mean_ms_max_window": 0.11282020408163265,
+            "host_credit_wait_mean_ms_max_window": 21.784417227272726,
+            "source_observed_submit_fps": 60.00691117763778,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46823256294758,
+              "run_id": 4,
+              "submitted": 6412,
+              "deadline_skips": 0,
+              "first_submit_ns": 46716415640840,
+              "last_submit_ns": 46823253334602,
+              "max_render_sync_ns": 13734106,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46740738724607,
+              "run_id": 4,
+              "reads": 2996,
+              "unique": 2994,
+              "duplicates": 0,
+              "invalid": 2,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 2996,
+              "max_read_ns": 584054,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [],
+            "host_send_buffer_diagnostics": [],
+            "viewer_observer_start_ns": 46665737845168,
+            "viewer_observer_end_ns": 46725737845168,
+            "uncapped_unique_fps_gate_met": true,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "clear/abba-clear-1080p-04-fixed/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-clear-1080p-05-fixed",
+          "result": {
+            "arm": "fixed",
+            "configured_cap_bytes_per_second": 0,
+            "send_buffer_bytes_requested": 0,
+            "pilot": false,
+            "session_id": "acf05d14539aef46348029fbe9e4f8bd",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.073686014,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 718,
+            "host_drawn_acks": 717,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 633,
+            "observer_unique_source_frames": 713,
+            "observer_unique_frames_per_second": 11.883333333333333,
+            "observer_gap_ms": {
+              "median": 59.191733,
+              "p95": 247.155915,
+              "max": 1193.370425
+            },
+            "host_payload_mbps": 3.7077130900223434,
+            "host_write_mean_ms_max_window": 0.11231322580645162,
+            "host_credit_wait_mean_ms_max_window": 142.06868802941176,
+            "source_observed_submit_fps": 60.00755471144397,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 46931719417984,
+              "run_id": 5,
+              "submitted": 6430,
+              "deadline_skips": 0,
+              "first_submit_ns": 46824580873221,
+              "last_submit_ns": 46931717383464,
+              "max_render_sync_ns": 14916984,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46848933584420,
+              "run_id": 5,
+              "reads": 1742,
+              "unique": 1736,
+              "duplicates": 1,
+              "invalid": 5,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 1742,
+              "max_read_ns": 1117207,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [],
+            "host_send_buffer_diagnostics": [],
+            "viewer_observer_start_ns": 46773933240241,
+            "viewer_observer_end_ns": 46833933240241,
+            "uncapped_unique_fps_gate_met": false,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "clear/abba-clear-1080p-05-fixed/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-clear-1080p-06-adaptive",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 0,
+            "send_buffer_bytes_requested": 0,
+            "pilot": false,
+            "session_id": "a7f1d8a561edd19dacb9191df57d9aed",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.11461938,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 681,
+            "host_drawn_acks": 681,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 674,
+            "observer_unique_source_frames": 678,
+            "observer_unique_frames_per_second": 11.3,
+            "observer_gap_ms": {
+              "median": 67.557399,
+              "p95": 292.199935,
+              "max": 674.866564
+            },
+            "host_payload_mbps": 4.196800621912213,
+            "host_write_mean_ms_max_window": 0.13285432,
+            "host_credit_wait_mean_ms_max_window": 105.12576970731706,
+            "source_observed_submit_fps": 60.005974497934346,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 47040426834405,
+              "run_id": 6,
+              "submitted": 6423,
+              "deadline_skips": 0,
+              "first_submit_ns": 46933394307269,
+              "last_submit_ns": 47040416983823,
+              "max_render_sync_ns": 12110247,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 46957808478251,
+              "run_id": 6,
+              "reads": 1164,
+              "unique": 1160,
+              "duplicates": 2,
+              "invalid": 2,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 1164,
+              "max_read_ns": 557209,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [
+              {
+                "fps": 24,
+                "percent": 100,
+                "pressure": "Credit"
+              },
+              {
+                "fps": 19,
+                "percent": 100,
+                "pressure": "Credit"
+              },
+              {
+                "fps": 15,
+                "percent": 100,
+                "pressure": "Credit"
+              },
+              {
+                "fps": 12,
+                "percent": 100,
+                "pressure": "Credit"
+              }
+            ],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              },
+              {
+                "fps": 24,
+                "percent": 100
+              },
+              {
+                "fps": 19,
+                "percent": 100
+              },
+              {
+                "fps": 15,
+                "percent": 100
+              },
+              {
+                "fps": 12,
+                "percent": 100
+              }
+            ],
+            "host_send_buffer_diagnostics": [],
+            "viewer_observer_start_ns": 46882807902066,
+            "viewer_observer_end_ns": 46942807902066,
+            "uncapped_unique_fps_gate_met": false,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": true
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "clear/abba-clear-1080p-06-adaptive/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-clear-1080p-07-adaptive",
+          "result": {
+            "arm": "adaptive",
+            "configured_cap_bytes_per_second": 0,
+            "send_buffer_bytes_requested": 0,
+            "pilot": false,
+            "session_id": "c6bc88ec46af760d0b07e50f1361a86d",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.075317588,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 705,
+            "host_drawn_acks": 705,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 706,
+            "observer_unique_source_frames": 700,
+            "observer_unique_frames_per_second": 11.666666666666666,
+            "observer_gap_ms": {
+              "median": 66.172265,
+              "p95": 234.240719,
+              "max": 689.972662
+            },
+            "host_payload_mbps": 4.297656914119617,
+            "host_write_mean_ms_max_window": 0.1393982,
+            "host_credit_wait_mean_ms_max_window": 90.62722481632653,
+            "source_observed_submit_fps": 60.00538531903637,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 47149199434719,
+              "run_id": 7,
+              "submitted": 6429,
+              "deadline_skips": 0,
+              "first_submit_ns": 47042060885106,
+              "last_submit_ns": 47149184603516,
+              "max_render_sync_ns": 11115149,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 47066452032888,
+              "run_id": 7,
+              "reads": 1185,
+              "unique": 1180,
+              "duplicates": 2,
+              "invalid": 3,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 1185,
+              "max_read_ns": 511534,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [
+              {
+                "fps": 24,
+                "percent": 100,
+                "pressure": "Credit"
+              },
+              {
+                "fps": 19,
+                "percent": 100,
+                "pressure": "Credit"
+              },
+              {
+                "fps": 15,
+                "percent": 100,
+                "pressure": "Credit"
+              },
+              {
+                "fps": 12,
+                "percent": 100,
+                "pressure": "Credit"
+              }
+            ],
+            "host_nvenc_applies": [
+              {
+                "fps": 30,
+                "percent": 100
+              },
+              {
+                "fps": 24,
+                "percent": 100
+              },
+              {
+                "fps": 19,
+                "percent": 100
+              },
+              {
+                "fps": 15,
+                "percent": 100
+              },
+              {
+                "fps": 12,
+                "percent": 100
+              }
+            ],
+            "host_send_buffer_diagnostics": [],
+            "viewer_observer_start_ns": 46991451530138,
+            "viewer_observer_end_ns": 47051451530138,
+            "uncapped_unique_fps_gate_met": false,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": true
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "clear/abba-clear-1080p-07-adaptive/"
+        },
+        {
+          "state": "scored",
+          "label": "abba-clear-1080p-08-fixed",
+          "result": {
+            "arm": "fixed",
+            "configured_cap_bytes_per_second": 0,
+            "send_buffer_bytes_requested": 0,
+            "pilot": false,
+            "session_id": "7445646f32759571ea204650adf9e4aa",
+            "ffmpeg_encoder": "h264_nvenc",
+            "codec": "H.264",
+            "source_and_encoded_dimensions": [
+              1920,
+              1080
+            ],
+            "requested_fps": 30,
+            "host_window_seconds": 60.067665223,
+            "observer_window_seconds": 60.0,
+            "host_h264_frames": 1002,
+            "host_drawn_acks": 1002,
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "viewer_drawn_frames": 985,
+            "observer_unique_source_frames": 994,
+            "observer_unique_frames_per_second": 16.566666666666666,
+            "observer_gap_ms": {
+              "median": 47.301133,
+              "p95": 139.520126,
+              "max": 536.433257
+            },
+            "host_payload_mbps": 5.173275685784681,
+            "host_write_mean_ms_max_window": 0.10844336144578313,
+            "host_credit_wait_mean_ms_max_window": 92.29846654166666,
+            "source_observed_submit_fps": 60.005647720943024,
+            "source_summary": {
+              "type": "p09_end",
+              "role": "source",
+              "monotonic_ns": 47258138506621,
+              "run_id": 8,
+              "submitted": 6442,
+              "deadline_skips": 0,
+              "first_submit_ns": 47150795685787,
+              "last_submit_ns": 47258135582024,
+              "max_render_sync_ns": 11524924,
+              "interrupted": true
+            },
+            "viewer_observer_summary": {
+              "type": "p09_end",
+              "role": "observer",
+              "monotonic_ns": 47175432927326,
+              "run_id": 8,
+              "reads": 1579,
+              "unique": 1574,
+              "duplicates": 0,
+              "invalid": 5,
+              "wrong_run": 0,
+              "reordered": 0,
+              "damage_events": 1579,
+              "max_read_ns": 550020,
+              "interrupted": false,
+              "target_lost": false
+            },
+            "host_rate_targets": [],
+            "host_nvenc_applies": [],
+            "host_send_buffer_diagnostics": [],
+            "viewer_observer_start_ns": 47100431968132,
+            "viewer_observer_end_ns": 47160431968132,
+            "uncapped_unique_fps_gate_met": false,
+            "adaptive_bitrate_step_applied": false,
+            "adaptive_fps_step_applied": false
+          },
+          "scope": {
+            "source_epoch": 1,
+            "geometry_epoch": 2,
+            "codec": "H.264"
+          },
+          "raw_path": "clear/abba-clear-1080p-08-fixed/"
+        }
+      ],
+      "supplementary_attempts": [],
+      "failed_attempts": [],
+      "pending_or_unscored_slots": [],
+      "network_rtt_observations": {
+        "before": [
+          "PING 192.168.0.78 (192.168.0.78) 56(84) bytes of data.",
+          "",
+          "--- 192.168.0.78 ping statistics ---",
+          "8 packets transmitted, 8 received, 0% packet loss, time 1756ms",
+          "rtt min/avg/max/mdev = 1.911/63.896/122.531/43.687 ms"
+        ],
+        "after": [
+          "PING 192.168.0.78 (192.168.0.78) 56(84) bytes of data.",
+          "",
+          "--- 192.168.0.78 ping statistics ---",
+          "8 packets transmitted, 8 received, 0% packet loss, time 1757ms",
+          "rtt min/avg/max/mdev = 1.332/3.260/6.677/1.535 ms"
+        ]
+      }
+    }
+  },
+  "raw_archive": {
+    "file": "x11-nvenc-adaptive-abba-raw.zip",
+    "members": 247,
+    "sha256": "d5d71b6b2e3367b95f8ae51d6d6fd27198e651dc5e1988e509423d2ba24fd0a7"
+  }
+}

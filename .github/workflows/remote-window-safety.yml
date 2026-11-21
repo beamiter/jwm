@@ -27,7 +27,7 @@ jobs:
             libudev-dev libinput-dev libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcursor-dev \
             libxfixes-dev libxi-dev libxrandr-dev libxrender-dev libgl1-mesa-dev libegl1-mesa-dev \
             libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
-            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev xcompmgr dbus-x11 x11-utils
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev xcompmgr dbus-x11 x11-utils xdotool python3-xlib
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           components: rustfmt,clippy
@@ -53,6 +53,9 @@ jobs:
           cargo test --locked --no-default-features --features remote-x11 --lib resize_owner_lifetime_ends_at_disconnect_or_read_half_close
           cargo test --locked --no-default-features --features remote-x11,backend-x11rb,backend-xcb --lib resize_history_fence
           cargo build --locked --no-default-features --features remote-x11,backend-x11rb --bin jwm --bin jwm-remote
+      - name: Owned X11 viewer recovery and clipboard restriction
+        timeout-minutes: 3
+        run: python3 -B scripts/test-remote-recovery-window.py target/debug/jwm-remote --scenario all
       - name: Sequential viewer lifecycle tests on one owned X server
         run: |
           # Do not reset the server between independent client lifetimes.

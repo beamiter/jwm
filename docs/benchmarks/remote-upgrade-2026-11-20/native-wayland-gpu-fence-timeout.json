@@ -1,0 +1,182 @@
+{
+  "archive": {
+    "file": "native-wayland-gpu-fence-timeout-raw.zip",
+    "member_sha256": {
+      "fixtures/run-scope.json": "e54f379a8e44f4637392fb20e62e688f04df4036c253c57ecfe34fba782f267c",
+      "logs/cargo-test.redacted.log": "1de06628c9b22749627ac3143efc89928a27771d8b656bf63de385cb4ece8bfd",
+      "sources/host-control-fixture-module-declaration.rs": "f730d313aa433c27c3b7ce7092e7b918b9f5fe14c5e3566ce8430c1d306e2ab9",
+      "sources/src/remote/client_native_video.rs": "6c07b24a4debf0b41562f5dd3591438981b4253fff8c399e2b8e142edba2334a",
+      "sources/src/remote/gpu_present.rs": "1a0b2a6cd2ca3268aed83d801246130fba7cb273d21d23ab210ec509ae40c676",
+      "sources/src/remote/host_wayland_gpu_fence_integration.rs": "d26e6e51840360aec344dac31d6ff2c5ea814e3791cb2c6fd1891a031289e0b9",
+      "sources/src/remote/native-video-probe.h264": "a8abec1aeb52fdd973e60b11704f6cbf58cf88ed85b026d1a780b44cb7f724d4",
+      "validated-evidence.json": "b14be654173f9eb747de960f3692907ded3ab24adbce696c5632767aeadf3acb"
+    },
+    "sha256": "b5526c679333635efadc35baebca56896d6cb493bb7b194afe8b5239bcf5a107"
+  },
+  "asserted_by_passing_test": {
+    "completion_injection": {
+      "commits_after_healthy_surface_commit": 0,
+      "egl_destroy_of_same_context_succeeded": true,
+      "failed_frame_acknowledged": false,
+      "injection_location": "After real glClientWaitSync and glDeleteSync, on the second signaled hardware draw.",
+      "overridden_sequence": 72,
+      "real_gl_fence_waits_returning_signaled": 2,
+      "same_exact_decoded_avframe_held_at_renderer_teardown": true,
+      "test_only_reported_status": "GL_TIMEOUT_EXPIRED"
+    },
+    "positive_control": {
+      "acknowledged_wire_frames_epoch_and_sequence": [
+        [
+          1,
+          71
+        ]
+      ],
+      "all_four_reference_colors_distinct": true,
+      "committed_buffer_is_dmabuf": true,
+      "compositor_presentation_feedback_count": 1,
+      "four_rgb_locations": [
+        [
+          16,
+          16
+        ],
+        [
+          233,
+          16
+        ],
+        [
+          16,
+          231
+        ],
+        [
+          233,
+          231
+        ]
+      ],
+      "max_absolute_difference_per_rgb_channel": 4,
+      "oracle": "Actual committed Wayland pixels read by the owned compositor, compared with a separate VA-API decode and CPU RGB reference.",
+      "sequence": 71
+    },
+    "shutdown": {
+      "both_fixture_workers_terminated": true,
+      "error_message": "GLES frame fence did not complete",
+      "hardware_decoder_retry_certificate": false,
+      "nested_io_error_kind": "TimedOut",
+      "reconnect_certified": false,
+      "session_cleanup_not_classified_incomplete": true,
+      "session_failure_stage": "session",
+      "worker_completion_assertion_deadline_seconds": 10
+    }
+  },
+  "date": "2026-11-21",
+  "fixture": {
+    "build_and_run": {
+      "exact_cargo_invocation": [
+        "cargo",
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "remote-wayland,backend-wayland-udev,remote-h264",
+        "--lib",
+        "native_wayland_fence_timeout_retires_real_surface_without_ack",
+        "--",
+        "--ignored",
+        "--test-threads=1",
+        "--show-output"
+      ],
+      "features": [
+        "remote-wayland",
+        "backend-wayland-udev",
+        "remote-h264"
+      ],
+      "render_node_linux_major_minor": [
+        226,
+        128
+      ],
+      "runner_evidence": "Command and environment from the retained runner. Live process IDs, scratch paths and loopback port are omitted.",
+      "runner_original_sha256": "0af2c9c1328443d0866b74ce03f70a79813ac941ee629fe415c602911b9921c0",
+      "runtime": {
+        "EGL_PLATFORM": "surfaceless",
+        "JWM_REMOTE_GPU_PRESENT": "/dev/dri/renderD128",
+        "JWM_REMOTE_WAYLAND_REUSE_RGB": null,
+        "JWM_REQUIRE_HEADLESS_GL": "1",
+        "LIBGL_ALWAYS_SOFTWARE": null
+      }
+    },
+    "transport": "authenticated loopback TCP using the production viewer session code and a deterministic test-only host sender",
+    "video": "two synthetic H.264 probe frames at 256\u00d7256, source epoch 1 and geometry epoch 1",
+    "viewer_permissions": "view only, with keyboard, pointer and clipboard control disabled",
+    "wayland": "owned headless Smithay GLES compositor over an isolated Wayland socket pair"
+  },
+  "limitations": [
+    "The genuine Intel driver signaled both draws. A test-only seam simulated the second wait returning TIMEOUT.",
+    "Real hardware noncompletion, device removal, prolonged GPU stalls and physical display timing were not exercised.",
+    "The 0.32-second result is whole-test execution time, not real timeout recovery latency."
+  ],
+  "observed_log": {
+    "acked": 1,
+    "archive_log": "logs/cargo-test.redacted.log",
+    "decode": "H.264 VA-API",
+    "decoded": 2,
+    "drawn": 1,
+    "failed_tests": 0,
+    "filtered_out_tests": 7886,
+    "first_presentation": "native VA-API/EGL/Wayland DMA-BUF",
+    "note": "The text announcing RGB appears when disabling native decode. The unresolved draw returns an error and does not commit an RGB replacement.",
+    "original_log_sha256": "1c063959da3b954c2857bd6b350ef690d677caf03708aee95e183f44c63dd9a1",
+    "passed_tests": 1,
+    "received": 2,
+    "redactions": [
+      "workspace and shared build paths",
+      "ephemeral loopback port"
+    ],
+    "renderer": "Mesa Intel(R) Graphics (ARL)",
+    "replaced": 0,
+    "terminal_path_diagnostic": "native wayland video disabled; using RGB (GLES frame fence did not complete)",
+    "test_harness_elapsed_seconds": 0.32,
+    "test_passed": true
+  },
+  "pins": {
+    "binary": {
+      "harness_name_reported_by_cargo": "jwm-ed0e7f128daa1b65"
+    },
+    "cargo_lock_current_workspace_sha256": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+    "compile_warning_scope": "The raw log retains the actual unused error::Error import warning. The archived current fixture omits that import and replaces its deterministic credential with a placeholder. Source hashes cover the selected workspace files, not the full test-time checkout.",
+    "source_files": {
+      "src/remote/client_native_video.rs": {
+        "current_workspace_sha256": "6c07b24a4debf0b41562f5dd3591438981b4253fff8c399e2b8e142edba2334a",
+        "member": "sources/src/remote/client_native_video.rs",
+        "member_is_redacted": false,
+        "member_sha256": "6c07b24a4debf0b41562f5dd3591438981b4253fff8c399e2b8e142edba2334a"
+      },
+      "src/remote/gpu_present.rs": {
+        "current_workspace_sha256": "1a0b2a6cd2ca3268aed83d801246130fba7cb273d21d23ab210ec509ae40c676",
+        "member": "sources/src/remote/gpu_present.rs",
+        "member_is_redacted": false,
+        "member_sha256": "1a0b2a6cd2ca3268aed83d801246130fba7cb273d21d23ab210ec509ae40c676"
+      },
+      "src/remote/host_wayland_control_viewer_integration.rs": {
+        "current_workspace_sha256": "416dfc01c6930b7a36e4653b764f8c189b1678ab4e66565a0f925d4125861959",
+        "member": "sources/host-control-fixture-module-declaration.rs",
+        "member_is_partial": true,
+        "member_sha256": "f730d313aa433c27c3b7ce7092e7b918b9f5fe14c5e3566ce8430c1d306e2ab9"
+      },
+      "src/remote/host_wayland_gpu_fence_integration.rs": {
+        "current_workspace_sha256": "835e460bcbb21e71b9521af3310eff58ddfef97501aa440d76b80a1759a5bbb3",
+        "member": "sources/src/remote/host_wayland_gpu_fence_integration.rs",
+        "member_is_redacted": true,
+        "member_sha256": "d26e6e51840360aec344dac31d6ff2c5ea814e3791cb2c6fd1891a031289e0b9",
+        "reconstructed_test_time_sha256": "44300c6a002bdc963405214434d96f526f43da0e731cf0586fa04ac369827fd6",
+        "reconstruction_scope": "Current fixture with the exact import line shown by Cargo restored. The test-time source was not separately snapshotted before the build."
+      },
+      "src/remote/native-video-probe.h264": {
+        "current_workspace_sha256": "a8abec1aeb52fdd973e60b11704f6cbf58cf88ed85b026d1a780b44cb7f724d4",
+        "member": "sources/src/remote/native-video-probe.h264",
+        "member_is_redacted": false,
+        "member_sha256": "a8abec1aeb52fdd973e60b11704f6cbf58cf88ed85b026d1a780b44cb7f724d4"
+      }
+    }
+  },
+  "schema_version": 1,
+  "scope": "P10/P13 native Wayland viewer handling of ambiguous GPU draw completion on an owned Intel render node."
+}

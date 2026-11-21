@@ -1,0 +1,45 @@
+{
+  "scope": "Owned Intel Xwayland and authenticated loopback. Test-only GLES status override after real signal, independent of physical device loss.",
+  "test_binary_sha256": "d83c50641ab4ddb1bc6f19ae52f464d8120f072bf30d3875c0dfe5af5c6ea29a",
+  "source_sha256": {
+    "Cargo.toml": "9dd243ceb81417a3781afabf9b040a105ad39eb63d18af118ac43a232d1c0ae6",
+    "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+    "src/remote/client.rs": "f063cf6c2324cb4314cd8b5c515e57c7e0949918af0e7d7c49822315acbe06b9",
+    "src/remote/client_native_video.rs": "1915b85f3c7b70aa9b8b602e285a4cc808dc9743961ccb4135b437ddcf59d060",
+    "src/remote/gpu_present.rs": "4c315e9eebad10cf51fe63515406312f023d0b783ab4f84ab9dda2cba87922a2",
+    "src/remote/h264.rs": "104694ba60f6c55305961b48403380621c481905b9ab6243b010b8cbe1c6f5d3",
+    "src/remote/host.rs": "3d2270c0f450be0d5cea60933451143f423bb6c71b170821cab88b578cee3070",
+    "src/remote/telemetry.rs": "e6bf7ee82824f2b64906f92af9a6e6030a49ffbb69db337faa0ef7ded0ce2ea5",
+    "src/remote/x11_viewer.rs": "736d4696eb46d03139de94299dc6f023091309ffd7ad59fa78b5d31e68aa0e06",
+    "src/remote/wayland_viewer_gpu.rs": "d14730e69adf95aef7c42802f8ed336e50f5c124b918edc6c4c39f5969b8b383",
+    "src/remote/host_wayland_gpu_fence_integration.rs": "f48ad234d321bd45c0acb2ecfca51a69ef2f6b3bd1c9be92481147cd9637a75a",
+    "src/remote/host_wayland_gpu_xwayland_integration.rs": "c04b672df772de6ad14ac1c3511730748b58cf121cb0001d3256c764b4f5d5c4",
+    "tools/jwm_remote.rs": "a151391b3b0bdbba78962b11188c922b369de361eb74dcaae3f65a29994459e5"
+  },
+  "controller_exit": 0,
+  "cases": [
+    {
+      "faulted_sequence": 71,
+      "frame_acks": [],
+      "injected_cleanup_failure": false,
+      "injected_status": "GL_TIMEOUT_EXPIRED",
+      "jpeg_retry_eligible": true,
+      "prefetch_joined_after_request": true,
+      "real_signaled_draws": 1,
+      "same_egl_context_destroyed": true,
+      "same_va_frame_held_at_egl_teardown": true
+    },
+    {
+      "faulted_sequence": 71,
+      "frame_acks": [],
+      "injected_cleanup_failure": true,
+      "injected_status": "GL_TIMEOUT_EXPIRED",
+      "jpeg_retry_eligible": false,
+      "prefetch_joined_after_request": true,
+      "real_signaled_draws": 1,
+      "same_egl_context_destroyed": true,
+      "same_va_frame_held_at_egl_teardown": true
+    }
+  ],
+  "launcher_exit": 0
+}

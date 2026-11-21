@@ -53,6 +53,7 @@ const HEVC444_HELPER_READY: &str = "hardware HEVC 4:4:4 negotiation available";
 
 #[derive(Clone, Debug)]
 pub struct SshOptions {
+    pub stats_json: bool,
     /// Explicit local client-area startup size; None preserves automatic sizing.
     pub window_size: Option<super::window_size::WindowSize>,
     /// Explicit local best-effort startup position; coordinates are bounded by i16.
@@ -180,6 +181,7 @@ fn run_ssh_session(options: SshOptions, offer_hardware: bool, jpeg_only: bool) -
     let relay_codec = Arc::clone(&host_codec);
     let relay_stop = Arc::new(AtomicBool::new(false));
     let reader = RelayReader::new(stderr, Arc::clone(&relay_stop));
+    let stats_json = options.stats_json;
     let relay = thread::Builder::new()
         .name("jwm-remote-ssh-relay".into())
         .spawn(move || {
@@ -187,7 +189,14 @@ fn run_ssh_session(options: SshOptions, offer_hardware: bool, jpeg_only: bool) -
                 let codec = match line.strip_prefix("jwm-remote: host: ") {
                     Some(HEVC444_HELPER_READY) => FrameCodec::Hevc444,
                     Some(H264_HELPER_READY) => FrameCodec::H264,
-                    _ => return eprintln!("{line}"),
+                    _ => {
+                        if stats_json && is_host_stats_json(line) {
+                            super::ssh_diagnostics::emit_json_line(line);
+                        } else {
+                            eprintln!("{line}");
+                        }
+                        return;
+                    }
                 };
                 relay_codec.fetch_max(codec as u8, Ordering::Release);
             });
@@ -213,12 +222,14 @@ fn run_ssh_session(options: SshOptions, offer_hardware: bool, jpeg_only: bool) -
             }
             run_client_with_video_codec(
                 ClientOptions {
+                    stats_json: options.stats_json,
                     control_duration: Default::default(),
                     viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
                     viewer_wayland_display: None,
                     wayland_keyboard: false,
                     wayland_pointer: false,
                     wayland_control: false,
+                    wayland_gestures: false,
                     resumable_control: false,
                     wayland_seamless_input: false,
                     wayland_text: None,
@@ -230,6 +241,7 @@ fn run_ssh_session(options: SshOptions, offer_hardware: bool, jpeg_only: bool) -
                     follow_source_size: false,
                     window_size: options.window_size,
                     window_position: options.window_position,
+                    x11_parent_window: None,
                     address: format!("127.0.0.1:{local_port}"),
                     peer_label: label.clone(),
                     key: KeySource::Bytes(key),
@@ -419,7 +431,13 @@ impl<R: Read + AsFd> Read for RelayReader<R> {
 /// Keep SSH/host diagnostics bounded even when a peer never writes a newline.
 /// Oversized lines are discarded whole, so a truncated prefix cannot signal
 /// readiness. Continue draining the stream so SSH cannot block on a full pipe.
-const MAX_HOST_LINE_BYTES: usize = 16 * 1024;
+const MAX_HOST_LINE_BYTES: usize = super::ssh_diagnostics::LINE_BYTES;
+
+fn is_host_stats_json(line: &str) -> bool {
+    line.starts_with('{')
+        && serde_json::from_str::<serde_json::Value>(line)
+            .is_ok_and(|record| record["type"] == "jwm_remote_host_stats")
+}
 
 fn read_host_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<bool> {
     line.clear();
@@ -819,6 +837,9 @@ fn remote_host_script_with_hardware(
     };
     let mut host =
         format!("host --listen 127.0.0.1:{remote_port} --key-stdin --once --display auto");
+    if options.stats_json {
+        host.push_str(" --stats-json");
+    }
     if !options.view_only {
         host.push_str(" --allow-input");
     }
@@ -911,6 +932,7 @@ mod tests {
 
     fn options() -> SshOptions {
         SshOptions {
+            stats_json: false,
             window_position: None,
             window_size: None,
             destination: "ubuntu@desk".into(),

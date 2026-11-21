@@ -352,6 +352,27 @@ impl WaylandCompositor {
         None
     }
 
+    pub(crate) fn composited_window_overlaps_output(
+        &self,
+        window_id: u64,
+        output: CompositorRect,
+    ) -> bool {
+        let Some(output) = output.normalized() else {
+            return false;
+        };
+        let x = output.x.max(0.0);
+        let y = output.y.max(0.0);
+        let framebuffer_slice = CompositorRect::new(
+            x,
+            y,
+            (output.x + output.width).min(self.screen_w as f32) - x,
+            (output.y + output.height).min(self.screen_h as f32) - y,
+        );
+        self.composited_window_bounds
+            .get(&window_id)
+            .is_some_and(|&bounds| compositor_rects_overlap(bounds, framebuffer_slice))
+    }
+
     /// Check if any animations are still running (requiring continuous redraws)
     pub(crate) fn has_active_animations(&self) -> bool {
         // Check fade animations

@@ -1,0 +1,96 @@
+{
+  "aether_binary_sha256": "9b70adc816a1815e79abfde7248bfd17c9e4817ecfa8ca0109964acdc561f00b",
+  "jwm_remote_binary_sha256": "653d8f4d4624c4349152416b2685eefe7e5ef29d063bf6a80f3ec186467a655c",
+  "canonical_and_vendored_adapter_sha256": "8a8087b939f4018bd5d96fc2f744a750b4084160256285d39aac1425338f1ccd",
+  "aether_source_sha256": {
+    "src-tauri/src/main.rs": "c02dbd95127fe910dfa75f8879e9f2a3b18477c2d612fb7f5d82ef84a0b4e840",
+    "src-tauri/src/remote_desktop.rs": "3dda9a55a5c4beba6f0f875605f345b11b4f5f0dfb85aebb9db7d62eec599b94",
+    "src-tauri/src/ipc_tests.rs": "b71c240735255d7539dcc5861b8ca9cc13858baae4f38b5192689c021261613b",
+    "src-tauri/vendor/jwm-remote/client.rs": "8a8087b939f4018bd5d96fc2f744a750b4084160256285d39aac1425338f1ccd",
+    "web/index.html": "e2ce707777108342be0b92bfab5872cdfc08b0dd550088c558faf478ee155278",
+    "web/remote-desktop.js": "91741f164b947149fb2f00cfeee77d88bf1e87a9ed112b2299acccb9e544c6a7",
+    "web/style.css": "655942b1bef203d42e5f60988435befe773ab973592e47548c534d13a779f19b"
+  },
+  "native_fixture_sha256": {
+    "smoke.py": "5a4b94e125750828bd335fe8ed4a83b8b89e13597653b0e4db0dd1f223b78056",
+    "bin/jwm-remote": "110a9902415120cc6f770c0a3277879e115523d83b05fe43a1c4fa055db33418"
+  },
+  "schema_version": 1,
+  "experiment": "Aether native X11 clipboard policy and receive-only smoke with final builds",
+  "statuses": {
+    "aether_build": 0,
+    "jwm_helper_build": 0,
+    "native_controller": 0
+  },
+  "evidence": {
+    "passed_scenarios": [
+      {
+        "scenario": "without_host_grant",
+        "effective_policy": {
+          "mode": null,
+          "direction": null,
+          "file_limit_bytes": "0",
+          "transfer": null
+        },
+        "viewing_records": 1,
+        "xembed_native_status_and_helper_agree": true,
+        "helper_exit": 0
+      },
+      {
+        "scenario": "receive_only",
+        "effective_policy": {
+          "mode": "text",
+          "direction": "from-host",
+          "file_limit_bytes": "0",
+          "transfer": null
+        },
+        "viewing_records": 1,
+        "xembed_native_status_and_helper_agree": true,
+        "helper_exit": 0
+      }
+    ],
+    "actual_synthetic_receive_and_reverse_rejection": true,
+    "both_hosts_helpers_app_and_displays_closed": true,
+    "images": {
+      "denied-effective.png": {
+        "dimensions": [
+          960,
+          820
+        ],
+        "sha256": "3c75ae6fac4949393f05e39987af512f31767f8aac0948751720e7133d05b029"
+      },
+      "from-host-effective.png": {
+        "dimensions": [
+          960,
+          820
+        ],
+        "sha256": "619ca80c2ba2ad29559aeaa87d7f50eb828eedf1230e3b4258bb8876e2054faa"
+      }
+    }
+  },
+  "method": [
+    "Actual WebKitGTK controls selected opt-in, text, and from host. The managed viewer embedded in the Aether native window.",
+    "Host-denied lane offered a fresh synthetic selection after connection and preserved the viewer selection.",
+    "Host-granted lane granted text in both directions on host and text from host in the viewer. The effective receive-only policy was shown by accessibility and the private screenshot.",
+    "A fresh host selection was read byte-for-byte at the viewer after negotiation. A subsequent synthetic viewer selection change did not alter the host selection across the observed check interval.",
+    "Both managed helpers sent closing and closed snapshots with no clipboard status and exited normally. The two host children, Aether and both private Xvfb displays also exited normally."
+  ],
+  "limitations": "Local native text consent and one-way transfer smoke. Direct helper image/file progression was a separate check.",
+  "privacy": "The JSONL is the fixture recording of allowlisted helper arguments and the clipboard-only fields from the actual native session snapshots. Images are the two actual client-area captures of the isolated synthetic desktop, with no endpoint fields shown. Runtime paths, endpoint addresses, session identifiers, keys, local selections, full host/app logs and environment were not packaged.",
+  "archive": {
+    "filename": "aether-x11-managed-clipboard-final-raw.zip",
+    "sha256": "08ca89b5110633dfd0ab41982871d8e2dce83e48177dcc690682b1c3d502671e",
+    "members_sha256": {
+      "denied-effective.png": "3c75ae6fac4949393f05e39987af512f31767f8aac0948751720e7133d05b029",
+      "fixture/bin/jwm-remote": "110a9902415120cc6f770c0a3277879e115523d83b05fe43a1c4fa055db33418",
+      "fixture/smoke.py": "5a4b94e125750828bd335fe8ed4a83b8b89e13597653b0e4db0dd1f223b78056",
+      "from-host-effective.png": "619ca80c2ba2ad29559aeaa87d7f50eb828eedf1230e3b4258bb8876e2054faa",
+      "helper-clipboard.jsonl": "27099aa6bdacb6641310aa277ddff23baf7919b70127c33e0f1d12399de2a4e5",
+      "native-result.json": "060b633570e449cfb84b40f02cb141a77179dce05005117894d1cf84d04919a7",
+      "provenance.json": "28f0fa139d88a8b41a3db96fa2672f7c8ad9df2aa78c059fe79902267b4ac982",
+      "replay-result.json": "e0bf28123d673297440e32937d79c397effdb84f4115b108abf31aeada28f0aa",
+      "replay.py": "c5097f7142e23446ec3edba6b88959ac2e1814d811ecfc665a1a8090301174c4"
+    },
+    "offline_replay": "python3 -I -B replay.py, from the extracted archive"
+  }
+}

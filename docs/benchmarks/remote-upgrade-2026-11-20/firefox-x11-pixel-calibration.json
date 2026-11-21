@@ -1,0 +1,52 @@
+{
+  "source": {
+    "observed_changes": 472,
+    "invalid_tile_reads": 0,
+    "duplicate_or_reverse_reads": 248,
+    "distinct_scroll_signatures": 472,
+    "max_internal_observed_gap_ms": 23.431931
+  },
+  "viewer": {
+    "observed_changes": 236,
+    "invalid_tile_reads": 0,
+    "duplicate_or_reverse_reads": 484,
+    "distinct_scroll_signatures": 236,
+    "max_internal_observed_gap_ms": 46.305321
+  },
+  "scope": "unscored single-machine software pixel calibration",
+  "duration_s": 8.0002306,
+  "size": [
+    960,
+    640
+  ],
+  "tile_top": 148,
+  "initial_source": [
+    0,
+    "32ce793b939540ea"
+  ],
+  "initial_viewer": [
+    0,
+    "e4b2b334912c0c83"
+  ],
+  "fixture_sha256": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+  "archive": {
+    "path": "firefox-x11-pixel-calibration-raw.zip",
+    "sha256": "2ce3ed36adda710a41c712000cb7acdabf9ce3b37ee057385dba756bb896e1bd",
+    "entries": {
+      "fixture/browser.html": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+      "fixture/calibrate.py": "ba12c09778a5ecd8ead77a19bb6b42c1af50735845c98cdebce28bf34a84316f",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "trace/result.json": "9d5324ad809988b4cade7638af0a0d6b3b83a4fdfa8d7e7f791aff672c1c5ed1",
+      "trace/pixels.jsonl": "4e4b45b14b9ce4eb57b0223f8ce76a33d1f1a6df3dc66d99edf536b746e7ce0b",
+      "trace/source-static.json": "453e534bb4f16f5175ee247e627d7e9677ad8315466266f2676da26361f9b62b",
+      "trace/source-discovery-tree.log": "0657fe43a9157b00bdf57c91a17ba36dd322ddf6cca61b528ed8408e4d7f3542",
+      "trace/source-positioned-tree.log": "b2d0822e9cf9dcdbc3fa6850082c83b0aac81b3f7d1c9e0cbda21d6f9c450b36",
+      "trace/source-static-root.ppm": "daadde18653b4cbe3aec9f62bad3e31d657a5d96e01a959fe73e2075388e8c8a",
+      "trace/source-static-window.ppm": "707612985e5ac10cf615b71b49256d09a21942ead3d67a2fc65c1557632b88dd",
+      "trace/viewer-static-window.ppm": "7fcb35a0a4563c00fbdca953e9b8f67cdfdf2c39a246716b2a8ca0b35d399385",
+      "trace/viewer-window-tree.log": "c2aaac6601b36268aa84d7a8ffc99693bba7b1f096d6b2d89494aec35410e0d4",
+      "trace/host.log": "f9af0f8128233e892cab9bb684d82540115a09c2d471b6b16448ea9912376863",
+      "trace/viewer.log": "d5cca2815bf87b7c6abaa17e8075cbe2ef228255eb45a8cde901de6753baa440"
+    }
+  }
+}

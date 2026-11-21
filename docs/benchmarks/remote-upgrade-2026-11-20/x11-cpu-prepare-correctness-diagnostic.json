@@ -1,0 +1,1192 @@
+{
+  "experiment": "X11 CPU preparation worker odd 1393\u00d7785 viewport and source-switch diagnostic",
+  "scope": "Single physical development machine, two private Xvfb displays, authenticated loopback, H.264 NVENC encode, VA-API decode, X11 CPU RGB presentation. Only the viewer worker opt-in changed across A/B/A.",
+  "controller_exit": 1,
+  "host_binary_sha256": "5945a9d94a65699ea0514be3bff6328f976d776ea8e94410d48b451ed034d371",
+  "viewer_binary_sha256": "5945a9d94a65699ea0514be3bff6328f976d776ea8e94410d48b451ed034d371",
+  "fixture_sha256": {
+    "correctness.py": "6ad7894e2174658b2ba71664cce29636c5d05bb46135a98c7edbced0f2e16105",
+    "pixels.py": "6cfb0bcabd726fff9960ccc5b75f33be228570e00f5773faa2fdea1e41fa9576",
+    "processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717"
+  },
+  "functional_arms": [
+    {
+      "case": "1-off",
+      "arm": "off",
+      "status": "failed",
+      "error": "TimeoutError: owned actual X11 edge 4/1",
+      "viewer_exit": null,
+      "host_exit": null,
+      "source_a_ack": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          1393,
+          785
+        ],
+        "geometry_epoch": 3,
+        "sequence": 224,
+        "source_dimensions": [
+          1393,
+          785
+        ],
+        "source_epoch": 1
+      },
+      "source_b_ack": null,
+      "viewer_preparation": null,
+      "authenticated_host_drawn_ack_count": null,
+      "authenticated_viewer_ack_count": null
+    },
+    {
+      "case": "2-on",
+      "arm": "on",
+      "status": "passed",
+      "error": null,
+      "viewer_exit": 0,
+      "host_exit": 0,
+      "source_a_ack": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          1393,
+          785
+        ],
+        "geometry_epoch": 3,
+        "sequence": 258,
+        "source_dimensions": [
+          1393,
+          785
+        ],
+        "source_epoch": 1
+      },
+      "source_b_ack": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          1393,
+          785
+        ],
+        "geometry_epoch": 6,
+        "sequence": 630,
+        "source_dimensions": [
+          1393,
+          785
+        ],
+        "source_epoch": 2
+      },
+      "viewer_preparation": {
+        "scheduled": 634,
+        "submitted": 634,
+        "prepared": 634,
+        "stale": 0,
+        "fallbacks": 0,
+        "stage_observations": 634
+      },
+      "authenticated_host_drawn_ack_count": 638,
+      "authenticated_viewer_ack_count": 638
+    },
+    {
+      "case": "3-off",
+      "arm": "off",
+      "status": "passed",
+      "error": null,
+      "viewer_exit": 0,
+      "host_exit": 0,
+      "source_a_ack": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          1393,
+          785
+        ],
+        "geometry_epoch": 3,
+        "sequence": 218,
+        "source_dimensions": [
+          1393,
+          785
+        ],
+        "source_epoch": 1
+      },
+      "source_b_ack": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          1393,
+          785
+        ],
+        "geometry_epoch": 6,
+        "sequence": 557,
+        "source_dimensions": [
+          1393,
+          785
+        ],
+        "source_epoch": 2
+      },
+      "viewer_preparation": {
+        "scheduled": 0,
+        "submitted": 0,
+        "prepared": 0,
+        "stale": 0,
+        "fallbacks": 0,
+        "stage_observations": 0
+      },
+      "authenticated_host_drawn_ack_count": 565,
+      "authenticated_viewer_ack_count": 565
+    }
+  ],
+  "image_evidence": {
+    "capture_witnesses": {
+      "a_initial": {
+        "1-off": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "68276d61750b0af3e5c8bbce9b85c60694a467a37fc3d6525f1e03b9e503e9f8",
+          "content_rgb_sha256": "f1ba506ff1c59ee645425920551a6e7c08942cb15635e5fb83c4fc83c78ec40e",
+          "content": [
+            0,
+            70,
+            1393,
+            785
+          ],
+          "viewport": [
+            1393,
+            925
+          ]
+        },
+        "2-on": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "68276d61750b0af3e5c8bbce9b85c60694a467a37fc3d6525f1e03b9e503e9f8",
+          "content_rgb_sha256": "f1ba506ff1c59ee645425920551a6e7c08942cb15635e5fb83c4fc83c78ec40e",
+          "content": [
+            0,
+            70,
+            1393,
+            785
+          ],
+          "viewport": [
+            1393,
+            925
+          ]
+        },
+        "3-off": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "68276d61750b0af3e5c8bbce9b85c60694a467a37fc3d6525f1e03b9e503e9f8",
+          "content_rgb_sha256": "f1ba506ff1c59ee645425920551a6e7c08942cb15635e5fb83c4fc83c78ec40e",
+          "content": [
+            0,
+            70,
+            1393,
+            785
+          ],
+          "viewport": [
+            1393,
+            925
+          ]
+        }
+      },
+      "a_other": {
+        "1-off": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "fa6da9ee0e5f05e9c9fcaba42e0d8a940a7167a38abc8b538df0dfe47297b93a",
+          "content_rgb_sha256": "5c2b02ee2370e8ac19d65c1043d33cb4a326dae92c5cfb6171187b4eeb23c401",
+          "content": [
+            129,
+            0,
+            1393,
+            785
+          ],
+          "viewport": [
+            1651,
+            785
+          ]
+        },
+        "2-on": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "fa6da9ee0e5f05e9c9fcaba42e0d8a940a7167a38abc8b538df0dfe47297b93a",
+          "content_rgb_sha256": "5c2b02ee2370e8ac19d65c1043d33cb4a326dae92c5cfb6171187b4eeb23c401",
+          "content": [
+            129,
+            0,
+            1393,
+            785
+          ],
+          "viewport": [
+            1651,
+            785
+          ]
+        },
+        "3-off": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "d38f8057b75ab8203d53ca343ab9a440c6998a6aeb97fd2c5b6f6186504247c9",
+          "content_rgb_sha256": "4ec225200290d58c9ad2e1a47cf4dbb673af7d67db032c033f0188a361dea84d",
+          "content": [
+            129,
+            0,
+            1393,
+            785
+          ],
+          "viewport": [
+            1651,
+            785
+          ]
+        }
+      },
+      "a_restored": {
+        "1-off": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "27790886b5aa0141a4ac2b8d96e097dec3cb41ed7b44195fb21edce7959c6501",
+          "content_rgb_sha256": "ebba528511b7725062517781044e7f273b8301d31fd92fac0aebe7dbe9eb12fc",
+          "content": [
+            0,
+            70,
+            1393,
+            785
+          ],
+          "viewport": [
+            1393,
+            925
+          ]
+        },
+        "2-on": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "41eb46e90927817a6673eaa3214f848cd52c928cbe716b2e3dd46fd010eb2b25",
+          "content_rgb_sha256": "5c2b02ee2370e8ac19d65c1043d33cb4a326dae92c5cfb6171187b4eeb23c401",
+          "content": [
+            0,
+            70,
+            1393,
+            785
+          ],
+          "viewport": [
+            1393,
+            925
+          ]
+        },
+        "3-off": {
+          "markers_rgb": {
+            "upper_left": [
+              216,
+              38,
+              32
+            ],
+            "upper_right": [
+              159,
+              23,
+              65
+            ],
+            "lower_left": [
+              236,
+              109,
+              55
+            ],
+            "lower_right": [
+              174,
+              58,
+              62
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "fc76897496f6d5aa5372900cac962e6eab76e53e5ddc5771e6751340ed59665d",
+          "content_rgb_sha256": "0c0a62006ea29ce49acc0d38c80ab58cd891cc294c0831ac9bae4e323578f76a",
+          "content": [
+            0,
+            70,
+            1393,
+            785
+          ],
+          "viewport": [
+            1393,
+            925
+          ]
+        }
+      },
+      "b_final": {
+        "2-on": {
+          "markers_rgb": {
+            "upper_left": [
+              15,
+              186,
+              103
+            ],
+            "upper_right": [
+              33,
+              153,
+              205
+            ],
+            "lower_left": [
+              37,
+              204,
+              144
+            ],
+            "lower_right": [
+              6,
+              112,
+              145
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "5e28c77ad86ba68cfd51df4b963c65767a6c3cd60e17ef934f3ec2886f9c45ba",
+          "content_rgb_sha256": "79d65471bd4372342eb7d4b02b39be742051dbb9f0cb620c775ec8da1b9bfa98",
+          "content": [
+            0,
+            70,
+            1393,
+            785
+          ],
+          "viewport": [
+            1393,
+            925
+          ]
+        },
+        "3-off": {
+          "markers_rgb": {
+            "upper_left": [
+              15,
+              186,
+              103
+            ],
+            "upper_right": [
+              33,
+              153,
+              205
+            ],
+            "lower_left": [
+              37,
+              204,
+              144
+            ],
+            "lower_right": [
+              6,
+              112,
+              145
+            ],
+            "last_column": [
+              196,
+              179,
+              189
+            ],
+            "last_row": [
+              155,
+              127,
+              141
+            ],
+            "gray_low": [
+              23,
+              23,
+              23
+            ],
+            "gray_high": [
+              233,
+              233,
+              233
+            ],
+            "origin": [
+              0,
+              0,
+              0
+            ]
+          },
+          "bars_exact_black": true,
+          "full_ppm_sha256": "b0a35e1f5753ff4d9cede20d9db8a9528ae38e618e1e7877dc24215988d62321",
+          "content_rgb_sha256": "0cbaff4ad05538ee6d8c3daa42525a066dbd31d87529858319ff926e8c2663eb",
+          "content": [
+            0,
+            70,
+            1393,
+            785
+          ],
+          "viewport": [
+            1393,
+            925
+          ]
+        }
+      }
+    },
+    "same_phase_comparisons": {
+      "a_initial": [
+        {
+          "arms": [
+            "1-off",
+            "2-on"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 0,
+          "max_absolute_rgb_delta": [
+            0,
+            0,
+            0
+          ],
+          "total_absolute_channel_delta": 0,
+          "mean_absolute_channel_delta": 0.0,
+          "pixels_over_absolute_delta": {
+            "2": 0,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": null
+        },
+        {
+          "arms": [
+            "1-off",
+            "3-off"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 0,
+          "max_absolute_rgb_delta": [
+            0,
+            0,
+            0
+          ],
+          "total_absolute_channel_delta": 0,
+          "mean_absolute_channel_delta": 0.0,
+          "pixels_over_absolute_delta": {
+            "2": 0,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": null
+        },
+        {
+          "arms": [
+            "2-on",
+            "3-off"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 0,
+          "max_absolute_rgb_delta": [
+            0,
+            0,
+            0
+          ],
+          "total_absolute_channel_delta": 0,
+          "mean_absolute_channel_delta": 0.0,
+          "pixels_over_absolute_delta": {
+            "2": 0,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": null
+        }
+      ],
+      "a_other": [
+        {
+          "arms": [
+            "1-off",
+            "2-on"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 0,
+          "max_absolute_rgb_delta": [
+            0,
+            0,
+            0
+          ],
+          "total_absolute_channel_delta": 0,
+          "mean_absolute_channel_delta": 0.0,
+          "pixels_over_absolute_delta": {
+            "2": 0,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": null
+        },
+        {
+          "arms": [
+            "1-off",
+            "3-off"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 361,
+          "max_absolute_rgb_delta": [
+            4,
+            2,
+            3
+          ],
+          "total_absolute_channel_delta": 936,
+          "mean_absolute_channel_delta": 0.0002853210547734121,
+          "pixels_over_absolute_delta": {
+            "2": 96,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": [
+            120,
+            392,
+            1391,
+            784
+          ]
+        },
+        {
+          "arms": [
+            "2-on",
+            "3-off"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 361,
+          "max_absolute_rgb_delta": [
+            4,
+            2,
+            3
+          ],
+          "total_absolute_channel_delta": 936,
+          "mean_absolute_channel_delta": 0.0002853210547734121,
+          "pixels_over_absolute_delta": {
+            "2": 96,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": [
+            120,
+            392,
+            1391,
+            784
+          ]
+        }
+      ],
+      "a_restored": [
+        {
+          "arms": [
+            "1-off",
+            "2-on"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 444,
+          "max_absolute_rgb_delta": [
+            4,
+            2,
+            4
+          ],
+          "total_absolute_channel_delta": 1204,
+          "mean_absolute_channel_delta": 0.00036701554481537196,
+          "pixels_over_absolute_delta": {
+            "2": 117,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": [
+            120,
+            392,
+            1391,
+            784
+          ]
+        },
+        {
+          "arms": [
+            "1-off",
+            "3-off"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 719,
+          "max_absolute_rgb_delta": [
+            4,
+            3,
+            4
+          ],
+          "total_absolute_channel_delta": 2086,
+          "mean_absolute_channel_delta": 0.0006358757695057026,
+          "pixels_over_absolute_delta": {
+            "2": 179,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": [
+            96,
+            385,
+            1392,
+            784
+          ]
+        },
+        {
+          "arms": [
+            "2-on",
+            "3-off"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 901,
+          "max_absolute_rgb_delta": [
+            5,
+            3,
+            4
+          ],
+          "total_absolute_channel_delta": 2652,
+          "mean_absolute_channel_delta": 0.0008084096551913343,
+          "pixels_over_absolute_delta": {
+            "2": 277,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": [
+            96,
+            385,
+            1392,
+            783
+          ]
+        }
+      ],
+      "b_final": [
+        {
+          "arms": [
+            "2-on",
+            "3-off"
+          ],
+          "compared_content_pixels": 1093505,
+          "differing_pixels": 289,
+          "max_absolute_rgb_delta": [
+            3,
+            3,
+            4
+          ],
+          "total_absolute_channel_delta": 824,
+          "mean_absolute_channel_delta": 0.00025118007386035424,
+          "pixels_over_absolute_delta": {
+            "2": 61,
+            "8": 0,
+            "16": 0,
+            "32": 0
+          },
+          "difference_content_bbox_inclusive": [
+            97,
+            700,
+            1391,
+            783
+          ]
+        }
+      ]
+    },
+    "per_arm_initial_to_opposite_letterbox_content_comparison": {
+      "1-off": {
+        "compared_content_pixels": 1093505,
+        "differing_pixels": 570,
+        "max_absolute_rgb_delta": [
+          4,
+          3,
+          4
+        ],
+        "total_absolute_channel_delta": 1605,
+        "mean_absolute_channel_delta": 0.000489252449691588,
+        "pixels_over_absolute_delta": {
+          "2": 162,
+          "8": 0,
+          "16": 0,
+          "32": 0
+        },
+        "difference_content_bbox_inclusive": [
+          96,
+          392,
+          1391,
+          784
+        ]
+      },
+      "2-on": {
+        "compared_content_pixels": 1093505,
+        "differing_pixels": 570,
+        "max_absolute_rgb_delta": [
+          4,
+          3,
+          4
+        ],
+        "total_absolute_channel_delta": 1605,
+        "mean_absolute_channel_delta": 0.000489252449691588,
+        "pixels_over_absolute_delta": {
+          "2": 162,
+          "8": 0,
+          "16": 0,
+          "32": 0
+        },
+        "difference_content_bbox_inclusive": [
+          96,
+          392,
+          1391,
+          784
+        ]
+      },
+      "3-off": {
+        "compared_content_pixels": 1093505,
+        "differing_pixels": 319,
+        "max_absolute_rgb_delta": [
+          4,
+          3,
+          4
+        ],
+        "total_absolute_channel_delta": 885,
+        "mean_absolute_channel_delta": 0.0002697747152505018,
+        "pixels_over_absolute_delta": {
+          "2": 76,
+          "8": 0,
+          "16": 0,
+          "32": 0
+        },
+        "difference_content_bbox_inclusive": [
+          96,
+          696,
+          1391,
+          783
+        ]
+      }
+    }
+  },
+  "interpretation": [
+    "All three initial full PPM hashes match. Each retained actual image passes the expected letterbox geometry, exact-black bars, odd crop edge check and source quadrant colors.",
+    "The two worker-off runs disagree on the full opposite-letterbox and restored captures with the same synthetic source raster. Opposite-letterbox and restored discrepancies therefore also occur without the worker.",
+    "The post-switch image differs across the two completed runs. They used independent H.264 encode/decode histories. This fixture has no same-decoded-frame oracle for assigning these byte differences to a pipeline stage.",
+    "The completed on and off arms delivered the old release to the original source before local key-up and the next balanced key to new source. The first off arm failed waiting for a real pointer down after resize and lacked normal terminal viewer stats.",
+    "Host telemetry reports the first off arm temporarily encoded 1241\u00d7699 and subsequently acknowledged later native-size frames. The original test did not wait for a fresh restored host and viewer scope before injecting the click. The actual edge drop cause remains unobserved.",
+    "The worker reported zero stale jobs and fallback submissions. The visible convergence test does not prove a job overlapped the burst or exact per-sequence ACK ordering."
+  ],
+  "archive": {
+    "name": "x11-cpu-prepare-correctness-diagnostic-raw.zip",
+    "sha256": "e32bd00f91bea3e88206f2b946803348409ca337d87070f0a73d78bec643be88",
+    "members_sha256": {
+      "1-off/a_initial.ppm": "68276d61750b0af3e5c8bbce9b85c60694a467a37fc3d6525f1e03b9e503e9f8",
+      "1-off/a_other.ppm": "fa6da9ee0e5f05e9c9fcaba42e0d8a940a7167a38abc8b538df0dfe47297b93a",
+      "1-off/a_restored.ppm": "27790886b5aa0141a4ac2b8d96e097dec3cb41ed7b44195fb21edce7959c6501",
+      "1-off/endpoint-evidence.json": "a222c675ab910c1e9e940ef2c2ef397c462d90f70b50c85f6b942aa0a2624f4b",
+      "2-on/a_initial.ppm": "68276d61750b0af3e5c8bbce9b85c60694a467a37fc3d6525f1e03b9e503e9f8",
+      "2-on/a_other.ppm": "fa6da9ee0e5f05e9c9fcaba42e0d8a940a7167a38abc8b538df0dfe47297b93a",
+      "2-on/a_restored.ppm": "41eb46e90927817a6673eaa3214f848cd52c928cbe716b2e3dd46fd010eb2b25",
+      "2-on/b_final.ppm": "5e28c77ad86ba68cfd51df4b963c65767a6c3cd60e17ef934f3ec2886f9c45ba",
+      "2-on/endpoint-evidence.json": "50109e7b6cdc344272e2be871f0c30c95944c3c15e51baaa380686828724a624",
+      "3-off/a_initial.ppm": "68276d61750b0af3e5c8bbce9b85c60694a467a37fc3d6525f1e03b9e503e9f8",
+      "3-off/a_other.ppm": "d38f8057b75ab8203d53ca343ab9a440c6998a6aeb97fd2c5b6f6186504247c9",
+      "3-off/a_restored.ppm": "fc76897496f6d5aa5372900cac962e6eab76e53e5ddc5771e6751340ed59665d",
+      "3-off/b_final.ppm": "b0a35e1f5753ff4d9cede20d9db8a9528ae38e618e1e7877dc24215988d62321",
+      "3-off/endpoint-evidence.json": "c955e92bf0b2013e533ab48dc52359e37cbd23bb61cdb6df4b6d02ef359de9bd",
+      "fixture/correctness.py": "6ad7894e2174658b2ba71664cce29636c5d05bb46135a98c7edbced0f2e16105",
+      "fixture/pixels.py": "6cfb0bcabd726fff9960ccc5b75f33be228570e00f5773faa2fdea1e41fa9576",
+      "fixture/processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "image-evidence.json": "bc4c3a7df12686b77fad923f6ec663b20e68e2ddb8c6c2b0c350e01d5da252ee",
+      "replay.py": "6dad8e365bce50b7e4db08d81db033b9ad2e144306d1d6a20f6c6c1af19d3dc0",
+      "trace.json": "521c94bba48589d4ab5b46cf7b4f9ce229e10b54b8028b07abc88f8a8a1c944d"
+    },
+    "offline_replay": "python3 -I -B replay.py from a fresh extracted directory"
+  }
+}

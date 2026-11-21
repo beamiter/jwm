@@ -1,0 +1,39 @@
+{
+  "screen_dimensions": [
+    3840,
+    2160
+  ],
+  "desired_render_node": "/dev/dri/renderD128",
+  "attempts": [
+    {
+      "name": "first-probe",
+      "renderer": "NVIDIA GeForce RTX 5080",
+      "reported_render_node": "/dev/dri/renderD129",
+      "dri3_advertised": true,
+      "accepted": false
+    },
+    {
+      "name": "mesa-probe",
+      "renderer": "Mesa Intel Graphics ARL",
+      "reported_render_node": "/dev/dri/renderD129",
+      "dri3_advertised": false,
+      "accepted": false
+    }
+  ],
+  "scope": "Fresh isolated Weston headless GL and Xwayland. Prerequisite only, with no authenticated video session or scored motion.",
+  "result": "The platform did not expose a matching Intel DRI3 device on either private display.",
+  "archive": {
+    "path": "x11-private-dri3-preflight-raw.zip",
+    "sha256": "7d19798becf9aa14f152f04d38e0722514ce4b093e2cc5d22b08f3a792a60704",
+    "entries": {
+      "trace/first-probe/weston.log": "7532d0c670102f2284268e65d3d10663998e88abf313cd44348b826f69be40de",
+      "trace/first-probe/xwayland.log": "b972e3ff8111fd126d92d036dd2788f5c96200b83f9bff3ec498dda4c3b2494b",
+      "trace/first-probe/xdpyinfo.txt": "e9603b8805f932ac2fae0f3ed8b3789ea740f55f77a2b4706e0e7327ca0975a1",
+      "trace/mesa-probe/weston.log": "d8358630a7d9eec82782dd7f0a560beb40138ed4b905221f6256b918d825ee9a",
+      "trace/mesa-probe/xwayland.log": "ff14d13182309a91a7849360781b7c0c3045e2d710f30e058eda2b98eb0df352",
+      "trace/mesa-probe/xdpyinfo.txt": "214d01b8e1abf05262f355d76a66218532d4fff2ad7ea425d3c268be9747df8c",
+      "fixture/PLAN.md": "12421b5a4a15925a80512aee855d12f1792d7e4e6c2f10281659fa48e28c9b1a",
+      "fixture/probe.py": "67961043a622fa9deaf9e8b63c50725c04102929b8c412ecbb63e64975b77bfd"
+    }
+  }
+}

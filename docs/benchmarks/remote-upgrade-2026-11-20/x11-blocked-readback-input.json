@@ -1,0 +1,232 @@
+{
+  "date": "2026-11-21",
+  "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+  "scope": "P05 software-only X11 root-capture input and held-key cancellation during one blocked readback per arm on local Xvfb. Physical trigger-to-display latency and source switching require separate evidence.",
+  "setup": "Fresh independent 640x480 source and viewer Xvfb processes per arm. Fixed-quality JPEG 85; core X11 root GetImage over an isolated proxy. Each arm ran an authenticated loopback session with X11 keyboard and pointer enabled. The independent cursor sampler was the controlled arm setting.",
+  "clock": "Single local monotonic clock for the software observation times in both arms.",
+  "hold_method": "The gate held exactly one full-size X11 GetImage request for a scheduled 3000 ms from observed entry. Hold and arm difference tolerance applies to fixture scheduling.",
+  "cancellation_method": "The viewer uses Ctrl+Super+F12 while its X11 server still shows F8 pressed. The source receiver observes a non-XSendEvent F8 release, followed by a cleared source keymap, with focus unchanged and before the gate opens or the 600 ms held-input watchdog can release it.",
+  "roi_points": {
+    "frame": [
+      30,
+      30
+    ],
+    "old_cursor": [
+      120,
+      160
+    ],
+    "target_cursor": [
+      280,
+      190
+    ]
+  },
+  "provenance": {
+    "binary_sha256": {
+      "jwm-remote": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+      "x11-fixture": "afe56ec71d6b7f47d61b3533686642baaa4e588d7a333513869f716af1ebe652"
+    },
+    "live_fixture_source_sha256": {
+      "check.py": "599c14864c39f1ecc753b4e4e5384ffe63163f44dba657765d956f4cd3e116cd",
+      "check_input.py": "32f0a76cab28074e1eda73b90fc9ca6c3cbb6f68f5fa03a2bf66458a42c5dc90",
+      "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "x11_delay.py": "af4efdb0284c86c2070c6db49bac3aa74beacc1428428f417ff63dfa4b4cddce",
+      "x11-fixture.c": "ce4016eb89db7ba8c205a969efad475256f70657f75f96ef640c06db8262efcb",
+      "replay.py": "497e68abbf09347250b1a58d8eb8109081bfbc61ae0a3b4ed78d0a5a7a13b062"
+    },
+    "redactions": "Local ephemeral TCP ports replaced with one placeholder in endpoint logs and title records. Ephemeral host_port omitted from the viewer startup record.",
+    "replay": "Run python3 replay.py from the extracted archive. Local software traces and sample pixels are retained."
+  },
+  "comparison": {
+    "status": "pass",
+    "same_target_hold_ms": 3000.0,
+    "gate_difference_ms": 2.9961560000001555,
+    "hold_validation_tolerance_ms": 75.0,
+    "arms": [
+      {
+        "status": "pass",
+        "arm": "capture-loop",
+        "core_readback": {
+          "opcode": 73,
+          "width": 640,
+          "height": 480,
+          "start_ns": 56649020407098,
+          "release_ns": 56652024265552
+        },
+        "actual_gate_hold_ms": 3003.858454,
+        "f7_press_local_to_source_ms": 9.526409,
+        "f7_release_local_to_source_ms": 18.087957,
+        "f8_local_chord_to_source_release_ms": 10.194894,
+        "f8_local_press_to_source_clear_witness_ms": 47.460999,
+        "preflight_and_cancel_focus": [
+          2097152,
+          4194304
+        ],
+        "source_keymap_cleared_while_viewer_F8_held": true,
+        "authenticated_session_id": "e1e710ccf5d7c89f464fd1a6bd0f87f9",
+        "core_readback_route": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+        "source_key_receiver_xid": 2097152,
+        "viewer_window_xid": 4194304,
+        "focus_assignment_count_before_and_after": [
+          3,
+          3
+        ],
+        "grab_release_chord": "Ctrl+Super+F12",
+        "viewer_grabbed_before_and_released_after": [
+          true,
+          true
+        ],
+        "f7_actual_source_press_and_release_ns": [
+          56649486773421,
+          56649505461500
+        ],
+        "f8_actual_source_press_and_release_ns": [
+          56649515650426,
+          56649548946022
+        ],
+        "x11_keymap_f8_before": {
+          "source": true,
+          "viewer": true
+        },
+        "x11_keymap_f8_after": {
+          "source": false,
+          "viewer": true
+        },
+        "source_keymap_clear_before_gate_forward_ms": 2470.649797,
+        "host_watchdog_reported": false,
+        "gated_roi_rgb_hex": {
+          "frame": "1f405f",
+          "old_cursor": "ffffff",
+          "target_cursor": "1f405f"
+        },
+        "resumed_roi_rgb_hex": {
+          "frame": "9a3d50",
+          "old_cursor": "9a3d50",
+          "target_cursor": "ffffff"
+        },
+        "resumed_roi_after_gate_ms": 83.069977,
+        "shutdown": {
+          "host_exit_status": 0,
+          "viewer_exit_status": 0,
+          "viewer_close_to_endpoint_exits_ms": 33.96677,
+          "final_x11_keymap_of_test_keys": {
+            "F7": {
+              "source": false,
+              "viewer": false
+            },
+            "F8": {
+              "source": false,
+              "viewer": false
+            },
+            "Control_L": {
+              "source": false,
+              "viewer": false
+            },
+            "Super_L": {
+              "source": false,
+              "viewer": false
+            },
+            "F12": {
+              "source": false,
+              "viewer": false
+            }
+          }
+        }
+      },
+      {
+        "status": "pass",
+        "arm": "independent",
+        "core_readback": {
+          "opcode": 73,
+          "width": 640,
+          "height": 480,
+          "start_ns": 56652944404308,
+          "release_ns": 56655945266606
+        },
+        "actual_gate_hold_ms": 3000.862298,
+        "f7_press_local_to_source_ms": 9.132364,
+        "f7_release_local_to_source_ms": 17.057996,
+        "f8_local_chord_to_source_release_ms": 9.002568,
+        "f8_local_press_to_source_clear_witness_ms": 42.193781,
+        "preflight_and_cancel_focus": [
+          2097152,
+          4194304
+        ],
+        "source_keymap_cleared_while_viewer_F8_held": true,
+        "authenticated_session_id": "ca1481dbc329cb7e2707ddcbe082ddb4",
+        "core_readback_route": "root/cpu-resize/core-getimage/no-damage/cursor-events",
+        "source_key_receiver_xid": 2097152,
+        "viewer_window_xid": 4194304,
+        "focus_assignment_count_before_and_after": [
+          3,
+          3
+        ],
+        "grab_release_chord": "Ctrl+Super+F12",
+        "viewer_grabbed_before_and_released_after": [
+          true,
+          true
+        ],
+        "f7_actual_source_press_and_release_ns": [
+          56653409690490,
+          56653427273355
+        ],
+        "f8_actual_source_press_and_release_ns": [
+          56653437119071,
+          56653467298622
+        ],
+        "x11_keymap_f8_before": {
+          "source": true,
+          "viewer": true
+        },
+        "x11_keymap_f8_after": {
+          "source": false,
+          "viewer": true
+        },
+        "source_keymap_clear_before_gate_forward_ms": 2475.160222,
+        "host_watchdog_reported": false,
+        "gated_roi_rgb_hex": {
+          "frame": "1f405f",
+          "old_cursor": "1f405f",
+          "target_cursor": "ffffff"
+        },
+        "resumed_roi_rgb_hex": {
+          "frame": "9a3d50",
+          "old_cursor": "9a3d50",
+          "target_cursor": "ffffff"
+        },
+        "resumed_roi_after_gate_ms": 82.627145,
+        "shutdown": {
+          "host_exit_status": 0,
+          "viewer_exit_status": 0,
+          "viewer_close_to_endpoint_exits_ms": 65.632872,
+          "final_x11_keymap_of_test_keys": {
+            "F7": {
+              "source": false,
+              "viewer": false
+            },
+            "F8": {
+              "source": false,
+              "viewer": false
+            },
+            "Control_L": {
+              "source": false,
+              "viewer": false
+            },
+            "Super_L": {
+              "source": false,
+              "viewer": false
+            },
+            "F12": {
+              "source": false,
+              "viewer": false
+            }
+          }
+        }
+      }
+    ]
+  },
+  "raw_archive": {
+    "file": "x11-blocked-readback-input-raw.zip",
+    "sha256": "4b577df9166a028402e0561c7cb90114d485d48304c87298dae2d5bd50b78dbb",
+    "replay": "python3 replay.py"
+  }
+}

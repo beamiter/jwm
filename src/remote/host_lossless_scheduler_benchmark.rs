@@ -251,6 +251,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
     let (client_tx, client_done) = mpsc::channel();
     let client_thread = thread::spawn(move || {
         let opts = ClientOptions {
+            stats_json: false,
             control_duration: Default::default(),
             viewer_backend: ViewerBackend::Wayland,
             viewer_wayland_display: None,
@@ -259,6 +260,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
             static_lossless: enabled,
             wayland_pointer: false,
             wayland_control: false,
+            wayland_gestures: false,
             resumable_control: false,
             wayland_seamless_input: false,
             wayland_scroll: false,
@@ -268,6 +270,7 @@ fn run_session_workload(arm: &str, report: &mut Value, continuous: bool, feedbac
             follow_source_size: false,
             window_size: None,
             window_position: None,
+            x11_parent_window: None,
             frame_limits: Default::default(),
             address: address.to_string(),
             peer_label: "owned static lossless".into(),

@@ -190,12 +190,14 @@ fn transport_cleanup_returns_local_input_before_waiting_for_receiver() {
             control.shutdown(Shutdown::Both).unwrap();
         });
         let options = ClientOptions {
+            stats_json: false,
             control_duration: Default::default(),
             viewer_backend: ViewerBackend::X11,
             viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            wayland_gestures: false,
             resumable_control: false,
             wayland_seamless_input: false,
             wayland_text: None,
@@ -207,6 +209,7 @@ fn transport_cleanup_returns_local_input_before_waiting_for_receiver() {
             follow_source_size: false,
             window_size: None,
             window_position: None,
+            x11_parent_window: None,
             address: address.to_string(),
             peer_label: label.clone(),
             key: KeySource::Bytes(KEY.to_vec()),

@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "scope": "Native terminal controls, authenticated local loopback, owned private Xvfb displays",
+  "helper_sha256": "653d8f4d4624c4349152416b2685eefe7e5ef29d063bf6a80f3ec186467a655c",
+  "shared_adapter_sha256": "8a8087b939f4018bd5d96fc2f744a750b4084160256285d39aac1425338f1ccd",
+  "trials": {
+    "forge": {
+      "mode": "text",
+      "direction": "from-host",
+      "copied_text_verified": true,
+      "disconnected_from_dialog": true,
+      "host_exit": 0,
+      "app_binary_sha256": "56f0fc0f269465b1a931fcd1800dfd2e328c12c149095ad1f4b7e5e7993e6d62"
+    },
+    "anvil": {
+      "mode": null,
+      "direction": null,
+      "host_consent_withheld": true,
+      "disconnected_from_dialog": true,
+      "host_exit": 0,
+      "app_binary_sha256": "98abb371efb9b77d9c5cf4912387c443abe916b6ed7b3c797d2b0af71656ea0f"
+    },
+    "ember": {
+      "app": "ember",
+      "opener": "command palette",
+      "first_drawn_acks": 129,
+      "pinned_helper": "653d8f4d4624c4349152416b2685eefe7e5ef29d063bf6a80f3ec186467a655c",
+      "clipboard_mode": "text",
+      "clipboard_direction": "from-host",
+      "clipboard_file_limit_bytes": 0,
+      "private_host_to_viewer_selection_matches": true,
+      "ungranted_reverse_value_did_not_cross": true,
+      "disconnected_cleanly": true,
+      "app_binary_sha256": "bf2f12d4137640cc68fa4ed3fe067fe8775d5b74c27a87f6700b7fb5aa4f3396"
+    },
+    "frost": {
+      "app": "frost",
+      "opener": "command palette",
+      "first_drawn_acks": 140,
+      "pinned_helper": "653d8f4d4624c4349152416b2685eefe7e5ef29d063bf6a80f3ec186467a655c",
+      "clipboard_mode": "text",
+      "clipboard_direction": "from-host",
+      "clipboard_file_limit_bytes": 0,
+      "private_host_to_viewer_selection_matches": true,
+      "ungranted_reverse_value_did_not_cross": true,
+      "disconnected_cleanly": true,
+      "app_binary_sha256": "4f69fbb3b6c09c96c25dbe09a35deb60def9001c1ee9af0cfe35c23f39d74fec"
+    }
+  },
+  "aether_evidence": "aether-x11-managed-clipboard-final.json"
+}

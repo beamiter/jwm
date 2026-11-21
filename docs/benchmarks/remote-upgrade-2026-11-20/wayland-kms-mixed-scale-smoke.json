@@ -1,0 +1,2681 @@
+{
+  "environment": {
+    "guest": "QEMU 8.2.2 KVM, Linux 6.17.0-35-generic",
+    "renderer": "virgl (Mesa Intel(R) Graphics (ARL))",
+    "compositor": "jwm --backend wayland-udev",
+    "transport": "Authenticated loopback TCP from an owned Xvfb source to a native Wayland JPEG viewer",
+    "features": [
+      "remote-wayland",
+      "backend-wayland-udev"
+    ],
+    "source_head": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "dirty_source": true,
+    "binary_sha256": {
+      "jwm": "84674001ec75d73843ec16291a436e2bcf925e9b5e88180801977cd9c39f3700",
+      "jwm-remote": "94fd21543caf350cee4beb38b47726d012b1bf86f0c82006dad87ea8b38e3993"
+    },
+    "output_modes": {
+      "Virtual-1": {
+        "origin": [
+          0,
+          0
+        ],
+        "width": 1024,
+        "height": 768,
+        "guest_crtc_index": 0,
+        "drm_crtc_id": 37
+      },
+      "Virtual-2": {
+        "origin": [
+          1024,
+          0
+        ],
+        "width": 1024,
+        "height": 768,
+        "guest_crtc_index": 1,
+        "drm_crtc_id": 44
+      }
+    },
+    "test": "scripts/test-remote-wayland-kms.py --check-viewport --expect-output-scales START END",
+    "primary_readback": {
+      "source": "scripts/test-virtio-drm-primary-rgb.c",
+      "binary_sha256": "429c9e38dc5f49af0ad1c762f009a005b7a9a1024c9d391efc5fed48ed806d47",
+      "method": "Active virtio DRM primary plane GETFB2, fenced VirGL host transfer and PRIME RGB sampling"
+    },
+    "validation_boundary": "Virtual outputs, compositor screencopy, guest primary framebuffer readback and independently matched guest kernel DRM completions. Actual physical scanout and input-to-light timing remain unmeasured."
+  },
+  "trials": [
+    {
+      "trial": "effects-2x",
+      "effects": true,
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              [
+                204,
+                34,
+                68
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                204,
+                34,
+                68
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 131,
+              "monotonic_ns": 4547617000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 1,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 51,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 58,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4547619000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              [
+                34,
+                68,
+                204
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                34,
+                68,
+                204
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 190,
+              "monotonic_ns": 5504069000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 2,
+              "composited": {
+                "visible_rect": [
+                  1043,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 58,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 51,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 5504070000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-1",
+          "to": "Virtual-2"
+        },
+        "output_scales": {
+          "Virtual-1": 1.0,
+          "Virtual-2": 2.0
+        }
+      }
+    },
+    {
+      "trial": "direct-2x",
+      "effects": false,
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              [
+                204,
+                34,
+                68
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                204,
+                34,
+                68
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 43,
+              "monotonic_ns": 4080275000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 1,
+              "direct": true
+            },
+            "virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 51,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 54,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4080277000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              [
+                34,
+                68,
+                204
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                34,
+                68,
+                204
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 102,
+              "monotonic_ns": 4880237000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 2,
+              "direct": true
+            },
+            "virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 58,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 51,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4880240000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-1",
+          "to": "Virtual-2"
+        },
+        "output_scales": {
+          "Virtual-1": 1.0,
+          "Virtual-2": 2.0
+        }
+      }
+    },
+    {
+      "trial": "effects-reverse-2x",
+      "effects": true,
+      "checks": {
+        "output": "Virtual-2",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              [
+                204,
+                34,
+                68
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                204,
+                34,
+                68
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 124,
+              "monotonic_ns": 6503450000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 2,
+              "composited": {
+                "visible_rect": [
+                  1043,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 54,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 56,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 6503452000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              [
+                34,
+                68,
+                204
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                34,
+                68,
+                204
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 181,
+              "monotonic_ns": 7265401000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 1,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 56,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 54,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 7265403000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-2",
+          "to": "Virtual-1"
+        },
+        "output_scales": {
+          "Virtual-2": 2.0,
+          "Virtual-1": 1.0
+        }
+      }
+    },
+    {
+      "trial": "direct-reverse-2x",
+      "effects": false,
+      "checks": {
+        "output": "Virtual-2",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              [
+                204,
+                34,
+                68
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                204,
+                34,
+                68
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 48,
+              "monotonic_ns": 5300795000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 2,
+              "direct": true
+            },
+            "virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 58,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 51,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 5300798000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              [
+                34,
+                68,
+                204
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                34,
+                68,
+                204
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 113,
+              "monotonic_ns": 6282594000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 1,
+              "direct": true
+            },
+            "virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 56,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 54,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 6282597000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-2",
+          "to": "Virtual-1"
+        },
+        "output_scales": {
+          "Virtual-2": 2.0,
+          "Virtual-1": 1.0
+        }
+      }
+    },
+    {
+      "trial": "effects-1p5x",
+      "effects": true,
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              [
+                204,
+                34,
+                68
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                204,
+                34,
+                68
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 141,
+              "monotonic_ns": 4803759000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 1,
+              "composited": {
+                "visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 56,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                767
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 54,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4803762000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              [
+                34,
+                68,
+                204
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                34,
+                68,
+                204
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                767
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 200,
+              "monotonic_ns": 5750667000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 2,
+              "composited": {
+                "visible_rect": [
+                  1043,
+                  71,
+                  980,
+                  672
+                ],
+                "output_visible_rect": [
+                  19,
+                  71,
+                  980,
+                  672
+                ],
+                "overlapping_cursor_elements": 0
+              }
+            },
+            "virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 54,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ],
+                [
+                  25,
+                  38,
+                  64
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 56,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    25,
+                    38,
+                    64
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 5750670000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-1",
+          "to": "Virtual-2"
+        },
+        "output_scales": {
+          "Virtual-1": 1.0,
+          "Virtual-2": 1.5
+        }
+      }
+    },
+    {
+      "trial": "direct-1p5x",
+      "effects": false,
+      "checks": {
+        "output": "Virtual-1",
+        "drawn_acks": 3,
+        "phases": [
+          {
+            "expected_rgb": [
+              [
+                204,
+                34,
+                68
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                48,
+                176,
+                80
+              ],
+              [
+                204,
+                34,
+                68
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  204,
+                  35,
+                  68
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  48,
+                  176,
+                  81
+                ],
+                [
+                  204,
+                  35,
+                  68
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-1",
+              "submission": 51,
+              "monotonic_ns": 4254799000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 1,
+              "direct": true
+            },
+            "virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 51,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    48,
+                    176,
+                    81
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    204,
+                    35,
+                    68
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-2",
+              "size": [
+                1024,
+                767
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 54,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4254803000,
+              "crtc": 0,
+              "sequence": 0
+            }
+          },
+          {
+            "expected_rgb": [
+              [
+                34,
+                68,
+                204
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                223,
+                169,
+                34
+              ],
+              [
+                34,
+                68,
+                204
+              ]
+            ],
+            "output": {
+              "size": [
+                1024,
+                767
+              ],
+              "rgb": [
+                [
+                  34,
+                  68,
+                  204
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  223,
+                  169,
+                  34
+                ],
+                [
+                  34,
+                  68,
+                  204
+                ]
+              ]
+            },
+            "matching_flip": {
+              "output_name": "Virtual-2",
+              "submission": 110,
+              "monotonic_ns": 4981165000,
+              "sequence": 0,
+              "flags": 0,
+              "buffer_scale": 2,
+              "direct": true
+            },
+            "virtio_primary": {
+              "connector": "Virtual-2",
+              "connector_id": 45,
+              "crtc_id": 44,
+              "plane_id": 40,
+              "framebuffer_id": 58,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    223,
+                    169,
+                    34
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    34,
+                    68,
+                    204
+                  ]
+                }
+              ]
+            },
+            "other_output": {
+              "name": "Virtual-1",
+              "size": [
+                1024,
+                768
+              ],
+              "rgb": [
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ],
+                [
+                  0,
+                  0,
+                  0
+                ]
+              ]
+            },
+            "other_virtio_primary": {
+              "connector": "Virtual-1",
+              "connector_id": 38,
+              "crtc_id": 37,
+              "plane_id": 33,
+              "framebuffer_id": 56,
+              "width": 1024,
+              "height": 768,
+              "format": "XRGB8888",
+              "modifier": "0x0000000000000000",
+              "pitch": 4096,
+              "offset": 0,
+              "host_transfer": true,
+              "samples": [
+                {
+                  "x": 384,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 256,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 384,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "x": 640,
+                  "y": 512,
+                  "rgb": [
+                    0,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "guest_kernel_event": {
+              "event": "drm_vblank_event_delivered",
+              "clock": "mono",
+              "monotonic_ns": 4981168000,
+              "crtc": 1,
+              "sequence": 0
+            }
+          }
+        ],
+        "window_move": {
+          "window_id": 1,
+          "from": "Virtual-1",
+          "to": "Virtual-2"
+        },
+        "output_scales": {
+          "Virtual-1": 1.0,
+          "Virtual-2": 1.5
+        }
+      }
+    }
+  ],
+  "same_scale_regressions": [
+    {
+      "trial": "dual-1x-effects",
+      "drawn_acks": 3
+    },
+    {
+      "trial": "dual-1x-direct",
+      "drawn_acks": 4
+    },
+    {
+      "trial": "single-effects",
+      "drawn_acks": 3
+    },
+    {
+      "trial": "single-cursor",
+      "drawn_acks": 3
+    },
+    {
+      "trial": "single-direct",
+      "drawn_acks": 4
+    }
+  ]
+}

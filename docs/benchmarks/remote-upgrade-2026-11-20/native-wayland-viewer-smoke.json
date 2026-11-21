@@ -1,0 +1,367 @@
+{
+  "environment": {
+    "machine": "ubuntu@192.168.0.78",
+    "os": "Ubuntu 22.04.5 LTS, Linux 6.8.0-149-generic",
+    "render_node": "/dev/dri/renderD128",
+    "gpu_renderer": "Mesa Intel(R) Graphics (RPL-S)",
+    "vaapi_driver": "iHD 22.3.1+ds1-1ubuntu0.1 from a private directory",
+    "ffmpeg": "4.4.2-0ubuntu0.22.04.1",
+    "compositors": "Two private JWM/Smithay compositors on the same real Intel GPU",
+    "test": "scripts/test-remote-wayland-cli.sh --gpu-viewer /dev/dri/renderD128",
+    "transport": "Authenticated loopback TCP between separate CLI processes"
+  },
+  "checks": {
+    "native": "Source GPU capture and H.264 encode, VA-API H.264 decode, GLES render and linear XRGB8888 DMA-BUF import",
+    "render_oracle": "The actual attached buffer type and compositor readback pixels were checked before presentation feedback",
+    "pixel_order": "BGRX",
+    "sample_sites": [
+      "upper left",
+      "center",
+      "middle of last row"
+    ],
+    "resize": "400x300 to 481x320 on the same role with exact black letterbox and retained red source",
+    "switch": "Source epoch 1 red window to authorized epoch 2 blue window, with a fresh viewer role",
+    "fallback": "Compositor rejected a buffer import. Same role, session and source presented via XRGB SHM while H.264 continued",
+    "validation_boundary": "Hardware GPU rendering in private compositors. Physical scanout and input-to-display timing were unmeasured."
+  },
+  "trials": [
+    {
+      "trial": 2,
+      "phases": {
+        "first": {
+          "window_ms": 5000.722839,
+          "last_decoded_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              200,
+              150
+            ],
+            "geometry_epoch": 2,
+            "sequence": 99,
+            "source_dimensions": [
+              200,
+              150
+            ],
+            "source_epoch": 1
+          },
+          "presented_frames": 100,
+          "acked_frames": 100,
+          "native_presented_frames": 100,
+          "last_presentation_path": "wayland-vaapi-dmabuf",
+          "hardware_download_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "native_preparation_and_submit_ms": {
+            "mean": 1.97304263,
+            "observations": 100,
+            "quantiles": {
+              "p50_ms": 2.039,
+              "p95_ms": 2.691,
+              "p99_ms": 2.898,
+              "samples": 100
+            }
+          }
+        },
+        "second": {
+          "window_ms": 5000.262946000001,
+          "last_decoded_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 5,
+            "sequence": 197,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "presented_frames": 98,
+          "acked_frames": 98,
+          "native_presented_frames": 98,
+          "last_presentation_path": "wayland-vaapi-dmabuf",
+          "hardware_download_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "native_preparation_and_submit_ms": {
+            "mean": 2.00915193877551,
+            "observations": 98,
+            "quantiles": {
+              "p50_ms": 2.133,
+              "p95_ms": 2.477,
+              "p99_ms": 2.989,
+              "samples": 98
+            }
+          }
+        },
+        "fallback": {
+          "window_ms": 5000.385348,
+          "last_decoded_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 5,
+            "sequence": 296,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "presented_frames": 98,
+          "acked_frames": 98,
+          "native_presented_frames": 1,
+          "last_presentation_path": "rgb",
+          "hardware_download_ms": {
+            "mean": 0.37961153061224495,
+            "observations": 98,
+            "quantiles": {
+              "p50_ms": 0.374,
+              "p95_ms": 0.574,
+              "p99_ms": 0.624,
+              "samples": 98
+            }
+          },
+          "native_preparation_and_submit_ms": {
+            "mean": 2.019688,
+            "observations": 1,
+            "quantiles": {
+              "p50_ms": 2.019,
+              "p95_ms": 2.019,
+              "p99_ms": 2.019,
+              "samples": 1
+            }
+          }
+        }
+      },
+      "resized_bgrx": [
+        [
+          0,
+          0,
+          0,
+          255
+        ],
+        [
+          0,
+          1,
+          255,
+          255
+        ],
+        [
+          0,
+          1,
+          255,
+          255
+        ]
+      ],
+      "fallback_bgrx": [
+        [
+          253,
+          0,
+          0,
+          255
+        ],
+        [
+          253,
+          0,
+          0,
+          255
+        ],
+        [
+          253,
+          0,
+          0,
+          255
+        ]
+      ],
+      "exit": "Both CLI processes exited successfully and the viewer reported closed"
+    },
+    {
+      "trial": 3,
+      "phases": {
+        "first": {
+          "window_ms": 5000.325586,
+          "last_decoded_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              200,
+              150
+            ],
+            "geometry_epoch": 2,
+            "sequence": 99,
+            "source_dimensions": [
+              200,
+              150
+            ],
+            "source_epoch": 1
+          },
+          "presented_frames": 100,
+          "acked_frames": 100,
+          "native_presented_frames": 100,
+          "last_presentation_path": "wayland-vaapi-dmabuf",
+          "hardware_download_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "native_preparation_and_submit_ms": {
+            "mean": 1.9181957899999995,
+            "observations": 100,
+            "quantiles": {
+              "p50_ms": 1.94,
+              "p95_ms": 2.681,
+              "p99_ms": 2.857,
+              "samples": 100
+            }
+          }
+        },
+        "second": {
+          "window_ms": 5001.154607,
+          "last_decoded_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 5,
+            "sequence": 198,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "presented_frames": 99,
+          "acked_frames": 99,
+          "native_presented_frames": 99,
+          "last_presentation_path": "wayland-vaapi-dmabuf",
+          "hardware_download_ms": {
+            "mean": null,
+            "observations": 0,
+            "quantiles": {
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "samples": 0
+            }
+          },
+          "native_preparation_and_submit_ms": {
+            "mean": 1.9216859595959592,
+            "observations": 99,
+            "quantiles": {
+              "p50_ms": 2.047,
+              "p95_ms": 2.666,
+              "p99_ms": 5.625,
+              "samples": 99
+            }
+          }
+        },
+        "fallback": {
+          "window_ms": 5000.451989,
+          "last_decoded_frame": {
+            "codec": "H.264",
+            "encoded_dimensions": [
+              240,
+              180
+            ],
+            "geometry_epoch": 5,
+            "sequence": 297,
+            "source_dimensions": [
+              240,
+              180
+            ],
+            "source_epoch": 2
+          },
+          "presented_frames": 99,
+          "acked_frames": 99,
+          "native_presented_frames": 1,
+          "last_presentation_path": "rgb",
+          "hardware_download_ms": {
+            "mean": 0.370051,
+            "observations": 98,
+            "quantiles": {
+              "p50_ms": 0.384,
+              "p95_ms": 0.562,
+              "p99_ms": 0.6,
+              "samples": 98
+            }
+          },
+          "native_preparation_and_submit_ms": {
+            "mean": 2.502074,
+            "observations": 1,
+            "quantiles": {
+              "p50_ms": 2.502,
+              "p95_ms": 2.502,
+              "p99_ms": 2.502,
+              "samples": 1
+            }
+          }
+        }
+      },
+      "resized_bgrx": [
+        [
+          0,
+          0,
+          0,
+          255
+        ],
+        [
+          0,
+          1,
+          255,
+          255
+        ],
+        [
+          0,
+          1,
+          255,
+          255
+        ]
+      ],
+      "fallback_bgrx": [
+        [
+          253,
+          0,
+          0,
+          255
+        ],
+        [
+          253,
+          0,
+          0,
+          255
+        ],
+        [
+          253,
+          0,
+          0,
+          255
+        ]
+      ],
+      "exit": "Both CLI processes exited successfully and the viewer reported closed"
+    }
+  ]
+}

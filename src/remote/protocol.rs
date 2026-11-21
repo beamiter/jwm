@@ -29,6 +29,7 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce, Tag};
@@ -185,6 +186,7 @@ pub enum MessageKind {
     WaylandPopupRevoke = 51,
     WaylandPopupRevokeAck = 52,
     WaylandResumableControl = 53,
+    WaylandControlPrepare = 54,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -243,6 +245,7 @@ impl TryFrom<u8> for MessageKind {
             51 => Ok(Self::WaylandPopupRevoke),
             52 => Ok(Self::WaylandPopupRevokeAck),
             53 => Ok(Self::WaylandResumableControl),
+            54 => Ok(Self::WaylandControlPrepare),
             21 => Ok(Self::ClipboardRestrict),
             22 => Ok(Self::ClipboardRestricted),
             other => Err(ProtocolError::UnknownMessageKind(other)),
@@ -326,6 +329,7 @@ impl From<io::Error> for ProtocolError {
 pub struct SessionKeys {
     pub c2s: [u8; MAC_LEN],
     pub s2c: [u8; MAC_LEN],
+    pub(super) correlation_id: u128,
 }
 
 // Owned buffers are wiped on drop, but Rust copies and Snow internals are not
@@ -355,6 +359,12 @@ pub struct SessionReader<R> {
     key: Zeroizing<[u8; MAC_LEN]>,
     expected_sequence: u64,
     max_payload_len: usize,
+}
+
+pub(super) struct RecordReadTiming {
+    pub(super) header_wait: Duration,
+    pub(super) body_receive: Duration,
+    pub(super) authentication: Duration,
 }
 
 impl<R> SessionReader<R> {
@@ -412,13 +422,38 @@ impl<R: Read> SessionReader<R> {
         &mut self,
         payload: &mut Vec<u8>,
     ) -> Result<MessageKind, ProtocolError> {
+        self.read_message_into_inner::<false>(payload)
+            .map(|(kind, _)| kind)
+    }
+
+    pub(super) fn read_message_into_timed(
+        &mut self,
+        payload: &mut Vec<u8>,
+    ) -> Result<(MessageKind, RecordReadTiming), ProtocolError> {
+        self.read_message_into_inner::<true>(payload)
+    }
+
+    fn read_message_into_inner<const TIMED: bool>(
+        &mut self,
+        payload: &mut Vec<u8>,
+    ) -> Result<(MessageKind, RecordReadTiming), ProtocolError> {
         let result = (|| {
             if self.expected_sequence == u64::MAX {
                 return Err(ProtocolError::SequenceExhausted);
             }
 
+            let mut stage_started = TIMED.then(Instant::now);
+            let mut finish_stage = || {
+                stage_started.as_mut().map_or(Duration::ZERO, |started| {
+                    let now = Instant::now();
+                    let elapsed = now.saturating_duration_since(*started);
+                    *started = now;
+                    elapsed
+                })
+            };
             let mut header = [0_u8; RECORD_HEADER_LEN];
             self.inner.read_exact(&mut header)?;
+            let header_wait = finish_stage();
 
             let received_sequence = u64::from_be_bytes(
                 header[1..9]
@@ -450,6 +485,7 @@ impl<R: Read> SessionReader<R> {
             // available. read_exact still handles fragmentation/Interrupted.
             payload.resize(payload_len + TAG_LEN, 0);
             self.inner.read_exact(payload)?;
+            let body_receive = finish_stage();
             let tag: [u8; TAG_LEN] = payload[payload_len..]
                 .try_into()
                 .expect("record tag has a fixed length");
@@ -468,7 +504,14 @@ impl<R: Read> SessionReader<R> {
             // untrusted kind byte short-circuit consumption of the record.
             let kind = MessageKind::try_from(header[0])?;
             self.expected_sequence += 1;
-            Ok(kind)
+            Ok((
+                kind,
+                RecordReadTiming {
+                    header_wait,
+                    body_receive,
+                    authentication: finish_stage(),
+                },
+            ))
         })();
         if result.is_err() {
             payload.clear();
@@ -790,11 +833,12 @@ mod tests {
             (51, MessageKind::WaylandPopupRevoke),
             (52, MessageKind::WaylandPopupRevokeAck),
             (53, MessageKind::WaylandResumableControl),
+            (54, MessageKind::WaylandControlPrepare),
         ] {
             assert_eq!(MessageKind::try_from(tag).unwrap(), kind);
             assert_eq!(u8::from(kind), tag);
         }
-        for tag in (0..=u8::MAX).filter(|tag| !(1..=53).contains(tag)) {
+        for tag in (0..=u8::MAX).filter(|tag| !(1..=54).contains(tag)) {
             assert!(
                 matches!(MessageKind::try_from(tag), Err(ProtocolError::UnknownMessageKind(rejected)) if rejected == tag),
                 "unallocated application message kind {tag} must be rejected"

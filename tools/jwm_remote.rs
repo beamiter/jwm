@@ -1,6 +1,7 @@
 //! JWM-to-JWM remote desktop helper for trusted X11 LANs.
 
 use clap::{Args, Parser, Subcommand};
+use jwm::remote::capabilities;
 use jwm::remote::client::{
     ClientOptions, run_client_reconnecting_with_video_codec, run_client_toggling_with_video_codec,
 };
@@ -25,9 +26,28 @@ use jwm::remote::x11_viewer::DEFAULT_ESCAPE_KEY;
 use jwm::remote::{RemoteResult, messages::APPLICATION_VERSION, protocol::TRANSPORT_VERSION};
 use std::path::{Path, PathBuf};
 
+#[path = "jwm_remote_session.rs"]
+mod managed_session;
+
 const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
 /// Default `--clipboard-file-limit`; matches `clipboard_sync::DEFAULT_FILE_LIMIT`.
 const DEFAULT_CLIPBOARD_FILE_LIMIT: &str = "2G";
+
+#[derive(Debug, Args)]
+struct DoctorProbeArgs {
+    /// Test local hardware encoders and decoders with a synthetic frame.
+    #[arg(long)]
+    probe_video: bool,
+    /// Test VA-API NV12 export and EGL import on one local DRM render node.
+    #[arg(long, value_name = "RENDER_NODE")]
+    probe_gpu_import: Option<PathBuf>,
+    /// Verify VA-API NV12 sampling, the GPU fence and an X11 DRI3 pixmap.
+    #[arg(long, value_name = "RENDER_NODE")]
+    probe_gpu_present: Option<PathBuf>,
+    /// Test same-device NV12 DMA-BUF import into the VA-API H.264 encoder.
+    #[arg(long, value_name = "RENDER_NODE")]
+    probe_gpu_encode: Option<PathBuf>,
+}
 
 /// Decoded-frame safety limits, independent of the viewport width policy.
 #[derive(Debug, Clone, Args)]
@@ -120,6 +140,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Start a viewer controlled by versioned JSON lines on standard input and output.
+    Session(managed_session::SessionArgs),
     /// Inspect or explicitly cap received-file staging on this machine only.
     #[command(
         after_help = "No cap is enabled by default. SIZE is a positive byte count or binary K/M/G/T size, such as 512M or 1.5G.\nThis is a logical archive-byte admission cap shared by cooperating processes using the same private cache root, not a disk quota.\nstatus never creates or deletes files; set-limit never evicts copies; disable preserves accounting and files.\nNo setting is forwarded over SSH or saved in a connection profile."
@@ -177,7 +199,7 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
-    /// Offline checks only: no X11/network connection and no key-content reads.
+    /// Report local build and setup, with optional hardware codec tests.
     Doctor {
         /// Private key; defaults to the JWM key path shown in top-level help.
         #[arg(long, value_name = "PATH")]
@@ -185,6 +207,14 @@ enum Command {
         /// Local X11 display (defaults to DISPLAY); presence is not connectivity.
         #[arg(long, value_name = "DISPLAY")]
         display: Option<String>,
+        /// Local viewer backend to check.
+        #[arg(long, default_value_t = ViewerBackend::X11, conflicts_with = "display")]
+        viewer_backend: ViewerBackend,
+        /// Native Wayland socket (defaults to the same socket as connect).
+        #[arg(long, value_name = "SOCKET", conflicts_with = "display")]
+        viewer_wayland_display: Option<String>,
+        #[command(flatten)]
+        probes: DoctorProbeArgs,
     },
     /// Share the current JWM X11 desktop.
     #[command(group(clap::ArgGroup::new("host_scroll_lease").args(["allow_wayland_pointer", "allow_wayland_control"]).multiple(false)))]
@@ -224,12 +254,12 @@ enum Command {
         #[arg(long, default_value = "30", value_parser = parse_fps)]
         fps: u16,
 
-        /// Limit hardware video to NVENC H.264 unless --allow-hevc444 is also set.
-        #[arg(long, conflicts_with_all = ["wayland_select", "window", "scroll_copy", "allow_static_lossless"])]
+        /// Allow H.264 hardware video. Wayland needs an opt-in DMA-BUF capture device.
+        #[arg(long, conflicts_with_all = ["window", "scroll_copy", "allow_static_lossless"])]
         allow_h264: bool,
 
         /// Allow mutually requested NVENC HEVC 4:4:4 for an X11 desktop.
-        #[arg(long, requires = "allow_h264")]
+        #[arg(long, requires = "allow_h264", conflicts_with = "wayland_select")]
         allow_hevc444: bool,
 
         /// JPEG quality ceiling (default 85). Setting it selects JPEG unless hardware is explicitly allowed.
@@ -303,8 +333,8 @@ enum Command {
         #[arg(long, requires_all = ["window", "once"])]
         allow_window_resize: bool,
 
-        /// Select a live Wayland toplevel locally on one persistent connection.
-        /// Read-only source; requires a remote-wayland build and one session.
+        /// Select live Wayland windows locally on one persistent connection.
+        /// Plain view-only accepts comma-separated indices. Scoped modes take one index.
         #[arg(long, requires = "once", conflicts_with_all = ["display", "window", "monitor", "region", "share_monitor", "share_region", "share_root", "allow_input", "allow_clipboard", "allow_window_resize", "key_stdin", "capture_source"])]
         wayland_select: bool,
 
@@ -331,6 +361,10 @@ enum Command {
         /// Permit one unified single-surface keyboard and pointer lease.
         #[arg(long, requires_all = ["wayland_select", "once"], conflicts_with_all = ["allow_wayland_keyboard", "allow_wayland_pointer", "allow_input", "allow_clipboard", "allow_window_resize"])]
         allow_wayland_control: bool,
+
+        /// Permit explicitly requested modifier clicks and in-window Wayland dragging.
+        #[arg(long, requires = "allow_wayland_control", conflicts_with_all = ["allow_resumable_control", "allow_static_lossless"])]
+        allow_wayland_gestures: bool,
 
         /// Explicitly permit versioned pause/resume inside one fixed control lease.
         /// Requires a mutually opted-in client; never renews or regrants control.
@@ -409,6 +443,10 @@ enum Command {
     /// session, with a fresh key handed over the SSH channel -- and opens it
     /// here through an SSH tunnel. Needs `jwm-remote` installed on both.
     Ssh {
+        /// Emit local viewer and remote host telemetry as JSON lines on stderr.
+        #[arg(long)]
+        stats_json: bool,
+
         /// `[USER@]HOST` or a Host alias from your SSH configuration.
         #[arg(value_name = "[USER@]HOST")]
         destination: String,
@@ -506,6 +544,10 @@ enum Command {
     #[command(group(clap::ArgGroup::new("viewer_scroll_lease").args(["wayland_pointer", "wayland_control"]).multiple(false)))]
     #[command(group(clap::ArgGroup::new("lossless_session_mode").args(["view_only", "wayland_keyboard", "wayland_pointer", "wayland_control"]).multiple(false)))]
     Connect {
+        /// Emit viewer telemetry as JSON lines on stderr.
+        #[arg(long)]
+        stats_json: bool,
+
         /// Local backend; Wayland requires an explicit read-only or scoped input mode.
         #[arg(long, default_value_t=ViewerBackend::X11, requires_if("wayland", "native_viewer_mode"))]
         viewer_backend: ViewerBackend,
@@ -728,6 +770,7 @@ fn diagnostic_command(command: &Command) -> &'static str {
     match command {
         Command::Host { .. } => "host",
         Command::Connect { .. } => "connect",
+        Command::Session(_) => "session",
         Command::Ssh { .. } => "ssh",
         Command::Keygen { .. } => "keygen",
         Command::Doctor { .. } => "doctor",
@@ -794,6 +837,7 @@ fn profile_error(message: &str) -> std::io::Error {
 fn profile_from_command(command: Command) -> RemoteResult<Profile> {
     let (connection, viewer) = match command {
         Command::Connect {
+            stats_json,
             viewer_backend,
             viewer_wayland_display,
             reconnect_attempts,
@@ -828,6 +872,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             frame_limits,
             scaling,
         } => {
+            if stats_json {
+                return Err(profile_error("profiles do not store --stats-json").into());
+            }
             if jpeg {
                 return Err(
                     profile_error("profiles do not store --jpeg; use connect directly").into(),
@@ -910,6 +957,7 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             )
         }
         Command::Ssh {
+            stats_json,
             destination,
             monitor,
             shares,
@@ -933,6 +981,9 @@ fn profile_from_command(command: Command) -> RemoteResult<Profile> {
             ssh_options,
             scaling,
         } => {
+            if stats_json {
+                return Err(profile_error("profiles do not store --stats-json").into());
+            }
             jwm::remote::ssh::validate_destination(&destination)?;
             if jpeg {
                 return Err(profile_error("profiles do not store --jpeg; use ssh directly").into());
@@ -1329,6 +1380,7 @@ fn validate_follow_source_cli(
 
 fn run(command: Command) -> RemoteResult<()> {
     match command {
+        Command::Session(args) => managed_session::run(args),
         Command::ClipboardStaging { action } => {
             run_clipboard_staging(action, &staging_root()?, &mut std::io::stdout().lock())?;
             Ok(())
@@ -1389,7 +1441,19 @@ fn run(command: Command) -> RemoteResult<()> {
             println!("Generated private remote key: {:?}", output);
             Ok(())
         }
-        Command::Doctor { key_file, display } => run_doctor(resolve_key_path(key_file)?, display),
+        Command::Doctor {
+            key_file,
+            display,
+            viewer_backend,
+            viewer_wayland_display,
+            probes,
+        } => run_doctor(
+            resolve_key_path(key_file)?,
+            display,
+            viewer_backend,
+            viewer_wayland_display,
+            probes,
+        ),
         Command::Host {
             listen,
             key_file,
@@ -1417,6 +1481,7 @@ fn run(command: Command) -> RemoteResult<()> {
             allow_wayland_keyboard,
             allow_wayland_pointer,
             allow_wayland_control,
+            allow_wayland_gestures,
             allow_resumable_control,
             max_wayland_control_duration,
             allow_wayland_text,
@@ -1490,6 +1555,7 @@ fn run(command: Command) -> RemoteResult<()> {
                     allow_wayland_keyboard,
                     allow_wayland_pointer,
                     allow_wayland_control,
+                    allow_wayland_gestures,
                     allow_resumable_control,
                     allow_wayland_text,
                     allow_wayland_popup_pointer,
@@ -1511,6 +1577,7 @@ fn run(command: Command) -> RemoteResult<()> {
             )
         }
         Command::Ssh {
+            stats_json,
             destination,
             fps,
             jpeg,
@@ -1540,6 +1607,7 @@ fn run(command: Command) -> RemoteResult<()> {
             let shared_sources = shares.areas(&initial)?;
             run_ssh_with_jpeg_override(
                 SshOptions {
+                    stats_json,
                     destination,
                     fps,
                     jpeg_quality,
@@ -1618,64 +1686,146 @@ fn resolve_host_display(display: Option<String>) -> RemoteResult<Option<String>>
     Ok(Some(session.display))
 }
 
-fn run_doctor(key_file: PathBuf, display: Option<String>) -> RemoteResult<()> {
-    println!(
-        "jwm-remote {} offline preflight (remote-x11 compiled)",
-        env!("CARGO_PKG_VERSION")
-    );
+fn run_doctor(
+    key_file: PathBuf,
+    display: Option<String>,
+    backend: ViewerBackend,
+    wayland_display: Option<String>,
+    probes: DoctorProbeArgs,
+) -> RemoteResult<()> {
+    println!("jwm-remote {} local preflight", env!("CARGO_PKG_VERSION"));
     println!("Local protocol: transport {TRANSPORT_VERSION}, application {APPLICATION_VERSION}");
-    println!("Peer compatibility: NOT probed; update both helpers together");
-    let display = display
-        .or_else(|| std::env::var("DISPLAY").ok())
-        .filter(|value| !value.trim().is_empty());
-    let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
     println!(
-        "Session type: {session:?}; DISPLAY: {:?} (not opened)",
-        display.as_deref().unwrap_or("missing")
+        "Build features: remote-x11=true remote-wayland={} remote-h264={} remote-fast-jpeg={}",
+        capabilities::NATIVE_WAYLAND,
+        capabilities::HARDWARE_VIDEO,
+        capabilities::FAST_JPEG
     );
-    // Over SSH there is no DISPLAY, yet `host --display auto` (and so
-    // `jwm-remote ssh` from the other machine) works from the running session.
-    let session_display = if display.is_none() {
-        session_env::discover().ok()
-    } else {
-        None
+    println!("Peer compatibility: run doctor on both peers and compare protocol versions");
+    let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
+    println!("Session type: {session:?}; selected viewer: {backend}");
+
+    let display_ok = match backend {
+        ViewerBackend::X11 => {
+            if wayland_display.is_some() {
+                return Err(profile_error(
+                    "--viewer-wayland-display requires --viewer-backend wayland",
+                )
+                .into());
+            }
+            let display = display
+                .clone()
+                .or_else(|| std::env::var("DISPLAY").ok())
+                .filter(|value| !value.trim().is_empty());
+            println!(
+                "DISPLAY: {:?} (not opened)",
+                display.as_deref().unwrap_or("missing")
+            );
+            // Over SSH, the host can locate a local X11 JWM session.
+            let session_display = display
+                .is_none()
+                .then(|| session_env::discover().ok())
+                .flatten();
+            if let Some(found) = &session_display {
+                println!(
+                    "JWM session: DISPLAY {:?} (pid {}); used by host --display auto",
+                    found.display, found.pid
+                );
+            }
+            if display.is_none() && session_display.is_none() {
+                println!("FAIL: provide an X11 display or select the native Wayland viewer");
+                false
+            } else {
+                println!("X11 capture scopes: root, overlay, monitor, region and view-only window");
+                true
+            }
+        }
+        ViewerBackend::Wayland => {
+            use std::os::unix::fs::FileTypeExt;
+            match capabilities::viewer_wayland_socket(wayland_display.as_deref()) {
+                Ok(path) => {
+                    let exists = path
+                        .metadata()
+                        .is_ok_and(|info| info.file_type().is_socket());
+                    println!("Wayland socket: {path:?}; exists={exists} (not opened)");
+                    println!(
+                        "Native viewer: view-only or one scoped keyboard, pointer, control, text or popup mode"
+                    );
+                    println!("Wayland capture scope: one selected surface with JPEG tiles");
+                    if capabilities::HARDWARE_VIDEO {
+                        println!(
+                            "Wayland GPU capture can use H.264 for a fixed view-only surface. \
+                             Set JWM_REMOTE_GPU_CAPTURE and use host --wayland-select --allow-h264. \
+                             The source probes same-device DMA-BUF and VA-API compatibility."
+                        );
+                    }
+                    exists
+                }
+                Err(error) => {
+                    println!("FAIL: {error}");
+                    false
+                }
+            }
+        }
     };
-    if let Some(found) = &session_display {
+    if probes.probe_video {
+        for codec in capabilities::HARDWARE_CODECS {
+            for (direction, result) in [
+                ("encode", capabilities::probe_encoder(codec)),
+                ("decode", capabilities::probe_decoder(codec)),
+            ] {
+                match result {
+                    Ok(device) => {
+                        println!("{} {direction}: {device} test frame passed", codec.name())
+                    }
+                    Err(error) => println!("{} {direction}: unavailable ({error})", codec.name()),
+                }
+            }
+        }
+    } else {
+        println!("Hardware codec runtime: use --probe-video to test a local frame");
+    }
+    if let Some(node) = probes.probe_gpu_import {
+        match capabilities::probe_gpu_import(&node) {
+            Ok(summary) => println!("GPU import: {summary}"),
+            Err(error) => println!("GPU import unavailable on {node:?} ({error})"),
+        }
+    }
+    if let Some(node) = probes.probe_gpu_present {
+        if backend != ViewerBackend::X11 {
+            return Err(profile_error("--probe-gpu-present requires the X11 viewer").into());
+        }
         println!(
-            "JWM session: DISPLAY {:?} (pid {}); `host --display auto` and `jwm-remote ssh` use it",
-            found.display, found.pid
+            "GPU present: {}",
+            capabilities::probe_gpu_present(&node, display.as_deref())?
         );
     }
-    let mut blocked =
-        (display.is_none() && session_display.is_none()) || session.eq_ignore_ascii_case("wayland");
-    if blocked {
+    if let Some(node) = probes.probe_gpu_encode {
         println!(
-            "FAIL: use a JWM X11 session on both machines; Wayland/Xwayland is outside this MVP"
+            "GPU encode import: {}",
+            capabilities::probe_gpu_encode(&node)?
         );
     }
     println!("Key path: {:?}", key_file);
-    match key_metadata(&key_file, unsafe { libc::geteuid() }) {
-        Ok(summary) => println!("Key metadata: {summary}"),
-        Err(error) => {
-            blocked = true;
-            println!("FAIL: key metadata: {error}");
-            println!(
-                "If setting up for the first time, see keygen --help; use --key-file for an existing private key. No file was changed."
-            );
+    let key_ok = match key_metadata(&key_file, unsafe { libc::geteuid() }) {
+        Ok(summary) => {
+            println!("Key metadata: {summary}");
+            true
         }
-    }
+        Err(error) => {
+            println!("FAIL: key metadata: {error}");
+            println!("See keygen --help or select an existing private key with --key-file.");
+            false
+        }
+    };
     println!(
-        "NOT probed: JWM ownership, X11 connectivity, Composite/XTEST/XKB, capture area, network reachability or peer key/version."
+        "A connected session reports the selected source, capture mode, codec and negotiated limits."
     );
-    println!("Dependencies: this helper loaded; native display extensions remain unverified.");
-    if blocked {
-        Err(std::io::Error::other(
-            "offline preflight found local setup problems; nothing was connected or changed",
-        )
-        .into())
-    } else {
-        println!("Offline checks passed. This is not an end-to-end readiness check.");
+    if display_ok && key_ok {
+        println!("Local setup checks passed.");
         Ok(())
+    } else {
+        Err(std::io::Error::other("local preflight found setup problems").into())
     }
 }
 
@@ -4904,6 +5054,7 @@ fn validate_wayland_seamless_cli(enabled: bool, backend: ViewerBackend) -> Remot
 /// Shared parser-to-runtime boundary, used by run and CLI regression tests.
 fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
     let Command::Connect {
+        stats_json,
         viewer_backend,
         viewer_wayland_display,
         reconnect_attempts,
@@ -4964,6 +5115,7 @@ fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
     )?;
     Ok((
         ClientOptions {
+            stats_json,
             control_duration: wayland_control_duration.unwrap_or_default(),
             viewer_backend,
             viewer_wayland_display,
@@ -4977,6 +5129,7 @@ fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
             wayland_keyboard,
             wayland_pointer,
             wayland_control,
+            wayland_gestures: false,
             resumable_control: wayland_seamless_input,
             wayland_seamless_input,
             wayland_popup_pointer,
@@ -4989,6 +5142,7 @@ fn connect_options(command: Command) -> RemoteResult<(ClientOptions, u8)> {
             wayland_scroll,
             wayland_horizontal_scroll,
             window_position,
+            x11_parent_window: None,
             view_only,
             grab_input,
             seamless_input,

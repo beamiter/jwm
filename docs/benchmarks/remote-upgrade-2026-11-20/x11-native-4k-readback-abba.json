@@ -1,0 +1,2828 @@
+{
+  "schema_version": 2,
+  "label": "readback-4k-20261121",
+  "status": "complete",
+  "controller_exit": 0,
+  "dimensions": [
+    3840,
+    2160
+  ],
+  "requested_fps": 30,
+  "paint_requested_fps": 60,
+  "order": [
+    "cpu",
+    "auto",
+    "auto",
+    "cpu",
+    "cpu",
+    "auto",
+    "auto",
+    "cpu"
+  ],
+  "timing": {
+    "warmup_seconds": 30,
+    "scored_seconds": 60,
+    "observer_requested_seconds": 105
+  },
+  "binary_pins": {
+    "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+    "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+    "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+    "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+  },
+  "trials": [
+    {
+      "block": 1,
+      "order": 1,
+      "arm": "cpu",
+      "accepted_case": "readback-4k-20261121-01-cpu-fixed",
+      "accepted_metrics": {
+        "observer_run_seconds": 105.001047643,
+        "source_replayed_submit_fps": 55.7229445397802,
+        "clean_close_from_controller": true,
+        "authenticated_session_id": "b902329400169e501d17a41ce76918fd",
+        "case": "readback-4k-20261121-01-cpu-fixed",
+        "host_scaling_policy": "cpu",
+        "binary_pins": {
+          "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+          "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+        },
+        "observer_invalid_reads_full_session": 3,
+        "observation_seconds": 60,
+        "telemetry_seconds": {
+          "host": 60.088115147,
+          "viewer": 60.029225697
+        },
+        "unique_fps": 12.166666666666666,
+        "p95_gap_ms": 152.646624,
+        "max_gap_ms": 431.204053,
+        "longest_observer_gaps": [
+          {
+            "gap_ms": 431.204053,
+            "measured_start_offset_ms": 24117.521999,
+            "from_marker": 3369,
+            "to_marker": 3390
+          },
+          {
+            "gap_ms": 368.821876,
+            "measured_start_offset_ms": 24593.790584,
+            "from_marker": 3399,
+            "to_marker": 3422
+          },
+          {
+            "gap_ms": 310.444908,
+            "measured_start_offset_ms": 23243.836946,
+            "from_marker": 3337,
+            "to_marker": 3339
+          }
+        ],
+        "capture": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 739,
+          "window_p50_ms": {
+            "minimum": 23.903,
+            "median": 34.245999999999995,
+            "maximum": 48.605
+          },
+          "window_p95_ms": {
+            "minimum": 71.037,
+            "median": 81.955,
+            "maximum": 100.847
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-01-cpu-fixed",
+            "window": 6,
+            "p99_ms": 132.485
+          }
+        },
+        "readback": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 739,
+          "window_p50_ms": {
+            "minimum": 16.229,
+            "median": 26.506500000000003,
+            "maximum": 40.553
+          },
+          "window_p95_ms": {
+            "minimum": 64.275,
+            "median": 74.32650000000001,
+            "maximum": 93.201
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-01-cpu-fixed",
+            "window": 6,
+            "p99_ms": 126.112
+          }
+        },
+        "actual_route_observations": {
+          "core_readback_ms": 739,
+          "shm_readback_ms": 0,
+          "cpu_resize_ms": 0
+        },
+        "capture_mode_labels": [
+          "root/cpu-resize/core-getimage/no-damage/cursor-events"
+        ],
+        "host_zero_frame_windows": 0,
+        "viewer_zero_drawn_windows": 0,
+        "payload_mbps": 17.428215836660083,
+        "source_submit_fps": 55.7229445397802,
+        "source_deadline_skips": 464,
+        "existing_27_fps_gate_met": false
+      },
+      "attempts": [
+        {
+          "case": "readback-4k-20261121-01-cpu-fixed",
+          "raw_directory": "readback-4k-20261121-01-cpu-fixed",
+          "failure_diagnostic": null,
+          "status": "valid",
+          "result": {
+            "observer_run_seconds": 105.001047643,
+            "source_replayed_submit_fps": 55.7229445397802,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "b902329400169e501d17a41ce76918fd",
+            "case": "readback-4k-20261121-01-cpu-fixed",
+            "host_scaling_policy": "cpu",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 3,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.088115147,
+              "viewer": 60.029225697
+            },
+            "unique_fps": 12.166666666666666,
+            "p95_gap_ms": 152.646624,
+            "max_gap_ms": 431.204053,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 431.204053,
+                "measured_start_offset_ms": 24117.521999,
+                "from_marker": 3369,
+                "to_marker": 3390
+              },
+              {
+                "gap_ms": 368.821876,
+                "measured_start_offset_ms": 24593.790584,
+                "from_marker": 3399,
+                "to_marker": 3422
+              },
+              {
+                "gap_ms": 310.444908,
+                "measured_start_offset_ms": 23243.836946,
+                "from_marker": 3337,
+                "to_marker": 3339
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 739,
+              "window_p50_ms": {
+                "minimum": 23.903,
+                "median": 34.245999999999995,
+                "maximum": 48.605
+              },
+              "window_p95_ms": {
+                "minimum": 71.037,
+                "median": 81.955,
+                "maximum": 100.847
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-01-cpu-fixed",
+                "window": 6,
+                "p99_ms": 132.485
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 739,
+              "window_p50_ms": {
+                "minimum": 16.229,
+                "median": 26.506500000000003,
+                "maximum": 40.553
+              },
+              "window_p95_ms": {
+                "minimum": 64.275,
+                "median": 74.32650000000001,
+                "maximum": 93.201
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-01-cpu-fixed",
+                "window": 6,
+                "p99_ms": 126.112
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 739,
+              "shm_readback_ms": 0,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/cpu-resize/core-getimage/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 17.428215836660083,
+            "source_submit_fps": 55.7229445397802,
+            "source_deadline_skips": 464,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "order": 2,
+      "arm": "auto",
+      "accepted_case": "readback-4k-20261121-02-auto-fixed",
+      "accepted_metrics": {
+        "observer_run_seconds": 105.000827685,
+        "source_replayed_submit_fps": 60.01080037544442,
+        "clean_close_from_controller": true,
+        "authenticated_session_id": "4a6a6b6231d1fe0438de31a0da19c421",
+        "case": "readback-4k-20261121-02-auto-fixed",
+        "host_scaling_policy": "auto",
+        "binary_pins": {
+          "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+          "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+        },
+        "observer_invalid_reads_full_session": 1,
+        "observation_seconds": 60,
+        "telemetry_seconds": {
+          "host": 60.066894458,
+          "viewer": 60.055658486
+        },
+        "unique_fps": 13.233333333333333,
+        "p95_gap_ms": 139.545958,
+        "max_gap_ms": 565.061797,
+        "longest_observer_gaps": [
+          {
+            "gap_ms": 565.061797,
+            "measured_start_offset_ms": 38857.614846,
+            "from_marker": 4222,
+            "to_marker": 4252
+          },
+          {
+            "gap_ms": 505.587823,
+            "measured_start_offset_ms": 37412.114387,
+            "from_marker": 4150,
+            "to_marker": 4177
+          },
+          {
+            "gap_ms": 387.332266,
+            "measured_start_offset_ms": 38426.708453,
+            "from_marker": 4197,
+            "to_marker": 4205
+          }
+        ],
+        "capture": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 810,
+          "window_p50_ms": {
+            "minimum": 11.326,
+            "median": 11.596,
+            "maximum": 11.687
+          },
+          "window_p95_ms": {
+            "minimum": 13.196,
+            "median": 14.133,
+            "maximum": 17.174
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-02-auto-fixed",
+            "window": 2,
+            "p99_ms": 24.44
+          }
+        },
+        "readback": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 810,
+          "window_p50_ms": {
+            "minimum": 3.807,
+            "median": 3.9325,
+            "maximum": 3.959
+          },
+          "window_p95_ms": {
+            "minimum": 6.17,
+            "median": 6.588,
+            "maximum": 9.057
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-02-auto-fixed",
+            "window": 9,
+            "p99_ms": 14.392
+          }
+        },
+        "actual_route_observations": {
+          "core_readback_ms": 0,
+          "shm_readback_ms": 810,
+          "cpu_resize_ms": 0
+        },
+        "capture_mode_labels": [
+          "root/xrender/shm/no-damage/cursor-events"
+        ],
+        "host_zero_frame_windows": 0,
+        "viewer_zero_drawn_windows": 0,
+        "payload_mbps": 18.932489755986378,
+        "source_submit_fps": 60.01080037544442,
+        "source_deadline_skips": 1,
+        "existing_27_fps_gate_met": false
+      },
+      "attempts": [
+        {
+          "case": "readback-4k-20261121-02-auto-fixed",
+          "raw_directory": "readback-4k-20261121-02-auto-fixed",
+          "failure_diagnostic": null,
+          "status": "valid",
+          "result": {
+            "observer_run_seconds": 105.000827685,
+            "source_replayed_submit_fps": 60.01080037544442,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "4a6a6b6231d1fe0438de31a0da19c421",
+            "case": "readback-4k-20261121-02-auto-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 1,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.066894458,
+              "viewer": 60.055658486
+            },
+            "unique_fps": 13.233333333333333,
+            "p95_gap_ms": 139.545958,
+            "max_gap_ms": 565.061797,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 565.061797,
+                "measured_start_offset_ms": 38857.614846,
+                "from_marker": 4222,
+                "to_marker": 4252
+              },
+              {
+                "gap_ms": 505.587823,
+                "measured_start_offset_ms": 37412.114387,
+                "from_marker": 4150,
+                "to_marker": 4177
+              },
+              {
+                "gap_ms": 387.332266,
+                "measured_start_offset_ms": 38426.708453,
+                "from_marker": 4197,
+                "to_marker": 4205
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 810,
+              "window_p50_ms": {
+                "minimum": 11.326,
+                "median": 11.596,
+                "maximum": 11.687
+              },
+              "window_p95_ms": {
+                "minimum": 13.196,
+                "median": 14.133,
+                "maximum": 17.174
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-02-auto-fixed",
+                "window": 2,
+                "p99_ms": 24.44
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 810,
+              "window_p50_ms": {
+                "minimum": 3.807,
+                "median": 3.9325,
+                "maximum": 3.959
+              },
+              "window_p95_ms": {
+                "minimum": 6.17,
+                "median": 6.588,
+                "maximum": 9.057
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-02-auto-fixed",
+                "window": 9,
+                "p99_ms": 14.392
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 810,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 18.932489755986378,
+            "source_submit_fps": 60.01080037544442,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "order": 3,
+      "arm": "auto",
+      "accepted_case": "readback-4k-20261121-03-auto-fixed",
+      "accepted_metrics": {
+        "observer_run_seconds": 105.000856417,
+        "source_replayed_submit_fps": 60.01129039184985,
+        "clean_close_from_controller": true,
+        "authenticated_session_id": "cc56f42adda335b42f9dab389b96afb5",
+        "case": "readback-4k-20261121-03-auto-fixed",
+        "host_scaling_policy": "auto",
+        "binary_pins": {
+          "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+          "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+        },
+        "observer_invalid_reads_full_session": 1,
+        "observation_seconds": 60,
+        "telemetry_seconds": {
+          "host": 60.097786866,
+          "viewer": 60.063731924
+        },
+        "unique_fps": 12.983333333333333,
+        "p95_gap_ms": 152.386103,
+        "max_gap_ms": 494.357572,
+        "longest_observer_gaps": [
+          {
+            "gap_ms": 494.357572,
+            "measured_start_offset_ms": 51876.499324,
+            "from_marker": 5025,
+            "to_marker": 5041
+          },
+          {
+            "gap_ms": 297.676926,
+            "measured_start_offset_ms": 51374.547814,
+            "from_marker": 4990,
+            "to_marker": 5006
+          },
+          {
+            "gap_ms": 256.465828,
+            "measured_start_offset_ms": 50852.756061,
+            "from_marker": 4959,
+            "to_marker": 4972
+          }
+        ],
+        "capture": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 795,
+          "window_p50_ms": {
+            "minimum": 11.527,
+            "median": 11.7375,
+            "maximum": 11.983
+          },
+          "window_p95_ms": {
+            "minimum": 13.788,
+            "median": 14.370000000000001,
+            "maximum": 17.383
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-03-auto-fixed",
+            "window": 12,
+            "p99_ms": 24.564
+          }
+        },
+        "readback": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 795,
+          "window_p50_ms": {
+            "minimum": 3.892,
+            "median": 3.9545,
+            "maximum": 4.062
+          },
+          "window_p95_ms": {
+            "minimum": 6.24,
+            "median": 6.625500000000001,
+            "maximum": 7.663
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-03-auto-fixed",
+            "window": 7,
+            "p99_ms": 15.835
+          }
+        },
+        "actual_route_observations": {
+          "core_readback_ms": 0,
+          "shm_readback_ms": 795,
+          "cpu_resize_ms": 0
+        },
+        "capture_mode_labels": [
+          "root/xrender/shm/no-damage/cursor-events"
+        ],
+        "host_zero_frame_windows": 0,
+        "viewer_zero_drawn_windows": 0,
+        "payload_mbps": 18.46907438496622,
+        "source_submit_fps": 60.01129039184985,
+        "source_deadline_skips": 1,
+        "existing_27_fps_gate_met": false
+      },
+      "attempts": [
+        {
+          "case": "readback-4k-20261121-03-auto-fixed",
+          "raw_directory": "readback-4k-20261121-03-auto-fixed",
+          "failure_diagnostic": null,
+          "status": "valid",
+          "result": {
+            "observer_run_seconds": 105.000856417,
+            "source_replayed_submit_fps": 60.01129039184985,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "cc56f42adda335b42f9dab389b96afb5",
+            "case": "readback-4k-20261121-03-auto-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 1,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.097786866,
+              "viewer": 60.063731924
+            },
+            "unique_fps": 12.983333333333333,
+            "p95_gap_ms": 152.386103,
+            "max_gap_ms": 494.357572,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 494.357572,
+                "measured_start_offset_ms": 51876.499324,
+                "from_marker": 5025,
+                "to_marker": 5041
+              },
+              {
+                "gap_ms": 297.676926,
+                "measured_start_offset_ms": 51374.547814,
+                "from_marker": 4990,
+                "to_marker": 5006
+              },
+              {
+                "gap_ms": 256.465828,
+                "measured_start_offset_ms": 50852.756061,
+                "from_marker": 4959,
+                "to_marker": 4972
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 795,
+              "window_p50_ms": {
+                "minimum": 11.527,
+                "median": 11.7375,
+                "maximum": 11.983
+              },
+              "window_p95_ms": {
+                "minimum": 13.788,
+                "median": 14.370000000000001,
+                "maximum": 17.383
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-03-auto-fixed",
+                "window": 12,
+                "p99_ms": 24.564
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 795,
+              "window_p50_ms": {
+                "minimum": 3.892,
+                "median": 3.9545,
+                "maximum": 4.062
+              },
+              "window_p95_ms": {
+                "minimum": 6.24,
+                "median": 6.625500000000001,
+                "maximum": 7.663
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-03-auto-fixed",
+                "window": 7,
+                "p99_ms": 15.835
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 795,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 18.46907438496622,
+            "source_submit_fps": 60.01129039184985,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "order": 4,
+      "arm": "cpu",
+      "accepted_case": "readback-4k-20261121-04-cpu-fixed",
+      "accepted_metrics": {
+        "observer_run_seconds": 105.000556266,
+        "source_replayed_submit_fps": 59.94602357209019,
+        "clean_close_from_controller": true,
+        "authenticated_session_id": "09f4aa0e52fb6b3591cabcd5a99d9419",
+        "case": "readback-4k-20261121-04-cpu-fixed",
+        "host_scaling_policy": "cpu",
+        "binary_pins": {
+          "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+          "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+        },
+        "observer_invalid_reads_full_session": 2,
+        "observation_seconds": 60,
+        "telemetry_seconds": {
+          "host": 60.487244471,
+          "viewer": 60.02552919
+        },
+        "unique_fps": 8.416666666666666,
+        "p95_gap_ms": 249.888068,
+        "max_gap_ms": 281.31113,
+        "longest_observer_gaps": [
+          {
+            "gap_ms": 281.31113,
+            "measured_start_offset_ms": 52839.008925,
+            "from_marker": 5076,
+            "to_marker": 5083
+          },
+          {
+            "gap_ms": 280.302433,
+            "measured_start_offset_ms": 34980.072056,
+            "from_marker": 4008,
+            "to_marker": 4012
+          },
+          {
+            "gap_ms": 278.084706,
+            "measured_start_offset_ms": 10216.845613,
+            "from_marker": 2521,
+            "to_marker": 2526
+          }
+        ],
+        "capture": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 512,
+          "window_p50_ms": {
+            "minimum": 68.747,
+            "median": 86.80199999999999,
+            "maximum": 120.71
+          },
+          "window_p95_ms": {
+            "minimum": 188.321,
+            "median": 203.476,
+            "maximum": 217.343
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-04-cpu-fixed",
+            "window": 5,
+            "p99_ms": 219.519
+          }
+        },
+        "readback": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 512,
+          "window_p50_ms": {
+            "minimum": 58.833,
+            "median": 76.7445,
+            "maximum": 110.643
+          },
+          "window_p95_ms": {
+            "minimum": 178.807,
+            "median": 193.1,
+            "maximum": 206.663
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-04-cpu-fixed",
+            "window": 5,
+            "p99_ms": 208.778
+          }
+        },
+        "actual_route_observations": {
+          "core_readback_ms": 512,
+          "shm_readback_ms": 0,
+          "cpu_resize_ms": 0
+        },
+        "capture_mode_labels": [
+          "root/cpu-resize/core-getimage/no-damage/cursor-events"
+        ],
+        "host_zero_frame_windows": 0,
+        "viewer_zero_drawn_windows": 0,
+        "payload_mbps": 12.076013155967196,
+        "source_submit_fps": 59.94602357209019,
+        "source_deadline_skips": 8,
+        "existing_27_fps_gate_met": false
+      },
+      "attempts": [
+        {
+          "case": "readback-4k-20261121-04-cpu-fixed",
+          "raw_directory": "readback-4k-20261121-04-cpu-fixed",
+          "failure_diagnostic": null,
+          "status": "valid",
+          "result": {
+            "observer_run_seconds": 105.000556266,
+            "source_replayed_submit_fps": 59.94602357209019,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "09f4aa0e52fb6b3591cabcd5a99d9419",
+            "case": "readback-4k-20261121-04-cpu-fixed",
+            "host_scaling_policy": "cpu",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 2,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.487244471,
+              "viewer": 60.02552919
+            },
+            "unique_fps": 8.416666666666666,
+            "p95_gap_ms": 249.888068,
+            "max_gap_ms": 281.31113,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 281.31113,
+                "measured_start_offset_ms": 52839.008925,
+                "from_marker": 5076,
+                "to_marker": 5083
+              },
+              {
+                "gap_ms": 280.302433,
+                "measured_start_offset_ms": 34980.072056,
+                "from_marker": 4008,
+                "to_marker": 4012
+              },
+              {
+                "gap_ms": 278.084706,
+                "measured_start_offset_ms": 10216.845613,
+                "from_marker": 2521,
+                "to_marker": 2526
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 512,
+              "window_p50_ms": {
+                "minimum": 68.747,
+                "median": 86.80199999999999,
+                "maximum": 120.71
+              },
+              "window_p95_ms": {
+                "minimum": 188.321,
+                "median": 203.476,
+                "maximum": 217.343
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-04-cpu-fixed",
+                "window": 5,
+                "p99_ms": 219.519
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 512,
+              "window_p50_ms": {
+                "minimum": 58.833,
+                "median": 76.7445,
+                "maximum": 110.643
+              },
+              "window_p95_ms": {
+                "minimum": 178.807,
+                "median": 193.1,
+                "maximum": 206.663
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-04-cpu-fixed",
+                "window": 5,
+                "p99_ms": 208.778
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 512,
+              "shm_readback_ms": 0,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/cpu-resize/core-getimage/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 12.076013155967196,
+            "source_submit_fps": 59.94602357209019,
+            "source_deadline_skips": 8,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "order": 5,
+      "arm": "cpu",
+      "accepted_case": "readback-4k-20261121-05-cpu-fixed",
+      "accepted_metrics": {
+        "observer_run_seconds": 105.0004101,
+        "source_replayed_submit_fps": 59.95486101789241,
+        "clean_close_from_controller": true,
+        "authenticated_session_id": "64010d138d5e3aa35d3f981c32f86cdd",
+        "case": "readback-4k-20261121-05-cpu-fixed",
+        "host_scaling_policy": "cpu",
+        "binary_pins": {
+          "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+          "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+        },
+        "observer_invalid_reads_full_session": 1,
+        "observation_seconds": 60,
+        "telemetry_seconds": {
+          "host": 60.936432431,
+          "viewer": 60.024255855999996
+        },
+        "unique_fps": 8.033333333333333,
+        "p95_gap_ms": 242.813693,
+        "max_gap_ms": 415.180985,
+        "longest_observer_gaps": [
+          {
+            "gap_ms": 415.180985,
+            "measured_start_offset_ms": 17721.293363,
+            "from_marker": 2957,
+            "to_marker": 2967
+          },
+          {
+            "gap_ms": 310.770924,
+            "measured_start_offset_ms": 18703.986577,
+            "from_marker": 3023,
+            "to_marker": 3033
+          },
+          {
+            "gap_ms": 304.187007,
+            "measured_start_offset_ms": 30906.177177,
+            "from_marker": 3763,
+            "to_marker": 3768
+          }
+        ],
+        "capture": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 490,
+          "window_p50_ms": {
+            "minimum": 80.709,
+            "median": 92.778,
+            "maximum": 110.52
+          },
+          "window_p95_ms": {
+            "minimum": 201.484,
+            "median": 210.8015,
+            "maximum": 215.215
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-05-cpu-fixed",
+            "window": 1,
+            "p99_ms": 217.451
+          }
+        },
+        "readback": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 490,
+          "window_p50_ms": {
+            "minimum": 70.869,
+            "median": 82.925,
+            "maximum": 101.253
+          },
+          "window_p95_ms": {
+            "minimum": 191.17,
+            "median": 200.2005,
+            "maximum": 205.176
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-05-cpu-fixed",
+            "window": 9,
+            "p99_ms": 207.404
+          }
+        },
+        "actual_route_observations": {
+          "core_readback_ms": 490,
+          "shm_readback_ms": 0,
+          "cpu_resize_ms": 0
+        },
+        "capture_mode_labels": [
+          "root/cpu-resize/core-getimage/no-damage/cursor-events"
+        ],
+        "host_zero_frame_windows": 0,
+        "viewer_zero_drawn_windows": 0,
+        "payload_mbps": 11.492355493455783,
+        "source_submit_fps": 59.95486101789241,
+        "source_deadline_skips": 7,
+        "existing_27_fps_gate_met": false
+      },
+      "attempts": [
+        {
+          "case": "readback-4k-20261121-05-cpu-fixed",
+          "raw_directory": "readback-4k-20261121-05-cpu-fixed",
+          "failure_diagnostic": null,
+          "status": "valid",
+          "result": {
+            "observer_run_seconds": 105.0004101,
+            "source_replayed_submit_fps": 59.95486101789241,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "64010d138d5e3aa35d3f981c32f86cdd",
+            "case": "readback-4k-20261121-05-cpu-fixed",
+            "host_scaling_policy": "cpu",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 1,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.936432431,
+              "viewer": 60.024255855999996
+            },
+            "unique_fps": 8.033333333333333,
+            "p95_gap_ms": 242.813693,
+            "max_gap_ms": 415.180985,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 415.180985,
+                "measured_start_offset_ms": 17721.293363,
+                "from_marker": 2957,
+                "to_marker": 2967
+              },
+              {
+                "gap_ms": 310.770924,
+                "measured_start_offset_ms": 18703.986577,
+                "from_marker": 3023,
+                "to_marker": 3033
+              },
+              {
+                "gap_ms": 304.187007,
+                "measured_start_offset_ms": 30906.177177,
+                "from_marker": 3763,
+                "to_marker": 3768
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 490,
+              "window_p50_ms": {
+                "minimum": 80.709,
+                "median": 92.778,
+                "maximum": 110.52
+              },
+              "window_p95_ms": {
+                "minimum": 201.484,
+                "median": 210.8015,
+                "maximum": 215.215
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-05-cpu-fixed",
+                "window": 1,
+                "p99_ms": 217.451
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 490,
+              "window_p50_ms": {
+                "minimum": 70.869,
+                "median": 82.925,
+                "maximum": 101.253
+              },
+              "window_p95_ms": {
+                "minimum": 191.17,
+                "median": 200.2005,
+                "maximum": 205.176
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-05-cpu-fixed",
+                "window": 9,
+                "p99_ms": 207.404
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 490,
+              "shm_readback_ms": 0,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/cpu-resize/core-getimage/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 11.492355493455783,
+            "source_submit_fps": 59.95486101789241,
+            "source_deadline_skips": 7,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "order": 6,
+      "arm": "auto",
+      "accepted_case": "readback-4k-20261121-06-auto-fixed",
+      "accepted_metrics": {
+        "observer_run_seconds": 105.000377119,
+        "source_replayed_submit_fps": 60.01163571698463,
+        "clean_close_from_controller": true,
+        "authenticated_session_id": "7e2a31994b6118fcade5d54b8855591d",
+        "case": "readback-4k-20261121-06-auto-fixed",
+        "host_scaling_policy": "auto",
+        "binary_pins": {
+          "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+          "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+        },
+        "observer_invalid_reads_full_session": 5,
+        "observation_seconds": 60,
+        "telemetry_seconds": {
+          "host": 60.109336541,
+          "viewer": 60.016995518
+        },
+        "unique_fps": 12.966666666666667,
+        "p95_gap_ms": 139.039504,
+        "max_gap_ms": 444.762559,
+        "longest_observer_gaps": [
+          {
+            "gap_ms": 444.762559,
+            "measured_start_offset_ms": 34011.466704,
+            "from_marker": 3934,
+            "to_marker": 3948
+          },
+          {
+            "gap_ms": 355.445564,
+            "measured_start_offset_ms": 6624.078042,
+            "from_marker": 2300,
+            "to_marker": 2320
+          },
+          {
+            "gap_ms": 280.297458,
+            "measured_start_offset_ms": 34489.212834,
+            "from_marker": 3956,
+            "to_marker": 3985
+          }
+        ],
+        "capture": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 792,
+          "window_p50_ms": {
+            "minimum": 11.143,
+            "median": 11.4835,
+            "maximum": 11.775
+          },
+          "window_p95_ms": {
+            "minimum": 13.63,
+            "median": 14.6325,
+            "maximum": 19.378
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-06-auto-fixed",
+            "window": 1,
+            "p99_ms": 24.888
+          }
+        },
+        "readback": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 792,
+          "window_p50_ms": {
+            "minimum": 3.836,
+            "median": 3.9240000000000004,
+            "maximum": 4.173
+          },
+          "window_p95_ms": {
+            "minimum": 6.171,
+            "median": 6.8965,
+            "maximum": 9.23
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-06-auto-fixed",
+            "window": 4,
+            "p99_ms": 15.153
+          }
+        },
+        "actual_route_observations": {
+          "core_readback_ms": 0,
+          "shm_readback_ms": 792,
+          "cpu_resize_ms": 0
+        },
+        "capture_mode_labels": [
+          "root/xrender/shm/no-damage/cursor-events"
+        ],
+        "host_zero_frame_windows": 0,
+        "viewer_zero_drawn_windows": 0,
+        "payload_mbps": 18.607602485132876,
+        "source_submit_fps": 60.01163571698463,
+        "source_deadline_skips": 1,
+        "existing_27_fps_gate_met": false
+      },
+      "attempts": [
+        {
+          "case": "readback-4k-20261121-06-auto-fixed",
+          "raw_directory": "readback-4k-20261121-06-auto-fixed",
+          "failure_diagnostic": null,
+          "status": "valid",
+          "result": {
+            "observer_run_seconds": 105.000377119,
+            "source_replayed_submit_fps": 60.01163571698463,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "7e2a31994b6118fcade5d54b8855591d",
+            "case": "readback-4k-20261121-06-auto-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 5,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.109336541,
+              "viewer": 60.016995518
+            },
+            "unique_fps": 12.966666666666667,
+            "p95_gap_ms": 139.039504,
+            "max_gap_ms": 444.762559,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 444.762559,
+                "measured_start_offset_ms": 34011.466704,
+                "from_marker": 3934,
+                "to_marker": 3948
+              },
+              {
+                "gap_ms": 355.445564,
+                "measured_start_offset_ms": 6624.078042,
+                "from_marker": 2300,
+                "to_marker": 2320
+              },
+              {
+                "gap_ms": 280.297458,
+                "measured_start_offset_ms": 34489.212834,
+                "from_marker": 3956,
+                "to_marker": 3985
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 792,
+              "window_p50_ms": {
+                "minimum": 11.143,
+                "median": 11.4835,
+                "maximum": 11.775
+              },
+              "window_p95_ms": {
+                "minimum": 13.63,
+                "median": 14.6325,
+                "maximum": 19.378
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-06-auto-fixed",
+                "window": 1,
+                "p99_ms": 24.888
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 792,
+              "window_p50_ms": {
+                "minimum": 3.836,
+                "median": 3.9240000000000004,
+                "maximum": 4.173
+              },
+              "window_p95_ms": {
+                "minimum": 6.171,
+                "median": 6.8965,
+                "maximum": 9.23
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-06-auto-fixed",
+                "window": 4,
+                "p99_ms": 15.153
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 792,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 18.607602485132876,
+            "source_submit_fps": 60.01163571698463,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "order": 7,
+      "arm": "auto",
+      "accepted_case": "readback-4k-20261121-07-auto-fixed",
+      "accepted_metrics": {
+        "observer_run_seconds": 105.001141071,
+        "source_replayed_submit_fps": 60.01106982595787,
+        "clean_close_from_controller": true,
+        "authenticated_session_id": "7e8d764692a6ae603d3e866e3d14c08a",
+        "case": "readback-4k-20261121-07-auto-fixed",
+        "host_scaling_policy": "auto",
+        "binary_pins": {
+          "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+          "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+        },
+        "observer_invalid_reads_full_session": 6,
+        "observation_seconds": 60,
+        "telemetry_seconds": {
+          "host": 60.110240579,
+          "viewer": 60.090624843
+        },
+        "unique_fps": 13.266666666666667,
+        "p95_gap_ms": 150.194385,
+        "max_gap_ms": 444.375737,
+        "longest_observer_gaps": [
+          {
+            "gap_ms": 444.375737,
+            "measured_start_offset_ms": 56637.874288,
+            "from_marker": 5298,
+            "to_marker": 5320
+          },
+          {
+            "gap_ms": 385.638603,
+            "measured_start_offset_ms": 45662.254674,
+            "from_marker": 4622,
+            "to_marker": 4636
+          },
+          {
+            "gap_ms": 292.820027,
+            "measured_start_offset_ms": 45369.434647,
+            "from_marker": 4612,
+            "to_marker": 4622
+          }
+        ],
+        "capture": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 823,
+          "window_p50_ms": {
+            "minimum": 11.2,
+            "median": 11.4545,
+            "maximum": 11.585
+          },
+          "window_p95_ms": {
+            "minimum": 13.438,
+            "median": 14.32,
+            "maximum": 15.374
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-07-auto-fixed",
+            "window": 1,
+            "p99_ms": 24.711
+          }
+        },
+        "readback": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 823,
+          "window_p50_ms": {
+            "minimum": 3.779,
+            "median": 3.901,
+            "maximum": 3.956
+          },
+          "window_p95_ms": {
+            "minimum": 6.322,
+            "median": 6.9485,
+            "maximum": 7.84
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-07-auto-fixed",
+            "window": 3,
+            "p99_ms": 10.045
+          }
+        },
+        "actual_route_observations": {
+          "core_readback_ms": 0,
+          "shm_readback_ms": 823,
+          "cpu_resize_ms": 0
+        },
+        "capture_mode_labels": [
+          "root/xrender/shm/no-damage/cursor-events"
+        ],
+        "host_zero_frame_windows": 0,
+        "viewer_zero_drawn_windows": 0,
+        "payload_mbps": 19.0893000085725,
+        "source_submit_fps": 60.01106982595787,
+        "source_deadline_skips": 1,
+        "existing_27_fps_gate_met": false
+      },
+      "attempts": [
+        {
+          "case": "readback-4k-20261121-07-auto-fixed",
+          "raw_directory": "readback-4k-20261121-07-auto-fixed",
+          "failure_diagnostic": null,
+          "status": "valid",
+          "result": {
+            "observer_run_seconds": 105.001141071,
+            "source_replayed_submit_fps": 60.01106982595787,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "7e8d764692a6ae603d3e866e3d14c08a",
+            "case": "readback-4k-20261121-07-auto-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 6,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.110240579,
+              "viewer": 60.090624843
+            },
+            "unique_fps": 13.266666666666667,
+            "p95_gap_ms": 150.194385,
+            "max_gap_ms": 444.375737,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 444.375737,
+                "measured_start_offset_ms": 56637.874288,
+                "from_marker": 5298,
+                "to_marker": 5320
+              },
+              {
+                "gap_ms": 385.638603,
+                "measured_start_offset_ms": 45662.254674,
+                "from_marker": 4622,
+                "to_marker": 4636
+              },
+              {
+                "gap_ms": 292.820027,
+                "measured_start_offset_ms": 45369.434647,
+                "from_marker": 4612,
+                "to_marker": 4622
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 823,
+              "window_p50_ms": {
+                "minimum": 11.2,
+                "median": 11.4545,
+                "maximum": 11.585
+              },
+              "window_p95_ms": {
+                "minimum": 13.438,
+                "median": 14.32,
+                "maximum": 15.374
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-07-auto-fixed",
+                "window": 1,
+                "p99_ms": 24.711
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 823,
+              "window_p50_ms": {
+                "minimum": 3.779,
+                "median": 3.901,
+                "maximum": 3.956
+              },
+              "window_p95_ms": {
+                "minimum": 6.322,
+                "median": 6.9485,
+                "maximum": 7.84
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-07-auto-fixed",
+                "window": 3,
+                "p99_ms": 10.045
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 823,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 19.0893000085725,
+            "source_submit_fps": 60.01106982595787,
+            "source_deadline_skips": 1,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "order": 8,
+      "arm": "cpu",
+      "accepted_case": "readback-4k-20261121-08-cpu-fixed",
+      "accepted_metrics": {
+        "observer_run_seconds": 105.000928995,
+        "source_replayed_submit_fps": 59.92791919374123,
+        "clean_close_from_controller": true,
+        "authenticated_session_id": "56c0ab86f95b74c3a452faf713749d38",
+        "case": "readback-4k-20261121-08-cpu-fixed",
+        "host_scaling_policy": "cpu",
+        "binary_pins": {
+          "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+          "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+        },
+        "observer_invalid_reads_full_session": 1,
+        "observation_seconds": 60,
+        "telemetry_seconds": {
+          "host": 60.907625274,
+          "viewer": 60.067539787
+        },
+        "unique_fps": 7.783333333333333,
+        "p95_gap_ms": 257.162929,
+        "max_gap_ms": 435.062413,
+        "longest_observer_gaps": [
+          {
+            "gap_ms": 435.062413,
+            "measured_start_offset_ms": 59334.435644,
+            "from_marker": 5459,
+            "to_marker": 5470
+          },
+          {
+            "gap_ms": 391.901301,
+            "measured_start_offset_ms": 58912.140789,
+            "from_marker": 5443,
+            "to_marker": 5455
+          },
+          {
+            "gap_ms": 308.20177,
+            "measured_start_offset_ms": 58199.437175,
+            "from_marker": 5400,
+            "to_marker": 5415
+          }
+        ],
+        "capture": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 477,
+          "window_p50_ms": {
+            "minimum": 80.463,
+            "median": 92.125,
+            "maximum": 131.501
+          },
+          "window_p95_ms": {
+            "minimum": 203.742,
+            "median": 211.2355,
+            "maximum": 216.087
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-08-cpu-fixed",
+            "window": 12,
+            "p99_ms": 222.129
+          }
+        },
+        "readback": {
+          "windows_with_samples": 12,
+          "recent_samples_in_windows": 477,
+          "window_p50_ms": {
+            "minimum": 69.765,
+            "median": 81.77600000000001,
+            "maximum": 121.195
+          },
+          "window_p95_ms": {
+            "minimum": 193.456,
+            "median": 201.1765,
+            "maximum": 205.413
+          },
+          "largest_window_p99": {
+            "case": "readback-4k-20261121-08-cpu-fixed",
+            "window": 12,
+            "p99_ms": 210.644
+          }
+        },
+        "actual_route_observations": {
+          "core_readback_ms": 477,
+          "shm_readback_ms": 0,
+          "cpu_resize_ms": 0
+        },
+        "capture_mode_labels": [
+          "root/cpu-resize/core-getimage/no-damage/cursor-events"
+        ],
+        "host_zero_frame_windows": 0,
+        "viewer_zero_drawn_windows": 0,
+        "payload_mbps": 11.192879921572231,
+        "source_submit_fps": 59.92791919374123,
+        "source_deadline_skips": 10,
+        "existing_27_fps_gate_met": false
+      },
+      "attempts": [
+        {
+          "case": "readback-4k-20261121-08-cpu-fixed",
+          "raw_directory": "readback-4k-20261121-08-cpu-fixed",
+          "failure_diagnostic": null,
+          "status": "valid",
+          "result": {
+            "observer_run_seconds": 105.000928995,
+            "source_replayed_submit_fps": 59.92791919374123,
+            "clean_close_from_controller": true,
+            "authenticated_session_id": "56c0ab86f95b74c3a452faf713749d38",
+            "case": "readback-4k-20261121-08-cpu-fixed",
+            "host_scaling_policy": "cpu",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observer_invalid_reads_full_session": 1,
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.907625274,
+              "viewer": 60.067539787
+            },
+            "unique_fps": 7.783333333333333,
+            "p95_gap_ms": 257.162929,
+            "max_gap_ms": 435.062413,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 435.062413,
+                "measured_start_offset_ms": 59334.435644,
+                "from_marker": 5459,
+                "to_marker": 5470
+              },
+              {
+                "gap_ms": 391.901301,
+                "measured_start_offset_ms": 58912.140789,
+                "from_marker": 5443,
+                "to_marker": 5455
+              },
+              {
+                "gap_ms": 308.20177,
+                "measured_start_offset_ms": 58199.437175,
+                "from_marker": 5400,
+                "to_marker": 5415
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 477,
+              "window_p50_ms": {
+                "minimum": 80.463,
+                "median": 92.125,
+                "maximum": 131.501
+              },
+              "window_p95_ms": {
+                "minimum": 203.742,
+                "median": 211.2355,
+                "maximum": 216.087
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-08-cpu-fixed",
+                "window": 12,
+                "p99_ms": 222.129
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 477,
+              "window_p50_ms": {
+                "minimum": 69.765,
+                "median": 81.77600000000001,
+                "maximum": 121.195
+              },
+              "window_p95_ms": {
+                "minimum": 193.456,
+                "median": 201.1765,
+                "maximum": 205.413
+              },
+              "largest_window_p99": {
+                "case": "readback-4k-20261121-08-cpu-fixed",
+                "window": 12,
+                "p99_ms": 210.644
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 477,
+              "shm_readback_ms": 0,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/cpu-resize/core-getimage/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 11.192879921572231,
+            "source_submit_fps": 59.92791919374123,
+            "source_deadline_skips": 10,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    }
+  ],
+  "route_comparison_complete": true,
+  "auto_all_four_meet_27_unique_fps": false,
+  "cpu_all_four_meet_27_unique_fps": false,
+  "paired_summaries": [
+    {
+      "slots": [
+        1,
+        2
+      ],
+      "execution_order": [
+        "cpu",
+        "auto"
+      ],
+      "status": "valid",
+      "auto_minus_cpu_unique_fps": 1.0666666666666664,
+      "auto_minus_cpu_gap_p95_ms": -13.10066599999999,
+      "auto_minus_cpu_capture_window_p50_median_ms": -22.649999999999995,
+      "auto_minus_cpu_readback_window_p50_median_ms": -22.574
+    },
+    {
+      "slots": [
+        3,
+        4
+      ],
+      "execution_order": [
+        "auto",
+        "cpu"
+      ],
+      "status": "valid",
+      "auto_minus_cpu_unique_fps": 4.566666666666666,
+      "auto_minus_cpu_gap_p95_ms": -97.50196500000001,
+      "auto_minus_cpu_capture_window_p50_median_ms": -75.0645,
+      "auto_minus_cpu_readback_window_p50_median_ms": -72.79
+    },
+    {
+      "slots": [
+        5,
+        6
+      ],
+      "execution_order": [
+        "cpu",
+        "auto"
+      ],
+      "status": "valid",
+      "auto_minus_cpu_unique_fps": 4.933333333333334,
+      "auto_minus_cpu_gap_p95_ms": -103.774189,
+      "auto_minus_cpu_capture_window_p50_median_ms": -81.2945,
+      "auto_minus_cpu_readback_window_p50_median_ms": -79.00099999999999
+    },
+    {
+      "slots": [
+        7,
+        8
+      ],
+      "execution_order": [
+        "auto",
+        "cpu"
+      ],
+      "status": "valid",
+      "auto_minus_cpu_unique_fps": 5.483333333333334,
+      "auto_minus_cpu_gap_p95_ms": -106.96854400000001,
+      "auto_minus_cpu_capture_window_p50_median_ms": -80.6705,
+      "auto_minus_cpu_readback_window_p50_median_ms": -77.87500000000001
+    }
+  ],
+  "arm_summaries": {
+    "cpu": {
+      "trial_count": 4,
+      "trial_unique_fps": {
+        "minimum": 7.783333333333333,
+        "median": 8.225,
+        "maximum": 12.166666666666666
+      },
+      "trial_observer_gap_p95_ms": {
+        "minimum": 152.646624,
+        "median": 246.35088050000002,
+        "maximum": 257.162929
+      },
+      "trial_observer_longest_gap_ms": {
+        "minimum": 281.31113,
+        "median": 423.192519,
+        "maximum": 435.062413
+      },
+      "trial_capture_window_p50_medians_ms": {
+        "minimum": 34.245999999999995,
+        "median": 89.4635,
+        "maximum": 92.778
+      },
+      "trial_readback_window_p50_medians_ms": {
+        "minimum": 26.506500000000003,
+        "median": 79.26025000000001,
+        "maximum": 82.925
+      },
+      "trials_meeting_existing_27_unique_fps_target": 0,
+      "stages": {
+        "host": {
+          "capture": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2218,
+            "window_p50_ms": {
+              "minimum": 23.903,
+              "median": 86.80199999999999,
+              "maximum": 131.501
+            },
+            "window_p95_ms": {
+              "minimum": 71.037,
+              "median": 207.445,
+              "maximum": 217.343
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-08-cpu-fixed",
+              "window": 12,
+              "p99_ms": 222.129
+            }
+          },
+          "core_getimage": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2218,
+            "window_p50_ms": {
+              "minimum": 16.229,
+              "median": 77.027,
+              "maximum": 121.195
+            },
+            "window_p95_ms": {
+              "minimum": 64.275,
+              "median": 196.9065,
+              "maximum": 206.663
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-08-cpu-fixed",
+              "window": 12,
+              "p99_ms": 210.644
+            }
+          },
+          "shm_getimage": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "x11_rgb_conversion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2218,
+            "window_p50_ms": {
+              "minimum": 6.62,
+              "median": 9.7685,
+              "maximum": 10.468
+            },
+            "window_p95_ms": {
+              "minimum": 7.838,
+              "median": 10.813,
+              "maximum": 13.331
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-04-cpu-fixed",
+              "window": 1,
+              "p99_ms": 14.385
+            }
+          },
+          "x11_cpu_resize": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "mailbox_age": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2210,
+            "window_p50_ms": {
+              "minimum": 0.075,
+              "median": 0.085,
+              "maximum": 18.876
+            },
+            "window_p95_ms": {
+              "minimum": 0.112,
+              "median": 44.254000000000005,
+              "maximum": 200.5
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-08-cpu-fixed",
+              "window": 12,
+              "p99_ms": 233.043
+            }
+          },
+          "h264_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2211,
+            "window_p50_ms": {
+              "minimum": 34.66,
+              "median": 36.1405,
+              "maximum": 36.442
+            },
+            "window_p95_ms": {
+              "minimum": 36.595,
+              "median": 39.370999999999995,
+              "maximum": 47.06
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-01-cpu-fixed",
+              "window": 10,
+              "p99_ms": 50.814
+            }
+          },
+          "nvenc_rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2211,
+            "window_p50_ms": {
+              "minimum": 2.928,
+              "median": 3.103,
+              "maximum": 3.34
+            },
+            "window_p95_ms": {
+              "minimum": 3.426,
+              "median": 4.035,
+              "maximum": 7.586
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-01-cpu-fixed",
+              "window": 5,
+              "p99_ms": 8.792
+            }
+          },
+          "nvenc_rgb_to_yuv": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2211,
+            "window_p50_ms": {
+              "minimum": 23.404,
+              "median": 25.0075,
+              "maximum": 25.158
+            },
+            "window_p95_ms": {
+              "minimum": 25.231,
+              "median": 26.889499999999998,
+              "maximum": 33.649
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-05-cpu-fixed",
+              "window": 4,
+              "p99_ms": 38.74
+            }
+          },
+          "nvenc_submit": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2211,
+            "window_p50_ms": {
+              "minimum": 7.597,
+              "median": 7.871,
+              "maximum": 7.953
+            },
+            "window_p95_ms": {
+              "minimum": 8.084,
+              "median": 8.3085,
+              "maximum": 8.402
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-01-cpu-fixed",
+              "window": 10,
+              "p99_ms": 10.156
+            }
+          },
+          "nvenc_output": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2211,
+            "window_p50_ms": {
+              "minimum": 0.003,
+              "median": 0.003,
+              "maximum": 0.004
+            },
+            "window_p95_ms": {
+              "minimum": 0.004,
+              "median": 0.004,
+              "maximum": 0.008
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-08-cpu-fixed",
+              "window": 12,
+              "p99_ms": 0.019
+            }
+          },
+          "writer_lock": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2211,
+            "window_p50_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.001
+            },
+            "window_p95_ms": {
+              "minimum": 0.001,
+              "median": 0.001,
+              "maximum": 0.001
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-04-cpu-fixed",
+              "window": 7,
+              "p99_ms": 0.01
+            }
+          },
+          "socket_write": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2211,
+            "window_p50_ms": {
+              "minimum": 0.308,
+              "median": 0.321,
+              "maximum": 0.334
+            },
+            "window_p95_ms": {
+              "minimum": 0.34,
+              "median": 0.604,
+              "maximum": 1.113
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-08-cpu-fixed",
+              "window": 6,
+              "p99_ms": 1.327
+            }
+          },
+          "credit_wait": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2210,
+            "window_p50_ms": {
+              "minimum": 0.0,
+              "median": 7.982,
+              "maximum": 31.328
+            },
+            "window_p95_ms": {
+              "minimum": 47.022,
+              "median": 81.611,
+              "maximum": 314.327
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-01-cpu-fixed",
+              "window": 6,
+              "p99_ms": 429.672
+            }
+          },
+          "send_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2210,
+            "window_p50_ms": {
+              "minimum": 92.788,
+              "median": 124.75,
+              "maximum": 139.754
+            },
+            "window_p95_ms": {
+              "minimum": 133.521,
+              "median": 149.46550000000002,
+              "maximum": 421.831
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-01-cpu-fixed",
+              "window": 6,
+              "p99_ms": 516.674
+            }
+          },
+          "capture_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2210,
+            "window_p50_ms": {
+              "minimum": 196.617,
+              "median": 252.172,
+              "maximum": 347.718
+            },
+            "window_p95_ms": {
+              "minimum": 266.366,
+              "median": 380.9305,
+              "maximum": 688.352
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-08-cpu-fixed",
+              "window": 12,
+              "p99_ms": 802.943
+            }
+          }
+        },
+        "viewer": {
+          "decode_path_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2204,
+            "window_p50_ms": {
+              "minimum": 46.449,
+              "median": 66.1455,
+              "maximum": 80.955
+            },
+            "window_p95_ms": {
+              "minimum": 79.434,
+              "median": 86.0695,
+              "maximum": 88.188
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-04-cpu-fixed",
+              "window": 9,
+              "p99_ms": 109.16
+            }
+          },
+          "vaapi_decode_call": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2204,
+            "window_p50_ms": {
+              "minimum": 0.751,
+              "median": 0.881,
+              "maximum": 0.974
+            },
+            "window_p95_ms": {
+              "minimum": 0.905,
+              "median": 1.011,
+              "maximum": 1.133
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-05-cpu-fixed",
+              "window": 8,
+              "p99_ms": 5.381
+            }
+          },
+          "vaapi_download": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2204,
+            "window_p50_ms": {
+              "minimum": 15.954,
+              "median": 21.610500000000002,
+              "maximum": 22.536
+            },
+            "window_p95_ms": {
+              "minimum": 22.358,
+              "median": 22.877499999999998,
+              "maximum": 24.475
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-05-cpu-fixed",
+              "window": 4,
+              "p99_ms": 66.708
+            }
+          },
+          "yuv_to_rgb": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2204,
+            "window_p50_ms": {
+              "minimum": 27.244,
+              "median": 38.2405,
+              "maximum": 54.722
+            },
+            "window_p95_ms": {
+              "minimum": 52.1,
+              "median": 59.249,
+              "maximum": 60.03
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-01-cpu-fixed",
+              "window": 6,
+              "p99_ms": 61.956
+            }
+          },
+          "rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2204,
+            "window_p50_ms": {
+              "minimum": 2.32,
+              "median": 2.7744999999999997,
+              "maximum": 3.564
+            },
+            "window_p95_ms": {
+              "minimum": 3.688,
+              "median": 4.4205000000000005,
+              "maximum": 5.173
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-04-cpu-fixed",
+              "window": 10,
+              "p99_ms": 5.703
+            }
+          },
+          "decode_queue": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "presentation_queue": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2205,
+            "window_p50_ms": {
+              "minimum": 0.114,
+              "median": 0.1405,
+              "maximum": 0.21
+            },
+            "window_p95_ms": {
+              "minimum": 0.172,
+              "median": 0.2065,
+              "maximum": 0.276
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-08-cpu-fixed",
+              "window": 4,
+              "p99_ms": 0.325
+            }
+          },
+          "presentation_completion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 2205,
+            "window_p50_ms": {
+              "minimum": 18.013,
+              "median": 26.641,
+              "maximum": 41.402
+            },
+            "window_p95_ms": {
+              "minimum": 30.422,
+              "median": 44.272999999999996,
+              "maximum": 76.274
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-08-cpu-fixed",
+              "window": 2,
+              "p99_ms": 93.221
+            }
+          },
+          "native_submit": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          }
+        }
+      }
+    },
+    "auto": {
+      "trial_count": 4,
+      "trial_unique_fps": {
+        "minimum": 12.966666666666667,
+        "median": 13.108333333333333,
+        "maximum": 13.266666666666667
+      },
+      "trial_observer_gap_p95_ms": {
+        "minimum": 139.039504,
+        "median": 144.87017150000003,
+        "maximum": 152.386103
+      },
+      "trial_observer_longest_gap_ms": {
+        "minimum": 444.375737,
+        "median": 469.5600655,
+        "maximum": 565.061797
+      },
+      "trial_capture_window_p50_medians_ms": {
+        "minimum": 11.4545,
+        "median": 11.53975,
+        "maximum": 11.7375
+      },
+      "trial_readback_window_p50_medians_ms": {
+        "minimum": 3.901,
+        "median": 3.9282500000000002,
+        "maximum": 3.9545
+      },
+      "trials_meeting_existing_27_unique_fps_target": 0,
+      "stages": {
+        "host": {
+          "capture": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3220,
+            "window_p50_ms": {
+              "minimum": 11.143,
+              "median": 11.552499999999998,
+              "maximum": 11.983
+            },
+            "window_p95_ms": {
+              "minimum": 13.196,
+              "median": 14.32,
+              "maximum": 19.378
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-06-auto-fixed",
+              "window": 1,
+              "p99_ms": 24.888
+            }
+          },
+          "core_getimage": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "shm_getimage": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3220,
+            "window_p50_ms": {
+              "minimum": 3.779,
+              "median": 3.934,
+              "maximum": 4.173
+            },
+            "window_p95_ms": {
+              "minimum": 6.17,
+              "median": 6.7195,
+              "maximum": 9.23
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-03-auto-fixed",
+              "window": 7,
+              "p99_ms": 15.835
+            }
+          },
+          "x11_rgb_conversion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3220,
+            "window_p50_ms": {
+              "minimum": 6.922,
+              "median": 7.63,
+              "maximum": 7.743
+            },
+            "window_p95_ms": {
+              "minimum": 7.829,
+              "median": 8.746500000000001,
+              "maximum": 10.307
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-02-auto-fixed",
+              "window": 1,
+              "p99_ms": 15.932
+            }
+          },
+          "x11_cpu_resize": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "mailbox_age": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 26.023,
+              "median": 32.808499999999995,
+              "maximum": 49.984
+            },
+            "window_p95_ms": {
+              "minimum": 81.681,
+              "median": 108.42949999999999,
+              "maximum": 126.382
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-03-auto-fixed",
+              "window": 10,
+              "p99_ms": 136.492
+            }
+          },
+          "h264_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 34.13,
+              "median": 35.545500000000004,
+              "maximum": 35.991
+            },
+            "window_p95_ms": {
+              "minimum": 36.013,
+              "median": 37.879,
+              "maximum": 43.15
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-07-auto-fixed",
+              "window": 4,
+              "p99_ms": 47.573
+            }
+          },
+          "nvenc_rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 2.717,
+              "median": 2.8175,
+              "maximum": 2.984
+            },
+            "window_p95_ms": {
+              "minimum": 3.171,
+              "median": 3.4625000000000004,
+              "maximum": 5.325
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-03-auto-fixed",
+              "window": 6,
+              "p99_ms": 7.667
+            }
+          },
+          "nvenc_rgb_to_yuv": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 23.372,
+              "median": 24.8495,
+              "maximum": 25.142
+            },
+            "window_p95_ms": {
+              "minimum": 25.034,
+              "median": 26.3675,
+              "maximum": 30.689
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-07-auto-fixed",
+              "window": 4,
+              "p99_ms": 37.213
+            }
+          },
+          "nvenc_submit": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 7.625,
+              "median": 7.694,
+              "maximum": 7.849
+            },
+            "window_p95_ms": {
+              "minimum": 8.02,
+              "median": 8.1645,
+              "maximum": 8.31
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-02-auto-fixed",
+              "window": 1,
+              "p99_ms": 10.285
+            }
+          },
+          "nvenc_output": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 0.003,
+              "median": 0.003,
+              "maximum": 0.003
+            },
+            "window_p95_ms": {
+              "minimum": 0.003,
+              "median": 0.004,
+              "maximum": 0.007
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-06-auto-fixed",
+              "window": 3,
+              "p99_ms": 0.103
+            }
+          },
+          "writer_lock": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.0
+            },
+            "window_p95_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.001
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-06-auto-fixed",
+              "window": 7,
+              "p99_ms": 0.007
+            }
+          },
+          "socket_write": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 0.302,
+              "median": 0.312,
+              "maximum": 0.324
+            },
+            "window_p95_ms": {
+              "minimum": 0.334,
+              "median": 0.376,
+              "maximum": 0.607
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-07-auto-fixed",
+              "window": 10,
+              "p99_ms": 0.731
+            }
+          },
+          "credit_wait": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 10.633,
+              "median": 32.0405,
+              "maximum": 43.142
+            },
+            "window_p95_ms": {
+              "minimum": 73.045,
+              "median": 99.929,
+              "maximum": 367.244
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-06-auto-fixed",
+              "window": 7,
+              "p99_ms": 486.082
+            }
+          },
+          "send_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 83.651,
+              "median": 118.91550000000001,
+              "maximum": 132.804
+            },
+            "window_p95_ms": {
+              "minimum": 124.446,
+              "median": 145.726,
+              "maximum": 493.575
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-02-auto-fixed",
+              "window": 8,
+              "p99_ms": 669.064
+            }
+          },
+          "capture_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3159,
+            "window_p50_ms": {
+              "minimum": 163.846,
+              "median": 200.5925,
+              "maximum": 250.752
+            },
+            "window_p95_ms": {
+              "minimum": 226.11,
+              "median": 285.9435,
+              "maximum": 564.529
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-02-auto-fixed",
+              "window": 8,
+              "p99_ms": 820.274
+            }
+          }
+        },
+        "viewer": {
+          "decode_path_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3143,
+            "window_p50_ms": {
+              "minimum": 43.693,
+              "median": 50.607,
+              "maximum": 61.129
+            },
+            "window_p95_ms": {
+              "minimum": 73.006,
+              "median": 85.733,
+              "maximum": 87.066
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-02-auto-fixed",
+              "window": 5,
+              "p99_ms": 110.775
+            }
+          },
+          "vaapi_decode_call": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3143,
+            "window_p50_ms": {
+              "minimum": 0.696,
+              "median": 0.7785,
+              "maximum": 0.856
+            },
+            "window_p95_ms": {
+              "minimum": 0.839,
+              "median": 0.992,
+              "maximum": 1.073
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-06-auto-fixed",
+              "window": 7,
+              "p99_ms": 5.226
+            }
+          },
+          "vaapi_download": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3143,
+            "window_p50_ms": {
+              "minimum": 14.67,
+              "median": 18.1205,
+              "maximum": 19.93
+            },
+            "window_p95_ms": {
+              "minimum": 20.042,
+              "median": 22.609499999999997,
+              "maximum": 24.363
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-03-auto-fixed",
+              "window": 12,
+              "p99_ms": 71.973
+            }
+          },
+          "yuv_to_rgb": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3143,
+            "window_p50_ms": {
+              "minimum": 24.853,
+              "median": 28.59,
+              "maximum": 38.486
+            },
+            "window_p95_ms": {
+              "minimum": 51.409,
+              "median": 58.914,
+              "maximum": 59.841
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-03-auto-fixed",
+              "window": 10,
+              "p99_ms": 60.776
+            }
+          },
+          "rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3143,
+            "window_p50_ms": {
+              "minimum": 2.321,
+              "median": 2.6715,
+              "maximum": 2.721
+            },
+            "window_p95_ms": {
+              "minimum": 3.185,
+              "median": 4.4435,
+              "maximum": 5.105
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-06-auto-fixed",
+              "window": 3,
+              "p99_ms": 6.065
+            }
+          },
+          "decode_queue": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "presentation_queue": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3140,
+            "window_p50_ms": {
+              "minimum": 0.07,
+              "median": 0.134,
+              "maximum": 0.188
+            },
+            "window_p95_ms": {
+              "minimum": 0.162,
+              "median": 0.202,
+              "maximum": 0.275
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-07-auto-fixed",
+              "window": 7,
+              "p99_ms": 0.336
+            }
+          },
+          "presentation_completion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 3140,
+            "window_p50_ms": {
+              "minimum": 17.345,
+              "median": 21.42,
+              "maximum": 39.699
+            },
+            "window_p95_ms": {
+              "minimum": 29.237,
+              "median": 40.961,
+              "maximum": 76.638
+            },
+            "largest_window_p99": {
+              "case": "readback-4k-20261121-07-auto-fixed",
+              "window": 7,
+              "p99_ms": 81.947
+            }
+          },
+          "native_submit": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          }
+        }
+      }
+    }
+  },
+  "method": "Exact 60-second viewer-visible marker score after 30 seconds of warmup within a 105-second window in one authenticated session per attempt. Host and viewer retain their own whole-window clocks. Stage quantiles describe reporting windows. Arm summaries use the first valid result per slot. Route completion and the 27 unique FPS target are evaluated separately.",
+  "fixture_provenance": {
+    "benchmark.py": {
+      "sha256_before_redaction": "ea833e8a8c1dd120145a1276ada60678a028e45b421a4f92c856629f4599edbb",
+      "redacted": true,
+      "record_origin": "staged local file"
+    },
+    "processes.py": {
+      "sha256_before_redaction": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "redacted": false,
+      "record_origin": "staged local file"
+    },
+    "source.py": {
+      "sha256_before_redaction": "f71c60e20a755e598f813a572bfc5ebe9cd4141374197f51ce3f08d202b2a153",
+      "redacted": false,
+      "record_origin": "supplied local copy"
+    }
+  },
+  "link_context": {
+    "before": {
+      "sha256_before_omission": "2ec16b329162f4faa805ab17662a58bc593b58ffaefbc8c4c7876165df878b9a",
+      "packets": {
+        "transmitted": 8,
+        "received": 8
+      },
+      "rtt_ms": {
+        "min": 1.563,
+        "mean": 1.928,
+        "max": 2.681,
+        "mdev": 0.414
+      }
+    },
+    "after": {
+      "sha256_before_omission": "5dca53d2ac4ac431eafbc08aa09ebb651bc3d9722d1d38d5ece5611fa4f008ef",
+      "packets": {
+        "transmitted": 8,
+        "received": 8
+      },
+      "rtt_ms": {
+        "min": 1.543,
+        "mean": 2.247,
+        "max": 2.543,
+        "mdev": 0.299
+      }
+    }
+  },
+  "controller_diagnostics": {
+    "sha256_before_omission": "f7ca77ed1ce34569c087b2216ee44f53c01adb93ea8aa161920591764a744d32",
+    "recognized_reasons": [],
+    "terminal_error_types": [],
+    "reported_starts": [
+      "readback-4k-20261121-01-cpu-fixed",
+      "readback-4k-20261121-02-auto-fixed",
+      "readback-4k-20261121-03-auto-fixed",
+      "readback-4k-20261121-04-cpu-fixed",
+      "readback-4k-20261121-05-cpu-fixed",
+      "readback-4k-20261121-06-auto-fixed",
+      "readback-4k-20261121-07-auto-fixed",
+      "readback-4k-20261121-08-cpu-fixed"
+    ],
+    "reported_failures": []
+  },
+  "route_and_scope": "Two isolated Xvfb desktops, Ubuntu host and Mint viewer, authenticated fixed NVENC H.264 over an unpaced SSH forward on the measured Wi-Fi link. Planned CPU/core XGetImage and AUTO/MIT-SHM arms differ only in host readback selection. Valid attempts establish the actual host readback, VA-API decode, and X11 RGB presentation. Observer-visible unique frame counts are local to this workload.",
+  "archive": {
+    "path": "x11-native-4k-readback-abba-raw.zip",
+    "sha256": "593be85dc487338658fbf65e83c43ef6a4c2f77f9940e4c5d3dfff6f3838b11f",
+    "entries": {
+      "fixture/benchmark.py": "9158dd2bcda219141c53bedd2c578f3b830ebe40998c4565e4154ebcc059e0bc",
+      "fixture/processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "fixture/source.py": "f71c60e20a755e598f813a572bfc5ebe9cd4141374197f51ce3f08d202b2a153",
+      "fixture/p09-workload.c": "47f6fd3ad8606673e78680846dad7b749598238153e9abddf328d2cdea89e06e",
+      "fixture/publish_abba.py": "26a4a20e7f02f4cb25d0cf570264a3e456228c14ec0bfffb8fc28778ff890af5",
+      "fixture/finalize_abba.py": "e5ff151483f51549a791f028eeee38740b7ba57edd76adede2b3109f56c122fc",
+      "fixture/stages.py": "325f4821b950f4742e3c3f9dfa8ed460c8a5968b037443171144519a1059854c",
+      "run/painter-sha256": "79f2b7d5e40e9dd7fbc7bfb0b18f33337ed50e6761226466219864c9e2422403",
+      "run/pins.json": "9348013c5219e3ac89ea67c7d6c8f980f1661e9a8632d4fa80d7a09fc17f3db0",
+      "run/readback-4k-20261121-01-cpu-fixed/result.json": "bfe60c5dac22a1d890a38e7cb66303eba130c1045a13a6ad9ac47afd5520a511",
+      "run/readback-4k-20261121-01-cpu-fixed/observed.jsonl": "1cfc0ed987c74aa5c4d60b66e0bb42dd007052297a5679d099757c0c1924afd2",
+      "run/readback-4k-20261121-01-cpu-fixed/viewer-clock.jsonl": "808bf6eade475db6a05fd9963e258535db1584252b386cb1173d8c618bfd71dc",
+      "run/readback-4k-20261121-01-cpu-fixed/retained-host.jsonl": "32ac145510878a17a8618fef8b5e641813bff0e16c256eed30f110586a702e82",
+      "run/readback-4k-20261121-01-cpu-fixed/retained-viewer.jsonl": "f587916fa1926f27a9c7c2f8b5e7fb77f1d2887beeb289b7681d22ed50d57ee4",
+      "run/readback-4k-20261121-01-cpu-fixed/retained-markers.jsonl": "f8520733ee057fa83ba5c0afcbf40855c3e383968bcd9e2f1bbdedb419a08e24",
+      "run/readback-4k-20261121-01-cpu-fixed/remote/paint.jsonl": "14de8841195b5c095aa760610aa4adb6bee0099e40bfb52867f23fc7d6eff217",
+      "run/readback-4k-20261121-01-cpu-fixed/remote/binaries.json": "16ba1fa2c44cca28fafab2506ef570f6df42dfd4e5db4d47d4acd07c59f5d25c",
+      "run/readback-4k-20261121-01-cpu-fixed/remote/host-telemetry.jsonl": "d3f1ce8e1336a7db4817174729f2cacb56543d0beaf2f7a72f62cc390589d203",
+      "run/readback-4k-20261121-01-cpu-fixed/viewer-telemetry.jsonl": "07c63e93dca0b8d19aac8ab01221e7c22798c245040d8c949ebb49204eafd9ad",
+      "run/readback-4k-20261121-01-cpu-fixed/diagnostics.json": "74471b64caf1c407522b23a42ad06270325a35a08e0bde27b6426575f1337dcc",
+      "run/readback-4k-20261121-02-auto-fixed/result.json": "c3c2a7dfbb473139c532f7b18529a2219b7ec48f735f50e93cfaf30362886892",
+      "run/readback-4k-20261121-02-auto-fixed/observed.jsonl": "02c4b42c38f04be12a9267d877da28f640eb9bceecc646bef70c49f2807780e8",
+      "run/readback-4k-20261121-02-auto-fixed/viewer-clock.jsonl": "19e71f00ef7edec8d35d277a50a0ba5e3b92521b7c9e2ffeafec0e50de53cb01",
+      "run/readback-4k-20261121-02-auto-fixed/retained-host.jsonl": "c517bd499cd5535ad22d6472321c6a3d3a112fe2d2b89924e09d043027e0370d",
+      "run/readback-4k-20261121-02-auto-fixed/retained-viewer.jsonl": "bbd46905941e41a535634faa6b30968554cbc9f9e783678a546e4bf7ce241552",
+      "run/readback-4k-20261121-02-auto-fixed/retained-markers.jsonl": "fb7d148e9cf5159a9c7e38bf73f52c2c2c24b9034d8b842f99b1813aa2841bd2",
+      "run/readback-4k-20261121-02-auto-fixed/remote/paint.jsonl": "db167faaea1c694ca5d802dae9badcd77c3a74ab743ed03d04f925a5f5517501",
+      "run/readback-4k-20261121-02-auto-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/readback-4k-20261121-02-auto-fixed/remote/host-telemetry.jsonl": "dc978bb1ac7b7d4c0ea15a7b12c205b2abc3ab74ee172b77a17c8d69ea939d6e",
+      "run/readback-4k-20261121-02-auto-fixed/viewer-telemetry.jsonl": "0a3580eed7e53d8d0b8db27a06e3ed75ab87765da95220d56eefe66ba07c408b",
+      "run/readback-4k-20261121-02-auto-fixed/diagnostics.json": "3446becf3a8d852dfe9a6e6458acc303ea5e07e359865fe622579b2308c7d032",
+      "run/readback-4k-20261121-03-auto-fixed/result.json": "b0a14f79a0975abf48c2a8badcbf27ea1c78965b856d72365c0928f4b3987d36",
+      "run/readback-4k-20261121-03-auto-fixed/observed.jsonl": "4896551f54215c54f6891835c6ae27aa4104d2a4ce5fd1cc3d942958b97e0c04",
+      "run/readback-4k-20261121-03-auto-fixed/viewer-clock.jsonl": "9cc641f4db919d3137c0771bdbee10ba4b0ccb8eed6a4188502c715c910e2c1b",
+      "run/readback-4k-20261121-03-auto-fixed/retained-host.jsonl": "e1c278fc821a1df6ee9cb77665d00bdd16439a6853c047f51156afd85a19534f",
+      "run/readback-4k-20261121-03-auto-fixed/retained-viewer.jsonl": "ecb5080e36488a8c2b288a1135f08547ed759fbb82df2bab4eb7920f8fabfadd",
+      "run/readback-4k-20261121-03-auto-fixed/retained-markers.jsonl": "c6107c43c27df9991e9ad7f15cd1729d618e037b2534363e88b64c8977490666",
+      "run/readback-4k-20261121-03-auto-fixed/remote/paint.jsonl": "239cd4707f03c68db56bdbb8b24bd61bed10ebd264763c7f603461ee1e310899",
+      "run/readback-4k-20261121-03-auto-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/readback-4k-20261121-03-auto-fixed/remote/host-telemetry.jsonl": "b965a5def4e1e7b721803a733b5bc08d0fb641350edf314de571d8936bc6e3ca",
+      "run/readback-4k-20261121-03-auto-fixed/viewer-telemetry.jsonl": "45d1968c4b7ac8ce506c7d1c758575a733b924f17abcb7e9b34c4e7850d0d1c5",
+      "run/readback-4k-20261121-03-auto-fixed/diagnostics.json": "c810dc8e458672a033212a3d542be4d7073691088fdede3fb6d3f22f9d455161",
+      "run/readback-4k-20261121-04-cpu-fixed/result.json": "5f219d693691c1d1f99614c41f1610d3c79f416a352bb92f4f60a2bb394f3981",
+      "run/readback-4k-20261121-04-cpu-fixed/observed.jsonl": "0fa387a96c4ff9f4c659c3c95dae83af90894847bc6bc21f602edcd732d3e383",
+      "run/readback-4k-20261121-04-cpu-fixed/viewer-clock.jsonl": "03ec517a9857612b8e2d26becbf5c15962d379cdb7b26346a76b04d129cfc3e4",
+      "run/readback-4k-20261121-04-cpu-fixed/retained-host.jsonl": "4411fb66d62f0a801a1cceaec29d616b6f4771311c8bc82764c0975063c5d2be",
+      "run/readback-4k-20261121-04-cpu-fixed/retained-viewer.jsonl": "7b9f3a23dfce2c2b1f96d4941d6390b0264cc6f975f58398cde53ff0228554ec",
+      "run/readback-4k-20261121-04-cpu-fixed/retained-markers.jsonl": "5defc257a77cdc88c977fde647ee559dddc4fdf64ee81370978a4d52391059ad",
+      "run/readback-4k-20261121-04-cpu-fixed/remote/paint.jsonl": "d9fcef742358ea12f23a605436dc5d45a3449903a1a9e314e49d29079fe13bd6",
+      "run/readback-4k-20261121-04-cpu-fixed/remote/binaries.json": "16ba1fa2c44cca28fafab2506ef570f6df42dfd4e5db4d47d4acd07c59f5d25c",
+      "run/readback-4k-20261121-04-cpu-fixed/remote/host-telemetry.jsonl": "8a0430e8b83c4ffdf9068eca5354c85dacd8b8935266b244e6af58f6d12233a6",
+      "run/readback-4k-20261121-04-cpu-fixed/viewer-telemetry.jsonl": "f98dedb5ed0ae867cbd11b10c5b91f5daa67a8f8a055ac7ff367ee042b04ac6f",
+      "run/readback-4k-20261121-04-cpu-fixed/diagnostics.json": "975cb55cd00601774b4e5ffeedf50b57fc4891e382ce392a88397a33172aec24",
+      "run/readback-4k-20261121-05-cpu-fixed/result.json": "211c64ecf005743b9011b64629ae6158b28a64340f370972c9795cb05f00e43f",
+      "run/readback-4k-20261121-05-cpu-fixed/observed.jsonl": "86a6a2543b9c08d0c652ee6745c4563b6d975677efd68a8d3342b972eb02fb5d",
+      "run/readback-4k-20261121-05-cpu-fixed/viewer-clock.jsonl": "a8102259ff38047de1b480926fb0c799cf9d1e7bb07eea819d2eb71b2f50935c",
+      "run/readback-4k-20261121-05-cpu-fixed/retained-host.jsonl": "7b6b0bc6cfa8aaf53566f1c41fc534a5f8746f55af92ac76c97a13ab38952446",
+      "run/readback-4k-20261121-05-cpu-fixed/retained-viewer.jsonl": "6cd24ae852612b17c9c0b214f5c98ea8bcdbe286773f93e8ef33b4417a094e2c",
+      "run/readback-4k-20261121-05-cpu-fixed/retained-markers.jsonl": "063ff1084694cab9903a8122bdd0afda6316161675c3ab213a959c46548c581e",
+      "run/readback-4k-20261121-05-cpu-fixed/remote/paint.jsonl": "364df6d30e5afddd6b70c3e68096c283f81b48d1640d5e328509909dc4f493ac",
+      "run/readback-4k-20261121-05-cpu-fixed/remote/binaries.json": "16ba1fa2c44cca28fafab2506ef570f6df42dfd4e5db4d47d4acd07c59f5d25c",
+      "run/readback-4k-20261121-05-cpu-fixed/remote/host-telemetry.jsonl": "67289f2f0364e302894a046c67917ef9baec48d2ab7b8dc069d8e39b467e21a2",
+      "run/readback-4k-20261121-05-cpu-fixed/viewer-telemetry.jsonl": "90a97e9a0d0e0b622bb24112a69c84fe877c9949d34f038911620370f61811da",
+      "run/readback-4k-20261121-05-cpu-fixed/diagnostics.json": "a767a15e9bf872c78519247bc8db65bf37008e8afa4ca6be807ae661dc049c1f",
+      "run/readback-4k-20261121-06-auto-fixed/result.json": "553aa3353b84608ee1b1f099045f196b4e83e834afd1040a6dc6117a36dd4bf3",
+      "run/readback-4k-20261121-06-auto-fixed/observed.jsonl": "c56333b558700e69b54687e69a8c7a0e2887158fad01953be756088ffed29843",
+      "run/readback-4k-20261121-06-auto-fixed/viewer-clock.jsonl": "ed5afa7f5d5f42dbfac5e858524d118f5fef5af51374fbfdf7e0ed933b3e29e5",
+      "run/readback-4k-20261121-06-auto-fixed/retained-host.jsonl": "5bd36ee8b56ba0c11196c20e990f388996c20b02e43c528f5d4e2cf359ebded6",
+      "run/readback-4k-20261121-06-auto-fixed/retained-viewer.jsonl": "bf7249e8df44f589ed28463b15c14915a3ca8e88c0eee1bc893415799cc04b04",
+      "run/readback-4k-20261121-06-auto-fixed/retained-markers.jsonl": "85c6aba8715a380631a1b8c307dfd6d05574bb4ff2eb83f019eb55f581ae8e10",
+      "run/readback-4k-20261121-06-auto-fixed/remote/paint.jsonl": "de2da6c611ab70ea94e28b20c219c16329895f6ba19c0137c1048c5d7c92e636",
+      "run/readback-4k-20261121-06-auto-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/readback-4k-20261121-06-auto-fixed/remote/host-telemetry.jsonl": "cc8a3f8131d2120482b0d32f0ebf7f704047838b22f3a6ed2d17af82ffb59c77",
+      "run/readback-4k-20261121-06-auto-fixed/viewer-telemetry.jsonl": "58ea6cbc048a0f5e727cf6a5f03bc4cf3fdacc123c32d9eccf35e7e9dcec2417",
+      "run/readback-4k-20261121-06-auto-fixed/diagnostics.json": "6ce0989a5eef682d8f16528f4d714e9575011bf72f4c9f08113b04c3893bb4e8",
+      "run/readback-4k-20261121-07-auto-fixed/result.json": "12692f1a6c265aa59f41bf8e05eda3f5f7b6f0922e20d4c4dec726e0fdd1fdf5",
+      "run/readback-4k-20261121-07-auto-fixed/observed.jsonl": "ad4365026bd41fbd8f2955b7b05f9f0408a1cc9f0a25cdc7db43b920076a89f5",
+      "run/readback-4k-20261121-07-auto-fixed/viewer-clock.jsonl": "2d6012f32ef0a78d9a3a9ad2fc03268c9fc38498982a361468ec6112cc3ababe",
+      "run/readback-4k-20261121-07-auto-fixed/retained-host.jsonl": "5dac0b35c25f05c60cd00b1c13b801a6e47880a24e9e9f0d9a066aa5c3d0583f",
+      "run/readback-4k-20261121-07-auto-fixed/retained-viewer.jsonl": "5bcc9adcfc7713e5f2c5d90666e5e7ae0aff1279d68ad8eca3a6b7eafd6f2254",
+      "run/readback-4k-20261121-07-auto-fixed/retained-markers.jsonl": "81fda512a418b5b1e8eac40b3c8b408a7a84d23d83b0a00f9d2fe6a964e08e92",
+      "run/readback-4k-20261121-07-auto-fixed/remote/paint.jsonl": "55fb509f7f7cfc52ec50f2649ad63c3f602c50df9335cad8497ba99e9f8e7457",
+      "run/readback-4k-20261121-07-auto-fixed/remote/binaries.json": "fdc10171089d1aff25ced770416dbd43d571b581da9f7f0763af7eeaa79fe8a0",
+      "run/readback-4k-20261121-07-auto-fixed/remote/host-telemetry.jsonl": "ca9ce5fec64d7e33467241b423f7dccc24e45c49079d4647d07030f457c7d308",
+      "run/readback-4k-20261121-07-auto-fixed/viewer-telemetry.jsonl": "240efabfa1890fadf092ca278758dd3817ff919d090b2f476dc039dc7dc756f6",
+      "run/readback-4k-20261121-07-auto-fixed/diagnostics.json": "ee76331176241918846f0179b06709a620f132973cc241a3bf465dc9a716bc9a",
+      "run/readback-4k-20261121-08-cpu-fixed/result.json": "60be98e6d168a802730412eea3519798283502a47cb7c87db899bbff445241eb",
+      "run/readback-4k-20261121-08-cpu-fixed/observed.jsonl": "d44ae6a0f4d9753c80886e67582394bffa347b2266e373f7245495918ee396d6",
+      "run/readback-4k-20261121-08-cpu-fixed/viewer-clock.jsonl": "bd3148a6c459a6cd3eced77b61b3428653c37ea8e5b3d3e2b92adf42bb2c6d39",
+      "run/readback-4k-20261121-08-cpu-fixed/retained-host.jsonl": "0246e5ac76861d8ddf0384cc308609b70d67894c2e031e1b95725ac410611046",
+      "run/readback-4k-20261121-08-cpu-fixed/retained-viewer.jsonl": "b484f6525cc8aa3563194ae2c22972335d888a89ed5a8683aac9ae40176dae5f",
+      "run/readback-4k-20261121-08-cpu-fixed/retained-markers.jsonl": "d4b29a32d37f5bc27993aae9877471563780dbd312d16830f8ba9198dad0d542",
+      "run/readback-4k-20261121-08-cpu-fixed/remote/paint.jsonl": "ed1115bb15dd3db1455aac1dc661602cf15252563de582b4a76dae8ffba09841",
+      "run/readback-4k-20261121-08-cpu-fixed/remote/binaries.json": "16ba1fa2c44cca28fafab2506ef570f6df42dfd4e5db4d47d4acd07c59f5d25c",
+      "run/readback-4k-20261121-08-cpu-fixed/remote/host-telemetry.jsonl": "2cbadc0bc684e657d1ca16af89d59b5e1fcb921c09be4535546a677b557caee2",
+      "run/readback-4k-20261121-08-cpu-fixed/viewer-telemetry.jsonl": "0549d38d99061af145788d1c5abeb5270ee9e70e836ddad8dfad1ab6a07d3b2a",
+      "run/readback-4k-20261121-08-cpu-fixed/diagnostics.json": "4c212cf42706f888b4d0e600b82f719ff6344f12cc420d693b38498545a30e9e",
+      "run/link-before.json": "447ef5ad1cbdb1c535935868386944d24edcd95f0a481698fec10e529e9de9a8",
+      "run/link-after.json": "7915c30d7ab194c2324edc1d51d44d71cdf6df674e4fcded77a97945f6349045",
+      "run/controller-diagnostics.json": "80e462f8ed7275b7d18f5bfc3a2883db4566817b7a37837167e719d31c36ffc1",
+      "run/terminal.json": "9201477155592e13914a0d4a966e5aed8da61836ff5bd300b527a32229d9328d"
+    }
+  }
+}

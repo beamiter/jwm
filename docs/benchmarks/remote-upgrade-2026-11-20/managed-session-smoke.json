@@ -1,0 +1,1013 @@
+{
+  "aether_gui": {
+    "disconnected_cleanly": true,
+    "environment": "Tauri 2 native WebKitGTK 2.52.6 on private Xvfb with Metacity",
+    "first_acks": 3,
+    "first_source": {
+      "codec": "JPEG",
+      "encoded_dimensions": [
+        640,
+        480
+      ],
+      "geometry_epoch": 4,
+      "sequence": 2,
+      "source_dimensions": [
+        640,
+        480
+      ],
+      "source_epoch": 1
+    },
+    "host_shift_released_on_window_close": true,
+    "native_window_close_exit_status": 0,
+    "opener": "Remote Desktop tab",
+    "same_viewer": true,
+    "second_acks": 2,
+    "second_source": {
+      "codec": "JPEG",
+      "encoded_dimensions": [
+        300,
+        200
+      ],
+      "geometry_epoch": 5,
+      "sequence": 4,
+      "source_dimensions": [
+        300,
+        200
+      ],
+      "source_epoch": 2
+    },
+    "terminal_tab_preserved_viewer": true,
+    "transport": "Authenticated loopback TCP",
+    "wayland": {
+      "compositor": "Weston 13.0.0 headless Pixman",
+      "disconnected_cleanly": true,
+      "first_acks": 3,
+      "first_source": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          640,
+          480
+        ],
+        "geometry_epoch": 4,
+        "sequence": 2,
+        "source_dimensions": [
+          640,
+          480
+        ],
+        "source_epoch": 1
+      },
+      "mode": "View only",
+      "native_viewer": "Wayland",
+      "same_viewer_helper": true,
+      "second_acks": 2,
+      "second_source": {
+        "codec": "JPEG",
+        "encoded_dimensions": [
+          300,
+          200
+        ],
+        "geometry_epoch": 5,
+        "sequence": 4,
+        "source_dimensions": [
+          300,
+          200
+        ],
+        "source_epoch": 2
+      }
+    }
+  },
+  "fixture": "Two private Xvfb displays and authenticated loopback TCP",
+  "forge_gui": {
+    "disconnected_cleanly": true,
+    "environment": "GTK4 with Metacity on private Xvfb, view-only, authenticated loopback TCP",
+    "first_acks": 3,
+    "first_source": {
+      "codec": "JPEG",
+      "encoded_dimensions": [
+        640,
+        480
+      ],
+      "geometry_epoch": 4,
+      "sequence": 2,
+      "source_dimensions": [
+        640,
+        480
+      ],
+      "source_epoch": 1
+    },
+    "opener": "command palette",
+    "same_viewer": true,
+    "second_acks": 1,
+    "second_source": {
+      "codec": "JPEG",
+      "encoded_dimensions": [
+        300,
+        200
+      ],
+      "geometry_epoch": 5,
+      "sequence": 3,
+      "source_dimensions": [
+        300,
+        200
+      ],
+      "source_epoch": 2
+    }
+  },
+  "interface": "jwm-remote session, JSON Lines protocol 1",
+  "runs": {
+    "local": {
+      "actual_host_shift_released": true,
+      "closed_cleanly": true,
+      "events": [
+        {
+          "catalog": null,
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": null,
+          "metrics": null,
+          "protocol": 1,
+          "state": "connecting"
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "1e829240c6886558e64355f784ba1899",
+            "source_epoch": "1",
+            "source_id": 1
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": null,
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "1e829240c6886558e64355f784ba1899",
+            "source_epoch": "1",
+            "source_id": 1
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": true,
+          "metrics": null,
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "accepted": true,
+          "error": null,
+          "event": "command_result",
+          "protocol": 1,
+          "request": 1
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "1e829240c6886558e64355f784ba1899",
+            "source_epoch": "1",
+            "source_id": 1
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": null,
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "accepted": false,
+          "error": "invalid_or_stale_selection",
+          "event": "command_result",
+          "protocol": 1,
+          "request": 2
+        },
+        {
+          "accepted": true,
+          "error": null,
+          "event": "command_result",
+          "protocol": 1,
+          "request": 3
+        },
+        {
+          "catalog": null,
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": null,
+          "protocol": 1,
+          "state": "waiting_for_presentation"
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "1e829240c6886558e64355f784ba1899",
+            "source_epoch": "2",
+            "source_id": 2
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": null,
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "1e829240c6886558e64355f784ba1899",
+            "source_epoch": "2",
+            "source_id": 2
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": {
+            "acked_frames": 3,
+            "decode_ms": {
+              "mean": 22.48279033333333,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 22.712,
+                "p95_ms": 44.698,
+                "p99_ms": 44.698,
+                "samples": 3
+              }
+            },
+            "final": false,
+            "last_decoded_frame": {
+              "codec": "JPEG",
+              "encoded_dimensions": [
+                300,
+                200
+              ],
+              "geometry_epoch": 4,
+              "sequence": 2,
+              "source_dimensions": [
+                300,
+                200
+              ],
+              "source_epoch": 2
+            },
+            "last_presentation_path": "rgb",
+            "native_preparation_and_submit_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "native_presented_frames": 0,
+            "negotiated_codec": "JPEG",
+            "presentation_completion_ms": {
+              "mean": 8.316402333333334,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 8.841,
+                "p95_ms": 14.064,
+                "p99_ms": 14.064,
+                "samples": 3
+              }
+            },
+            "presentation_queue_ms": {
+              "mean": 1.836044,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 0.245,
+                "p95_ms": 5.08,
+                "p99_ms": 5.08,
+                "samples": 3
+              }
+            },
+            "presented_frames": 3,
+            "session_id": "1e829240c6886558e64355f784ba1899",
+            "window_ms": 5000.855373
+          },
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "accepted": false,
+          "error": "invalid_or_stale_selection",
+          "event": "command_result",
+          "protocol": 1,
+          "request": 4
+        },
+        {
+          "accepted": true,
+          "error": null,
+          "event": "command_result",
+          "protocol": 1,
+          "request": 5
+        },
+        {
+          "catalog": null,
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": null,
+          "metrics": {
+            "acked_frames": 3,
+            "decode_ms": {
+              "mean": 22.48279033333333,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 22.712,
+                "p95_ms": 44.698,
+                "p99_ms": 44.698,
+                "samples": 3
+              }
+            },
+            "final": false,
+            "last_decoded_frame": {
+              "codec": "JPEG",
+              "encoded_dimensions": [
+                300,
+                200
+              ],
+              "geometry_epoch": 4,
+              "sequence": 2,
+              "source_dimensions": [
+                300,
+                200
+              ],
+              "source_epoch": 2
+            },
+            "last_presentation_path": "rgb",
+            "native_preparation_and_submit_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "native_presented_frames": 0,
+            "negotiated_codec": "JPEG",
+            "presentation_completion_ms": {
+              "mean": 8.316402333333334,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 8.841,
+                "p95_ms": 14.064,
+                "p99_ms": 14.064,
+                "samples": 3
+              }
+            },
+            "presentation_queue_ms": {
+              "mean": 1.836044,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 0.245,
+                "p95_ms": 5.08,
+                "p99_ms": 5.08,
+                "samples": 3
+              }
+            },
+            "presented_frames": 3,
+            "session_id": "1e829240c6886558e64355f784ba1899",
+            "window_ms": 5000.855373
+          },
+          "protocol": 1,
+          "state": "closing"
+        },
+        {
+          "catalog": null,
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": null,
+          "metrics": {
+            "acked_frames": 0,
+            "decode_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "final": true,
+            "last_decoded_frame": null,
+            "last_presentation_path": null,
+            "native_preparation_and_submit_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "native_presented_frames": 0,
+            "negotiated_codec": "JPEG",
+            "presentation_completion_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "presentation_queue_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "presented_frames": 0,
+            "session_id": "1e829240c6886558e64355f784ba1899",
+            "window_ms": 37.481394
+          },
+          "protocol": 1,
+          "state": "closed"
+        }
+      ],
+      "source_dimensions": [
+        300,
+        200
+      ],
+      "stale_selection_rejected": true,
+      "switch": [
+        "1",
+        "2"
+      ]
+    },
+    "ubuntu": {
+      "actual_host_shift_released": true,
+      "closed_cleanly": true,
+      "events": [
+        {
+          "catalog": null,
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": null,
+          "metrics": null,
+          "protocol": 1,
+          "state": "connecting"
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "f92574de65e816341b0075c8c7706a3f",
+            "source_epoch": "1",
+            "source_id": 1
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": null,
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "f92574de65e816341b0075c8c7706a3f",
+            "source_epoch": "1",
+            "source_id": 1
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": true,
+          "metrics": null,
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "accepted": true,
+          "error": null,
+          "event": "command_result",
+          "protocol": 1,
+          "request": 1
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "f92574de65e816341b0075c8c7706a3f",
+            "source_epoch": "1",
+            "source_id": 1
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": null,
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "accepted": false,
+          "error": "invalid_or_stale_selection",
+          "event": "command_result",
+          "protocol": 1,
+          "request": 2
+        },
+        {
+          "accepted": true,
+          "error": null,
+          "event": "command_result",
+          "protocol": 1,
+          "request": 3
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "f92574de65e816341b0075c8c7706a3f",
+            "source_epoch": "2",
+            "source_id": 2
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": null,
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "catalog": {
+            "entries": [
+              {
+                "label": "640x480+0+0",
+                "source_id": 1
+              },
+              {
+                "label": "300x200+50+60",
+                "source_id": 2
+              }
+            ],
+            "session_id": "f92574de65e816341b0075c8c7706a3f",
+            "source_epoch": "2",
+            "source_id": 2
+          },
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": false,
+          "metrics": {
+            "acked_frames": 3,
+            "decode_ms": {
+              "mean": 0.9219226666666667,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 0.507,
+                "p95_ms": 2.255,
+                "p99_ms": 2.255,
+                "samples": 3
+              }
+            },
+            "final": false,
+            "last_decoded_frame": {
+              "codec": "JPEG",
+              "encoded_dimensions": [
+                300,
+                200
+              ],
+              "geometry_epoch": 4,
+              "sequence": 2,
+              "source_dimensions": [
+                300,
+                200
+              ],
+              "source_epoch": 2
+            },
+            "last_presentation_path": "rgb",
+            "native_preparation_and_submit_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "native_presented_frames": 0,
+            "negotiated_codec": "JPEG",
+            "presentation_completion_ms": {
+              "mean": 2.0919526666666663,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 2.271,
+                "p95_ms": 3.101,
+                "p99_ms": 3.101,
+                "samples": 3
+              }
+            },
+            "presentation_queue_ms": {
+              "mean": 0.704415,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 0.147,
+                "p95_ms": 1.876,
+                "p99_ms": 1.876,
+                "samples": 3
+              }
+            },
+            "presented_frames": 3,
+            "session_id": "f92574de65e816341b0075c8c7706a3f",
+            "window_ms": 5000.705623
+          },
+          "protocol": 1,
+          "state": "viewing"
+        },
+        {
+          "accepted": false,
+          "error": "invalid_or_stale_selection",
+          "event": "command_result",
+          "protocol": 1,
+          "request": 4
+        },
+        {
+          "accepted": true,
+          "error": null,
+          "event": "command_result",
+          "protocol": 1,
+          "request": 5
+        },
+        {
+          "catalog": null,
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": null,
+          "metrics": {
+            "acked_frames": 3,
+            "decode_ms": {
+              "mean": 0.9219226666666667,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 0.507,
+                "p95_ms": 2.255,
+                "p99_ms": 2.255,
+                "samples": 3
+              }
+            },
+            "final": false,
+            "last_decoded_frame": {
+              "codec": "JPEG",
+              "encoded_dimensions": [
+                300,
+                200
+              ],
+              "geometry_epoch": 4,
+              "sequence": 2,
+              "source_dimensions": [
+                300,
+                200
+              ],
+              "source_epoch": 2
+            },
+            "last_presentation_path": "rgb",
+            "native_preparation_and_submit_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "native_presented_frames": 0,
+            "negotiated_codec": "JPEG",
+            "presentation_completion_ms": {
+              "mean": 2.0919526666666663,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 2.271,
+                "p95_ms": 3.101,
+                "p99_ms": 3.101,
+                "samples": 3
+              }
+            },
+            "presentation_queue_ms": {
+              "mean": 0.704415,
+              "observations": 3,
+              "quantiles": {
+                "p50_ms": 0.147,
+                "p95_ms": 1.876,
+                "p99_ms": 1.876,
+                "samples": 3
+              }
+            },
+            "presented_frames": 3,
+            "session_id": "f92574de65e816341b0075c8c7706a3f",
+            "window_ms": 5000.705623
+          },
+          "protocol": 1,
+          "state": "closing"
+        },
+        {
+          "catalog": null,
+          "event": "snapshot",
+          "failure": null,
+          "input_grabbed": null,
+          "metrics": {
+            "acked_frames": 0,
+            "decode_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "final": true,
+            "last_decoded_frame": null,
+            "last_presentation_path": null,
+            "native_preparation_and_submit_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "native_presented_frames": 0,
+            "negotiated_codec": "JPEG",
+            "presentation_completion_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "presentation_queue_ms": {
+              "mean": null,
+              "observations": 0,
+              "quantiles": {
+                "p50_ms": null,
+                "p95_ms": null,
+                "p99_ms": null,
+                "samples": 0
+              }
+            },
+            "presented_frames": 0,
+            "session_id": "f92574de65e816341b0075c8c7706a3f",
+            "window_ms": 20.453903
+          },
+          "protocol": 1,
+          "state": "closed"
+        }
+      ],
+      "source_dimensions": [
+        300,
+        200
+      ],
+      "stale_selection_rejected": true,
+      "switch": [
+        "1",
+        "2"
+      ]
+    }
+  },
+  "terminal_gui": {
+    "environment": "Private Xvfb displays with Metacity and authenticated loopback TCP, view-only",
+    "runs": {
+      "anvil": {
+        "disconnected_cleanly": true,
+        "first_acks": 3,
+        "first_source": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            640,
+            480
+          ],
+          "geometry_epoch": 4,
+          "sequence": 2,
+          "source_dimensions": [
+            640,
+            480
+          ],
+          "source_epoch": 1
+        },
+        "opener": "command palette",
+        "same_viewer": true,
+        "second_acks": 1,
+        "second_source": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            300,
+            200
+          ],
+          "geometry_epoch": 5,
+          "sequence": 3,
+          "source_dimensions": [
+            300,
+            200
+          ],
+          "source_epoch": 2
+        },
+        "toolkit": "GTK4 / Relm4"
+      },
+      "ember": {
+        "disconnected_cleanly": true,
+        "first_acks": 3,
+        "first_source": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            640,
+            480
+          ],
+          "geometry_epoch": 4,
+          "sequence": 2,
+          "source_dimensions": [
+            640,
+            480
+          ],
+          "source_epoch": 1
+        },
+        "opener": "command palette",
+        "same_viewer": true,
+        "second_acks": 1,
+        "second_source": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            300,
+            200
+          ],
+          "geometry_epoch": 5,
+          "sequence": 3,
+          "source_dimensions": [
+            300,
+            200
+          ],
+          "source_epoch": 2
+        },
+        "toolkit": "egui"
+      },
+      "forge": {
+        "disconnected_cleanly": true,
+        "first_acks": 3,
+        "first_source": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            640,
+            480
+          ],
+          "geometry_epoch": 4,
+          "sequence": 2,
+          "source_dimensions": [
+            640,
+            480
+          ],
+          "source_epoch": 1
+        },
+        "opener": "command palette",
+        "same_viewer": true,
+        "second_acks": 1,
+        "second_source": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            300,
+            200
+          ],
+          "geometry_epoch": 5,
+          "sequence": 3,
+          "source_dimensions": [
+            300,
+            200
+          ],
+          "source_epoch": 2
+        },
+        "toolkit": "GTK4"
+      },
+      "frost": {
+        "disconnected_cleanly": true,
+        "first_acks": 3,
+        "first_source": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            640,
+            480
+          ],
+          "geometry_epoch": 4,
+          "sequence": 2,
+          "source_dimensions": [
+            640,
+            480
+          ],
+          "source_epoch": 1
+        },
+        "opener": "command palette",
+        "same_viewer": true,
+        "second_acks": 1,
+        "second_source": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            300,
+            200
+          ],
+          "geometry_epoch": 5,
+          "sequence": 3,
+          "source_dimensions": [
+            300,
+            200
+          ],
+          "source_epoch": 2
+        },
+        "toolkit": "Iced"
+      }
+    }
+  }
+}

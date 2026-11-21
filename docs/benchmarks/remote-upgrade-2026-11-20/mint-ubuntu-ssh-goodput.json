@@ -1,0 +1,118 @@
+{
+  "status": "completed",
+  "scope": "Bounded SSH payload goodput retry on the existing IPv4 Wi-Fi/Ethernet lab route.",
+  "icmp_repeated": false,
+  "tcp": {
+    "configuration": {
+      "sender_target_seconds": 8,
+      "sender_maximum_bytes": 268435456,
+      "data_idle_timeout_seconds": 4,
+      "receiver_absolute_timeout_seconds": 16,
+      "transport": "IPv4 loopback OpenSSH forward with compression disabled",
+      "completion": "counted application end marker and receiver receipt",
+      "rate_scope": "receiver payload goodput through SSH including endpoint/cipher effects"
+    },
+    "directions": [
+      {
+        "direction": "mint_to_ubuntu",
+        "mint_trace": "mint_to_ubuntu.mint.jsonl",
+        "ubuntu_trace": "mint_to_ubuntu.ubuntu.jsonl",
+        "receiver_observed_goodput_mbps": 93.80412108576421,
+        "receiver_observed_duration_seconds": 8.367000585,
+        "sender": {
+          "bytes": 98107392,
+          "start_monotonic_ns": 54263920448651,
+          "end_monotonic_ns": 54271950737470,
+          "receipt_monotonic_ns": 54272279783606,
+          "receipt_bytes": 98107392,
+          "stop_condition": "duration"
+        },
+        "receiver": {
+          "bytes": 98107392,
+          "start_monotonic_ns": 54346237886179,
+          "last_byte_monotonic_ns": 54354604886764,
+          "end_marker_monotonic_ns": 54354604941910,
+          "sender_reported_bytes": 98107392,
+          "receipt_sent_monotonic_ns": 54354604977036
+        },
+        "status": "completed"
+      },
+      {
+        "direction": "ubuntu_to_mint",
+        "mint_trace": "ubuntu_to_mint.mint.jsonl",
+        "ubuntu_trace": "ubuntu_to_mint.ubuntu.jsonl",
+        "receiver_observed_goodput_mbps": 93.32501698431089,
+        "receiver_observed_duration_seconds": 8.533547571,
+        "sender": {
+          "bytes": 99549184,
+          "start_monotonic_ns": 54354755288184,
+          "end_monotonic_ns": 54362763538775,
+          "receipt_monotonic_ns": 54363263885622,
+          "receipt_bytes": 99549184,
+          "stop_condition": "duration"
+        },
+        "receiver": {
+          "bytes": 99549184,
+          "start_monotonic_ns": 54272430098876,
+          "last_byte_monotonic_ns": 54280963646447,
+          "end_marker_monotonic_ns": 54280963850121,
+          "sender_reported_bytes": 99549184,
+          "receipt_sent_monotonic_ns": 54280963938088
+        },
+        "status": "completed"
+      }
+    ]
+  },
+  "mint": {
+    "route_before": {
+      "interface": "eno1",
+      "classification": "ethernet",
+      "carrier": 1,
+      "operstate": "up",
+      "reported_ethernet_link_speed_mbps": 1000,
+      "reported_ethernet_duplex": "full"
+    },
+    "iperf3_available": false,
+    "route_after": {
+      "interface": "eno1",
+      "classification": "ethernet",
+      "carrier": 1,
+      "operstate": "up",
+      "reported_ethernet_link_speed_mbps": 1000,
+      "reported_ethernet_duplex": "full"
+    }
+  },
+  "ubuntu": {
+    "route_before": {
+      "interface": "wlp3s0",
+      "classification": "wifi",
+      "carrier": 1,
+      "operstate": "up",
+      "reported_ethernet_link_speed_mbps": null,
+      "reported_ethernet_duplex": null
+    },
+    "iperf3_available": false,
+    "route_after": {
+      "interface": "wlp3s0",
+      "classification": "wifi",
+      "carrier": 1,
+      "operstate": "up",
+      "reported_ethernet_link_speed_mbps": null,
+      "reported_ethernet_duplex": null
+    }
+  },
+  "archive": {
+    "path": "mint-ubuntu-ssh-goodput-raw.zip",
+    "sha256": "b07eccd81d2a45536ff00c1da338038254b696346d20851c391fee3114220865",
+    "entries": {
+      "fixture/test_offline.py": "21e2644dddfe1d01ffd9b802763fb3c3b9cf2a17a91c0794a49eb76e7e690737",
+      "fixture/characterize.py": "904f653a76a5a128a0266f5d20e02340544721c91e28f65ad25150d0cfee7f7f",
+      "fixture/net_probe.py": "653aed9023d586b9dc111fc6907389d5bc089d72c9db2685a20e159c2607de4f",
+      "trace/result.json": "dcfaf7f4ccf48c79baeeb646eee726e0b068c8b1fbbffe3d41986af703fae548",
+      "trace/mint_to_ubuntu.mint.jsonl": "f70bd5114d533222ef2fc9de7d2c2a8fd34bc119310a1469eb561e598cc83888",
+      "trace/mint_to_ubuntu.ubuntu.jsonl": "9a6433fbc8b61914fbeab33b6ba79fcbab491e573bd4d4f96302861476ced69c",
+      "trace/ubuntu_to_mint.mint.jsonl": "1ec29ae0ee82c8c4f7ff7f8e0a4a185cec66576c831f42e74d7d200bec0d9583",
+      "trace/ubuntu_to_mint.ubuntu.jsonl": "ddd303926e9df19e9a2ade147e4aa1f284abff6af6c024da9dd8ec2f38b76b53"
+    }
+  }
+}

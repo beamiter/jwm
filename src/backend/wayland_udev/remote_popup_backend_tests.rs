@@ -69,6 +69,19 @@ impl GlobalHandler<JwmWaylandState> for Reentrant {
     }
 }
 
+#[cfg(feature = "remote-wayland")]
+#[test]
+fn popup_manager_advertisement_requires_filtered_dynamic_globals() {
+    let supported = super::probe_dynamic_global_filter().expect("probe's private display");
+    let mut server = Server::new();
+    let target = server.connect();
+    assert_eq!(
+        target.global_count("jwm_remote_popup_manager_v1"),
+        usize::from(supported),
+    );
+    eprintln!("dynamic filtered globals={supported}, popup manager advertised={supported}");
+}
+
 #[test]
 fn actual_filtered_global_pending_reentrancy_and_registered_getter_are_safe() {
     let mut server = Server::new();

@@ -34,13 +34,18 @@ use super::clipboard_wire::{ClipboardRestriction, RestrictionState};
 use super::close_wire::{SessionClose, SessionCloseCode};
 use super::connect_toggle::ConnectToggle;
 use super::deadline::TcpStreamDeadline;
-use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
+use super::engine::ClipboardSnapshot;
+#[cfg(feature = "remote-h264")]
+use super::frame::FrameInfo;
+use super::frame::{
+    FrameLease, RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool,
+};
 #[cfg(feature = "remote-h264")]
 use super::h264_wire::{self, HardwareFrameHeader, VideoPayload};
 use super::key::KeySource;
 use super::messages::{
-    ClientHello, FrameCodec, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_input_batch_into,
-    encode_source_frame_ack, encode_viewport,
+    ClientHello, FrameCodec, InputMode, MAX_INPUT_BATCH_EVENTS, ServerHello,
+    encode_input_batch_into, encode_source_frame_ack, encode_viewport,
 };
 use super::protocol::{
     MAX_PAYLOAD_LEN, MessageKind, PayloadBufferRetention, ProtocolError, SessionReader,
@@ -66,11 +71,16 @@ use std::net::{Shutdown, TcpStream};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(test)]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use super::messages::{ApplicationProfile, ViewerFrameFeedback};
+
+#[cfg(feature = "remote-h264")]
+#[path = "client_native_video.rs"]
+mod native_video;
 
 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
 type LosslessFrameObserver = Arc<Mutex<Vec<(u64, bool)>>>;
@@ -189,6 +199,7 @@ const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
+    pub stats_json: bool,
     /// Explicit immutable requested duration; never inferred from host permission.
     pub control_duration: super::resumable_control::ControlDuration,
     pub viewer_backend: ViewerBackend,
@@ -196,6 +207,7 @@ pub struct ClientOptions {
     pub wayland_keyboard: bool,
     pub wayland_pointer: bool,
     pub wayland_control: bool,
+    pub wayland_gestures: bool,
     /// Explicit version-1 resumable protocol opt-in; never implied by control.
     pub resumable_control: bool,
     /// Explicit JWM compositor seamless handoff; never implied by resumable control.
@@ -212,6 +224,8 @@ pub struct ClientOptions {
     pub window_size: Option<super::window_size::WindowSize>,
     /// Explicit local best-effort startup position; coordinates are bounded by i16.
     pub window_position: Option<super::window_position::WindowPosition>,
+    /// Native XEmbed container on the viewer's local X11 display.
+    pub x11_parent_window: Option<std::num::NonZeroU32>,
     pub frame_limits: super::messages::FrameLimits,
     pub address: String,
     /// What to call the host in messages and the window title: the address
@@ -375,6 +389,12 @@ pub fn classify_failure(error: &(dyn std::error::Error + 'static)) -> FailureDia
     let mut current = Some(error);
     for _ in 0..32 {
         let Some(error) = current else { break };
+        #[cfg(feature = "remote-wayland")]
+        if error.is::<super::wayland_viewer::PresentationDiscarded>()
+            && result.category == "unknown"
+        {
+            result.category = "wayland_presentation_discarded";
+        }
         if let Some(failure) = error.downcast_ref::<ClientFailure>() {
             result.stage.get_or_insert(match failure.stage {
                 ClientStage::Setup => "setup",
@@ -398,11 +418,36 @@ pub fn classify_failure(error: &(dyn std::error::Error + 'static)) -> FailureDia
             result.peer_close_code = peer.code;
             result.reconnect_certified = false;
             if result.category == "unknown" {
-                result.category = "peer_closed";
+                use super::wayland_control_wire::{
+                    GESTURE_CONSENT_REQUIRED, GESTURE_NATIVE_V6_REQUIRED,
+                };
+                result.category = match (
+                    peer.code,
+                    peer.reason
+                        .strip_prefix("host cannot capture its display: "),
+                ) {
+                    (
+                        Some(SessionCloseCode::CaptureUnavailable),
+                        Some(GESTURE_CONSENT_REQUIRED),
+                    ) => "wayland_gestures_permission_required",
+                    (
+                        Some(SessionCloseCode::CaptureUnavailable),
+                        Some(GESTURE_NATIVE_V6_REQUIRED),
+                    ) => "native_wayland_gestures_unavailable",
+                    _ => "peer_closed",
+                };
             }
         } else if error.is::<UserClosed>() {
             if result.category == "unknown" {
                 result.category = "user_closed";
+            }
+        } else if let Some(refusal) = error.downcast_ref::<ConfirmedReleaseUnavailable>() {
+            if result.category == "unknown" {
+                result.category = if refusal.gestures {
+                    "managed_wayland_gestures_unavailable"
+                } else {
+                    "wayland_release_confirmation_unavailable"
+                };
             }
         } else if let Some(protocol) = error.downcast_ref::<ProtocolError>() {
             let category = match protocol {
@@ -513,19 +558,23 @@ pub(super) fn run_client_with_video_codec(
     options: ClientOptions,
     preferred: FrameCodec,
 ) -> RemoteResult<()> {
-    run_client_attempt(options, preferred, None)
+    run_client_attempt(options, preferred, None, None)
 }
 
 fn run_client_attempt(
     options: ClientOptions,
     preferred: FrameCodec,
     toggle: Option<&ConnectToggle>,
+    window: Option<&mut Option<Viewer>>,
 ) -> RemoteResult<()> {
     if toggle.is_some_and(|toggle| !toggle.begin_attempt()) {
         return Ok(());
     }
     let mut stage = ClientStage::Setup;
-    let result = run_client_session(options, preferred, &mut stage, toggle);
+    if options.wayland_gestures && !toggle.is_some_and(|toggle| !toggle.owns_shortcut()) {
+        return Err(invalid_data("Wayland gestures require a managed session").into());
+    }
+    let result = run_client_session(options, preferred, &mut stage, toggle, window);
     match result {
         Ok(()) => {
             eprintln!("jwm-remote: session ended");
@@ -567,7 +616,7 @@ pub fn run_client_reconnecting_with_video_codec(
     attempts: u8,
     preferred: FrameCodec,
 ) -> RemoteResult<()> {
-    reconnect_client(options, attempts, preferred, None)
+    reconnect_client(options, attempts, preferred, None, false)
 }
 
 /// Toggle one direct viewer per X11 screen and endpoint, or cycle its shared source.
@@ -585,14 +634,15 @@ pub fn run_client_toggling_with_video_codec(
     else {
         return Ok(());
     };
-    reconnect_client(options, attempts, preferred, Some(&toggle))
+    reconnect_client(options, attempts, preferred, Some(&toggle), false)
 }
 
-fn reconnect_client(
+pub(super) fn reconnect_client(
     options: ClientOptions,
     attempts: u8,
     mut preferred: FrameCodec,
     toggle: Option<&ConnectToggle>,
+    retain_x11_window: bool,
 ) -> RemoteResult<()> {
     if (options.follow_source_size
         || options.resize_source.is_some()
@@ -614,10 +664,27 @@ fn reconnect_client(
         )
         .into());
     }
+    let keep_window = attempts != 0
+        && options.viewer_backend == ViewerBackend::X11
+        && options.view_only
+        && !options.clipboard
+        && (retain_x11_window
+            || std::env::var_os("JWM_REMOTE_KEEP_WINDOW").as_deref() == Some("1".as_ref()));
+    let saved_window = std::cell::RefCell::new(None);
+    let backoff_outcome = std::cell::RefCell::new(None);
     reconnect_with(
         attempts,
         || {
-            let outcome = run_client_attempt(options.clone(), preferred, toggle);
+            if let Some(outcome) = backoff_outcome.borrow_mut().take() {
+                return outcome;
+            }
+            let mut window = saved_window.borrow_mut();
+            let outcome = run_client_attempt(
+                options.clone(),
+                preferred,
+                toggle,
+                keep_window.then_some(&mut *window),
+            );
             if outcome.as_ref().err().is_some_and(|error| {
                 error
                     .downcast_ref::<ClientFailure>()
@@ -628,25 +695,118 @@ fn reconnect_client(
             }) {
                 preferred = FrameCodec::JpegTiles;
                 eprintln!("jwm-remote: host requires the JPEG stream profile; retrying with JPEG");
-                return run_client_attempt(options.clone(), preferred, toggle);
+                return run_client_attempt(
+                    options.clone(),
+                    preferred,
+                    toggle,
+                    keep_window.then_some(&mut *window),
+                );
             }
             outcome
         },
         |attempt, delay| {
-            if toggle.is_some_and(ConnectToggle::close_requested) {
+            if toggle.is_some_and(|toggle| !toggle.begin_backoff()) {
                 return;
             }
             eprintln!(
                 "jwm-remote: transport lost; reconnect attempt {attempt}/{attempts} in {} seconds (Ctrl+C to stop)",
                 delay.as_secs()
             );
-            if let Some(toggle) = toggle {
+            if let Some(window) = saved_window.borrow_mut().as_mut() {
+                match wait_for_recovery_window(window, toggle, delay) {
+                    Ok(true) => {}
+                    Ok(false) => *backoff_outcome.borrow_mut() = Some(Ok(())),
+                    Err(error) => *backoff_outcome.borrow_mut() = Some(Err(error)),
+                }
+            } else if let Some(toggle) = toggle {
                 toggle.wait_to_retry(delay);
             } else {
                 thread::sleep(delay);
             }
         },
     )
+}
+
+fn wait_for_recovery_window(
+    window: &mut Viewer,
+    toggle: Option<&ConnectToggle>,
+    delay: Duration,
+) -> RemoteResult<bool> {
+    let deadline = Instant::now() + delay;
+    loop {
+        if toggle.is_some_and(ConnectToggle::close_requested)
+            || !window.poll_disconnected_window()?
+        {
+            return Ok(false);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(true);
+        }
+        window.prepare_wait()?;
+        super::x11_capture::wait_readable(
+            window.connection_fd(),
+            remaining.min(Duration::from_millis(25)),
+        )?;
+    }
+}
+
+/// Keep the retained X11 shell on this thread while the existing socket
+/// deadlines cover the authenticated setup work on a scoped worker.
+fn run_recovery_io<T: Send, S: Send>(
+    viewer: Option<&mut Viewer>,
+    connection: S,
+    socket: impl FnOnce(&S) -> &TcpStream,
+    operation: impl FnOnce(S) -> RemoteResult<T> + Send,
+) -> RemoteResult<Option<T>> {
+    let Some(viewer) = viewer else {
+        return operation(connection).map(Some);
+    };
+    let cancel = socket(&connection).try_clone()?;
+    let (wake, completion) = wake_pair()?;
+    thread::scope(|scope| {
+        let worker = thread::Builder::new()
+            .name("jwm-remote-recovery-io".into())
+            .spawn_scoped(scope, move || {
+                let result = operation(connection);
+                // Closing this end wakes the main poll even if setup failed.
+                drop(completion);
+                result
+            })?;
+        let ready: RemoteResult<bool> = (|| {
+            loop {
+                if !viewer.poll_disconnected_window()? {
+                    return Ok(false);
+                }
+                if worker.is_finished() {
+                    return Ok(true);
+                }
+                viewer.prepare_wait()?;
+                if viewer.has_pending_events()? {
+                    continue;
+                }
+                if wait_for_activity(
+                    viewer.connection_fd(),
+                    wake.as_fd(),
+                    Instant::now() + Duration::from_millis(25),
+                )? == WaitOutcome::ViewerHangup
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "X11 viewer connection closed during recovery",
+                    )
+                    .into());
+                }
+            }
+        })();
+        if !matches!(ready, Ok(true)) {
+            let _ = cancel.shutdown(Shutdown::Both);
+        }
+        let result = worker
+            .join()
+            .map_err(|_| io::Error::other("viewer recovery I/O worker panicked"))?;
+        if ready? { result.map(Some) } else { Ok(None) }
+    })
 }
 
 fn reconnect_with(
@@ -723,6 +883,24 @@ fn suppress_reconnect(result: RemoteResult<()>, suppress: bool) -> RemoteResult<
 }
 
 fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
+    if options.x11_parent_window.is_some()
+        && (options.viewer_backend != ViewerBackend::X11
+            || options.window_size.is_some()
+            || options.window_position.is_some())
+    {
+        return Err(invalid_data("X11 embedding requires X11 and container-owned geometry").into());
+    }
+    if options.wayland_gestures
+        && (!options.wayland_control
+            || options.resumable_control
+            || options.static_lossless
+            || options.view_only
+            || options.viewer_backend != ViewerBackend::Wayland)
+    {
+        return Err(
+            invalid_data("Wayland gestures require one-shot managed Wayland control").into(),
+        );
+    }
     if options.control_duration.is_extended() && !options.wayland_seamless_input {
         return Err(invalid_data(
             "extended control duration requires explicit Wayland seamless input",
@@ -860,7 +1038,7 @@ fn validate_viewer_backend(options: &ClientOptions) -> RemoteResult<()> {
         );
     }
     if options.viewer_backend == ViewerBackend::Wayland {
-        if !cfg!(feature = "remote-wayland")
+        if !super::capabilities::NATIVE_WAYLAND
             || usize::from(options.view_only)
                 + usize::from(options.wayland_keyboard)
                 + usize::from(options.wayland_pointer)
@@ -921,7 +1099,7 @@ fn requested_video_codec(options: &ClientOptions, preferred: FrameCodec) -> Fram
     if !preferred.is_hardware() {
         return FrameCodec::JpegTiles;
     }
-    if options.viewer_backend != ViewerBackend::X11
+    if (options.viewer_backend != ViewerBackend::X11 && !options.view_only)
         || options.static_lossless
         || options.wayland_keyboard
         || options.wayland_pointer
@@ -935,10 +1113,10 @@ fn requested_video_codec(options: &ClientOptions, preferred: FrameCodec) -> Fram
         return FrameCodec::JpegTiles;
     }
     #[cfg(feature = "remote-h264")]
-    match super::h264::probe_decode(FrameCodec::H264) {
-        Ok(()) => {
+    match super::capabilities::probe_decoder(FrameCodec::H264) {
+        Ok(_) => {
             if preferred == FrameCodec::Hevc444
-                && super::h264::probe_decode(FrameCodec::Hevc444).is_ok()
+                && super::capabilities::probe_decoder(FrameCodec::Hevc444).is_ok()
             {
                 return FrameCodec::Hevc444;
             }
@@ -958,7 +1136,13 @@ fn run_client_session(
     preferred: FrameCodec,
     stage: &mut ClientStage,
     toggle: Option<&ConnectToggle>,
+    mut recovery_window: Option<&mut Option<Viewer>>,
 ) -> RemoteResult<()> {
+    if let Some(viewer) = recovery_window.as_deref_mut().and_then(Option::as_mut)
+        && !viewer.poll_disconnected_window()?
+    {
+        return Ok(());
+    }
     if let Some(size) = options.window_size {
         size.validate()?;
     }
@@ -1004,13 +1188,19 @@ fn run_client_session(
     } else {
         KeymapTable::empty()
     };
-    let (initial_viewport, request_cursor_plane) = match options.viewer_backend {
+    let (mut initial_viewport, request_cursor_plane) = match options.viewer_backend {
         ViewerBackend::X11 => (
-            super::x11_viewer::initial_viewport_with_position(
-                options.display.as_deref(),
-                options.window_size,
-                options.window_position,
-            )?,
+            match options.x11_parent_window {
+                Some(parent) => super::x11_viewer::initial_embedded_viewport(
+                    options.display.as_deref(),
+                    parent,
+                )?,
+                None => super::x11_viewer::initial_viewport_with_position(
+                    options.display.as_deref(),
+                    options.window_size,
+                    options.window_position,
+                )?,
+            },
             super::x11_viewer::supports_cursor_plane(options.display.as_deref())?,
         ),
         ViewerBackend::Wayland => (
@@ -1018,6 +1208,9 @@ fn run_client_session(
             false,
         ),
     };
+    if let Some(viewer) = recovery_window.as_deref().and_then(Option::as_ref) {
+        initial_viewport = viewer.viewport();
+    }
     let requested_codec = requested_video_codec(&options, preferred);
     if toggle.is_some_and(ConnectToggle::close_requested) {
         return Ok(());
@@ -1035,37 +1228,58 @@ fn run_client_session(
     let popup_requested_at = Instant::now();
     #[cfg(feature = "remote-wayland")]
     let control_budget_started = Instant::now();
-    let (mut reader, writer, hello) = negotiate_session(
-        options.resize_source.is_some() || options.follow_source_size,
-        options.wayland_keyboard,
-        options.wayland_pointer,
-        options.wayland_scroll,
-        options.wayland_horizontal_scroll,
-        options.wayland_control,
-        options.resumable_control,
-        options.control_duration,
-        options.wayland_text.is_some(),
-        options.static_lossless,
-        options.wayland_popup_pointer,
+    let input_mode = if options.wayland_gestures {
+        InputMode::WaylandControlWithGestures
+    } else if options.wayland_control && toggle.is_some_and(|t| !t.owns_shortcut()) {
+        InputMode::WaylandControlWithConfirmedRelease
+    } else {
+        InputMode::X11Keycodes
+    };
+    let Some((mut reader, writer, hello, correlation_id, application_profile)) = run_recovery_io(
+        recovery_window.as_deref_mut().and_then(Option::as_mut),
         stream,
-        &key,
-        request_input,
-        options.clipboard,
-        options.clipboard_file_limit,
-        options.clipboard_mode,
-        options.clipboard_direction,
-        &keymap,
-        ViewportPolicy::for_follow(options.follow_source_size).initial(initial_viewport),
-        request_cursor_plane,
-        options.frame_limits,
-        requested_codec,
-        HANDSHAKE_TIMEOUT,
-    )?;
+        |stream| stream,
+        |stream| {
+            negotiate_session(
+                options.resize_source.is_some() || options.follow_source_size,
+                options.wayland_keyboard,
+                options.wayland_pointer,
+                options.wayland_scroll,
+                options.wayland_horizontal_scroll,
+                options.wayland_control,
+                input_mode,
+                options.resumable_control,
+                options.control_duration,
+                options.wayland_text.is_some(),
+                options.static_lossless,
+                options.wayland_popup_pointer,
+                stream,
+                &key,
+                request_input,
+                options.clipboard,
+                options.clipboard_file_limit,
+                options.clipboard_mode,
+                options.clipboard_direction,
+                &keymap,
+                ViewportPolicy::for_follow(options.follow_source_size).initial(initial_viewport),
+                request_cursor_plane,
+                options.frame_limits,
+                requested_codec,
+                HANDSHAKE_TIMEOUT,
+            )
+        },
+    )?
+    else {
+        return Ok(());
+    };
     if requested_codec.is_hardware() && hello.stream.codec != requested_codec {
         eprintln!(
             "jwm-remote: host selected {} video",
             hello.stream.codec.name()
         );
+    }
+    if application_profile == ApplicationProfile::VideoFeedback {
+        eprintln!("jwm-remote: viewer rate feedback negotiated (application v36)");
     }
     if (options.resize_source.is_some() || options.follow_source_size)
         && !hello.stream.window_resize
@@ -1099,9 +1313,12 @@ fn run_client_session(
         eprintln!("jwm-remote: clipboard files are not enabled for this session");
     }
     let (mut wake_receiver, wake_sender) = wake_pair()?;
+    let managed_clipboard = toggle
+        .filter(|toggle| !toggle.owns_shortcut() && options.viewer_backend == ViewerBackend::X11);
     let (mut clipboard_sync, clipboard_inbox, clipboard_outbox) = if hello.clipboard_enabled {
         *stage = ClientStage::LocalClipboard;
-        let clipboard_wake = wake_sender.try_clone()?;
+        let clipboard_wake = Arc::new(wake_sender.try_clone()?);
+        let record_wake = Arc::clone(&clipboard_wake);
         match ClipboardSync::start(
             options.display.as_deref(),
             SyncOptions {
@@ -1115,10 +1332,15 @@ fn run_client_session(
                 share_existing: hello.stream.clipboard_directions & 1 != 0,
             },
             Some(Box::new(move || {
-                let _ = clipboard_wake.signal();
+                let _ = record_wake.signal();
             })),
         ) {
             Ok((sync, inbox, outbox)) => {
+                if managed_clipboard.is_some() {
+                    sync.status().wake_on_progress(move || {
+                        let _ = clipboard_wake.signal();
+                    });
+                }
                 eprintln!(
                     "jwm-remote: clipboard sharing enabled ({})",
                     clipboard_policy::label(
@@ -1142,6 +1364,32 @@ fn run_client_session(
 
     *stage = ClientStage::FirstFrame;
     let mut initial_state = ReceiveState::new();
+    initial_state.session_epoch = correlation_id;
+    #[cfg(feature = "remote-h264")]
+    let mut native = native_video::Presenter::configure(&options, hello.stream.codec);
+    #[cfg(feature = "remote-h264")]
+    {
+        initial_state.native_video = native.as_ref().map(native_video::Presenter::decoder_config);
+        initial_state.vaapi_direct_map = options.viewer_backend == ViewerBackend::X11
+            && native.is_none()
+            && std::env::var_os("JWM_REMOTE_VAAPI_DIRECT_MAP").as_deref() == Some("1".as_ref());
+    }
+    let engine_toggle = toggle.filter(|toggle| !toggle.owns_shortcut());
+    let detailed_telemetry = options.stats_json || engine_toggle.is_some();
+    initial_state.telemetry.detailed = detailed_telemetry;
+    initial_state.read_ahead = (options.viewer_backend == ViewerBackend::X11 || options.view_only)
+        && !hello.stream.wayland_keyboard
+        && !hello.stream.wayland_pointer
+        && !hello.stream.wayland_control
+        && !hello.stream.wayland_text
+        && !hello.stream.wayland_popup_pointer
+        && std::env::var_os("JWM_REMOTE_READ_AHEAD").as_deref() == Some("1".as_ref());
+    if initial_state.read_ahead {
+        eprintln!("jwm-remote: authenticated reader and ordered decoder running independently");
+    }
+    initial_state
+        .telemetry
+        .expect_first_frame(1, Instant::now());
     if options.wayland_popup_pointer {
         initial_state
             .wayland_popup
@@ -1154,6 +1402,8 @@ fn run_client_session(
     initial_state.scroll_copy = hello.stream.scroll_copy;
     initial_state.static_lossless = hello.stream.static_lossless;
     initial_state.frame_codec = hello.stream.codec;
+    initial_state.telemetry.video_feedback =
+        application_profile == ApplicationProfile::VideoFeedback;
     initial_state.resize.get_mut().unwrap().requested = options.resize_source;
     if options.follow_source_size {
         initial_state.resize.get_mut().unwrap().follow =
@@ -1168,28 +1418,49 @@ fn run_client_session(
         hello.stream.cursor == super::messages::CursorMode::Independent,
         Ordering::Release,
     );
-    let mut telemetry_reporter = ClientTelemetryReporter::new(&state.telemetry);
-    let payload = read_initial_frame(
-        &mut reader,
-        hello.clipboard_enabled,
-        state.cursor_enabled.load(Ordering::Acquire),
-        FIRST_FRAME_TIMEOUT,
-        |kind, payload| {
-            if kind == MessageKind::SourceCatalog {
-                return receive_catalog(&state, payload);
-            }
-            if state.catalog.lock().unwrap().is_none() {
-                return Err(invalid_data("host record precedes source catalog").into());
-            }
-            if matches!(kind, MessageKind::CursorShape | MessageKind::CursorPosition) {
-                return receive_cursor(&state, kind, payload);
-            }
-            clipboard_inbox
-                .as_ref()
-                .ok_or_else(|| invalid_data("clipboard sharing was not negotiated"))?
-                .deliver(kind, payload)
+    let mut telemetry_reporter = ClientTelemetryReporter::new(
+        &state.telemetry,
+        ViewerTelemetryContext {
+            correlation_id,
+            backend: options.viewer_backend,
+            negotiated_codec: hello.stream.codec,
+            limits: hello.stream.frame_limits,
+            input_mode: negotiated_input_mode(&hello),
         },
-    )?;
+        options.stats_json,
+        engine_toggle,
+    );
+    let Some(payload) = run_recovery_io(
+        recovery_window.as_deref_mut().and_then(Option::as_mut),
+        &mut reader,
+        |reader| reader.get_ref(),
+        |reader| {
+            read_initial_frame(
+                reader,
+                hello.clipboard_enabled,
+                state.cursor_enabled.load(Ordering::Acquire),
+                FIRST_FRAME_TIMEOUT,
+                |kind, payload| {
+                    if kind == MessageKind::SourceCatalog {
+                        return receive_catalog(&state, payload);
+                    }
+                    if state.catalog.lock().unwrap().is_none() {
+                        return Err(invalid_data("host record precedes source catalog").into());
+                    }
+                    if matches!(kind, MessageKind::CursorShape | MessageKind::CursorPosition) {
+                        return receive_cursor(&state, kind, payload);
+                    }
+                    clipboard_inbox
+                        .as_ref()
+                        .ok_or_else(|| invalid_data("clipboard sharing was not negotiated"))?
+                        .deliver(kind, payload)
+                },
+            )
+        },
+    )?
+    else {
+        return Ok(());
+    };
     state.telemetry.record_received();
     // SessionReader exposes this payload only after its record MAC succeeds;
     // no decoded-image allocation is checked out before authentication.
@@ -1231,46 +1502,71 @@ fn run_client_session(
             .push((first_frame.frame.sequence(), first_frame.purpose));
     }
     #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-    if state.frame_codec == FrameCodec::JpegTiles {
+    if state.frame_codec == FrameCodec::JpegTiles
+        && let Some(cpu) = first_frame.frame.cpu()
+    {
         observe_decoded_scroll(
             &state.scroll_decode_observer,
             initial_payload,
             initial_epoch,
-            &first_frame.frame,
+            cpu,
             video_decoder.jpeg.last_frame_was_lossless(),
         );
     }
-    first_frame.frame = first_frame.frame.with_source_epoch(initial_epoch);
+    first_frame.frame = first_frame
+        .frame
+        .with_scope(state.session_epoch, initial_epoch);
+    state
+        .telemetry
+        .record_frame_scope(&first_frame.frame, video_decoder.active_codec(&state));
     reader
         .get_ref()
         .set_read_timeout(Some(VIDEO_FRAME_IDLE_TIMEOUT))?;
-    let initial_width = u16::try_from(first_frame.frame.image().width())
+    let (width, height) = first_frame.frame.dimensions();
+    let initial_width = u16::try_from(width)
         .map_err(|_| invalid_data("initial frame is wider than an X11 window"))?;
-    let initial_height = u16::try_from(first_frame.frame.image().height())
+    let initial_height = u16::try_from(height)
         .map_err(|_| invalid_data("initial frame is taller than an X11 window"))?;
     let last_sequence = first_frame.frame.sequence();
     *stage = ClientStage::Display;
     if toggle.is_some_and(ConnectToggle::close_requested) {
         return Ok(());
     }
-    let mut viewer = Viewer::connect(
-        &options,
-        initial_width,
-        initial_height,
-        hello.pointer_enabled,
-        hello.keyboard_enabled,
-        hello.keyboard_enabled.then_some(keymap),
-    )?;
+    let mut viewer = if let Some(mut viewer) = recovery_window.as_deref_mut().and_then(Option::take)
+    {
+        if !viewer.resume_disconnected_window(current_source_label(&state))? {
+            return Ok(());
+        }
+        viewer
+    } else {
+        Viewer::connect(
+            &options,
+            initial_width,
+            initial_height,
+            hello.pointer_enabled,
+            hello.keyboard_enabled,
+            hello.keyboard_enabled.then_some(keymap),
+        )?
+    };
+    if recovery_window.is_some() {
+        viewer.keep_window_on_retry();
+    }
     if let Some(toggle) = toggle {
-        viewer.enable_toggle_shortcut()?;
+        if toggle.owns_shortcut() {
+            viewer.enable_toggle_shortcut()?;
+        }
         if !toggle.begin_viewing(&wake_sender)? {
             return Ok(());
         }
     }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_control {
-        let digest = viewer
-            .enable_wayland_control(options.wayland_scroll, options.wayland_horizontal_scroll)?;
+        let digest = viewer.enable_wayland_control(
+            options.wayland_scroll,
+            options.wayland_horizontal_scroll,
+            hello.stream.input.managed_wayland(),
+            options.wayland_gestures,
+        )?;
         let mut control = state.wayland_control.lock().unwrap();
         control.digest = Some(digest);
         if hello.stream.resumable_control {
@@ -1289,6 +1585,7 @@ fn run_client_session(
         control.capture_repair_observer();
         control.scroll_enabled = options.wayland_scroll;
         control.horizontal_enabled = options.wayland_horizontal_scroll;
+        control.gestures = options.wayland_gestures;
     }
     #[cfg(feature = "remote-wayland")]
     if options.wayland_seamless_input {
@@ -1335,6 +1632,20 @@ fn run_client_session(
         hello.stream.clipboard_content,
         hello.stream.clipboard_directions,
     ));
+    let clipboard_snapshot = managed_clipboard.map(|controller| {
+        let mut snapshot = ClipboardSnapshot::negotiated(
+            hello.stream.clipboard_content,
+            hello.stream.clipboard_directions,
+            hello.stream.clipboard_file_limit,
+        );
+        snapshot.update_transfer(
+            clipboard_status
+                .as_deref()
+                .and_then(SyncStatus::viewer_transfer),
+        );
+        controller.publish_clipboard(Some(snapshot));
+        snapshot
+    });
     viewer.set_source_label(current_source_label(&state));
     if state.cursor_enabled.load(Ordering::Acquire) {
         viewer.enable_cursor_plane()?;
@@ -1345,7 +1656,11 @@ fn run_client_session(
     let mut writer = Sender::spawn(
         writer,
         hello.pointer_enabled || hello.keyboard_enabled,
-        move |kind| {
+        detailed_telemetry,
+        move |kind, timing| {
+            if let Some(timing) = timing {
+                sender_state.telemetry.record_send(kind, timing);
+            }
             if kind == MessageKind::FrameAck {
                 sender_state.telemetry.record_acked();
             }
@@ -1380,89 +1695,129 @@ fn run_client_session(
             0
         }
     };
-    if !submit_frame_with_revision(
-        &mut viewer,
-        first_frame,
-        &mut pending_presentations,
-        first_revision,
-    )? {
-        return Ok(());
-    }
-
-    *stage = ClientStage::Session;
-    eprintln!(
-        "jwm-remote: connected; {}; clipboard {}",
-        negotiated_session_label(
-            hello.stream.wayland_popup_pointer,
-            hello.pointer_enabled && request_input,
-            hello.keyboard_enabled && request_input,
-        ),
-        clipboard_policy::label(
-            hello.stream.clipboard_content,
-            hello.stream.clipboard_directions
-        )
-    );
-    if options.wayland_seamless_input {
-        eprintln!(
-            "jwm-remote: experimental JWM Wayland handoff: enter the remote image with all keys/buttons released to control; leave to release. After a black-bar exit, leave the whole surface before re-entering. Ctrl+Super+F12 ends control permanently; configured lock shortcuts stay local. The original approved budget is at most {} seconds, never renewed. Focus/geometry changes end control; Super is not forwarded and ends control. No drag or modifier-click.",
-            options.control_duration.as_secs()
-        );
-    } else if options.seamless_input == Some(SeamlessInput::Hover) {
-        eprintln!(
-            "jwm-remote: seamless input: enter remote image to control, leave to release; Ctrl+Super+{} releases until you leave and enter again",
-            options.escape_key
-        );
-    } else if options.seamless_input == Some(SeamlessInput::Click) {
-        eprintln!(
-            "jwm-remote: click the remote image to control. Move out of the image or press Ctrl+Super+{} to release input",
-            options.escape_key
-        );
-    } else if options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled) {
-        eprintln!(
-            "jwm-remote: click the viewer to control; Ctrl+Super+{} to release input",
-            options.escape_key
-        );
-    }
-
     let mut cancel = SessionCancel::new(control, Arc::clone(&state));
-    let receive_state = Arc::clone(&state);
-    #[cfg(test)]
-    let cleanup_probe = cleanup_probe::current();
-    let receiver = ReceiverThread::spawn(move || {
-        // Move the authenticated first-frame allocation into the receiver
-        // thread. It remains thread-local while avoiding a second large
-        // allocation for the next frame.
-        receive_frames(
-            reader,
-            receive_state,
-            last_sequence,
-            payload,
-            wake_sender,
-            video_decoder,
-            clipboard_inbox,
-        );
-        #[cfg(test)]
-        if let Some(probe) = cleanup_probe {
-            probe.receiver_finished();
+    let mut preparation = None;
+    let mut receiver = None;
+    // The first submit can already schedule native allocation. Use session
+    // cleanup for an initial draw or receiver-start failure too.
+    let loop_result = (|| {
+        if !submit_frame_with_revision(
+            &mut viewer,
+            first_frame,
+            &mut pending_presentations,
+            first_revision,
+            &state,
+            None,
+            #[cfg(feature = "remote-h264")]
+            native.as_mut(),
+        )? {
+            return Ok(ViewerLoopExit {
+                close_release_flushed: false,
+            });
         }
-    })?;
 
-    let pointer_enabled = hello.pointer_enabled && !options.view_only;
-    let keyboard_enabled = hello.keyboard_enabled && !options.view_only;
-    let loop_result = viewer_loop(
-        &mut viewer,
-        &mut writer,
-        &state,
-        pointer_enabled,
-        keyboard_enabled,
-        &mut telemetry_reporter,
-        &mut wake_receiver,
-        clipboard_outbox.as_ref(),
-        clipboard_status.as_deref(),
-        hello.stream.clipboard_directions,
-        &mut pending_presentations,
-        toggle,
-    );
+        *stage = ClientStage::Session;
+        eprintln!(
+            "jwm-remote: connected; {}; clipboard {}",
+            if hello.stream.wayland_control {
+                "scoped Wayland control pending local and host authorization"
+            } else {
+                negotiated_session_label(
+                    hello.stream.wayland_popup_pointer,
+                    hello.pointer_enabled && request_input,
+                    hello.keyboard_enabled && request_input,
+                )
+            },
+            clipboard_policy::label(
+                hello.stream.clipboard_content,
+                hello.stream.clipboard_directions
+            )
+        );
+        if options.wayland_seamless_input {
+            eprintln!(
+                "jwm-remote: experimental JWM Wayland handoff: enter the remote image with all keys/buttons released to control; leave to release. After a black-bar exit, leave the whole surface before re-entering. Ctrl+Super+F12 ends control permanently; configured lock shortcuts stay local. The original approved budget is at most {} seconds, never renewed. Focus/geometry changes end control; Super is not forwarded and ends control. No drag or modifier-click.",
+                options.control_duration.as_secs()
+            );
+        } else if options.seamless_input == Some(SeamlessInput::Hover) {
+            eprintln!(
+                "jwm-remote: seamless input: enter remote image to control, leave to release; Ctrl+Super+{} releases until you leave and enter again",
+                options.escape_key
+            );
+        } else if options.seamless_input == Some(SeamlessInput::Click) {
+            eprintln!(
+                "jwm-remote: click the remote image to control. Move out of the image or press Ctrl+Super+{} to release input",
+                options.escape_key
+            );
+        } else if options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled) {
+            eprintln!(
+                "jwm-remote: click the viewer to control; Ctrl+Super+{} to release input",
+                options.escape_key
+            );
+        }
+
+        preparation = if options.viewer_backend == ViewerBackend::X11
+            && matches!(hello.stream.codec, FrameCodec::H264 | FrameCodec::Hevc444)
+            && std::env::var_os("JWM_REMOTE_X11_PREPARE").as_deref() == Some("1".as_ref())
+        {
+            match wake_sender
+                .try_clone()
+                .and_then(X11PreparationWorker::start)
+            {
+                Ok(worker) => Some(worker),
+                Err(error) => {
+                    eprintln!("jwm-remote: X11 CPU preparation worker unavailable ({error})");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let receive_state = Arc::clone(&state);
+        #[cfg(test)]
+        let cleanup_probe = cleanup_probe::current();
+        receiver = Some(ReceiverThread::spawn(move || {
+            // Move the authenticated first-frame allocation into the receiver
+            // thread. It remains thread-local while avoiding a second large
+            // allocation for the next frame.
+            receive_frames(
+                reader,
+                receive_state,
+                last_sequence,
+                payload,
+                wake_sender,
+                video_decoder,
+                clipboard_inbox,
+            );
+            #[cfg(test)]
+            if let Some(probe) = cleanup_probe {
+                probe.receiver_finished();
+            }
+        })?);
+
+        let pointer_enabled = hello.pointer_enabled && !options.view_only;
+        let keyboard_enabled = hello.keyboard_enabled && !options.view_only;
+        viewer_loop(
+            &mut viewer,
+            &mut writer,
+            &state,
+            pointer_enabled,
+            keyboard_enabled,
+            &mut telemetry_reporter,
+            &mut wake_receiver,
+            clipboard_outbox.as_ref(),
+            clipboard_status.as_deref(),
+            hello.stream.clipboard_directions,
+            clipboard_snapshot,
+            &mut pending_presentations,
+            toggle,
+            preparation.as_mut(),
+            #[cfg(feature = "remote-h264")]
+            native.as_mut(),
+        )
+    })();
+    if let Some(controller) = managed_clipboard {
+        controller.publish_clipboard(None);
+    }
     let graceful_close = matches!(
         &loop_result,
         Ok(ViewerLoopExit {
@@ -1475,7 +1830,9 @@ fn run_client_session(
     let (local_cleanup, (cancel_result, receiver_exit, sender_result, clipboard_result)) =
         run_remaining_cleanup(local_cleanup, || {
             let cancel_result = cancel.cancel(&mut writer, graceful_close);
-            let receiver_exit = receiver.join_timeout(RECEIVER_JOIN_TIMEOUT);
+            let receiver_exit = receiver.map_or(ReceiverExit::Completed, |receiver| {
+                receiver.join_timeout(RECEIVER_JOIN_TIMEOUT)
+            });
             let sender_result = writer.shutdown_timeout(RECEIVER_JOIN_TIMEOUT);
             let clipboard_result = clipboard_sync
                 .as_mut()
@@ -1501,13 +1858,32 @@ fn run_client_session(
         clipboard_result,
     );
     let result = include_local_cleanup(result, local_cleanup);
-    finalize_retry_intent(result, || {
+    let result = include_local_cleanup(result, preparation.map_or(Ok(()), |worker| worker.close()));
+    #[cfg(feature = "remote-h264")]
+    let result = include_local_cleanup(
+        result,
+        native
+            .as_mut()
+            .map_or(Ok(()), native_video::Presenter::close_prefetch),
+    );
+    let result = finalize_retry_intent(result, || {
         if toggle.is_some_and(ConnectToggle::close_requested) {
             Ok(false)
         } else {
             viewer.reconnect_allowed_after_cleanup()
         }
-    })
+    });
+    if let Some(window) = recovery_window
+        && result
+            .as_ref()
+            .is_err_and(|error| error.is::<CleanTransportDisconnect>())
+    {
+        if let Err(error) = viewer.freeze_disconnected_window() {
+            return include_local_cleanup(result, Err(error));
+        }
+        *window = Some(viewer);
+    }
+    result
 }
 
 /// Reconnecting with the original CLI grant could silently undo a runtime
@@ -1777,6 +2153,7 @@ fn negotiate_session(
     request_wayland_scroll: bool,
     request_wayland_horizontal_scroll: bool,
     request_wayland_control: bool,
+    input_mode: InputMode,
     request_resumable_control: bool,
     requested_control_duration: super::resumable_control::ControlDuration,
     request_wayland_text: bool,
@@ -1799,6 +2176,8 @@ fn negotiate_session(
     SessionReader<TcpStream>,
     SessionWriter<TcpStream>,
     ServerHello,
+    u128,
+    ApplicationProfile,
 )> {
     frame_limits.validate()?;
     let requested_policy = clipboard_policy::requested(
@@ -1818,11 +2197,20 @@ fn negotiate_session(
         .map_err(|error| explain_negotiation_eof(error, false))?;
 
     let reader_stream = stream.try_clone()?;
+    let correlation_id = session_keys.correlation_id;
     let (receive_key, send_key) = session_keys.into_client();
     let mut reader = SessionReader::new(reader_stream, receive_key);
     // The acknowledgement and a refusal are both tiny; frames come later.
     reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
     let mut writer = SessionWriter::new(stream, send_key);
+    let application_offer = if requested_codec.is_hardware()
+        && !request_window_resize
+        && std::env::var_os("JWM_REMOTE_ADAPT_FEEDBACK").as_deref() == Some("1".as_ref())
+    {
+        ApplicationProfile::VideoFeedback
+    } else {
+        ApplicationProfile::Standard
+    };
     writer.write_message(
         MessageKind::Hello,
         &ClientHello {
@@ -1833,6 +2221,7 @@ fn negotiate_session(
                 wayland_scroll: request_wayland_scroll,
                 wayland_horizontal_scroll: request_wayland_horizontal_scroll,
                 wayland_control: request_wayland_control,
+                input: input_mode,
                 resumable_control: request_resumable_control,
                 control_duration: requested_control_duration,
                 wayland_popup_pointer: request_wayland_popup_pointer,
@@ -1862,10 +2251,28 @@ fn negotiate_session(
             request_clipboard_files,
             keymap: keymap.clone(),
         }
-        .encode(),
+        .encode_with_profile(application_offer),
     )?;
     writer.flush()?;
-    let hello = read_server_hello(&mut reader, requested_codec)?;
+    let confirmed_release = input_mode.managed_wayland();
+    let gestures = input_mode == InputMode::WaylandControlWithGestures;
+    let (hello, application_profile) =
+        read_server_hello(&mut reader, requested_codec, application_offer).map_err(|error| {
+            if confirmed_release
+                && error.downcast_ref::<PeerClosed>().is_some_and(|peer| {
+                    peer.code.is_none() && peer.reason.as_bytes() == LEGACY_STREAM_PROFILE_REFUSAL
+                })
+            {
+                return Box::new(ConfirmedReleaseUnavailable { gestures }) as RemoteError;
+            }
+            error
+        })?;
+    if hello.stream.input != input_mode {
+        if confirmed_release {
+            return Err(ConfirmedReleaseUnavailable { gestures }.into());
+        }
+        return Err(invalid_data("host did not confirm the requested input mode").into());
+    }
     requested_codec.confirm(hello.stream.codec)?;
     validate_server_frame_limits(&hello, frame_limits)?;
     if hello.stream.static_lossless != request_static_lossless
@@ -2004,7 +2411,7 @@ fn negotiate_session(
         .get_ref()
         .set_read_timeout(Some(FIRST_FRAME_TIMEOUT))?;
     writer.get_ref().set_write_timeout(Some(WRITE_TIMEOUT))?;
-    Ok((reader, writer, hello))
+    Ok((reader, writer, hello, correlation_id, application_profile))
 }
 
 #[derive(Debug)]
@@ -2018,7 +2425,24 @@ impl std::fmt::Display for LegacyVideoProfileRefused {
 
 impl std::error::Error for LegacyVideoProfileRefused {}
 
-const LEGACY_VIDEO_PROFILE_REFUSAL: &[u8] =
+#[derive(Debug)]
+struct ConfirmedReleaseUnavailable {
+    gestures: bool,
+}
+
+impl std::fmt::Display for ConfirmedReleaseUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.gestures {
+            f.write_str("update the host's jwm-remote to use managed Wayland gestures")
+        } else {
+            f.write_str("update the host's jwm-remote to use managed Wayland control")
+        }
+    }
+}
+
+impl std::error::Error for ConfirmedReleaseUnavailable {}
+
+const LEGACY_STREAM_PROFILE_REFUSAL: &[u8] =
     b"unsupported remote codec, cursor or input mode; update jwm-remote on both machines together";
 
 /// Read only authenticated records, accepting explicit terminal responses before
@@ -2026,7 +2450,8 @@ const LEGACY_VIDEO_PROFILE_REFUSAL: &[u8] =
 fn read_server_hello<R: io::Read>(
     reader: &mut SessionReader<R>,
     requested_codec: FrameCodec,
-) -> RemoteResult<ServerHello> {
+    offered: ApplicationProfile,
+) -> RemoteResult<(ServerHello, ApplicationProfile)> {
     let (kind, payload) = reader
         .read_message()
         .map_err(|error| explain_negotiation_eof(error, true))?;
@@ -2035,7 +2460,7 @@ fn read_server_hello<R: io::Read>(
         // session. Match their exact authenticated legacy response, not EOF,
         // authentication failures or any later refusal.
         MessageKind::Close
-            if requested_codec.is_hardware() && payload == LEGACY_VIDEO_PROFILE_REFUSAL =>
+            if requested_codec.is_hardware() && payload == LEGACY_STREAM_PROFILE_REFUSAL =>
         {
             Err(LegacyVideoProfileRefused.into())
         }
@@ -2046,7 +2471,7 @@ fn read_server_hello<R: io::Read>(
             }
             Err(close.into())
         }
-        MessageKind::HelloAck => ServerHello::decode(&payload),
+        MessageKind::HelloAck => ServerHello::decode_response(&payload, offered),
         _ => Err(invalid_data("host did not acknowledge remote session negotiation").into()),
     }
 }
@@ -2200,6 +2625,44 @@ fn read_initial_frame_records<R: io::Read>(
     }
 }
 
+fn release_managed_wayland_control(
+    viewer: &mut Viewer,
+    writer: &mut Sender,
+    state: &ReceiveState,
+    controller: &ConnectToggle,
+) -> RemoteResult<bool> {
+    let record = state
+        .wayland_control
+        .lock()
+        .unwrap()
+        .begin_managed_release(Instant::now());
+    let Some(record) = record else {
+        return Ok(false);
+    };
+    viewer.release_managed_wayland_control()?;
+    writer.write_message(MessageKind::WaylandControlRevoke, &record.encode()?)?;
+    writer.flush()?;
+    controller.publish_wayland_input(super::engine::WaylandInputState::Releasing);
+    Ok(true)
+}
+
+fn send_control_action(
+    control: &mut ClientControl,
+    writer: &mut Sender,
+    action: super::wayland_control_wire::ControlAction,
+    now: Instant,
+) -> RemoteResult<()> {
+    control.repair_sent(&action, now)?;
+    if let Some(session) = control.resumable.as_mut() {
+        let envelope = session.wrap_action(&action.encode()?, now)?;
+        writer.write_message(MessageKind::WaylandResumableControl, &envelope.encode())?;
+    } else {
+        writer.write_message(MessageKind::WaylandControlAction, &action.encode()?)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 fn viewer_loop(
     viewer: &mut Viewer,
     writer: &mut Sender,
@@ -2211,8 +2674,11 @@ fn viewer_loop(
     clipboard: Option<&ClipboardOutbox>,
     clipboard_status: Option<&SyncStatus>,
     clipboard_directions: u8,
+    mut clipboard_snapshot: Option<ClipboardSnapshot>,
     pending_presentations: &mut std::collections::VecDeque<PendingFrameTiming>,
     toggle: Option<&ConnectToggle>,
+    mut preparation: Option<&mut X11PreparationWorker>,
+    #[cfg(feature = "remote-h264")] mut native: Option<&mut native_video::Presenter>,
 ) -> RemoteResult<ViewerLoopExit> {
     let mut clipboard_status_seen = 0;
     let mut reported_control_generation = None;
@@ -2229,7 +2695,7 @@ fn viewer_loop(
     let mut source_epoch = 1;
     let mut presented_scope = (1, 1);
     let mut switching = false;
-    let mut requested_epoch = None;
+    let mut requested_source: Option<(u64, super::source_session::SourceId)> = None;
     let mut source_ready = false;
     let source_cycle_available = state
         .catalog
@@ -2237,12 +2703,85 @@ fn viewer_loop(
         .unwrap()
         .as_ref()
         .is_some_and(|catalog| catalog.entries.len() > 1);
+    let local_controller = toggle.filter(|toggle| !toggle.owns_shortcut());
+    let fixed_control_geometry = viewer.managed_wayland_layout_generation().is_some();
+    let managed_source_control =
+        fixed_control_geometry && source_cycle_available && local_controller.is_some();
+    if managed_source_control {
+        local_controller.unwrap().enable_wayland_source_control();
+    }
+    let (managed_scroll, managed_horizontal, managed_gestures) = {
+        let control = state.wayland_control.lock().unwrap();
+        (
+            control.scroll_enabled,
+            control.horizontal_enabled,
+            control.gestures,
+        )
+    };
+    let mut used_control_sources =
+        std::collections::BTreeSet::from([super::source_session::SourceId(1)]);
+    let mut deferred_selection = None;
+    let mut current_wayland_grant = super::source_session::SourceId(1);
+    let mut last_presented = None;
+    let mut rearm: Option<(Instant, bool)> = None;
     #[allow(unused_labels)] // Native control cancellation rejoins the close path.
     'viewer: loop {
         state.wayland_text.lock().unwrap().check()?;
         wake.drain()?;
         if toggle.is_some_and(ConnectToggle::close_requested) {
             viewer.request_close();
+        }
+        if managed_source_control
+            && !viewer.user_close_requested()
+            && let Some((epoch, target)) =
+                local_controller.and_then(ConnectToggle::take_request_input)
+        {
+            if !source_ready
+                || switching
+                || epoch != source_epoch
+                || target != current_wayland_grant
+                || used_control_sources.contains(&target)
+            {
+                return Err(invalid_data("input request lost its presented Wayland source").into());
+            }
+            let digest = viewer.enable_wayland_control(
+                managed_scroll,
+                managed_horizontal,
+                true,
+                managed_gestures,
+            )?;
+            let mut control = state.wayland_control.lock().unwrap();
+            *control = ClientControl::default();
+            control.digest = Some(digest);
+            control.scroll_enabled = managed_scroll;
+            control.horizontal_enabled = managed_horizontal;
+            control.gestures = managed_gestures;
+            rearm = Some((Instant::now() + Duration::from_secs(30), false));
+        }
+        let mut release_input = local_controller.is_some_and(ConnectToggle::take_release_input);
+        if let Some(controller) = local_controller {
+            let input = state
+                .wayland_control
+                .lock()
+                .unwrap()
+                .managed_input()
+                .or_else(|| {
+                    (managed_source_control && source_ready && !switching).then(|| {
+                        if used_control_sources.contains(&current_wayland_grant) {
+                            super::engine::WaylandInputState::Unavailable
+                        } else {
+                            super::engine::WaylandInputState::Available
+                        }
+                    })
+                });
+            if let Some(input) = input {
+                let releasing = std::mem::take(&mut release_input)
+                    && !viewer.user_close_requested()
+                    && release_managed_wayland_control(viewer, writer, state, controller)?;
+                if !releasing {
+                    controller.publish_wayland_input(input);
+                }
+            }
         }
         #[cfg(feature = "remote-wayland")]
         {
@@ -2274,21 +2813,34 @@ fn viewer_loop(
             };
             if configured {
                 if ended {
-                    #[cfg(feature = "remote-wayland")]
-                    viewer.disable_wayland_control();
+                    if local_controller.is_some() {
+                        viewer.release_managed_wayland_control()?;
+                    } else {
+                        #[cfg(feature = "remote-wayland")]
+                        viewer.disable_wayland_control();
+                    }
                 } else if epoch.is_some() && !activated && viewer.wayland_handoff_active() {
                     // Do not hold the shared state while a real compositor fence waits.
                     #[cfg(feature = "remote-wayland")]
-                    if !viewer.check_wayland_control(true)? {
-                        continue 'viewer;
-                    }
-                    let mut control = state.wayland_control.lock().unwrap();
-                    control.check(presented_scope, Instant::now())?;
-                    if !control.ended && control.epoch == epoch && !control.activated {
-                        control.activated = true;
-                        eprintln!(
-                            "jwm-remote: control ready for sequential typing and pointer actions"
-                        );
+                    {
+                        if viewer.check_wayland_control(true)? {
+                            let mut control = state.wayland_control.lock().unwrap();
+                            control.check(presented_scope, Instant::now())?;
+                            if !control.ended && control.epoch == epoch && !control.activated {
+                                control.activated = true;
+                                if control.gestures {
+                                    eprintln!(
+                                        "jwm-remote: control ready for Wayland modifier clicks and dragging"
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "jwm-remote: control ready for sequential typing and pointer actions"
+                                    );
+                                }
+                            }
+                        } else if viewer.user_close_requested() {
+                            continue 'viewer;
+                        }
                     }
                 }
             }
@@ -2375,6 +2927,9 @@ fn viewer_loop(
         }
         let received_epoch = state.source_epoch.load(Ordering::Acquire);
         if received_epoch != source_epoch {
+            if let Some(toggle) = toggle {
+                toggle.invalidate_sources();
+            }
             if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
                 follow.stop("source changed");
             }
@@ -2395,11 +2950,27 @@ fn viewer_loop(
                 .lock()
                 .unwrap()
                 .check_scope((received_epoch, presented_scope.1))?;
+            let selection = requested_source.take();
+            let explicitly_selected = selection.is_some_and(|(epoch, id)| {
+                epoch.checked_add(1) == Some(received_epoch)
+                    && state
+                        .catalog
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|catalog| {
+                            catalog.current.epoch == received_epoch && catalog.current.source == id
+                        })
+            });
             source_epoch = received_epoch;
-            requested_epoch = None;
             switching = true;
             pending_presentations.clear();
-            viewer.invalidate_source(current_source_label(state))?;
+            viewer.confirm_source_change(current_source_label(state), explicitly_selected)?;
+            if managed_source_control && explicitly_selected {
+                current_wayland_grant = selection.unwrap().1;
+                *state.wayland_control.lock().unwrap() = ClientControl::default();
+                last_presented = None;
+            }
             write_source_release(writer, presented_scope, pointer_enabled || keyboard_enabled)?;
         }
         // Snapshot only: the native Ready transition may synchronize with the
@@ -2431,13 +3002,55 @@ fn viewer_loop(
             .lock()
             .unwrap()
             .active_input_generation();
-        let mut events = viewer.poll_events().map_err(|error| {
-            if viewer.user_close_requested() {
-                user_close_cleanup_failure(error)
-            } else {
-                error
+        let mut events = match viewer.poll_events() {
+            Ok(events) => events,
+            Err(error) if viewer.user_close_requested() => {
+                return Err(user_close_cleanup_failure(error));
             }
-        })?;
+            Err(_)
+                if viewer.managed_wayland_focus_left()
+                    && let Some(controller) = local_controller
+                    && release_managed_wayland_control(viewer, writer, state, controller)? =>
+            {
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+        let polled_layout = viewer.managed_wayland_layout_generation();
+        if let Some((deadline, prepared)) = rearm
+            && !events.contains(&ViewerEvent::Close)
+        {
+            let granted = state.wayland_control.lock().unwrap().activated;
+            if granted {
+                rearm = None;
+            } else if Instant::now() >= deadline {
+                if prepared {
+                    return Err(invalid_data("Wayland replacement input proof timed out").into());
+                }
+                *state.wayland_control.lock().unwrap() = ClientControl::default();
+                viewer.release_managed_wayland_control()?;
+                rearm = None;
+                events.clear();
+            } else if !prepared && viewer.managed_wayland_focus_ready() {
+                let scope = last_presented.ok_or_else(|| {
+                    invalid_data("Wayland request without a current presentation")
+                })?;
+                writer.write_message(
+                    MessageKind::WaylandControlPrepare,
+                    &super::wayland_control_wire::encode_prepare(scope)?,
+                )?;
+                writer.flush()?;
+                used_control_sources.insert(current_wayland_grant);
+                rearm = Some((Instant::now() + Duration::from_secs(5), true));
+            }
+        }
+        if let Some(toggle) = local_controller {
+            if release_input && !events.contains(&ViewerEvent::Close) {
+                events.clear();
+                viewer.release_managed_input(&mut events)?;
+            }
+            toggle.publish_input(viewer.managed_input_grab());
+        }
         if reported_viewport.is_some_and(|previous| previous != viewer.viewport()) {
             if state.wayland_popup.lock().unwrap().enabled {
                 return Err(invalid_data("popup viewer viewport changed").into());
@@ -2470,13 +3083,28 @@ fn viewer_loop(
             }
             let check_local = {
                 let control = state.wayland_control.lock().unwrap();
-                control.configured() && !control.ended && !events.contains(&ViewerEvent::Close)
+                control.configured()
+                    && control.accepts_input()
+                    && !events.contains(&ViewerEvent::Close)
             };
             if check_local {
                 #[cfg(feature = "remote-wayland")]
-                if !viewer.check_wayland_control(false)? {
-                    events.clear();
-                    events.push(ViewerEvent::Close);
+                match viewer.check_wayland_control(false) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        events.clear();
+                        events.push(ViewerEvent::Close);
+                    }
+                    Err(_)
+                        if viewer.managed_wayland_focus_left()
+                            && let Some(controller) = local_controller
+                            && release_managed_wayland_control(
+                                viewer, writer, state, controller,
+                            )? =>
+                    {
+                        events.clear()
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             let validate_resume = events.is_empty()
@@ -2502,6 +3130,20 @@ fn viewer_loop(
                     .unwrap()
                     .complete_resumable_local_validation(Instant::now())?;
             }
+            if polled_layout.is_some()
+                && polled_layout != viewer.managed_wayland_layout_generation()
+            {
+                // The compositor fence above may have accepted a configure
+                // since polling. Do not send coordinates from the old layout.
+                events.retain(|event| {
+                    !matches!(
+                        event,
+                        ViewerEvent::WaylandPointer { .. }
+                            | ViewerEvent::WaylandPointerCancel
+                            | ViewerEvent::WaylandPointerButtonCancel { .. }
+                    )
+                });
+            }
             let mut control = state.wayland_control.lock().unwrap();
             // Both local protocol fences above may dispatch a late leave. Never
             // authorize the polled batch using the pre-fence local snapshot.
@@ -2520,7 +3162,7 @@ fn viewer_loop(
                 );
                 reported_control_generation = Some(generation);
             }
-            if control.configured() {
+            if control.configured() && control.managed_release_deadline().is_none() {
                 // Terminal local intent goes straight to revoke below. Never
                 // race a new Pause ACK against close cleanup or resume on exit.
                 if control.seamless_enabled
@@ -2588,6 +3230,9 @@ fn viewer_loop(
                         }
                     }
                 }
+                if events.contains(&ViewerEvent::WaylandDragRelease { cancelled: true }) {
+                    control.discard_drag_motion();
+                }
                 for event in &events {
                     if matches!(
                         event,
@@ -2610,12 +3255,22 @@ fn viewer_loop(
                         // paused, but local releases must not be forwarded after
                         // the native pause already released their remote pair.
                         if !control.resumable_input_active()
+                            || (rearm.is_some() && !control.activated)
                             || (control.resumable_enabled
                                 && polled_control_generation != control.active_input_generation())
                         {
                             continue;
                         }
-                        let action = match control.event(event, Instant::now()) {
+                        let now = Instant::now();
+                        if matches!(
+                            event,
+                            ViewerEvent::Key { .. }
+                                | ViewerEvent::WaylandDragRelease { cancelled: false }
+                        ) && let Some(motion) = control.take_drag_motion(now, true)?
+                        {
+                            send_control_action(&mut control, writer, motion, now)?;
+                        }
+                        let action = match control.event(event, now) {
                             Ok(action) => action,
                             Err(error) => {
                                 // A real input during a closed repair phase is
@@ -2631,23 +3286,16 @@ fn viewer_loop(
                             }
                         };
                         if let Some(action) = action {
-                            control.repair_sent(&action, Instant::now())?;
-                            if let Some(session) = control.resumable.as_mut() {
-                                let envelope =
-                                    session.wrap_action(&action.encode()?, Instant::now())?;
-                                writer.write_message(
-                                    MessageKind::WaylandResumableControl,
-                                    &envelope.encode(),
-                                )?;
-                            } else {
-                                writer.write_message(
-                                    MessageKind::WaylandControlAction,
-                                    &action.encode()?,
-                                )?;
-                            }
-                            writer.flush()?;
+                            send_control_action(&mut control, writer, action, now)?;
                         }
                     }
+                }
+                let now = Instant::now();
+                if let Some(motion) = control.take_drag_motion(now, false)? {
+                    send_control_action(&mut control, writer, motion, now)?;
+                }
+                if managed_gestures && let Some(controller) = local_controller {
+                    controller.publish_wayland_gesture_ready(control.ready_sequence());
                 }
                 if let Some((kind, token)) =
                     control.repair_outgoing(Instant::now(), viewer.wayland_control_repair_busy())?
@@ -2822,6 +3470,12 @@ fn viewer_loop(
                 clipboard
                     .control()
                     .restrict(request, MessageKind::ClipboardRestrict)?;
+                if let (Some(controller), Some(snapshot)) =
+                    (local_controller, clipboard_snapshot.as_mut())
+                {
+                    snapshot.narrow(request.content);
+                    controller.publish_clipboard(Some(*snapshot));
+                }
                 write_source_release(writer, presented_scope, pointer_enabled || keyboard_enabled)?;
                 let label = clipboard_policy::label(request.content, clipboard_directions);
                 viewer
@@ -2832,37 +3486,66 @@ fn viewer_loop(
         // The host accepts selection only after the current source's first
         // drawn ACK. Keep a shortcut pressed during startup or a switch queued.
         if source_ready && !switching && !events.contains(&ViewerEvent::Close) {
-            let external_cycle = toggle.is_some_and(ConnectToggle::take_next_source);
+            let (selected_source, external_cycle) =
+                toggle.map_or((None, false), ConnectToggle::take_next_source);
             if external_cycle {
                 viewer.request_activation()?;
             }
-            let next = if external_cycle || events.contains(&ViewerEvent::CycleSource) {
-                state
-                    .catalog
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .and_then(|catalog| next_source(catalog, source_epoch))
-            } else {
-                None
-            };
-            if let Some((target, label)) = next {
-                if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
-                    follow.stop("source change requested");
+            let next = deferred_selection.take().or_else(|| {
+                if selected_source.is_some()
+                    || external_cycle
+                    || events.contains(&ViewerEvent::CycleSource)
+                {
+                    state.catalog.lock().unwrap().as_ref().and_then(|catalog| {
+                        if let Some(target) = selected_source {
+                            if catalog.current.epoch != source_epoch {
+                                return None;
+                            }
+                            catalog.entries.iter().find_map(|entry| {
+                                (entry.id == target).then(|| (entry.id, entry.label.clone()))
+                            })
+                        } else {
+                            next_source(catalog, source_epoch)
+                        }
+                    })
+                } else {
+                    None
                 }
-                write_source_release(writer, presented_scope, pointer_enabled || keyboard_enabled)?;
-                writer.write_message(
-                    MessageKind::SourceRequest,
-                    &SourceRequest {
-                        expected_epoch: source_epoch,
-                        target,
+            });
+            if let Some((target, label)) = next {
+                let waiting = {
+                    let control = state.wayland_control.lock().unwrap();
+                    managed_source_control && control.configured() && !control.ended
+                };
+                if waiting {
+                    let controller = local_controller.unwrap();
+                    release_managed_wayland_control(viewer, writer, state, controller)?;
+                    deferred_selection = Some((target, label));
+                } else {
+                    if let Some(toggle) = toggle {
+                        toggle.invalidate_sources();
                     }
-                    .encode()?,
-                )?;
-                pending_presentations.clear();
-                viewer.invalidate_source(label)?;
-                requested_epoch = Some(source_epoch);
-                switching = true;
+                    if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
+                        follow.stop("source change requested");
+                    }
+                    write_source_release(
+                        writer,
+                        presented_scope,
+                        pointer_enabled || keyboard_enabled,
+                    )?;
+                    viewer.begin_source_change(label)?;
+                    writer.write_message(
+                        MessageKind::SourceRequest,
+                        &SourceRequest {
+                            expected_epoch: source_epoch,
+                            target,
+                        }
+                        .encode()?,
+                    )?;
+                    pending_presentations.clear();
+                    requested_source = Some((source_epoch, target));
+                    switching = true;
+                }
             }
         }
         if switching {
@@ -2899,7 +3582,15 @@ fn viewer_loop(
                 // local viewport for the invalidation check, never request
                 // remote scaling through the ordinary viewport protocol.
                 reported_viewport = Some(viewport);
-            } else {
+            } else if !fixed_control_geometry
+                || (viewer.managed_wayland_layout_generation().is_none() && {
+                    let control = state.wayland_control.lock().unwrap();
+                    !control.configured() || control.ended
+                })
+            {
+                // Native keys and capture proofs are anchored to the lease's
+                // host geometry. The managed viewer scales locally until the
+                // host confirms that input authority has ended.
                 wrote |= viewport_policy.report(writer, &mut reported_viewport, viewport)?;
             }
         }
@@ -2931,6 +3622,11 @@ fn viewer_loop(
         {
             clipboard_status_seen = version;
             viewer.set_clipboard_activity(line);
+        }
+        if let (Some(controller), Some(snapshot)) = (local_controller, clipboard_snapshot.as_mut())
+            && snapshot.update_transfer(clipboard_status.and_then(SyncStatus::viewer_transfer))
+        {
+            controller.publish_clipboard(Some(*snapshot));
         }
         {
             let mut restriction = state.clipboard_restriction.lock().unwrap();
@@ -2970,6 +3666,11 @@ fn viewer_loop(
                 }
                 if purpose != FramePurpose::VisualRepair {
                     presented_scope = (timing.source_epoch, timing.geometry_epoch);
+                    last_presented = Some(DrawnScope {
+                        source_epoch: presented_scope.0,
+                        geometry_epoch: presented_scope.1,
+                        frame_sequence: sequence,
+                    });
                     if let Some(follow) = state.resize.lock().unwrap().follow.as_mut() {
                         follow.presented(
                             presented_scope,
@@ -3049,7 +3750,7 @@ fn viewer_loop(
                     let mut control = state.wayland_control.lock().unwrap();
                     control.check(presented_scope, Instant::now())?;
                     (
-                        control.configured() && !control.ended,
+                        control.configured() && control.accepts_input(),
                         control.needs_request(),
                         control.epoch,
                     )
@@ -3061,6 +3762,15 @@ fn viewer_loop(
                     {
                         #[cfg(feature = "remote-wayland")]
                         if !viewer.check_wayland_control(true)? {
+                            if !viewer.user_close_requested()
+                                && let Some(request) = control_request
+                            {
+                                state
+                                    .wayland_control
+                                    .lock()
+                                    .unwrap()
+                                    .cancel_unsent_request(request);
+                            }
                             continue 'viewer;
                         }
                     }
@@ -3161,42 +3871,114 @@ fn viewer_loop(
             }
             viewer.source_presented(presented_scope.1);
             viewer.enable_source_cycle(source_cycle_available);
+            if (!source_ready || switching)
+                && let Some(toggle) = toggle
+                && !toggle.owns_shortcut()
+            {
+                let sources = state
+                    .catalog
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|catalog| catalog.current.epoch == presented_scope.0)
+                    .map(|catalog| super::engine::SessionSources {
+                        session_id: state.session_epoch,
+                        catalog: catalog.clone(),
+                    });
+                if managed_source_control && !state.wayland_control.lock().unwrap().configured() {
+                    toggle.publish_wayland_input(
+                        if used_control_sources.contains(&current_wayland_grant) {
+                            super::engine::WaylandInputState::Unavailable
+                        } else {
+                            super::engine::WaylandInputState::Available
+                        },
+                    );
+                }
+                toggle.presented_source(sources);
+            }
             switching = false;
             source_ready = true;
         }
         if viewer.can_submit_frame() {
-            if let Some(frame) = take_latest(state, source_epoch) {
-                if frame.frame.source_epoch() == source_epoch
-                    && requested_epoch != Some(source_epoch)
-                {
-                    state
-                        .wayland_keyboard
-                        .lock()
-                        .unwrap()
-                        .check_scope((frame.frame.source_epoch(), frame.frame.geometry_epoch()))?;
-                    if viewer.prepare_frame_geometry(frame.frame.geometry_epoch())? {
-                        write_source_release(
-                            writer,
-                            presented_scope,
-                            pointer_enabled || keyboard_enabled,
+            let item = match preparation.as_deref_mut() {
+                Some(worker) => {
+                    worker.next_frame(state, source_epoch, requested_source.is_none())?
+                }
+                None => take_latest(state, source_epoch).map(|frame| (frame, None)),
+            };
+            if let Some((frame, mut prepared)) = item {
+                if frame.frame.source_epoch() == source_epoch && requested_source.is_none() {
+                    let frame = match preparation.as_deref_mut() {
+                        Some(worker) if prepared.is_none() && source_ready && !switching => {
+                            worker.schedule(viewer, state, presented_scope, frame)?
+                        }
+                        _ => Some(frame),
+                    };
+                    if let Some(frame) = frame {
+                        state.wayland_keyboard.lock().unwrap().check_scope((
+                            frame.frame.source_epoch(),
+                            frame.frame.geometry_epoch(),
+                        ))?;
+                        if viewer.prepare_frame_geometry(frame.frame.geometry_epoch())? {
+                            write_source_release(
+                                writer,
+                                presented_scope,
+                                pointer_enabled || keyboard_enabled,
+                            )?;
+                        }
+                        let revision = state
+                            .resize
+                            .lock()
+                            .unwrap()
+                            .follow
+                            .as_ref()
+                            .map_or(0, |follow| follow.revision());
+                        submit_frame_with_revision(
+                            viewer,
+                            frame,
+                            pending_presentations,
+                            revision,
+                            state,
+                            prepared.as_ref(),
+                            #[cfg(feature = "remote-h264")]
+                            native.as_deref_mut(),
                         )?;
                     }
-                    let revision = state
-                        .resize
-                        .lock()
-                        .unwrap()
-                        .follow
-                        .as_ref()
-                        .map_or(0, |follow| follow.revision());
-                    submit_frame_with_revision(viewer, frame, pending_presentations, revision)?;
                 }
-            } else {
+                if let Some(output) = prepared.take()
+                    && let Some(worker) = preparation.as_deref_mut()
+                {
+                    worker.recycle(output);
+                }
+            } else if preparation.as_ref().is_none_or(|worker| !worker.busy())
+                || matches!(viewer, Viewer::X11(x11) if x11.can_refresh_while_preparing())
+            {
+                #[cfg(all(feature = "remote-h264", feature = "remote-wayland"))]
+                if let Some(presenter) = native.as_deref_mut()
+                    && let Some((sequence, submission)) = presenter.refresh_wayland(
+                        viewer,
+                        &state.decode_pool,
+                        state.telemetry.detailed,
+                    )?
+                {
+                    if let Some(timings) = submission.fallback {
+                        state.telemetry.record_hardware_decode(timings);
+                    }
+                    if submission.drawn
+                        && let Some(pending) = pending_presentations
+                            .iter_mut()
+                            .find(|pending| pending.sequence == sequence)
+                    {
+                        pending.presentation_path =
+                            submission.native.map_or("rgb", |(path, _)| path);
+                    }
+                }
                 viewer.refresh_pending_redraw()?;
             }
         }
 
         if !switching
-            && requested_epoch.is_none()
+            && requested_source.is_none()
             && state.source_epoch.load(Ordering::Acquire) == source_epoch
         {
             let request = state
@@ -3235,6 +4017,18 @@ fn viewer_loop(
             continue;
         }
         let mut deadline = next_heartbeat.min(telemetry_reporter.next_deadline());
+        if let Some((rearm_deadline, _)) = rearm {
+            deadline = deadline.min(rearm_deadline);
+        }
+        {
+            let control = state.wayland_control.lock().unwrap();
+            if let Some(release) = control.managed_release_deadline() {
+                deadline = deadline.min(release);
+            }
+            if let Some(motion) = control.next_drag_motion() {
+                deadline = deadline.min(motion);
+            }
+        }
         {
             let text = state.wayland_text.lock().unwrap();
             text.check()?;
@@ -3259,11 +4053,11 @@ fn viewer_loop(
             deadline = deadline.min(viewer_deadline);
         }
         if wait_for_activity(viewer.connection_fd(), wake.as_fd(), deadline)?
-            == WaitOutcome::X11Hangup
+            == WaitOutcome::ViewerHangup
         {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
-                "local X11 viewer connection closed",
+                "local viewer display connection closed",
             )
             .into());
         }
@@ -3395,6 +4189,8 @@ fn for_each_input_batch(
             ViewerEvent::WaylandPointer { .. }
             | ViewerEvent::WaylandPointerCancel
             | ViewerEvent::WaylandPointerButtonCancel { .. }
+            | ViewerEvent::WaylandDragMotion { .. }
+            | ViewerEvent::WaylandDragRelease { .. }
             | ViewerEvent::WaylandPointerRevoke => {
                 pointer_run_open = false;
                 continue;
@@ -3453,6 +4249,69 @@ fn next_source(
     Some((next.id, next.label.clone()))
 }
 
+#[cfg(test)]
+#[test]
+fn in_process_selection_expires_with_its_connection_and_source() {
+    use super::engine::SessionSources;
+    use super::source_session::{SourceId, SourceVersion};
+    use super::source_wire::SourceEntry;
+
+    let (toggle, commands) = ConnectToggle::local();
+    let (_receiver, sender) = wake_pair().unwrap();
+    assert!(toggle.begin_viewing(&sender).unwrap());
+    let catalog = SourceCatalog {
+        current: SourceVersion {
+            source: SourceId(1),
+            epoch: 1,
+        },
+        entries: vec![
+            SourceEntry {
+                id: SourceId(1),
+                label: "One".into(),
+            },
+            SourceEntry {
+                id: SourceId(2),
+                label: "Two".into(),
+            },
+        ],
+    };
+    assert!(commands.select_source(10, 1, SourceId(2)).is_err());
+    toggle.presented_source(Some(SessionSources {
+        session_id: 10,
+        catalog: catalog.clone(),
+    }));
+    assert!(commands.select_source(10, 1, SourceId(3)).is_err());
+    commands.select_source(10, 1, SourceId(2)).unwrap();
+    assert!(toggle.next_source_pending());
+    assert_eq!(toggle.take_next_source(), (Some(SourceId(2)), false));
+    assert!(commands.sources().is_none());
+    let mut changed = catalog.clone();
+    changed.current = SourceVersion {
+        source: SourceId(2),
+        epoch: 2,
+    };
+    toggle.presented_source(Some(SessionSources {
+        session_id: 10,
+        catalog: changed,
+    }));
+    assert!(commands.select_source(10, 1, SourceId(1)).is_err());
+
+    assert!(toggle.begin_backoff());
+    assert!(commands.sources().is_none());
+    assert!(toggle.begin_attempt());
+    assert!(toggle.begin_viewing(&sender).unwrap());
+    toggle.presented_source(Some(SessionSources {
+        session_id: 11,
+        catalog,
+    }));
+    assert!(commands.select_source(10, 1, SourceId(2)).is_err());
+    assert!(!toggle.next_source_pending());
+    commands.select_source(11, 1, SourceId(2)).unwrap();
+    assert!(toggle.next_source_pending());
+    commands.close();
+    assert!(!toggle.next_source_pending());
+}
+
 fn write_source_release(
     writer: &mut impl RecordWriter,
     scope: (u64, u64),
@@ -3493,7 +4352,9 @@ struct PendingFrameTiming {
     geometry_epoch: u64,
     sequence: u64,
     ready_at: Instant,
+    decode_elapsed: Duration,
     draw_started: Instant,
+    presentation_path: &'static str,
 }
 
 fn submit_frame_with_revision(
@@ -3501,20 +4362,80 @@ fn submit_frame_with_revision(
     queued: QueuedFrame,
     pending: &mut std::collections::VecDeque<PendingFrameTiming>,
     viewport_revision: u64,
+    state: &ReceiveState,
+    prepared: Option<&PreparedX11Rgb>,
+    #[cfg(feature = "remote-h264")] native: Option<&mut native_video::Presenter>,
 ) -> RemoteResult<bool> {
-    let timing = PendingFrameTiming {
-        purpose: queued.purpose,
-        source_size: (queued.frame.source_width(), queued.frame.source_height()),
-        viewport_revision,
-        source_epoch: queued.frame.source_epoch(),
-        geometry_epoch: queued.frame.geometry_epoch(),
-        sequence: queued.frame.sequence(),
-        ready_at: queued.ready_at,
-        draw_started: Instant::now(),
+    let info = queued.frame.info();
+    if info.session_epoch != state.session_epoch {
+        return Err(invalid_data("received frame belongs to a different session").into());
+    }
+    let x11_presenter = matches!(viewer, Viewer::X11(_));
+    let draw_started = Instant::now();
+    let (drawn, presentation_path) = match queued.frame {
+        FrameLease::Cpu(frame) => {
+            let (drawn, used_preparation) = match (viewer, prepared) {
+                (Viewer::X11(x11), Some(output)) if output.packed => {
+                    x11.draw_prepared(frame, output.plan, &output.pixels)?
+                }
+                (viewer, _) => (viewer.draw_recyclable(frame)?, false),
+            };
+            if let Some(output) = prepared
+                && drawn
+            {
+                state.telemetry.record_x11_prepare_submission(
+                    used_preparation,
+                    output.plan.viewport_revision(),
+                );
+            }
+            (drawn, "rgb")
+        }
+        #[cfg(feature = "remote-h264")]
+        FrameLease::Vaapi { pixels, info } => {
+            let presenter = native.ok_or_else(|| invalid_data("missing native frame presenter"))?;
+            let submitted = presenter.draw(
+                viewer,
+                pixels,
+                info,
+                &state.decode_pool,
+                state.telemetry.detailed,
+            )?;
+            if let Some(timings) = submitted.fallback {
+                state.telemetry.record_hardware_decode(timings);
+            }
+            let path = if let Some((path, elapsed)) = submitted.native {
+                state.telemetry.record_native_submission(
+                    elapsed,
+                    x11_presenter,
+                    submitted.native_stages,
+                );
+                path
+            } else {
+                "rgb"
+            };
+            (submitted.drawn, path)
+        }
     };
-    if !viewer.draw_recyclable(queued.frame)? {
+    if x11_presenter {
+        state
+            .telemetry
+            .record_x11_presenter_submit(draw_started.elapsed());
+    }
+    if !drawn {
         return Ok(false);
     }
+    let timing = PendingFrameTiming {
+        purpose: queued.purpose,
+        source_size: info.source_size,
+        viewport_revision,
+        source_epoch: info.source_epoch,
+        geometry_epoch: info.geometry_epoch,
+        sequence: info.sequence,
+        ready_at: queued.ready_at,
+        decode_elapsed: queued.decode_elapsed,
+        draw_started,
+        presentation_path,
+    };
     pending.push_back(timing);
     Ok(true)
 }
@@ -3535,11 +4456,27 @@ fn acknowledge_presentation(
         pending.pop_front();
     }
     let timing = pending.pop_front().unwrap();
-    telemetry.record_drawn_at(timing.ready_at, timing.draw_started, Instant::now());
-    writer.write_message(
-        MessageKind::FrameAck,
-        &encode_source_frame_ack(timing.source_epoch, sequence)?,
-    )?;
+    let finished_at = Instant::now();
+    telemetry.record_drawn_at(timing.ready_at, timing.draw_started, finished_at);
+    telemetry.record_presented_scope(&timing, finished_at);
+    if telemetry.video_feedback {
+        let feedback = ViewerFrameFeedback {
+            decode: timing.decode_elapsed,
+            presentation_queue: timing
+                .draw_started
+                .saturating_duration_since(timing.ready_at),
+            presentation: finished_at.saturating_duration_since(timing.draw_started),
+        };
+        writer.write_message(
+            MessageKind::FrameAck,
+            &feedback.encode_ack(timing.source_epoch, sequence)?,
+        )?;
+    } else {
+        writer.write_message(
+            MessageKind::FrameAck,
+            &encode_source_frame_ack(timing.source_epoch, sequence)?,
+        )?;
+    }
     writer.flush()?;
     if !writer.queued() {
         telemetry.record_acked();
@@ -3557,7 +4494,11 @@ fn draw_and_ack(
     let sequence = queued.frame.sequence();
     let source_epoch = queued.frame.source_epoch();
     let draw_started = Instant::now();
-    let draw_result = draw(queued.frame);
+    #[allow(irrefutable_let_patterns)]
+    let FrameLease::Cpu(frame) = queued.frame else {
+        panic!("CPU-only fixture")
+    };
+    let draw_result = draw(frame);
     let draw_finished = Instant::now();
     if !draw_result? {
         return Ok(());
@@ -3576,8 +4517,243 @@ fn draw_and_ack(
 
 struct QueuedFrame {
     purpose: FramePurpose,
-    frame: RecyclableDecodedFrame,
+    frame: FrameLease,
     ready_at: Instant,
+    decode_elapsed: Duration,
+}
+
+struct PreparedX11Rgb {
+    plan: super::x11_viewer::CpuPreparation,
+    pixels: Vec<u8>,
+    packed: bool,
+}
+
+struct X11PreparationJob {
+    queued: QueuedFrame,
+    output: PreparedX11Rgb,
+    work_elapsed: Duration,
+}
+
+struct X11PreparationWorker {
+    jobs: mpsc::SyncSender<X11PreparationJob>,
+    ready: mpsc::Receiver<X11PreparationJob>,
+    thread: ReceiverThread,
+    scratch: Vec<u8>,
+    pending_scope: Option<(u64, u64)>,
+    obsolete: bool,
+}
+
+impl X11PreparationWorker {
+    fn start(wake: WakeSender) -> io::Result<Self> {
+        let (jobs, requests) = mpsc::sync_channel::<X11PreparationJob>(1);
+        let (replies, ready) = mpsc::sync_channel(1);
+        let thread = ReceiverThread::spawn_named("jwm-remote-x11-prepare", move || {
+            while let Ok(mut job) = requests.recv() {
+                let started = Instant::now();
+                #[allow(irrefutable_let_patterns)]
+                if let FrameLease::Cpu(frame) = &job.queued.frame {
+                    job.output.packed = job
+                        .output
+                        .plan
+                        .prepare(frame.image(), &mut job.output.pixels)
+                        .is_ok();
+                }
+                job.work_elapsed = started.elapsed();
+                if replies.send(job).is_err() || wake.signal().is_err() {
+                    return;
+                }
+            }
+        })?;
+        Ok(Self {
+            jobs,
+            ready,
+            thread,
+            scratch: Vec::new(),
+            pending_scope: None,
+            obsolete: false,
+        })
+    }
+
+    fn busy(&self) -> bool {
+        self.pending_scope.is_some()
+    }
+
+    fn schedule(
+        &mut self,
+        viewer: &Viewer,
+        state: &ReceiveState,
+        presented_scope: (u64, u64),
+        queued: QueuedFrame,
+    ) -> RemoteResult<Option<QueuedFrame>> {
+        let info = queued.frame.info();
+        let scope = (info.source_epoch, info.geometry_epoch);
+        if self.busy()
+            || scope != presented_scope
+            || queued.purpose != FramePurpose::Video
+            || !state.alive.load(Ordering::Acquire)
+        {
+            return Ok(Some(queued));
+        }
+        let plan = match (viewer, &queued.frame) {
+            (Viewer::X11(x11), FrameLease::Cpu(frame)) => x11.cpu_preparation(frame),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        };
+        let Some(plan) = plan else {
+            return Ok(Some(queued));
+        };
+        let job = X11PreparationJob {
+            queued,
+            output: PreparedX11Rgb {
+                plan,
+                pixels: std::mem::take(&mut self.scratch),
+                packed: false,
+            },
+            work_elapsed: Duration::ZERO,
+        };
+        self.jobs.try_send(job).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "X11 CPU preparation worker stopped",
+            )
+        })?;
+        self.pending_scope = Some(scope);
+        self.obsolete = false;
+        state.telemetry.record_x11_prepare_scheduled();
+        Ok(None)
+    }
+
+    fn next_frame(
+        &mut self,
+        state: &ReceiveState,
+        source_epoch: u64,
+        accepting: bool,
+    ) -> RemoteResult<Option<(QueuedFrame, Option<PreparedX11Rgb>)>> {
+        if let Some((source, geometry)) = self.pending_scope {
+            let reply = self.ready.try_recv();
+            self.obsolete |= !accepting
+                || source != source_epoch
+                || source != state.source_epoch.load(Ordering::Acquire);
+            let next = if !self.obsolete {
+                // A new geometry or proof takes precedence over old CPU work.
+                // Old materializations can finish but cannot reenter the lane.
+                state
+                    .latest
+                    .lock()
+                    .unwrap()
+                    .take_when(source_epoch, |queued| {
+                        queued.purpose != FramePurpose::Video
+                            || queued.frame.geometry_epoch() != geometry
+                    })
+            } else {
+                None
+            };
+            self.obsolete |= next.is_some() || source != state.source_epoch.load(Ordering::Acquire);
+            match reply {
+                Ok(job) => {
+                    self.pending_scope = None;
+                    state.telemetry.record_x11_prepare_finished(
+                        job.output.packed,
+                        self.obsolete,
+                        job.work_elapsed,
+                    );
+                    if !self.obsolete {
+                        return Ok(Some((job.queued, Some(job.output))));
+                    }
+                    self.recycle(job.output);
+                }
+                Err(mpsc::TryRecvError::Empty) if !self.obsolete => return Ok(None),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "X11 CPU preparation worker stopped",
+                    )
+                    .into());
+                }
+            }
+            if let Some(next) = next {
+                return Ok(Some((next, None)));
+            }
+        }
+        Ok(take_latest(state, source_epoch).map(|queued| (queued, None)))
+    }
+
+    fn recycle(&mut self, output: PreparedX11Rgb) {
+        self.scratch = output.pixels;
+    }
+
+    fn close(self) -> RemoteResult<()> {
+        let Self { jobs, thread, .. } = self;
+        drop(jobs);
+        match thread.join_timeout(RECEIVER_JOIN_TIMEOUT) {
+            ReceiverExit::Completed => Ok(()),
+            exit => Err(io::Error::other(format!(
+                "X11 CPU preparation worker did not close cleanly: {exit:?}"
+            ))
+            .into()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct PresentationMailbox {
+    latest: Option<QueuedFrame>,
+    repair: Option<QueuedFrame>,
+}
+
+impl PresentationMailbox {
+    fn is_none(&self) -> bool {
+        self.latest.is_none() && self.repair.is_none()
+    }
+
+    fn publish(&mut self, next: QueuedFrame) -> [Option<QueuedFrame>; 2] {
+        let unchanged = self
+            .latest
+            .as_ref()
+            .is_some_and(|old| next.frame.shares_unchanged_tiles(&old.frame));
+        // A native proof may immediately follow a PNG repair carrying the
+        // same pixels. Keep both receipts in presentation order. They share
+        // one immutable tile snapshot. Real damage or a new scope discards
+        // the reserved repair and takes the normal latest-frame path.
+        let keep_repair = unchanged
+            && next.purpose == FramePurpose::NativeProof
+            && self
+                .latest
+                .as_ref()
+                .is_some_and(|old| old.purpose == FramePurpose::VisualRepair);
+        let previous = self.latest.replace(next);
+        if keep_repair {
+            return [std::mem::replace(&mut self.repair, previous), None];
+        }
+        let stale_repair = if unchanged { None } else { self.repair.take() };
+        [previous, stale_repair]
+    }
+
+    fn take(&mut self, epoch: u64) -> Option<QueuedFrame> {
+        self.take_when(epoch, |_| true)
+    }
+
+    fn take_when(
+        &mut self,
+        epoch: u64,
+        condition: impl FnOnce(&QueuedFrame) -> bool,
+    ) -> Option<QueuedFrame> {
+        if self
+            .latest
+            .as_ref()
+            .is_some_and(|queued| queued.frame.source_epoch() > epoch)
+        {
+            return None;
+        }
+        if !condition(self.repair.as_ref().or(self.latest.as_ref())?) {
+            return None;
+        }
+        self.repair
+            .take()
+            .or_else(|| self.latest.take())
+            .filter(|queued| queued.frame.source_epoch() == epoch)
+    }
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -3590,24 +4766,280 @@ struct ClientTelemetryWindow {
     decode_elapsed: Duration,
     queue_elapsed: Duration,
     draw_elapsed: Duration,
+    decode_samples: super::telemetry::StageStats,
+    presentation_queue: super::telemetry::StageStats,
+    presentation_completion: super::telemetry::StageStats,
+    x11_cpu_prepare: super::telemetry::StageStats,
+    x11_presenter_submit: super::telemetry::StageStats,
+    x11_cpu_preparation: X11PreparationStats,
+    cursor_interval: super::telemetry::StageStats,
+    hardware_decode: super::telemetry::StageStats,
+    hardware_download: super::telemetry::StageStats,
+    hardware_direct_map: super::telemetry::StageStats,
+    hardware_conversion: super::telemetry::StageStats,
+    hardware_rgb_copy: super::telemetry::StageStats,
+    hardware_rgb_work: HardwareRgbStats,
+    first_presentation: super::telemetry::StageStats,
+    source_switch_presentation: super::telemetry::StageStats,
+    decode_queue_wait: super::telemetry::StageStats,
+    frame_header_wait: super::telemetry::StageStats,
+    frame_body_receive: super::telemetry::StageStats,
+    frame_authentication: super::telemetry::StageStats,
+    decode_queue_records: usize,
+    decode_queue_bytes: usize,
+    last_frame: Option<super::engine::ViewerFrameScope>,
+    last_viewport_revision: Option<u64>,
+    last_presentation_path: Option<&'static str>,
+    native_presented: u64,
+    native_preparation_and_submit: super::telemetry::StageStats,
+    #[cfg(feature = "remote-h264")]
+    native_x11_stages: super::telemetry::NativeStageStats,
+    #[cfg(all(feature = "remote-h264", feature = "remote-wayland"))]
+    native_wayland_stages: super::telemetry::NativeStageStats,
+    sender: ViewerSendStats,
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct X11PreparationStats {
+    scheduled: u64,
+    prepared: u64,
+    submitted: u64,
+    fallbacks: u64,
+    stale: u64,
+    last_submitted_viewport_revision: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HardwareRgbStats {
+    fitting_checkouts: u64,
+    fresh_reserves: u64,
+    growth_reserves: u64,
+    requested_bytes: u64,
+    added_capacity_bytes: u64,
+    download_targets_populated: u64,
+    download_targets_reused: u64,
+    download_targets_replaced: u64,
+    direct_map_frames: u64,
+    direct_map_staged_bytes: u64,
+    direct_map_fallback_frames: u64,
+    full_frame_copies: u64,
+    full_frame_copy_bytes: u64,
+    banded_copies: u64,
+    banded_copy_bytes: u64,
+}
+
+impl HardwareRgbStats {
+    #[cfg(feature = "remote-h264")]
+    fn record(&mut self, work: super::h264::HardwareRgbWork) {
+        use super::{
+            frame::DecodeBufferAllocation,
+            h264::{DownloadTarget, RgbCopy, RgbInput},
+        };
+
+        // A native redraw can materialize the same surface again. Count the
+        // work independently of decoded or presented sequences.
+        let Some(checkout) = work.checkout else {
+            return;
+        };
+        match checkout.allocation {
+            DecodeBufferAllocation::Reused => self.fitting_checkouts += 1,
+            DecodeBufferAllocation::Fresh => self.fresh_reserves += 1,
+            DecodeBufferAllocation::Grown => self.growth_reserves += 1,
+        }
+        self.requested_bytes += checkout.requested_bytes as u64;
+        self.added_capacity_bytes += checkout.capacity_added_bytes as u64;
+        let download = match work.input {
+            RgbInput::Download(target) => Some(target),
+            RgbInput::DirectMap(bytes) => {
+                self.direct_map_frames += 1;
+                self.direct_map_staged_bytes += bytes as u64;
+                None
+            }
+            RgbInput::MapFallback(target) => {
+                self.direct_map_fallback_frames += 1;
+                Some(target)
+            }
+        };
+        match download {
+            Some(DownloadTarget::Populated) => self.download_targets_populated += 1,
+            Some(DownloadTarget::Reused) => self.download_targets_reused += 1,
+            Some(DownloadTarget::Replaced) => self.download_targets_replaced += 1,
+            None => {}
+        }
+        match work.copy {
+            RgbCopy::FullFrame(bytes) => {
+                self.full_frame_copies += 1;
+                self.full_frame_copy_bytes += bytes as u64;
+            }
+            RgbCopy::Banded(bytes) => {
+                self.banded_copies += 1;
+                self.banded_copy_bytes += bytes as u64;
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.full_frame_copies == 0 && self.banded_copies == 0
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "pool": {
+                "fitting_checkouts": self.fitting_checkouts,
+                "fresh_reserves": self.fresh_reserves,
+                "growth_reserves": self.growth_reserves,
+                "requested_bytes": self.requested_bytes,
+                "added_capacity_bytes": self.added_capacity_bytes,
+            },
+            "download": {
+                "empty_targets_populated": self.download_targets_populated,
+                "retained_targets_reused": self.download_targets_reused,
+                "populated_targets_replaced": self.download_targets_replaced,
+            },
+            "vaapi_map": {
+                "mapped_frames": self.direct_map_frames,
+                "staged_bytes": self.direct_map_staged_bytes,
+                "fallback_frames": self.direct_map_fallback_frames,
+            },
+            "copy": {
+                "full_frame_copies": self.full_frame_copies,
+                "full_frame_bytes": self.full_frame_copy_bytes,
+                "banded_copies": self.banded_copies,
+                "banded_bytes": self.banded_copy_bytes,
+            },
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ViewerSendStats {
+    control_wait: super::telemetry::StageStats,
+    input_wait: super::telemetry::StageStats,
+    bulk_wait: super::telemetry::StageStats,
+    control_write: super::telemetry::StageStats,
+    bulk_write: super::telemetry::StageStats,
+    oldest_queued: super::telemetry::StageStats,
+    control_records: usize,
+    bulk_records: usize,
+    control_bytes: usize,
+    bulk_bytes: usize,
+}
+
+impl ViewerSendStats {
+    fn record(&mut self, kind: MessageKind, timing: super::sender::SendTiming) {
+        if matches!(
+            kind,
+            MessageKind::Clipboard | MessageKind::ClipboardTransfer
+        ) {
+            self.bulk_wait.record(timing.queue_wait);
+            self.bulk_write.record(timing.write_elapsed);
+        } else {
+            self.control_wait.record(timing.queue_wait);
+            self.control_write.record(timing.write_elapsed);
+        }
+        if matches!(
+            kind,
+            MessageKind::InputBatch
+                | MessageKind::WaylandKeyboardKey
+                | MessageKind::WaylandPointerAction
+                | MessageKind::WaylandControlAction
+                | MessageKind::WaylandKeyboardRevoke
+                | MessageKind::WaylandPointerRevoke
+                | MessageKind::WaylandControlRevoke
+                | MessageKind::WaylandPopupRevoke
+        ) {
+            self.input_wait.record(timing.queue_wait);
+        }
+        self.oldest_queued.record(timing.oldest_queued);
+        self.control_records = self.control_records.max(timing.control_records);
+        self.bulk_records = self.bulk_records.max(timing.bulk_records);
+        self.control_bytes = self.control_bytes.max(timing.control_bytes);
+        self.bulk_bytes = self.bulk_bytes.max(timing.bulk_bytes);
+    }
 }
 
 impl ClientTelemetryWindow {
     fn is_empty(self) -> bool {
-        self.received == 0
+        let empty = self.received == 0
             && self.decoded == 0
             && self.replaced == 0
             && self.drawn == 0
             && self.acked == 0
+            && self.cursor_interval.observations == 0
+            && self.frame_authentication.observations == 0
+            && self.x11_cpu_preparation == X11PreparationStats::default()
+            && self.sender.oldest_queued.observations == 0
+            && self.hardware_rgb_work.is_empty();
+        #[cfg(feature = "remote-h264")]
+        let empty = empty && self.native_x11_stages.is_empty();
+        #[cfg(all(feature = "remote-h264", feature = "remote-wayland"))]
+        let empty = empty && self.native_wayland_stages.is_empty();
+        empty
     }
 }
 
 #[derive(Default)]
 struct ClientTelemetry {
+    detailed: bool,
+    video_feedback: bool,
     window: Mutex<ClientTelemetryWindow>,
+    last_cursor: Mutex<Option<(u64, Instant)>>,
+    awaiting_presentation: Mutex<Option<(u64, Instant)>>,
 }
 
 impl ClientTelemetry {
+    fn record_x11_prepare_scheduled(&self) {
+        if self.detailed {
+            self.lock_window().x11_cpu_preparation.scheduled += 1;
+        }
+    }
+
+    fn record_x11_prepare_finished(&self, packed: bool, stale: bool, elapsed: Duration) {
+        if self.detailed {
+            let mut window = self.lock_window();
+            window.x11_cpu_prepare.record(elapsed);
+            window.x11_cpu_preparation.prepared += u64::from(packed);
+            window.x11_cpu_preparation.stale += u64::from(stale);
+        }
+    }
+
+    fn record_x11_prepare_submission(&self, used: bool, viewport_revision: u64) {
+        if self.detailed {
+            let mut window = self.lock_window();
+            let counters = &mut window.x11_cpu_preparation;
+            if used {
+                counters.submitted += 1;
+                counters.last_submitted_viewport_revision = Some(viewport_revision);
+            } else {
+                counters.fallbacks += 1;
+            }
+        }
+    }
+
+    fn record_x11_presenter_submit(&self, elapsed: Duration) {
+        if self.detailed {
+            self.lock_window().x11_presenter_submit.record(elapsed);
+        }
+    }
+
+    fn read_record<R: io::Read>(
+        &self,
+        reader: &mut SessionReader<R>,
+        payload: &mut Vec<u8>,
+    ) -> Result<MessageKind, ProtocolError> {
+        if !self.detailed {
+            return reader.read_message_into(payload);
+        }
+        let (kind, timing) = reader.read_message_into_timed(payload)?;
+        if kind == MessageKind::Frame {
+            let mut window = self.lock_window();
+            window.frame_header_wait.record(timing.header_wait);
+            window.frame_body_receive.record(timing.body_receive);
+            window.frame_authentication.record(timing.authentication);
+        }
+        Ok(kind)
+    }
+
     fn record_received(&self) {
         let mut window = self.lock_window();
         window.received = window.received.saturating_add(1);
@@ -3615,10 +5047,123 @@ impl ClientTelemetry {
 
     fn record_decoded_at(&self, decode_started: Instant, ready_at: Instant) {
         let mut window = self.lock_window();
+        let elapsed = ready_at.saturating_duration_since(decode_started);
         window.decoded = window.decoded.saturating_add(1);
-        window.decode_elapsed = window
-            .decode_elapsed
-            .saturating_add(ready_at.saturating_duration_since(decode_started));
+        window.decode_elapsed = window.decode_elapsed.saturating_add(elapsed);
+        if self.detailed {
+            window.decode_samples.record(elapsed);
+        }
+    }
+
+    fn record_frame_scope(&self, frame: &FrameLease, codec: FrameCodec) {
+        if self.detailed {
+            let info = frame.info();
+            self.lock_window().last_frame = Some(super::engine::ViewerFrameScope {
+                source_epoch: info.source_epoch,
+                geometry_epoch: info.geometry_epoch,
+                sequence: info.sequence,
+                codec: codec.name(),
+                source_dimensions: info.source_size,
+                encoded_dimensions: info.encoded_size,
+            });
+        }
+    }
+
+    fn expect_first_frame(&self, epoch: u64, now: Instant) {
+        if self.detailed {
+            *self.awaiting_presentation.lock().unwrap() = Some((epoch, now));
+        }
+    }
+
+    fn record_presented_scope(&self, timing: &PendingFrameTiming, finished: Instant) {
+        if !self.detailed {
+            return;
+        }
+        let mut awaiting = self.awaiting_presentation.lock().unwrap();
+        let mut window = self.lock_window();
+        window.last_viewport_revision = Some(timing.viewport_revision);
+        window.last_presentation_path = Some(timing.presentation_path);
+        if matches!(
+            timing.presentation_path,
+            "x11-vaapi-dmabuf-dri3" | "wayland-vaapi-dmabuf"
+        ) {
+            window.native_presented = window.native_presented.saturating_add(1);
+        }
+        if let Some((epoch, started)) = *awaiting
+            && epoch == timing.source_epoch
+        {
+            let elapsed = finished.saturating_duration_since(started);
+            if epoch == 1 {
+                window.first_presentation.record(elapsed);
+            } else {
+                window.source_switch_presentation.record(elapsed);
+            }
+            *awaiting = None;
+        }
+    }
+
+    #[cfg(feature = "remote-h264")]
+    fn record_hardware_decode(&self, timings: super::h264::DecodeTimings) {
+        if self.detailed {
+            let mut window = self.lock_window();
+            if let Some(decode) = timings.decode {
+                window.hardware_decode.record(decode);
+            }
+            if let Some(download) = timings.download {
+                window.hardware_download.record(download);
+            }
+            if let Some(direct_map) = timings.direct_map {
+                window.hardware_direct_map.record(direct_map);
+            }
+            if let Some(conversion) = timings.conversion {
+                window.hardware_conversion.record(conversion);
+            }
+            if let Some(copy) = timings.copy {
+                window.hardware_rgb_copy.record(copy);
+            }
+            if let Some(work) = timings.rgb_work {
+                window.hardware_rgb_work.record(work);
+            }
+        }
+    }
+
+    #[cfg(feature = "remote-h264")]
+    fn record_native_submission(
+        &self,
+        elapsed: Duration,
+        x11: bool,
+        stages: Option<super::telemetry::NativeStageTimes>,
+    ) {
+        if self.detailed {
+            let mut window = self.lock_window();
+            window.native_preparation_and_submit.record(elapsed);
+            if let Some(stages) = stages {
+                if x11 {
+                    window.native_x11_stages.record(stages);
+                } else {
+                    #[cfg(feature = "remote-wayland")]
+                    window.native_wayland_stages.record(stages);
+                }
+            }
+        }
+    }
+
+    fn record_cursor_position(&self, source_epoch: u64, now: Instant) {
+        if !self.detailed {
+            return;
+        }
+        let previous = self
+            .last_cursor
+            .lock()
+            .unwrap()
+            .replace((source_epoch, now));
+        if let Some((previous_epoch, previous)) = previous
+            && source_epoch == previous_epoch
+        {
+            self.lock_window()
+                .cursor_interval
+                .record(now.saturating_duration_since(previous));
+        }
     }
 
     fn record_replaced(&self) {
@@ -3628,18 +5173,39 @@ impl ClientTelemetry {
 
     fn record_drawn_at(&self, ready_at: Instant, draw_started: Instant, draw_finished: Instant) {
         let mut window = self.lock_window();
+        let queue = draw_started.saturating_duration_since(ready_at);
+        let completion = draw_finished.saturating_duration_since(draw_started);
         window.drawn = window.drawn.saturating_add(1);
-        window.queue_elapsed = window
-            .queue_elapsed
-            .saturating_add(draw_started.saturating_duration_since(ready_at));
-        window.draw_elapsed = window
-            .draw_elapsed
-            .saturating_add(draw_finished.saturating_duration_since(draw_started));
+        window.queue_elapsed = window.queue_elapsed.saturating_add(queue);
+        window.draw_elapsed = window.draw_elapsed.saturating_add(completion);
+        if self.detailed {
+            window.presentation_queue.record(queue);
+            window.presentation_completion.record(completion);
+        }
     }
 
     fn record_acked(&self) {
         let mut window = self.lock_window();
         window.acked = window.acked.saturating_add(1);
+    }
+
+    fn record_send(&self, kind: MessageKind, timing: super::sender::SendTiming) {
+        self.lock_window().sender.record(kind, timing);
+    }
+
+    fn record_decode_queue(
+        &self,
+        kind: MessageKind,
+        timing: super::client_decode_queue::DequeueTiming,
+    ) {
+        if self.detailed {
+            let mut window = self.lock_window();
+            if kind == MessageKind::Frame {
+                window.decode_queue_wait.record(timing.age);
+            }
+            window.decode_queue_records = window.decode_queue_records.max(timing.records);
+            window.decode_queue_bytes = window.decode_queue_bytes.max(timing.bytes);
+        }
     }
 
     fn take_window(&self) -> ClientTelemetryWindow {
@@ -3659,7 +5225,148 @@ struct ClientTelemetryReport {
     elapsed: Duration,
 }
 
+#[derive(Clone, Copy)]
+struct ViewerTelemetryContext {
+    correlation_id: u128,
+    backend: ViewerBackend,
+    negotiated_codec: FrameCodec,
+    limits: super::messages::FrameLimits,
+    input_mode: &'static str,
+}
+
+fn negotiated_input_mode(hello: &ServerHello) -> &'static str {
+    let stream = hello.stream;
+    if stream.wayland_popup_pointer {
+        "wayland-popup"
+    } else if stream.wayland_text {
+        "wayland-text"
+    } else if stream.resumable_control {
+        "wayland-resumable-control"
+    } else if stream.wayland_control {
+        "wayland-control"
+    } else if stream.wayland_keyboard {
+        "wayland-keyboard"
+    } else if stream.wayland_pointer {
+        "wayland-pointer"
+    } else if hello.pointer_enabled && hello.keyboard_enabled {
+        "x11-keyboard-pointer"
+    } else if hello.pointer_enabled {
+        "x11-pointer"
+    } else {
+        "view-only"
+    }
+}
+
 impl ClientTelemetryReport {
+    fn snapshot(
+        &self,
+        context: ViewerTelemetryContext,
+        final_report: bool,
+    ) -> super::engine::MetricsSnapshot {
+        let window = &self.window;
+        super::engine::MetricsSnapshot {
+            session_id: context.correlation_id,
+            window: self.elapsed,
+            final_report,
+            negotiated_codec: context.negotiated_codec,
+            last_decoded_frame: window.last_frame,
+            presented_frames: window.drawn,
+            acked_frames: window.acked,
+            native_presented_frames: window.native_presented,
+            last_presentation_path: window.last_presentation_path,
+            decode: window.decode_samples.snapshot(),
+            hardware_download: window.hardware_download.snapshot(),
+            presentation_queue: window.presentation_queue.snapshot(),
+            presentation_completion: window.presentation_completion.snapshot(),
+            native_preparation_and_submit: window.native_preparation_and_submit.snapshot(),
+        }
+    }
+
+    fn json(&self, context: ViewerTelemetryContext, final_report: bool) -> serde_json::Value {
+        let window = &self.window;
+        #[cfg_attr(
+            not(all(feature = "remote-h264", feature = "remote-wayland")),
+            allow(unused_mut)
+        )]
+        let mut report = serde_json::json!({
+            "type": "jwm_remote_viewer_stats", "schema_version": 1,
+            "version": env!("CARGO_PKG_VERSION"),
+            "commit": option_env!("JWM_BUILD_COMMIT"),
+            "session_id": format!("{:032x}", context.correlation_id),
+            "viewer_backend": context.backend.to_string(),
+            "negotiated_codec": context.negotiated_codec.name(),
+            "input_mode": context.input_mode,
+            "frame_limits": {
+                "max_width": context.limits.max_width,
+                "max_height": context.limits.max_height,
+                "max_pixels": context.limits.max_pixels,
+            },
+            "window_seconds": self.elapsed.as_secs_f64(),
+            "final": final_report,
+            "received": window.received, "decoded": window.decoded, "replaced": window.replaced,
+            "drawn": window.drawn, "acked": window.acked, "last_frame": window.last_frame,
+            "last_viewport_revision": window.last_viewport_revision,
+            "last_presentation_path": window.last_presentation_path,
+            "native_presented": window.native_presented,
+            "hardware_rgb_work": window.hardware_rgb_work.json(),
+            "x11_cpu_preparation": {
+                "scheduled": window.x11_cpu_preparation.scheduled,
+                "prepared": window.x11_cpu_preparation.prepared,
+                "submitted": window.x11_cpu_preparation.submitted,
+                "fallbacks": window.x11_cpu_preparation.fallbacks,
+                "stale": window.x11_cpu_preparation.stale,
+                "last_submitted_viewport_revision":
+                    window.x11_cpu_preparation.last_submitted_viewport_revision,
+            },
+            "quantile_policy": super::telemetry::QUANTILE_POLICY,
+            "sender_max_sampled_at_dequeue": {
+                "control_records": window.sender.control_records,
+                "bulk_records": window.sender.bulk_records,
+                "control_bytes": window.sender.control_bytes,
+                "bulk_bytes": window.sender.bulk_bytes,
+            },
+            "decode_queue_max_sampled_at_dequeue": {
+                "records": window.decode_queue_records,
+                "bytes": window.decode_queue_bytes,
+            },
+            "stages": {
+                "decode_ms": window.decode_samples.json(),
+                "presentation_queue_ms": window.presentation_queue.json(),
+                "presentation_completion_ms": window.presentation_completion.json(),
+                "x11_cpu_prepare_ms": window.x11_cpu_prepare.json(),
+                "x11_presenter_submit_ms": window.x11_presenter_submit.json(),
+                "native_preparation_and_submit_ms": window.native_preparation_and_submit.json(),
+                "cursor_interval_ms": window.cursor_interval.json(),
+                "hardware_decode_ms": window.hardware_decode.json(),
+                "hardware_download_ms": window.hardware_download.json(),
+                "hardware_direct_map_ms": window.hardware_direct_map.json(),
+                "hardware_conversion_ms": window.hardware_conversion.json(),
+                "hardware_rgb_copy_ms": window.hardware_rgb_copy.json(),
+                "first_presentation_ms": window.first_presentation.json(),
+                "source_switch_presentation_ms": window.source_switch_presentation.json(),
+                "decode_queue_ms": window.decode_queue_wait.json(),
+                "frame_header_wait_ms": window.frame_header_wait.json(),
+                "frame_body_receive_ms": window.frame_body_receive.json(),
+                "frame_authentication_ms": window.frame_authentication.json(),
+                "sender_control_queue_ms": window.sender.control_wait.json(),
+                "sender_input_queue_ms": window.sender.input_wait.json(),
+                "sender_bulk_queue_ms": window.sender.bulk_wait.json(),
+                "sender_control_write_ms": window.sender.control_write.json(),
+                "sender_bulk_write_ms": window.sender.bulk_write.json(),
+                "sender_oldest_queued_ms": window.sender.oldest_queued.json(),
+            },
+        });
+        #[cfg(feature = "remote-h264")]
+        if let Some(stages) = window.native_x11_stages.json() {
+            report["native_x11_stages"] = stages;
+        }
+        #[cfg(all(feature = "remote-h264", feature = "remote-wayland"))]
+        if let Some(stages) = window.native_wayland_stages.json() {
+            report["native_wayland_stages"] = stages;
+        }
+        report
+    }
+
     fn emit(self, final_report: bool) {
         let label = if final_report {
             "viewer final"
@@ -3685,11 +5392,23 @@ struct ClientTelemetryReporter<'a> {
     telemetry: &'a ClientTelemetry,
     window_started: Instant,
     finished: bool,
+    context: Option<ViewerTelemetryContext>,
+    stats_json: bool,
+    engine: Option<&'a ConnectToggle>,
 }
 
 impl<'a> ClientTelemetryReporter<'a> {
-    fn new(telemetry: &'a ClientTelemetry) -> Self {
-        Self::new_at(telemetry, Instant::now())
+    fn new(
+        telemetry: &'a ClientTelemetry,
+        context: ViewerTelemetryContext,
+        stats_json: bool,
+        engine: Option<&'a ConnectToggle>,
+    ) -> Self {
+        let mut reporter = Self::new_at(telemetry, Instant::now());
+        reporter.context = telemetry.detailed.then_some(context);
+        reporter.stats_json = stats_json;
+        reporter.engine = engine;
+        reporter
     }
 
     fn new_at(telemetry: &'a ClientTelemetry, window_started: Instant) -> Self {
@@ -3697,7 +5416,25 @@ impl<'a> ClientTelemetryReporter<'a> {
             telemetry,
             window_started,
             finished: false,
+            context: None,
+            stats_json: false,
+            engine: None,
         }
+    }
+
+    fn emit(&self, report: ClientTelemetryReport, final_report: bool) {
+        if let Some(context) = self.context {
+            if let Some(engine) = self.engine {
+                engine.publish_metrics(report.snapshot(context, final_report));
+            }
+            if self.stats_json {
+                super::ssh_diagnostics::emit_json_line(
+                    &report.json(context, final_report).to_string(),
+                );
+                return;
+            }
+        }
+        report.emit(final_report);
     }
 
     fn maybe_report(&mut self) {
@@ -3705,7 +5442,7 @@ impl<'a> ClientTelemetryReporter<'a> {
             return;
         }
         if let Some(report) = self.maybe_report_at(Instant::now(), false) {
-            report.emit(false);
+            self.emit(report, false);
         }
     }
 
@@ -3714,7 +5451,7 @@ impl<'a> ClientTelemetryReporter<'a> {
             return;
         }
         if let Some(report) = self.maybe_report_at(Instant::now(), true) {
-            report.emit(true);
+            self.emit(report, true);
         }
         self.finished = true;
     }
@@ -3802,14 +5539,14 @@ fn wake_pair() -> io::Result<(WakeReceiver, WakeSender)> {
 }
 
 fn wait_for_activity(
-    x11_fd: BorrowedFd<'_>,
+    viewer_fd: BorrowedFd<'_>,
     wake_fd: BorrowedFd<'_>,
     deadline: Instant,
 ) -> io::Result<WaitOutcome> {
     loop {
         let interests = PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP;
         let mut descriptors = [
-            PollFd::new(x11_fd, interests),
+            PollFd::new(viewer_fd, interests),
             PollFd::new(wake_fd, interests),
         ];
         match poll(
@@ -3830,7 +5567,7 @@ fn wait_for_activity(
                 if descriptors[0].revents().is_some_and(|events| {
                     events.intersects(PollFlags::POLLERR | PollFlags::POLLHUP)
                 }) {
-                    return Ok(WaitOutcome::X11Hangup);
+                    return Ok(WaitOutcome::ViewerHangup);
                 }
                 return Ok(WaitOutcome::Activity);
             }
@@ -3843,7 +5580,7 @@ fn wait_for_activity(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WaitOutcome {
     Activity,
-    X11Hangup,
+    ViewerHangup,
 }
 
 fn poll_timeout_until(now: Instant, deadline: Instant) -> PollTimeout {
@@ -3972,9 +5709,11 @@ struct ReceiverThread {
 
 impl ReceiverThread {
     fn spawn(task: impl FnOnce() + Send + 'static) -> io::Result<Self> {
-        let handle = thread::Builder::new()
-            .name("jwm-remote-video".into())
-            .spawn(task)?;
+        Self::spawn_named("jwm-remote-video", task)
+    }
+
+    fn spawn_named(name: &str, task: impl FnOnce() + Send + 'static) -> io::Result<Self> {
+        let handle = thread::Builder::new().name(name.into()).spawn(task)?;
         Ok(Self {
             handle: Some(handle),
         })
@@ -4691,13 +6430,19 @@ struct ReceiveState {
     clipboard_restriction: Mutex<Option<RestrictionState>>,
     catalog: Mutex<Option<SourceCatalog>>,
     source_epoch: AtomicU64,
+    session_epoch: u128,
     frame_limits: super::messages::FrameLimits,
     frame_codec: FrameCodec,
+    #[cfg(feature = "remote-h264")]
+    native_video: Option<native_video::Decode>,
+    #[cfg(feature = "remote-h264")]
+    vaapi_direct_map: bool,
+    read_ahead: bool,
     scroll_copy: bool,
     static_lossless: bool,
     cursor_enabled: AtomicBool,
     cursor: Mutex<super::cursor::CursorInbox>,
-    latest: Mutex<Option<QueuedFrame>>,
+    latest: Mutex<PresentationMailbox>,
     error: Mutex<Option<RemoteError>>,
     alive: AtomicBool,
     stopping: AtomicBool,
@@ -4741,13 +6486,19 @@ impl ReceiveState {
             clipboard_restriction: Mutex::new(None),
             catalog: Mutex::new(None),
             source_epoch: AtomicU64::new(1),
+            session_epoch: 0,
             frame_limits: super::messages::FrameLimits::default(),
             frame_codec: FrameCodec::JpegTiles,
+            #[cfg(feature = "remote-h264")]
+            native_video: None,
+            #[cfg(feature = "remote-h264")]
+            vaapi_direct_map: false,
+            read_ahead: false,
             scroll_copy: false,
             static_lossless: false,
             cursor_enabled: AtomicBool::new(false),
             cursor: Mutex::new(super::cursor::CursorInbox::default()),
-            latest: Mutex::new(None),
+            latest: Mutex::new(PresentationMailbox::default()),
             error: Mutex::new(None),
             alive: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
@@ -4795,14 +6546,18 @@ fn receive_cursor(state: &ReceiveState, kind: MessageKind, payload: &[u8]) -> Re
         return Err(invalid_data("independent cursor was not negotiated").into());
     }
     let (epoch, payload) = decode_source_payload(payload)?;
+    let mut inbox = state.cursor.lock().unwrap();
     if !accept_source_epoch(epoch, state.source_epoch.load(Ordering::Acquire))? {
         return Ok(());
     }
-    let mut inbox = state.cursor.lock().unwrap();
     match kind {
         MessageKind::CursorShape => inbox.shape(super::cursor::CursorShape::decode(payload)?),
         MessageKind::CursorPosition => {
-            inbox.position(super::cursor::CursorPosition::decode(payload)?)
+            inbox.position(super::cursor::CursorPosition::decode(payload)?)?;
+            state
+                .telemetry
+                .record_cursor_position(epoch, Instant::now());
+            Ok(())
         }
         _ => Err(invalid_data("unexpected cursor record").into()),
     }
@@ -4831,21 +6586,7 @@ fn apply_pending_cursor(viewer: &mut Viewer, state: &ReceiveState, epoch: u64) -
 }
 
 fn take_latest(state: &ReceiveState, epoch: u64) -> Option<QueuedFrame> {
-    let mut latest = state.latest.lock().unwrap();
-    if latest
-        .as_ref()
-        .is_some_and(|queued| queued.frame.source_epoch() > epoch)
-    {
-        return None;
-    }
-    latest
-        .take()
-        .filter(|queued| queued.frame.source_epoch() == epoch)
-}
-
-fn replace_latest<T>(latest: &Mutex<Option<T>>, next: T) -> Option<T> {
-    let mut latest = latest.lock().unwrap();
-    latest.replace(next)
+    state.latest.lock().unwrap().take(epoch)
 }
 
 struct SessionVideoDecoder {
@@ -4869,6 +6610,14 @@ impl From<TileDecoder> for SessionVideoDecoder {
 }
 
 impl SessionVideoDecoder {
+    fn active_codec(&self, _state: &ReceiveState) -> FrameCodec {
+        #[cfg(feature = "remote-h264")]
+        if self.hardware.is_some() {
+            return _state.frame_codec;
+        }
+        FrameCodec::JpegTiles
+    }
+
     fn reset_source(&mut self, state: &ReceiveState) -> RemoteResult<()> {
         self.jpeg = state.new_tile_decoder()?;
         #[cfg(feature = "remote-h264")]
@@ -4977,8 +6726,22 @@ impl SessionVideoDecoder {
                 *previous = header;
             } else {
                 self.hardware = None;
-                let decoder = super::h264::Decoder::new(state.frame_codec, padded.0, padded.1)
-                    .map_err(hardware_decoder_error)?;
+                let decoder = match state
+                    .native_video
+                    .as_ref()
+                    .and_then(|native| native.open(padded))
+                {
+                    Some(decoder) => decoder,
+                    None => {
+                        let mut decoder =
+                            super::h264::Decoder::new(state.frame_codec, padded.0, padded.1)
+                                .map_err(hardware_decoder_error)?;
+                        if state.vaapi_direct_map {
+                            decoder.enable_vaapi_map();
+                        }
+                        decoder
+                    }
+                };
                 self.hardware = Some((header, decoder));
             }
         }
@@ -4986,17 +6749,50 @@ impl SessionVideoDecoder {
             .hardware
             .as_mut()
             .expect("hardware decoder initialized");
+        if state
+            .native_video
+            .as_ref()
+            .is_some_and(native_video::Decode::active)
+        {
+            let (pixels, timings) = decoder
+                .decode_vaapi_surface(annex_b, state.telemetry.detailed)
+                .map_err(hardware_decoder_error)?;
+            state.telemetry.record_hardware_decode(timings);
+            let ready_at = Instant::now();
+            state.telemetry.record_decoded_at(decode_started, ready_at);
+            return Ok(QueuedFrame {
+                purpose: FramePurpose::Video,
+                frame: FrameLease::Vaapi {
+                    pixels,
+                    info: FrameInfo {
+                        session_epoch: state.session_epoch,
+                        source_epoch: 0,
+                        geometry_epoch: header.geometry_epoch,
+                        sequence: header.sequence,
+                        source_size: (header.source_width, header.source_height),
+                        encoded_size: dimensions,
+                    },
+                },
+                ready_at,
+                decode_elapsed: ready_at.saturating_duration_since(decode_started),
+            });
+        }
         // Feed all authenticated access units in arrival order. The viewer
         // may skip presentation after decoding, so pictures used as future
         // H.264 references must not be skipped at this boundary.
-        let rgb = decoder.decode(annex_b).map_err(hardware_decoder_error)?;
-        if rgb.dimensions() != padded {
-            return Err(invalid_data(
-                "hardware output dimensions differ from the authenticated frame",
-            )
-            .into());
-        }
-        let rgb = crop_h264_padding(rgb, dimensions)?;
+        let rgb_bytes = dimensions.0 as usize * dimensions.1 as usize * 3;
+        let (mut pixels, checkout) = super::frame::prepare_decode_buffer(
+            &state.decode_pool,
+            rgb_bytes,
+            state.telemetry.detailed,
+        )?;
+        let timings = decoder
+            .decode_into(annex_b, dimensions, &mut pixels, state.telemetry.detailed)
+            .map_err(hardware_decoder_error)?
+            .with_checkout(checkout);
+        let rgb = image::RgbImage::from_raw(dimensions.0, dimensions.1, pixels)
+            .ok_or_else(|| invalid_data("decoded hardware frame has invalid RGB dimensions"))?;
+        state.telemetry.record_hardware_decode(timings);
         if reset {
             eprintln!(
                 "jwm-remote: hardware {} decoding active ({}x{})",
@@ -5008,42 +6804,21 @@ impl SessionVideoDecoder {
         let ready_at = Instant::now();
         state.telemetry.record_decoded_at(decode_started, ready_at);
         Ok(QueuedFrame {
-            frame: RecyclableDecodedFrame::new(
-                header.sequence,
-                header.source_width,
-                header.source_height,
-                rgb,
-                Arc::clone(&state.decode_pool),
-            )
-            .with_geometry_epoch(header.geometry_epoch),
+            frame: FrameLease::Cpu(
+                RecyclableDecodedFrame::new(
+                    header.sequence,
+                    header.source_width,
+                    header.source_height,
+                    rgb,
+                    Arc::clone(&state.decode_pool),
+                )
+                .with_geometry_epoch(header.geometry_epoch),
+            ),
             ready_at,
+            decode_elapsed: ready_at.saturating_duration_since(decode_started),
             purpose: FramePurpose::Video,
         })
     }
-}
-
-#[cfg(feature = "remote-h264")]
-fn crop_h264_padding(
-    rgb: image::RgbImage,
-    (width, height): (u32, u32),
-) -> RemoteResult<image::RgbImage> {
-    if rgb.dimensions() == (width, height) {
-        return Ok(rgb);
-    }
-    let padded_stride = rgb.width() as usize * 3;
-    let stride = width as usize * 3;
-    let rows = height as usize;
-    let mut pixels = rgb.into_raw();
-    if padded_stride != stride {
-        for row in 1..rows {
-            let padded_offset = row * padded_stride;
-            pixels.copy_within(padded_offset..padded_offset + stride, row * stride);
-        }
-    }
-    pixels.truncate(stride * rows);
-    image::RgbImage::from_raw(width, height, pixels).ok_or_else(|| {
-        invalid_data("cropped H.264 RGB buffer does not match frame dimensions").into()
-    })
 }
 
 fn decode_popup_queued_frame(
@@ -5089,7 +6864,16 @@ fn decode_popup_queued_frame(
             .wayland_popup
             .lock()
             .unwrap()
-            .commit_decoded_or_drain(metadata, epoch, purpose, &queued.frame, Instant::now())?;
+            .commit_decoded_or_drain(
+                metadata,
+                epoch,
+                purpose,
+                queued
+                    .frame
+                    .cpu()
+                    .ok_or_else(|| invalid_data("popup frame requires CPU pixels"))?,
+                Instant::now(),
+            )?;
     }
     Ok(queued)
 }
@@ -5114,8 +6898,9 @@ fn decode_queued_frame(
     let ready_at = Instant::now();
     telemetry.record_decoded_at(decode_started, ready_at);
     Ok(QueuedFrame {
-        frame,
+        frame: FrameLease::Cpu(frame),
         ready_at,
+        decode_elapsed: ready_at.saturating_duration_since(decode_started),
         purpose,
     })
 }
@@ -5151,16 +6936,21 @@ impl ReceiveCompletion {
         // Mark first so even a poisoned diagnostic lock cannot recurse into
         // terminal publication while unwinding.
         self.finished = true;
+        let mut slot = self
+            .state
+            .error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.state.alive.load(Ordering::Acquire) {
+            return;
+        }
         if let Some(error) = error
             && !self.state.stopping.load(Ordering::Acquire)
         {
-            let mut slot = match self.state.error.lock() {
-                Ok(slot) => slot,
-                Err(poisoned) => poisoned.into_inner(),
-            };
             *slot = Some(error);
         }
         self.state.alive.store(false, Ordering::Release);
+        drop(slot);
         self.state.popup_close_wake.notify_all();
         let _ = self.wake.signal();
     }
@@ -5185,20 +6975,183 @@ fn receive_frames(
     video_decoder: SessionVideoDecoder,
     clipboard: Option<ClipboardInbox>,
 ) {
+    if state.read_ahead {
+        receive_with_read_ahead(
+            reader,
+            state,
+            last_sequence,
+            payload,
+            wake,
+            video_decoder,
+            clipboard,
+        );
+        return;
+    }
     receive_frame_records(
         |payload, remaining| {
             reader.get_ref().set_read_timeout(Some(remaining))?;
-            reader
-                .read_message_into(payload)
+            state
+                .telemetry
+                .read_record(&mut reader, payload)
                 .map_err(receiver_read_error)
         },
-        state,
+        Arc::clone(&state),
         last_sequence,
         payload,
         wake,
         video_decoder,
         clipboard,
     );
+}
+
+struct StopReadAhead<'a> {
+    socket: TcpStream,
+    queue: &'a super::client_decode_queue::DecodeQueue,
+}
+
+impl Drop for StopReadAhead<'_> {
+    fn drop(&mut self) {
+        self.queue.close();
+        let _ = self.socket.shutdown(Shutdown::Read);
+    }
+}
+
+struct CloseDecodeQueue<'a>(&'a super::client_decode_queue::DecodeQueue);
+
+impl Drop for CloseDecodeQueue<'_> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+fn receive_with_read_ahead(
+    mut reader: SessionReader<TcpStream>,
+    state: Arc<ReceiveState>,
+    last_sequence: u64,
+    payload: Vec<u8>,
+    wake: WakeSender,
+    video_decoder: SessionVideoDecoder,
+    clipboard: Option<ClipboardInbox>,
+) {
+    let queue = super::client_decode_queue::DecodeQueue::with_video_deadline(
+        Instant::now() + VIDEO_FRAME_IDLE_TIMEOUT,
+    );
+    let mut setup_completion = ReceiveCompletion::new(Arc::clone(&state), wake);
+    let result: RemoteResult<()> = thread::scope(|scope| {
+        let cancel = StopReadAhead {
+            socket: reader.get_ref().try_clone()?,
+            queue: &queue,
+        };
+        // The deadline worker interrupts the socket independently of both
+        // decoder progress and partial reads of an authenticated record.
+        reader.get_ref().set_read_timeout(None)?;
+        let deadline_socket = cancel.socket.try_clone()?;
+        let deadline_wake = setup_completion.wake.try_clone()?;
+        let reader_wake = setup_completion.wake.try_clone()?;
+        let mut read_payload = payload;
+        let queue_ref = &queue;
+        let reader_state = &state;
+        let deadline = thread::Builder::new()
+            .name("jwm-remote-deadline".into())
+            .spawn_scoped(scope, move || {
+                if let Some(reason) = queue_ref.wait_for_expiry() {
+                    let mut completion =
+                        ReceiveCompletion::new(Arc::clone(reader_state), deadline_wake);
+                    // Publish the cause before interrupting the read so the
+                    // resulting EOF cannot become a reconnectable failure.
+                    completion.finish(Err(reason.error().into()));
+                    queue_ref.close();
+                    let _ = deadline_socket.shutdown(Shutdown::Read);
+                }
+            })?;
+        let producer = thread::Builder::new()
+            .name("jwm-remote-reader".into())
+            .spawn_scoped(scope, move || {
+                let _queue_closer = CloseDecodeQueue(queue_ref);
+                let mut completion = ReceiveCompletion::new(Arc::clone(reader_state), reader_wake);
+                let result: RemoteResult<()> = (|| {
+                    let mut wire_epoch = reader_state.source_epoch.load(Ordering::Acquire);
+                    let mut retention = PayloadBufferRetention::default();
+                    while reader_state.alive.load(Ordering::Acquire)
+                        && !reader_state.stopping.load(Ordering::Acquire)
+                    {
+                        let kind = reader_state
+                            .telemetry
+                            .read_record(&mut reader, &mut read_payload)
+                            .map_err(|error| {
+                                if matches!(&error, ProtocolError::Io(_))
+                                    && let Some(reason) = queue_ref.expired_at(Instant::now())
+                                {
+                                    return Box::new(reason.error()) as RemoteError;
+                                }
+                                receiver_read_error(error)
+                            })?;
+                        let authenticated_at = Instant::now();
+                        queue_ref.record_authenticated(
+                            kind,
+                            authenticated_at,
+                            VIDEO_FRAME_IDLE_TIMEOUT,
+                        )?;
+                        match kind {
+                            MessageKind::Close | MessageKind::SessionClose => {
+                                return Err(PeerClosed::decode(kind, &read_payload)?.into());
+                            }
+                            MessageKind::CursorShape | MessageKind::CursorPosition
+                                if wire_epoch
+                                    == reader_state.source_epoch.load(Ordering::Acquire)
+                                    && queue_ref.can_dispatch_cursor() =>
+                            {
+                                receive_cursor(reader_state, kind, &read_payload)?;
+                                completion.signal()?;
+                                retention.observe(&mut read_payload);
+                                continue;
+                            }
+                            MessageKind::SourceChanged => {
+                                let changed = decode_source_changed(&read_payload)?;
+                                if wire_epoch.checked_add(1) != Some(changed.epoch) {
+                                    return Err(invalid_data("invalid source change order").into());
+                                }
+                                wire_epoch = changed.epoch;
+                            }
+                            _ => {}
+                        }
+                        queue_ref.push(kind, &mut read_payload, authenticated_at, || {
+                            reader_state.stopping.load(Ordering::Acquire)
+                                || !reader_state.alive.load(Ordering::Acquire)
+                        })?;
+                    }
+                    Ok(())
+                })();
+                completion.finish(result);
+            })?;
+        let mut previous = None;
+        receive_frame_records(
+            |payload, remaining| {
+                if let Some(kind) = previous.take() {
+                    queue.handled(kind);
+                }
+                let (kind, timing) = queue.pop(payload, remaining)?;
+                previous = Some(kind);
+                state.telemetry.record_decode_queue(kind, timing);
+                Ok(kind)
+            },
+            Arc::clone(&state),
+            last_sequence,
+            Vec::new(),
+            setup_completion.wake.try_clone()?,
+            video_decoder,
+            clipboard,
+        );
+        drop(cancel);
+        producer
+            .join()
+            .map_err(|_| io::Error::other("remote authenticated reader panicked"))?;
+        deadline
+            .join()
+            .map_err(|_| io::Error::other("remote receive deadline worker panicked"))?;
+        Ok(())
+    });
+    setup_completion.finish(result);
 }
 
 /// Record handling is shared by TCP and authenticated in-memory fixtures.
@@ -5396,14 +7349,20 @@ fn receive_frame_records(
                     catalog.current = changed;
                 }
                 video_decoder.reset_source(&state)?;
-                *state.latest.lock().unwrap() = None;
-                *state.cursor.lock().unwrap() = super::cursor::CursorInbox::default();
+                let stale = std::mem::take(&mut *state.latest.lock().unwrap());
+                drop(stale);
+                let mut cursor = state.cursor.lock().unwrap();
+                *cursor = super::cursor::CursorInbox::default();
                 if state.wayland_popup.lock().unwrap().enabled {
                     return Err(
                         invalid_data("popup source cannot change during the session").into(),
                     );
                 }
                 state.source_epoch.store(changed.epoch, Ordering::Release);
+                drop(cursor);
+                state
+                    .telemetry
+                    .expect_first_frame(changed.epoch, Instant::now());
                 completion.signal()?;
             }
             MessageKind::Frame => {
@@ -5417,6 +7376,13 @@ fn receive_frame_records(
                 state.telemetry.record_received();
                 let mut queued =
                     decode_popup_queued_frame(&state, &mut video_decoder, inner, purpose, epoch)?;
+                let publication_gate = state.read_ahead.then(|| state.error.lock().unwrap());
+                if publication_gate.is_some()
+                    && (!state.alive.load(Ordering::Acquire)
+                        || state.stopping.load(Ordering::Acquire))
+                {
+                    return Ok(());
+                }
                 // Serialize the final publication with local revoke. Decode
                 // can run outside this lock, but a close during decode must
                 // never publish a new frame or mutate input proof state.
@@ -5442,7 +7408,7 @@ fn receive_frame_records(
                     assert!(rows.len() < 4096);
                     rows.push((queued.frame.sequence(), queued.purpose));
                 }
-                queued.frame = queued.frame.with_source_epoch(epoch);
+                queued.frame = queued.frame.with_scope(state.session_epoch, epoch);
                 let expected = last_sequence
                     .checked_add(1)
                     .ok_or_else(|| invalid_data("video frame sequence exhausted"))?;
@@ -5453,13 +7419,18 @@ fn receive_frame_records(
                     ))
                     .into());
                 }
+                state
+                    .telemetry
+                    .record_frame_scope(&queued.frame, video_decoder.active_codec(&state));
                 #[cfg(all(test, feature = "remote-wayland", feature = "backend-wayland-udev"))]
-                if state.frame_codec == FrameCodec::JpegTiles {
+                if state.frame_codec == FrameCodec::JpegTiles
+                    && let Some(cpu) = queued.frame.cpu()
+                {
                     observe_decoded_scroll(
                         &state.scroll_decode_observer,
                         inner,
                         epoch,
-                        &queued.frame,
+                        cpu,
                         video_decoder.jpeg.last_frame_was_lossless(),
                     );
                 }
@@ -5494,9 +7465,10 @@ fn receive_frame_records(
                     )?;
                     pointer.before_frame();
                 }
-                let replaced = replace_latest(&state.latest, queued);
+                let replaced = state.latest.lock().unwrap().publish(queued);
                 drop(popup_publication);
-                if replaced.is_some() {
+                drop(publication_gate);
+                for _ in replaced.iter().flatten() {
                     state.telemetry.record_replaced();
                 }
                 completion.signal()?;
@@ -5540,6 +7512,7 @@ fn receive_frame_records(
             | MessageKind::WaylandControlRepairRequest
             | MessageKind::WaylandControlRepairDecline
             | MessageKind::WaylandControlRequest
+            | MessageKind::WaylandControlPrepare
             | MessageKind::WaylandControlAction
             | MessageKind::WaylandControlRevoke
             | MessageKind::WaylandTextCommit
@@ -5808,24 +7781,6 @@ pub(super) mod tests {
                 .contains("requires an IDR")
         );
         assert!(decoder.hardware.is_none());
-    }
-
-    #[cfg(feature = "remote-h264")]
-    #[test]
-    fn h264_crop_preserves_logical_rows_and_discards_only_right_bottom_padding() {
-        use super::*;
-        let padded = image::RgbImage::from_fn(6, 8, |x, y| image::Rgb([x as u8, y as u8, 57]));
-        for dimensions in [(5, 7), (6, 7), (5, 8), (6, 8)] {
-            let cropped = crop_h264_padding(padded.clone(), dimensions).unwrap();
-            assert_eq!(cropped.dimensions(), dimensions);
-            assert_eq!(
-                cropped.as_raw().len(),
-                (dimensions.0 * dimensions.1 * 3) as usize
-            );
-            for (x, y, rgb) in cropped.enumerate_pixels() {
-                assert_eq!(rgb, padded.get_pixel(x, y));
-            }
-        }
     }
 
     #[test]
@@ -6656,7 +8611,12 @@ pub(super) mod tests {
         let cause = match phase {
             ClientStage::Negotiate => {
                 reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
-                read_server_hello(&mut reader, FrameCodec::JpegTiles).unwrap_err()
+                read_server_hello(
+                    &mut reader,
+                    FrameCodec::JpegTiles,
+                    ApplicationProfile::Standard,
+                )
+                .unwrap_err()
             }
             ClientStage::FirstFrame => {
                 read_initial_frame_records(&mut reader, true, true, |_, _| {
@@ -6841,7 +8801,7 @@ pub(super) mod tests {
             writer.write_message(kind, payload).unwrap();
             let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), receive_key);
             reader.set_max_payload_len(MAX_NEGOTIATION_PAYLOAD_LEN);
-            read_server_hello(&mut reader, codec).unwrap_err()
+            read_server_hello(&mut reader, codec, ApplicationProfile::Standard).unwrap_err()
         };
 
         for codec in [FrameCodec::H264, FrameCodec::Hevc444] {
@@ -6979,12 +8939,14 @@ pub(super) mod tests {
     #[test]
     fn invalid_startup_size_fails_before_reading_key_or_display() {
         let options = ClientOptions {
+            stats_json: false,
             control_duration: Default::default(),
             viewer_backend: crate::remote::viewer_backend::ViewerBackend::X11,
             viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            wayland_gestures: false,
             resumable_control: false,
             wayland_seamless_input: false,
             wayland_popup_pointer: false,
@@ -6995,6 +8957,7 @@ pub(super) mod tests {
             resize_source: None,
             follow_source_size: false,
             window_position: None,
+            x11_parent_window: None,
             window_size: Some(super::super::window_size::WindowSize {
                 width: 0,
                 height: 1,
@@ -7031,10 +8994,10 @@ pub(super) mod tests {
         // and published the one keyframe whose ACK the host now waits for.
         state.source_epoch.store(2, Ordering::Release);
         let mut queued = queued_test_frame(41);
-        queued.frame = queued.frame.with_source_epoch(2);
-        *state.latest.lock().unwrap() = Some(queued);
+        queued.frame = queued.frame.with_scope(state.session_epoch, 2);
+        state.latest.lock().unwrap().publish(queued);
         assert!(take_latest(&state, 1).is_none());
-        assert!(state.latest.lock().unwrap().is_some());
+        assert!(!state.latest.lock().unwrap().is_none());
         assert_eq!(take_latest(&state, 2).unwrap().frame.sequence(), 41);
         state.cursor_enabled.store(true, Ordering::Release);
         let shape = crate::remote::cursor::CursorShape {
@@ -7448,19 +9411,15 @@ pub(super) mod tests {
             .next()
             .unwrap();
         assert!(
-            body.find("let loop_result = viewer_loop(").unwrap()
+            body.find("viewer_loop(").unwrap()
                 < body.find("let cancel_result = cancel.cancel(").unwrap()
         );
         assert!(
             body.find("let cancel_result = cancel.cancel(").unwrap()
-                < body
-                    .find("let receiver_exit = receiver.join_timeout(")
-                    .unwrap()
+                < body.find("receiver.join_timeout(").unwrap()
         );
         assert!(
-            body.find("let receiver_exit = receiver.join_timeout(")
-                .unwrap()
-                < body.find("finish_session(").unwrap()
+            body.find("receiver.join_timeout(").unwrap() < body.find("finish_session(").unwrap()
         );
     }
 
@@ -7686,9 +9645,74 @@ pub(super) mod tests {
     fn queued_test_frame(sequence: u64) -> QueuedFrame {
         QueuedFrame {
             purpose: FramePurpose::Video,
-            frame: decoded_test_frame(sequence),
+            frame: FrameLease::Cpu(decoded_test_frame(sequence)),
             ready_at: Instant::now(),
+            decode_elapsed: Duration::ZERO,
         }
+    }
+
+    #[test]
+    fn ready_x11_preparation_cannot_overtake_a_new_geometry_or_source() {
+        let (jobs, _requests) = mpsc::sync_channel(1);
+        let (replies, ready) = mpsc::sync_channel(1);
+        let mut worker = X11PreparationWorker {
+            jobs,
+            ready,
+            thread: ReceiverThread::spawn(|| {}).unwrap(),
+            scratch: Vec::new(),
+            pending_scope: None,
+            obsolete: false,
+        };
+        let mut state = ReceiveState::new();
+        state.telemetry.detailed = true;
+        let queued = |seq, source, geometry| QueuedFrame {
+            purpose: FramePurpose::Video,
+            frame: FrameLease::Cpu(
+                decoded_test_frame(seq)
+                    .with_source_epoch(source)
+                    .with_geometry_epoch(geometry),
+            ),
+            ready_at: Instant::now(),
+            decode_elapsed: Duration::ZERO,
+        };
+        for (new_source, new_geometry) in [(1, 2), (2, 1)] {
+            state.source_epoch.store(new_source, Ordering::Release);
+            worker.pending_scope = Some((1, 1));
+            worker.obsolete = false;
+            replies
+                .send(X11PreparationJob {
+                    queued: queued(10, 1, 1),
+                    output: PreparedX11Rgb {
+                        plan: super::super::x11_viewer::CpuPreparation::new(0, (1, 1), (1, 1))
+                            .unwrap(),
+                        pixels: vec![0; 4],
+                        packed: true,
+                    },
+                    work_elapsed: Duration::from_millis(1),
+                })
+                .unwrap_or_else(|_| panic!("preparation receiver was dropped"));
+            state
+                .latest
+                .lock()
+                .unwrap()
+                .publish(queued(11, new_source, new_geometry));
+
+            let (next, prepared) = worker
+                .next_frame(&state, new_source, true)
+                .unwrap()
+                .unwrap();
+            assert_eq!(next.frame.sequence(), 11);
+            assert!(prepared.is_none());
+            assert!(!worker.busy());
+            assert!(
+                worker
+                    .next_frame(&state, new_source, true)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(state.telemetry.lock_window().x11_cpu_preparation.stale, 2);
+        worker.close().unwrap();
     }
 
     #[derive(Default)]
@@ -8225,7 +10249,9 @@ pub(super) mod tests {
                 geometry_epoch: 0,
                 sequence,
                 ready_at: now,
+                decode_elapsed: Duration::ZERO,
                 draw_started: now,
+                presentation_path: "rgb",
             })
             .collect();
         let key = [0x31; 32];
@@ -8243,7 +10269,10 @@ pub(super) mod tests {
 
     #[test]
     fn asynchronous_completion_acks_only_the_expected_submitted_frame() {
-        let telemetry = ClientTelemetry::default();
+        let telemetry = ClientTelemetry {
+            detailed: true,
+            ..ClientTelemetry::default()
+        };
         let now = Instant::now();
         let mut pending = std::collections::VecDeque::from([PendingFrameTiming {
             purpose: FramePurpose::Video,
@@ -8253,12 +10282,16 @@ pub(super) mod tests {
             geometry_epoch: 0,
             sequence: 42,
             ready_at: now,
+            decode_elapsed: Duration::ZERO,
             draw_started: now,
+            presentation_path: "x11-vaapi-dmabuf-dri3",
         }]);
         let mut writer = SessionWriter::new(Vec::new(), [0x31; 32]);
+        assert_eq!(telemetry.lock_window().native_presented, 0);
         acknowledge_presentation(&mut writer, 42, &mut pending, &telemetry).unwrap();
         assert!(pending.is_empty());
         assert_eq!(telemetry.window.lock().unwrap().drawn, 1);
+        assert_eq!(telemetry.lock_window().native_presented, 1);
         assert!(acknowledge_presentation(&mut writer, 42, &mut pending, &telemetry).is_err());
         let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), [0x31; 32]);
         let (kind, payload) = reader.read_message().unwrap();
@@ -8308,8 +10341,9 @@ pub(super) mod tests {
         let pool = new_decode_buffer_pool();
         let queued = QueuedFrame {
             purpose: FramePurpose::Video,
-            frame: decoded_test_frame_in_pool(20, Arc::clone(&pool)),
+            frame: FrameLease::Cpu(decoded_test_frame_in_pool(20, Arc::clone(&pool))),
             ready_at: Instant::now(),
+            decode_elapsed: Duration::ZERO,
         };
         let mut writer = SessionWriter::new(Vec::new(), key);
         draw_and_ack(&mut writer, queued, &telemetry, |_| Ok(false)).unwrap();
@@ -8318,8 +10352,9 @@ pub(super) mod tests {
 
         let queued = QueuedFrame {
             purpose: FramePurpose::Video,
-            frame: decoded_test_frame_in_pool(21, Arc::clone(&pool)),
+            frame: FrameLease::Cpu(decoded_test_frame_in_pool(21, Arc::clone(&pool))),
             ready_at: Instant::now(),
+            decode_elapsed: Duration::ZERO,
         };
         let mut writer = SessionWriter::new(Vec::new(), key);
         assert!(
@@ -8331,6 +10366,53 @@ pub(super) mod tests {
         assert!(writer.into_inner().is_empty());
         assert_eq!(decode_pool_snapshot(&pool).0, 2);
         assert!(telemetry.take_window().is_empty());
+    }
+
+    #[test]
+    fn frame_read_telemetry_counts_only_authenticated_video_records() {
+        let key = [0x29; 32];
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        writer.write_message(MessageKind::Heartbeat, &[]).unwrap();
+        writer.write_message(MessageKind::Frame, b"first").unwrap();
+        writer
+            .write_message(MessageKind::Frame, b"invalid")
+            .unwrap();
+        let mut wire = writer.into_inner();
+        *wire.last_mut().unwrap() ^= 1;
+
+        let telemetry = ClientTelemetry {
+            detailed: true,
+            ..Default::default()
+        };
+        let mut reader = SessionReader::new(Cursor::new(&wire), key);
+        let mut payload = Vec::new();
+        assert_eq!(
+            telemetry.read_record(&mut reader, &mut payload).unwrap(),
+            MessageKind::Heartbeat
+        );
+        assert!(telemetry.take_window().is_empty());
+        assert_eq!(
+            telemetry.read_record(&mut reader, &mut payload).unwrap(),
+            MessageKind::Frame
+        );
+        assert_eq!(payload, b"first");
+        let window = telemetry.take_window();
+        assert!(!window.is_empty());
+        assert_eq!(window.frame_header_wait.observations, 1);
+        assert_eq!(window.frame_body_receive.observations, 1);
+        assert_eq!(window.frame_authentication.observations, 1);
+        assert!(matches!(
+            telemetry.read_record(&mut reader, &mut payload),
+            Err(ProtocolError::AuthenticationFailed)
+        ));
+        assert!(payload.is_empty());
+        assert!(telemetry.take_window().is_empty());
+
+        let undetailed = ClientTelemetry::default();
+        let mut reader = SessionReader::new(Cursor::new(&wire), key);
+        undetailed.read_record(&mut reader, &mut payload).unwrap();
+        undetailed.read_record(&mut reader, &mut payload).unwrap();
+        assert!(undetailed.take_window().is_empty());
     }
 
     #[test]
@@ -8386,6 +10468,107 @@ pub(super) mod tests {
         );
     }
 
+    #[cfg(feature = "remote-h264")]
+    #[test]
+    fn hardware_rgb_materialization_keeps_its_own_telemetry_window() {
+        use crate::remote::{
+            frame::{DecodeBufferAllocation, DecodeBufferCheckout},
+            h264::{DecodeTimings, DownloadTarget, HardwareRgbWork, RgbCopy, RgbInput},
+        };
+
+        let telemetry = ClientTelemetry {
+            detailed: true,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let mut reporter = ClientTelemetryReporter::new_at(&telemetry, started);
+        telemetry.record_hardware_decode(DecodeTimings {
+            decode: Some(Duration::from_millis(2)),
+            ..Default::default()
+        });
+        for (allocation, capacity_added_bytes, input, copy) in [
+            (
+                DecodeBufferAllocation::Fresh,
+                36,
+                RgbInput::Download(DownloadTarget::Populated),
+                RgbCopy::FullFrame(36),
+            ),
+            (
+                DecodeBufferAllocation::Reused,
+                0,
+                RgbInput::DirectMap(18),
+                RgbCopy::Banded(36),
+            ),
+            (
+                DecodeBufferAllocation::Grown,
+                18,
+                RgbInput::MapFallback(DownloadTarget::Reused),
+                RgbCopy::Banded(36),
+            ),
+        ] {
+            telemetry.record_hardware_decode(
+                DecodeTimings {
+                    download: matches!(input, RgbInput::Download(_) | RgbInput::MapFallback(_))
+                        .then_some(Duration::from_millis(3)),
+                    direct_map: matches!(input, RgbInput::DirectMap(_))
+                        .then_some(Duration::from_millis(4)),
+                    rgb_work: Some(HardwareRgbWork {
+                        input,
+                        copy,
+                        checkout: None,
+                    }),
+                    ..Default::default()
+                }
+                .with_checkout(Some(DecodeBufferCheckout {
+                    allocation,
+                    requested_bytes: 36,
+                    capacity_added_bytes,
+                })),
+            );
+        }
+
+        let report = reporter.maybe_report_at(started, true).unwrap();
+        let record = report.json(
+            ViewerTelemetryContext {
+                correlation_id: 1,
+                backend: ViewerBackend::X11,
+                negotiated_codec: FrameCodec::H264,
+                limits: Default::default(),
+                input_mode: "view-only",
+            },
+            true,
+        );
+        assert_eq!(record["decoded"], 0);
+        assert_eq!(record["stages"]["hardware_decode_ms"]["observations"], 1);
+        assert_eq!(record["stages"]["hardware_rgb_copy_ms"]["observations"], 0);
+        assert_eq!(record["stages"]["hardware_download_ms"]["observations"], 2);
+        assert_eq!(
+            record["stages"]["hardware_direct_map_ms"]["observations"],
+            1
+        );
+        assert_eq!(
+            record["hardware_rgb_work"],
+            serde_json::json!({
+                "pool": {
+                    "fitting_checkouts": 1, "fresh_reserves": 1, "growth_reserves": 1,
+                    "requested_bytes": 108, "added_capacity_bytes": 54,
+                },
+                "download": {
+                    "empty_targets_populated": 1, "retained_targets_reused": 1,
+                    "populated_targets_replaced": 0,
+                },
+                "vaapi_map": {
+                    "mapped_frames": 1, "staged_bytes": 18, "fallback_frames": 1,
+                },
+                "copy": {
+                    "full_frame_copies": 1, "full_frame_bytes": 36,
+                    "banded_copies": 2, "banded_bytes": 72,
+                },
+            })
+        );
+        assert!(reporter.maybe_report_at(started, true).is_none());
+    }
+
     #[test]
     fn authenticated_frame_is_received_even_when_jpeg_decode_fails() {
         let telemetry = ClientTelemetry::default();
@@ -8408,17 +10591,272 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn replacing_latest_returns_the_stale_value_after_unlocking() {
-        let latest = Mutex::new(Some(vec![1_u8; 1024]));
-        let stale = replace_latest(&latest, vec![2_u8; 2048]);
+    fn same_pixel_proof_preserves_the_pending_repair_until_new_damage_or_scope() {
+        use super::super::frame::TileSnapshot;
 
-        assert_eq!(stale.as_ref().map(Vec::len), Some(1024));
-        let current = latest
-            .try_lock()
-            .expect("latest-frame lock must be released before stale frame drop");
-        assert_eq!(current.as_ref().map(Vec::len), Some(2048));
-        drop(current);
-        drop(stale);
+        let image = image::RgbImage::new(16, 16);
+        let tiles = TileSnapshot::update(&image, None, &[1], 16);
+        let pool = new_decode_buffer_pool();
+        let queued = |sequence, geometry, purpose, snapshot| QueuedFrame {
+            purpose,
+            frame: FrameLease::Cpu(
+                RecyclableDecodedFrame::from_tiles(sequence, 16, 16, snapshot, Arc::clone(&pool))
+                    .with_geometry_epoch(geometry),
+            ),
+            ready_at: Instant::now(),
+            decode_elapsed: Duration::ZERO,
+        };
+        let mut mailbox = PresentationMailbox::default();
+        mailbox.publish(queued(1, 1, FramePurpose::VisualRepair, tiles.clone()));
+        mailbox.publish(queued(2, 1, FramePurpose::NativeProof, tiles.clone()));
+        assert_eq!(mailbox.take(1).unwrap().frame.sequence(), 1);
+        assert_eq!(mailbox.take(1).unwrap().frame.sequence(), 2);
+
+        mailbox.publish(queued(3, 1, FramePurpose::VisualRepair, tiles.clone()));
+        mailbox.publish(queued(4, 1, FramePurpose::NativeProof, tiles.clone()));
+        let changed = TileSnapshot::update(&image, Some(&tiles), &[1], 16);
+        let [old_proof, old_repair] = mailbox.publish(queued(5, 1, FramePurpose::Video, changed));
+        assert_eq!(old_proof.unwrap().frame.sequence(), 4);
+        assert_eq!(old_repair.unwrap().frame.sequence(), 3);
+        assert_eq!(mailbox.take(1).unwrap().frame.sequence(), 5);
+
+        mailbox.publish(queued(6, 1, FramePurpose::VisualRepair, tiles.clone()));
+        mailbox.publish(queued(7, 2, FramePurpose::NativeProof, tiles));
+        assert_eq!(mailbox.take(1).unwrap().frame.sequence(), 7);
+    }
+
+    #[test]
+    fn read_ahead_source_change_rejects_delta_using_the_old_canvas() {
+        use crate::remote::source_session::{SourceId, SourceVersion};
+        use crate::remote::source_wire::{
+            SourceEntry, encode_frame_payload, encode_source_changed,
+        };
+
+        let timeout = Duration::from_secs(5);
+        let old_source = SourceVersion {
+            source: SourceId(1),
+            epoch: 1,
+        };
+        let new_source = SourceVersion {
+            source: SourceId(2),
+            epoch: 2,
+        };
+        let catalog = SourceCatalog {
+            current: old_source,
+            entries: [old_source, new_source]
+                .into_iter()
+                .map(|version| SourceEntry {
+                    id: version.source,
+                    label: format!("Source {}", version.epoch),
+                })
+                .collect(),
+        }
+        .encode()
+        .unwrap();
+
+        let old_color = Rgb([24, 48, 96]);
+        let patch_color = Rgb([190, 60, 40]);
+        let new_color = Rgb([60, 170, 40]);
+        let old_frame = CapturedFrame {
+            geometry_epoch: 7,
+            image: RgbImage::from_pixel(32, 32, old_color),
+            source_width: 32,
+            source_height: 32,
+        };
+        let mut encoder = TileEncoder::new();
+        let plan = encoder
+            .plan(&old_frame, TileEncodeRequest::Keyframe)
+            .unwrap();
+        assert!(plan.emit && plan.keyframe);
+        let mut keyframe = Vec::new();
+        encoder
+            .encode_into(&mut keyframe, 0, &old_frame, 100)
+            .unwrap();
+        encoder.commit(&old_frame);
+        let delta_frame = CapturedFrame {
+            image: RgbImage::from_fn(32, 32, |x, y| {
+                if x < 16 && y < 16 {
+                    patch_color
+                } else {
+                    old_color
+                }
+            }),
+            ..old_frame
+        };
+        let plan = encoder
+            .plan(&delta_frame, TileEncodeRequest::Delta)
+            .unwrap();
+        assert!(plan.emit && !plan.keyframe);
+        assert_eq!(plan.dirty_tiles, 1);
+        let mut old_delta = Vec::new();
+        encoder
+            .encode_into(&mut old_delta, 1, &delta_frame, 100)
+            .unwrap();
+        let new_keyframe = tile_keyframe_payload(
+            1,
+            &CapturedFrame {
+                image: RgbImage::from_pixel(32, 32, new_color),
+                ..old_frame
+            },
+            100,
+        );
+
+        // The same delta is valid within the old source. Both new-source
+        // records keep the dimensions and inner geometry epoch, so only
+        // processing SourceChanged can invalidate the old decoder reference.
+        for (source, encoded, colors) in [
+            (old_source, &old_delta, Some([patch_color, old_color])),
+            (new_source, &old_delta, None),
+            (new_source, &new_keyframe, Some([new_color, new_color])),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut viewer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut host, _) = listener.accept().unwrap();
+            for socket in [&host, &viewer] {
+                socket.set_read_timeout(Some(timeout)).unwrap();
+                socket.set_write_timeout(Some(timeout)).unwrap();
+            }
+            let (mut writer, mut reader) = thread::scope(|scope| {
+                let host = scope.spawn(move || {
+                    let (_, send_key) = server_handshake(&mut host, &TEST_PSK, [0x27; 32])
+                        .unwrap()
+                        .into_server();
+                    SessionWriter::new(host, send_key)
+                });
+                let (receive_key, _) = client_handshake(&mut viewer, &TEST_PSK, [0x19; 32])
+                    .unwrap()
+                    .into_client();
+                (
+                    host.join().unwrap(),
+                    SessionReader::new(viewer, receive_key),
+                )
+            });
+            writer
+                .write_message(MessageKind::SourceCatalog, &catalog)
+                .unwrap();
+            writer
+                .write_message(
+                    MessageKind::Frame,
+                    &encode_frame_payload(old_source.epoch, FramePurpose::Video, &keyframe)
+                        .unwrap(),
+                )
+                .unwrap();
+            writer.flush().unwrap();
+
+            let mut state = ReceiveState::new();
+            state.read_ahead = true;
+            state.telemetry.detailed = true;
+            let state = Arc::new(state);
+            let payload =
+                read_initial_frame(&mut reader, false, false, timeout, |kind, payload| {
+                    assert_eq!(kind, MessageKind::SourceCatalog);
+                    receive_catalog(&state, payload)
+                })
+                .unwrap();
+            let mut decoder = state.new_video_decoder().unwrap();
+            let (epoch, purpose, inner) = decode_frame_payload(&payload).unwrap();
+            let first =
+                decode_popup_queued_frame(&state, &mut decoder, inner, purpose, epoch).unwrap();
+            assert_eq!(
+                (epoch, first.frame.sequence(), first.frame.geometry_epoch()),
+                (1, 0, 7)
+            );
+
+            if source != old_source {
+                writer
+                    .write_message(
+                        MessageKind::SourceChanged,
+                        &encode_source_changed(source).unwrap(),
+                    )
+                    .unwrap();
+            }
+            writer
+                .write_message(
+                    MessageKind::Frame,
+                    &encode_frame_payload(source.epoch, FramePurpose::Video, encoded).unwrap(),
+                )
+                .unwrap();
+            writer.flush().unwrap();
+
+            let (mut wake_receiver, wake_sender) = wake_pair().unwrap();
+            let cancel =
+                SessionCancel::new(reader.get_ref().try_clone().unwrap(), Arc::clone(&state));
+            let receiver_state = Arc::clone(&state);
+            let receiver = ReceiverThread::spawn(move || {
+                receive_frames(
+                    reader,
+                    receiver_state,
+                    0,
+                    payload,
+                    wake_sender,
+                    decoder,
+                    None,
+                );
+            })
+            .unwrap();
+            let deadline = Instant::now() + timeout;
+            let (published, terminal) = loop {
+                let published = take_latest(&state, source.epoch);
+                let terminal = !state.alive.load(Ordering::Acquire);
+                if published.is_some() || terminal {
+                    break (published, terminal);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero()
+                    || !super::super::x11_capture::wait_readable(wake_receiver.as_fd(), remaining)
+                        .unwrap()
+                {
+                    break (None, false);
+                }
+                wake_receiver.drain().unwrap();
+            };
+            // Keep the writer open until the decoder has decided. EOF at the
+            // read-ahead producer could otherwise preempt the queued records.
+            drop(cancel);
+            drop(writer);
+            assert_eq!(receiver.join_timeout(timeout), ReceiverExit::Completed);
+            assert_eq!(state.source_epoch.load(Ordering::Acquire), source.epoch);
+            let telemetry = state.telemetry.take_window();
+            assert_eq!(telemetry.decode_queue_wait.observations, 1);
+            assert_eq!(telemetry.frame_header_wait.observations, 1);
+            assert_eq!(telemetry.frame_body_receive.observations, 1);
+            assert_eq!(telemetry.frame_authentication.observations, 1);
+            let error = state.error.lock().unwrap().take();
+            if let Some(colors) = colors {
+                assert!(
+                    !terminal && error.is_none(),
+                    "unexpected decoder error: {error:?}"
+                );
+                let frame = published.expect("valid frame was not published").frame;
+                assert_eq!(
+                    (frame.sequence(), frame.geometry_epoch(), frame.dimensions()),
+                    (1, 7, (32, 32))
+                );
+                let image = frame.cpu().unwrap().image();
+                for ((x, y), expected) in [(8, 8), (24, 24)].into_iter().zip(colors) {
+                    let actual = image.get_pixel(x, y);
+                    assert!(
+                        actual
+                            .0
+                            .into_iter()
+                            .zip(expected.0)
+                            .all(|(a, b)| a.abs_diff(b) <= 5),
+                        "pixel ({x}, {y}) expected {expected:?}, got {actual:?}"
+                    );
+                }
+            } else {
+                assert!(
+                    published.is_none() && terminal,
+                    "old reference crossed SourceChanged"
+                );
+                let error = error.expect("decoder did not reject the old reference");
+                assert_eq!(
+                    error.to_string(),
+                    "tile delta frame does not match the current source geometry"
+                );
+                assert!(state.latest.lock().unwrap().is_none());
+            }
+        }
     }
 
     #[test]
@@ -8606,7 +11044,7 @@ pub(super) mod tests {
                 Instant::now() + Duration::from_secs(1),
             )
             .unwrap(),
-            WaitOutcome::X11Hangup
+            WaitOutcome::ViewerHangup
         );
     }
 
@@ -8924,8 +11362,13 @@ pub(super) mod tests {
             .unwrap();
         let control = socket.try_clone().unwrap();
         let mut reader = SessionReader::new(socket.try_clone().unwrap(), TEST_PSK);
-        let mut sender =
-            Sender::spawn(SessionWriter::new(socket, TEST_PSK), false, |_| {}).unwrap();
+        let mut sender = Sender::spawn(
+            SessionWriter::new(socket, TEST_PSK),
+            false,
+            false,
+            |_, _| {},
+        )
+        .unwrap();
         let peer = thread::spawn(move || {
             let mut writer = SessionWriter::new(peer, TEST_PSK);
             writer.write_message(MessageKind::Heartbeat, &[]).unwrap();
@@ -9259,6 +11702,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            InputMode::X11Keycodes,
             false,
             Default::default(),
             false,
@@ -9357,6 +11801,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            InputMode::X11Keycodes,
             false,
             Default::default(),
             false,
@@ -9431,6 +11876,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            InputMode::X11Keycodes,
             false,
             Default::default(),
             false,
@@ -9498,6 +11944,7 @@ pub(super) mod tests {
             false,
             false,
             false,
+            InputMode::X11Keycodes,
             false,
             Default::default(),
             false,
@@ -9573,6 +12020,7 @@ pub(super) mod tests {
                 false,
                 false,
                 false,
+                InputMode::X11Keycodes,
                 false,
                 Default::default(),
                 false,
@@ -9674,13 +12122,14 @@ pub(super) mod tests {
 
         let stream = TcpStream::connect(address).unwrap();
         let started = Instant::now();
-        let (mut reader, _writer, hello) = negotiate_session(
+        let (mut reader, _writer, hello, _, _) = negotiate_session(
             true,
             false,
             false,
             false,
             false,
             false,
+            InputMode::X11Keycodes,
             false,
             Default::default(),
             false,
@@ -9893,6 +12342,52 @@ mod diagnostic_tests {
         }
         assert!(clipboard_was_restricted(&state, 7));
     }
+
+    #[test]
+    fn managed_clipboard_policy_drops_stale_progress_and_clears_on_close_or_retry() {
+        use super::super::engine::{ClipboardProgress, TransferKind};
+
+        let (toggle, control) = ConnectToggle::local();
+        let (_wake, send) = wake_pair().unwrap();
+        assert!(toggle.begin_viewing(&send).unwrap());
+        let mut snapshot = ClipboardSnapshot::negotiated(7, 1, 1024);
+        let files = ClipboardProgress {
+            direction: ClipboardDirection::ToHost,
+            kind: TransferKind::Files,
+            bytes_processed: 512,
+            total_bytes: 1024,
+        };
+        assert!(snapshot.update_transfer(Some(files)));
+        toggle.publish_clipboard(Some(snapshot));
+        toggle.invalidate_sources();
+        assert_eq!(control.snapshot().clipboard, Some(snapshot));
+        snapshot.narrow(3);
+        assert_eq!(snapshot.mode, Some(ClipboardMode::TextImages));
+        assert_eq!(snapshot.direction, Some(ClipboardDirection::ToHost));
+        assert_eq!(snapshot.file_limit_bytes, 0);
+        assert_eq!(snapshot.transfer, None);
+        assert!(!snapshot.update_transfer(Some(files)));
+        snapshot.narrow(7);
+        assert_eq!(snapshot.mode, Some(ClipboardMode::TextImages));
+        let incoming = ClipboardProgress {
+            direction: ClipboardDirection::FromHost,
+            kind: TransferKind::Image,
+            ..files
+        };
+        assert!(!snapshot.update_transfer(Some(incoming)));
+        toggle.publish_clipboard(Some(snapshot));
+        assert!(toggle.begin_backoff());
+        assert_eq!(control.snapshot().clipboard, None);
+        assert!(toggle.begin_attempt());
+        assert!(toggle.begin_viewing(&send).unwrap());
+        snapshot.narrow(0);
+        assert_eq!(snapshot, ClipboardSnapshot::default());
+        toggle.publish_clipboard(Some(snapshot));
+        assert_eq!(control.snapshot().clipboard, Some(snapshot));
+        control.close();
+        toggle.publish_clipboard(Some(snapshot));
+        assert_eq!(control.snapshot().clipboard, None);
+    }
 }
 
 #[cfg(test)]
@@ -9938,12 +12433,14 @@ mod native_viewer_permission_tests {
     #[test]
     fn native_wayland_viewer_permissions_are_checked_before_any_io() {
         let mut options = ClientOptions {
+            stats_json: false,
             control_duration: Default::default(),
             viewer_backend: crate::remote::viewer_backend::ViewerBackend::Wayland,
             viewer_wayland_display: None,
             wayland_keyboard: false,
             wayland_pointer: false,
             wayland_control: false,
+            wayland_gestures: false,
             resumable_control: false,
             wayland_seamless_input: false,
             wayland_popup_pointer: false,
@@ -9954,6 +12451,7 @@ mod native_viewer_permission_tests {
             resize_source: None,
             follow_source_size: false,
             window_position: None,
+            x11_parent_window: None,
             window_size: None,
             frame_limits: super::super::messages::FrameLimits::default(),
             address: "invalid address".into(),

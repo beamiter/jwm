@@ -21,6 +21,7 @@ fn candidate(texture: u32, token: u64) -> FboPresentationCandidate {
         token,
         window: 7,
         texture,
+        texture_size: (16, 12),
         rect: (8, 6, 16, 12),
     }
 }
@@ -82,7 +83,61 @@ fn fbo_provenance_actual_red_blue_same_allocation_has_distinct_content_receipts(
 }
 
 #[test]
+fn fbo_provenance_decoration_preserves_only_the_sampled_interior() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        return;
+    };
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    unsafe {
+        let mut comp = WaylandCompositor::new(&gl, 64, 48, false).unwrap();
+        comp.apply_config();
+        comp.set_wallpaper("", "fill");
+        let texture = create_element_texture(&gl, 40, 32, &[255, 0, 0, 255].repeat(40 * 32));
+        insert_opaque_test_window(&mut comp, 7, texture, 40, 32);
+        comp.windows.get_mut(&7).unwrap().corner_radius_override = None;
+        let candidate = FboPresentationCandidate {
+            texture_size: (40, 32),
+            rect: (8, 6, 40, 32),
+            ..candidate(texture, 1)
+        };
+        let scene = [(7, 8, 6, 40, 32)];
+        assert!(draw(&mut comp, &gl, &scene));
+        // Settle the default one-shot focus pulse without sleeping in the test.
+        comp.focus_highlight_start = None;
+        assert!(!comp.has_active_animations());
+        assert_eq!(gl.GetError(), ffi::NO_ERROR);
+        comp.set_presentation_candidate(Some(candidate));
+        assert!(draw(&mut comp, &gl, &scene));
+        let receipt = comp
+            .take_presentation_receipt()
+            .expect("settled decorated window");
+        let (x, y, w, h) = receipt.visible_rect;
+        assert!(x > 8 && y > 6 && w > 0 && h > 0);
+        let frame = read_fbo_frame(&gl, comp.output_fbo, 64, 48);
+        assert_ne!(frame_pixel(&frame, 64, 48, 8, 6), [255, 0, 0, 255]);
+        assert!((y as usize..y as usize + h as usize).all(|y| {
+            (x as usize..x as usize + w as usize)
+                .all(|x| frame_pixel(&frame, 64, 48, x, y) == [255, 0, 0, 255])
+        }));
+
+        let window = comp.windows.get_mut(&7).unwrap();
+        window.fade_opacity = 0.5;
+        window.anim_scale = 0.85;
+        comp.set_presentation_candidate(Some(FboPresentationCandidate {
+            token: 2,
+            ..candidate
+        }));
+        assert!(draw(&mut comp, &gl, &scene));
+        assert!(comp.take_presentation_receipt().is_none());
+        comp.release_gpu_resources(&gl, CompositorOutputTextureOwnership::RawCompositor);
+        gl.DeleteTextures(1, &texture);
+    }
+}
+
+#[test]
 fn fbo_provenance_hidden_clipped_overlay_and_cached_redraw_never_certify_old_candidate() {
+    use crate::backend::api::CompositorRect;
+
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
         return;
     };
@@ -95,8 +150,32 @@ fn fbo_provenance_hidden_clipped_overlay_and_cached_redraw_never_certify_old_can
         comp.set_presentation_candidate(Some(candidate(texture, 1)));
         assert!(draw(&mut comp, &gl, &[(7, 8, 6, 16, 12)]));
         assert!(comp.take_presentation_receipt().is_some());
+        let left = CompositorRect::new(0.0, 0.0, 24.0, 48.0);
+        let right = CompositorRect::new(24.0, 0.0, 40.0, 48.0);
+        assert!(comp.composited_window_overlaps_output(7, left));
+        assert!(!comp.composited_window_overlaps_output(7, right));
+        comp.force_full_redraw();
+        assert!(draw(&mut comp, &gl, &[(7, 9, 6, 16, 12)]));
+        assert!(comp.composited_window_overlaps_output(7, left));
+        assert!(comp.composited_window_overlaps_output(7, right));
+        insert_opaque_test_window(&mut comp, 8, texture, 16, 12);
+        comp.set_presentation_candidate(Some(candidate(texture, 10)));
+        assert!(draw(
+            &mut comp,
+            &gl,
+            &[(7, 8, 6, 16, 12), (8, 63, 6, 16, 12)]
+        ));
+        let frame = read_fbo_frame(&gl, comp.output_fbo, 64, 48);
+        assert_eq!(frame_pixel(&frame, 64, 48, 63, 12), [255, 0, 0, 255]);
+        assert!(
+            comp.take_presentation_receipt().is_none(),
+            "a partially visible second window still prevents a receipt"
+        );
+        comp.windows.remove(&8);
         comp.set_presentation_candidate(Some(candidate(texture, 2)));
         draw(&mut comp, &gl, &[]);
+        assert!(!comp.composited_window_overlaps_output(7, left));
+        assert!(!comp.composited_window_overlaps_output(7, right));
         assert!(
             comp.take_presentation_receipt().is_none(),
             "hidden candidate has no quad"
@@ -194,6 +273,16 @@ mod native {
     use std::os::fd::AsRawFd;
 
     fn commit(server: &mut Server, app: &mut App, color: [u8; 4], format: u32) -> u32 {
+        commit_at_scale(server, app, color, format, 1)
+    }
+
+    fn commit_at_scale(
+        server: &mut Server,
+        app: &mut App,
+        color: [u8; 4],
+        format: u32,
+        scale: u32,
+    ) -> u32 {
         let before_epoch = server
             .state
             .surface_commit_epoch(app.window)
@@ -205,18 +294,22 @@ mod native {
             nix::sys::memfd::MFdFlags::MFD_CLOEXEC,
         )
         .unwrap();
-        nix::unistd::ftruncate(&fd, 16 * 12 * 4).unwrap();
+        let (width, height) = (16 * scale, 12 * scale);
+        let pixels = (width * height) as usize;
+        let bytes = width * height * 4;
+        nix::unistd::ftruncate(&fd, bytes.into()).unwrap();
         let mut file = std::fs::File::from(fd);
-        file.write_all(&color.repeat(16 * 12)).unwrap();
+        file.write_all(&color.repeat(pixels)).unwrap();
         let pool = app.client.new_id();
         app.client
-            .request_with_fd_args(shm, 0, &[pool, 16 * 12 * 4], file.as_raw_fd());
+            .request_with_fd_args(shm, 0, &[pool, bytes], file.as_raw_fd());
         let buffer = app.client.new_id();
         app.client
-            .request(pool, 0, &[buffer, 0, 16, 12, 16 * 4, format]);
+            .request(pool, 0, &[buffer, 0, width, height, width * 4, format]);
         let feedback = app.client.new_id();
         app.client
             .request(presentation, 1, &[app.surface, feedback]);
+        app.client.request(app.surface, 8, &[scale]);
         app.client.request(app.surface, 1, &[buffer, 0, 0]);
         app.client.request(app.surface, 2, &[0, 0, 16, 12]);
         app.client.request(app.surface, 6, &[]);
@@ -289,6 +382,62 @@ mod native {
         let app = App::with_size_color(&mut server, [0, 0, 255, 255], 16, 12);
         (server, app)
     }
+
+    #[test]
+    fn fbo_provenance_deferred_feedback_stays_with_its_imported_commit() {
+        let Some(mut gl) = HeadlessSmithayGles::new() else {
+            return;
+        };
+        let (mut server, mut app) = setup();
+        let first = commit(&mut server, &mut app, [0, 0, 255, 255], 1);
+        let scene = [(app.window.raw(), 8, 6, 16, 12)];
+        let prepared = fbo_presentation::prepare(&server.state, &mut gl.renderer, &scene).unwrap();
+        let candidate = prepared.candidate();
+        let deferred = prepared.defer(&server.state, true).unwrap();
+        assert!(deferred.may_retry(&server.state, deferred.next_wakeup(true)));
+        assert!(!deferred.may_retry(&server.state, deferred.next_wakeup(false)));
+        let resumed = deferred
+            .resume(&server.state, &mut gl.renderer, &scene)
+            .unwrap();
+        assert_eq!(resumed.candidate(), candidate);
+        server.roundtrip();
+        assert!(
+            app.client
+                .events()
+                .iter()
+                .all(|event| event.sender != first)
+        );
+
+        let deferred = resumed.defer(&server.state, false).unwrap();
+        assert_eq!(deferred.next_wakeup(true), deferred.next_wakeup(false));
+        let second = commit(&mut server, &mut app, [255, 0, 0, 255], 1);
+        assert!(
+            deferred
+                .resume(&server.state, &mut gl.renderer, &scene)
+                .is_none()
+        );
+        server.roundtrip();
+        let events = app.client.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.sender == first && event.opcode == 2)
+                .count(),
+            1,
+        );
+        assert!(events.iter().all(|event| event.sender != second));
+        drop(fbo_presentation::prepare(&server.state, &mut gl.renderer, &scene).unwrap());
+        server.roundtrip();
+        assert_eq!(
+            app.client
+                .events()
+                .iter()
+                .filter(|event| event.sender == second && event.opcode == 2)
+                .count(),
+            1,
+        );
+    }
+
     #[test]
     fn fbo_provenance_real_import_late_commit_discards_a_without_taking_b() {
         let Some(mut gl) = HeadlessSmithayGles::new() else {
@@ -517,7 +666,7 @@ mod native {
     fn fbo_provenance_actual_software_cursor_geometry_preserves_or_denies_source_proof() {
         use crate::backend::wayland_udev::backend::{
             KmsRenderElement, composite_fbo_elements_for_test, compositor_frame_element_for_test,
-            fbo_cursor_composition_for_test,
+            fbo_cursor_composition_for_test, physical_cursor_element_for_test,
         };
         use smithay::backend::allocator::Fourcc;
         use smithay::backend::renderer::Color32F;
@@ -531,27 +680,35 @@ mod native {
         let Some(mut gl) = HeadlessSmithayGles::new() else {
             return;
         };
+        let output_origin = (32, 24);
+        let output_scale = 1.5;
+        let output = fbo_presentation::OutputRoute {
+            generation: 11,
+            desktop_rect: (output_origin.0, output_origin.1, 64, 48),
+        };
         for case in [
             "memory-outside",
             "solid-outside",
             "memory-inside",
             "hotspot-overlap",
             "shadow-overlap",
+            "fully-covered",
             "unknown-kind",
             "untrusted-extra",
         ] {
             let (mut server, mut app) = setup();
-            let feedback = commit(&mut server, &mut app, [0, 0, 255, 255], 1);
-            let scene = [(app.window.raw(), 8, 6, 16, 12)];
+            let feedback = commit_at_scale(&mut server, &mut app, [0, 0, 255, 255], 1, 2);
+            let scene = [(app.window.raw(), 40, 30, 16, 12)];
             let prepared = fbo_presentation::prepare(&server.state, &mut gl.renderer, &scene)
                 .expect("actual native XRGB import");
             let c = prepared.candidate();
+            assert_eq!(c.texture_size, (32, 24));
             let (mut comp, receipt) = gl
                 .renderer
                 .with_context(|raw| {
-                    let mut comp = unsafe { WaylandCompositor::new(raw, 64, 48, false) }.unwrap();
+                    let mut comp = unsafe { WaylandCompositor::new(raw, 96, 72, false) }.unwrap();
                     plain(&mut comp);
-                    insert_opaque_test_window(&mut comp, c.window, c.texture, 16, 12);
+                    insert_opaque_test_window(&mut comp, c.window, c.texture, 32, 24);
                     comp.set_presentation_candidate(Some(c));
                     assert!(comp.render_frame(
                         raw,
@@ -567,8 +724,14 @@ mod native {
                     (comp, receipt)
                 })
                 .unwrap();
-            let proof = prepared.finish(receipt, &server.state).unwrap();
-            let target = proof.target_rect();
+            let proof = prepared
+                .finish(receipt, &server.state)
+                .unwrap()
+                .bind_output(output)
+                .unwrap();
+            assert_eq!(proof.source_rect(), (40, 30, 16, 12));
+            assert_eq!(proof.output(), Some(output));
+            let target = output.local_rect(proof.target_rect()).unwrap();
             assert_eq!(target, (8, 6, 16, 12));
             // Transfer this output allocation's deletion to Smithay, matching
             // the production FBO element factory and teardown ownership mode.
@@ -578,12 +741,18 @@ mod native {
                     Some(comp.output_texture_internal_format()),
                     false,
                     comp.output_texture,
-                    (64, 48).into(),
+                    (96, 72).into(),
                 )
             };
-            let background = compositor_frame_element_for_test(&gl.renderer, texture.clone());
-            let baseline =
-                composite_fbo_elements_for_test(&mut gl.renderer, &[background], (64, 48)).unwrap();
+            let background =
+                compositor_frame_element_for_test(&gl.renderer, texture.clone(), output_origin);
+            let baseline = composite_fbo_elements_for_test(
+                &mut gl.renderer,
+                &[background],
+                (64, 48),
+                output_scale,
+            )
+            .unwrap();
             let source_is_red = |pixels: &[u8]| {
                 (6..18).all(|y| {
                     (8..24).all(|x| {
@@ -594,8 +763,19 @@ mod native {
             };
             assert!(
                 source_is_red(&baseline),
-                "actual FBO source must reach software composition at its physical rectangle"
+                "cropped FBO source must reach software composition at its output-local rectangle"
             );
+            if case == "memory-outside" {
+                let left = compositor_frame_element_for_test(&gl.renderer, texture.clone(), (0, 0));
+                let pixels =
+                    composite_fbo_elements_for_test(&mut gl.renderer, &[left], (32, 72), 1.0)
+                        .unwrap();
+                assert!(
+                    pixels
+                        .chunks_exact(4)
+                        .all(|pixel| pixel != [255, 0, 0, 255])
+                );
+            }
             let solid = |x, y, width, height, color, kind| {
                 KmsRenderElement::Solid(SolidColorRenderElement::new(
                     Id::new(),
@@ -606,7 +786,16 @@ mod native {
                 ))
             };
             let mut elements = Vec::new();
-            if case == "solid-outside" || case == "shadow-overlap" {
+            if case == "fully-covered" {
+                elements.push(solid(
+                    8,
+                    6,
+                    16,
+                    12,
+                    Color32F::new(0.0, 1.0, 0.0, 1.0),
+                    Kind::Cursor,
+                ));
+            } else if case == "solid-outside" || case == "shadow-overlap" {
                 let (x, y) = if case == "solid-outside" {
                     (40, 20)
                 } else {
@@ -661,12 +850,13 @@ mod native {
                     kind,
                 )
                 .unwrap();
-                elements.push(KmsRenderElement::Memory(element));
+                elements.push(physical_cursor_element_for_test(element));
             }
             let cursor_prefix = elements.len();
             elements.push(compositor_frame_element_for_test(
                 &gl.renderer,
                 texture.clone(),
+                output_origin,
             ));
             if case == "untrusted-extra" {
                 elements.push(solid(
@@ -683,18 +873,35 @@ mod native {
                 cursor_prefix,
                 Some(cursor_prefix),
                 target,
+                output_scale,
             );
             assert_eq!(
                 allowed,
-                matches!(case, "memory-outside" | "solid-outside"),
+                !matches!(case, "fully-covered" | "unknown-kind" | "untrusted-extra"),
                 "production actual-element gate: {case}"
             );
-            let pixels = composite_fbo_elements_for_test(&mut gl.renderer, &elements, (64, 48))
-                .expect("actual software composition");
+            let pixels = composite_fbo_elements_for_test(
+                &mut gl.renderer,
+                &elements,
+                (64, 48),
+                output_scale,
+            )
+            .expect("actual software composition");
             assert_eq!(
                 source_is_red(&pixels),
-                !matches!(case, "memory-inside" | "hotspot-overlap" | "shadow-overlap"),
+                !matches!(
+                    case,
+                    "memory-inside" | "hotspot-overlap" | "shadow-overlap" | "fully-covered"
+                ),
                 "actual source pixel coverage: {case}"
+            );
+            assert_eq!(
+                (6..18).any(|y| (8..24).any(|x| {
+                    let offset = (y * 64 + x) * 4;
+                    pixels[offset..offset + 4] == [255, 0, 0, 255]
+                })),
+                case != "fully-covered",
+                "retained source pixels: {case}"
             );
             if matches!(case, "memory-outside" | "solid-outside") {
                 let offset = (21 * 64 + 41) * 4;

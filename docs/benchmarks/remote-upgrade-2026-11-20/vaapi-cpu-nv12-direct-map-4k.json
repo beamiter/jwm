@@ -1,0 +1,435 @@
+{
+  "archive": {
+    "file": "vaapi-cpu-nv12-direct-map-4k-raw.zip",
+    "members_sha256": {
+      "README.md": "070fd459d76d01c29b74c1a4626ea33406b60319106d79f5a5f05b3ac6563931",
+      "invocations.json": "708caefe09f25583cb707b3ddabeff147eb7cdbb483bb00a6683c579d771531e",
+      "preflight.c": "52f442f5f0fea6b9b5fe23cb1a69ae50345f666b66762d22bf0d1afb9c3bd992",
+      "provenance.json": "0619281897361edafc52463270662fd9abc5cdd4d389c93c2d13bb6ec646bf80",
+      "raw/build.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/build.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/cc-version.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/cc-version.log": "3e8cc208c40f60832f67377aa1b03c3e7e858f20cd5d365464944700c0bd7ad1",
+      "raw/cc-version.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/controller.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/device.txt": "944750ec6fa17be306dcc2985f435ed964a88fa37de60ba47268e37944e58894",
+      "raw/ffmpeg-abi.txt": "f0e634e64ad50d2bb3ac90f46768bb15b8c04afa71af45ecbedbfc98bcbb8282",
+      "raw/ffmpeg-version.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/ffmpeg-version.log": "5b320c97f515e79171f10a2147d875ffb6b14bd2b25681047b73c46fe0a527ee",
+      "raw/ffmpeg-version.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/generate-smptehdbars.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/generate-smptehdbars.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/generate-smptehdbars.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/generate-testsrc2.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/generate-testsrc2.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/generate-testsrc2.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/kernel.txt": "96e1fb4ba73c9db843e9e377b1cb271b13c9f989479963e5c6f5748245b6041c",
+      "raw/packet.sha256": "f7527e25cb7b6ac411d558ed062036a02f80144d60c53556dbf5bb6790ead21d",
+      "raw/smptehdbars-map-first.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/smptehdbars-map-first.log": "385ca9cff8efa76f6ca69aa2f37d68486720119ce4b937a43fdc322a4ff32185",
+      "raw/smptehdbars-map-first.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/smptehdbars-transfer-first.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/smptehdbars-transfer-first.log": "06899b0499bc3a18dec4e5f61a97ec2c5cd2b125515c7fc21671ef3fc7ab89d4",
+      "raw/smptehdbars-transfer-first.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/smptehdbars.h264": "69702756f0f14d433626899cb869e3656a791a261e8546c2c2f347e6a2168c15",
+      "raw/stream-smptehdbars.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/stream-smptehdbars.log": "ae41099aca6e1a80f20a0a4cbe5d6c0f877b6240ee766c64d745d7d9b97b229e",
+      "raw/stream-smptehdbars.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/stream-testsrc2.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/stream-testsrc2.log": "80962a4ebd8439ae8c3c4296698bfd5f5d8aa843626dfcf1e54cb1f2ef5c8da8",
+      "raw/stream-testsrc2.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/testsrc2-map-first.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/testsrc2-map-first.log": "f6b60e29cc56ddc48ce7aeee5b4e59ff36c4a5292310f6409c41fd5f613c392b",
+      "raw/testsrc2-map-first.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/testsrc2-transfer-first.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "raw/testsrc2-transfer-first.log": "15a066a9c3a7bbaf1fbc6986d57d7b5dbd2f731f5f2c625d8e6cbd7ec8d818b7",
+      "raw/testsrc2-transfer-first.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw/testsrc2.h264": "05f987caf29cdc4ecb07e09472628eb10ada85528c1cdf8908420604217be36e",
+      "replay.py": "98f486b4e4063d2e56aec3e1ad8586895d07f6f523f2aa5244cdfffbb9b40d4a",
+      "run.sh": "ebc59b41996eb880e85ae104a660b9e3e72c0b03094e5f7bc50113b9f2f8f751"
+    },
+    "sha256": "028adeb3049c75bb3dd1935babf7cb75018a9b5e4aa2e853d1832c388d0e2de3"
+  },
+  "archive_checks": {
+    "deterministic_replay": true,
+    "fresh_extraction_replay_matches_original": true,
+    "nonzero_hardware_status_rejected": true
+  },
+  "binary_sha256": "baa5d108fdb0af0867b4f9575191c305bfab604c5bd77097a4b20780f58ca424",
+  "ffmpeg_abi": {
+    "libavcodec": "60.31.102",
+    "libavutil": "58.29.100",
+    "libswscale": "7.5.100"
+  },
+  "kernel_release": "6.17.0-35-generic",
+  "limitations": [
+    "The mapped frame did not expose a software AVBufferRef covering either plane. Stride and active spans are observed, but padding is unverified.",
+    "RGB comparison uses separately aligned snapshots. No direct libswscale read of mapped storage was attempted.",
+    "Same-surface accesses may share synchronization/cache costs; no timing, sequence throughput or product presentation claim is made."
+  ],
+  "mapped_allocation_span_verified": false,
+  "outcome": "all_four_hardware_cases_verified",
+  "performance_measured": false,
+  "phases": [
+    {
+      "annex_b_nal_types": [
+        9,
+        7,
+        8,
+        6,
+        5
+      ],
+      "cases": [
+        {
+          "exit_code": 0,
+          "result": {
+            "coded_size": [
+              3840,
+              2160
+            ],
+            "decoded_size": [
+              3840,
+              2160
+            ],
+            "decoder": "h264/vaapi",
+            "downloaded_planes": [
+              {
+                "active_span_bytes": 8294400,
+                "reference_buffer_bytes": 12533888,
+                "reference_bytes_after_active_span": 4239488,
+                "stride": 3840
+              },
+              {
+                "active_span_bytes": 4147200,
+                "reference_buffer_bytes": 12533888,
+                "reference_bytes_after_active_span": 30816,
+                "stride": 3840
+              }
+            ],
+            "frame_pool_size": [
+              3840,
+              2160
+            ],
+            "map": "cpu-nv12-read-direct",
+            "mapped_planes": [
+              {
+                "active_span_bytes": 8294400,
+                "reference_buffer_bytes": null,
+                "reference_bytes_after_active_span": null,
+                "stride": 3840
+              },
+              {
+                "active_span_bytes": 4147200,
+                "reference_buffer_bytes": null,
+                "reference_bytes_after_active_span": null,
+                "stride": 3840
+              }
+            ],
+            "nv12_active_bytes_equal": 12441600,
+            "order": "download-first",
+            "performance_measured": false,
+            "rgb_adler32": "caa9e11b",
+            "rgb_crop_bytes_equal": 24865203,
+            "rgb_full_bytes_equal": 24883200,
+            "status": "pass",
+            "surface_color_range": 1,
+            "surface_colorspace": 6,
+            "tested_crop": [
+              3839,
+              2159
+            ],
+            "uv_adler32": "a6efb58e",
+            "y_adler32": "8848632d"
+          },
+          "stdout_sha256": "15a066a9c3a7bbaf1fbc6986d57d7b5dbd2f731f5f2c625d8e6cbd7ec8d818b7"
+        },
+        {
+          "exit_code": 0,
+          "result": {
+            "coded_size": [
+              3840,
+              2160
+            ],
+            "decoded_size": [
+              3840,
+              2160
+            ],
+            "decoder": "h264/vaapi",
+            "downloaded_planes": [
+              {
+                "active_span_bytes": 8294400,
+                "reference_buffer_bytes": 12533888,
+                "reference_bytes_after_active_span": 4239488,
+                "stride": 3840
+              },
+              {
+                "active_span_bytes": 4147200,
+                "reference_buffer_bytes": 12533888,
+                "reference_bytes_after_active_span": 30816,
+                "stride": 3840
+              }
+            ],
+            "frame_pool_size": [
+              3840,
+              2160
+            ],
+            "map": "cpu-nv12-read-direct",
+            "mapped_planes": [
+              {
+                "active_span_bytes": 8294400,
+                "reference_buffer_bytes": null,
+                "reference_bytes_after_active_span": null,
+                "stride": 3840
+              },
+              {
+                "active_span_bytes": 4147200,
+                "reference_buffer_bytes": null,
+                "reference_bytes_after_active_span": null,
+                "stride": 3840
+              }
+            ],
+            "nv12_active_bytes_equal": 12441600,
+            "order": "map-first",
+            "performance_measured": false,
+            "rgb_adler32": "caa9e11b",
+            "rgb_crop_bytes_equal": 24865203,
+            "rgb_full_bytes_equal": 24883200,
+            "status": "pass",
+            "surface_color_range": 1,
+            "surface_colorspace": 6,
+            "tested_crop": [
+              3839,
+              2159
+            ],
+            "uv_adler32": "a6efb58e",
+            "y_adler32": "8848632d"
+          },
+          "stdout_sha256": "f6b60e29cc56ddc48ce7aeee5b4e59ff36c4a5292310f6409c41fd5f613c392b"
+        }
+      ],
+      "declared_stream_color": {
+        "matrix": "smpte170m",
+        "range": "tv"
+      },
+      "decoder_surface_color": {
+        "matrix_av_enum": 6,
+        "range_av_enum": 1
+      },
+      "packet_bytes": 425260,
+      "packet_sha256": "05f987caf29cdc4ecb07e09472628eb10ada85528c1cdf8908420604217be36e",
+      "pattern": "testsrc2",
+      "stream": {
+        "codec_name": "h264",
+        "coded_height": 2160,
+        "coded_width": 3840,
+        "color_range": "tv",
+        "color_space": "smpte170m",
+        "height": 2160,
+        "pix_fmt": "yuv420p",
+        "profile": "Constrained Baseline",
+        "width": 3840
+      }
+    },
+    {
+      "annex_b_nal_types": [
+        9,
+        7,
+        8,
+        6,
+        5
+      ],
+      "cases": [
+        {
+          "exit_code": 0,
+          "result": {
+            "coded_size": [
+              3840,
+              2160
+            ],
+            "decoded_size": [
+              3840,
+              2160
+            ],
+            "decoder": "h264/vaapi",
+            "downloaded_planes": [
+              {
+                "active_span_bytes": 8294400,
+                "reference_buffer_bytes": 12533888,
+                "reference_bytes_after_active_span": 4239488,
+                "stride": 3840
+              },
+              {
+                "active_span_bytes": 4147200,
+                "reference_buffer_bytes": 12533888,
+                "reference_bytes_after_active_span": 30816,
+                "stride": 3840
+              }
+            ],
+            "frame_pool_size": [
+              3840,
+              2160
+            ],
+            "map": "cpu-nv12-read-direct",
+            "mapped_planes": [
+              {
+                "active_span_bytes": 8294400,
+                "reference_buffer_bytes": null,
+                "reference_bytes_after_active_span": null,
+                "stride": 3840
+              },
+              {
+                "active_span_bytes": 4147200,
+                "reference_buffer_bytes": null,
+                "reference_bytes_after_active_span": null,
+                "stride": 3840
+              }
+            ],
+            "nv12_active_bytes_equal": 12441600,
+            "order": "download-first",
+            "performance_measured": false,
+            "rgb_adler32": "88247ac9",
+            "rgb_crop_bytes_equal": 24865203,
+            "rgb_full_bytes_equal": 24883200,
+            "status": "pass",
+            "surface_color_range": 2,
+            "surface_colorspace": 1,
+            "tested_crop": [
+              3839,
+              2159
+            ],
+            "uv_adler32": "5406062a",
+            "y_adler32": "e8aa1721"
+          },
+          "stdout_sha256": "06899b0499bc3a18dec4e5f61a97ec2c5cd2b125515c7fc21671ef3fc7ab89d4"
+        },
+        {
+          "exit_code": 0,
+          "result": {
+            "coded_size": [
+              3840,
+              2160
+            ],
+            "decoded_size": [
+              3840,
+              2160
+            ],
+            "decoder": "h264/vaapi",
+            "downloaded_planes": [
+              {
+                "active_span_bytes": 8294400,
+                "reference_buffer_bytes": 12533888,
+                "reference_bytes_after_active_span": 4239488,
+                "stride": 3840
+              },
+              {
+                "active_span_bytes": 4147200,
+                "reference_buffer_bytes": 12533888,
+                "reference_bytes_after_active_span": 30816,
+                "stride": 3840
+              }
+            ],
+            "frame_pool_size": [
+              3840,
+              2160
+            ],
+            "map": "cpu-nv12-read-direct",
+            "mapped_planes": [
+              {
+                "active_span_bytes": 8294400,
+                "reference_buffer_bytes": null,
+                "reference_bytes_after_active_span": null,
+                "stride": 3840
+              },
+              {
+                "active_span_bytes": 4147200,
+                "reference_buffer_bytes": null,
+                "reference_bytes_after_active_span": null,
+                "stride": 3840
+              }
+            ],
+            "nv12_active_bytes_equal": 12441600,
+            "order": "map-first",
+            "performance_measured": false,
+            "rgb_adler32": "88247ac9",
+            "rgb_crop_bytes_equal": 24865203,
+            "rgb_full_bytes_equal": 24883200,
+            "status": "pass",
+            "surface_color_range": 2,
+            "surface_colorspace": 1,
+            "tested_crop": [
+              3839,
+              2159
+            ],
+            "uv_adler32": "5406062a",
+            "y_adler32": "e8aa1721"
+          },
+          "stdout_sha256": "385ca9cff8efa76f6ca69aa2f37d68486720119ce4b937a43fdc322a4ff32185"
+        }
+      ],
+      "declared_stream_color": {
+        "matrix": "bt709",
+        "range": "pc"
+      },
+      "decoder_surface_color": {
+        "matrix_av_enum": 1,
+        "range_av_enum": 2
+      },
+      "packet_bytes": 27687,
+      "packet_sha256": "69702756f0f14d433626899cb869e3656a791a261e8546c2c2f347e6a2168c15",
+      "pattern": "smptehdbars",
+      "stream": {
+        "codec_name": "h264",
+        "coded_height": 2160,
+        "coded_width": 3840,
+        "color_range": "pc",
+        "color_space": "bt709",
+        "height": 2160,
+        "pix_fmt": "yuvj420p",
+        "profile": "Constrained Baseline",
+        "width": 3840
+      }
+    }
+  ],
+  "platform": {
+    "device": "0x7d67",
+    "driver": "i915",
+    "revision": "0x06",
+    "vendor": "0x8086"
+  },
+  "provenance": {
+    "executed_probe_in_archive": false,
+    "executed_probe_sha256": "baa5d108fdb0af0867b4f9575191c305bfab604c5bd77097a4b20780f58ca424",
+    "ffmpeg_library_sonames": {
+      "libavcodec": "libavcodec.so.60",
+      "libavutil": "libavutil.so.58",
+      "libswscale": "libswscale.so.7"
+    },
+    "invocations_sha256": "708caefe09f25583cb707b3ddabeff147eb7cdbb483bb00a6683c579d771531e",
+    "original_launcher_in_archive": false,
+    "original_verified_results_sha256": "4adf0aa9f28b0f66b2e97d4c2fb63a1b187d054072008b60ae3b960e1710faea",
+    "portable_launcher_sha256": "ebc59b41996eb880e85ae104a660b9e3e72c0b03094e5f7bc50113b9f2f8f751",
+    "source_and_tool_sha256": {
+      "ffmpeg": "ed16af623947494a72e284b6eb8ff225f2da22b38b5d5069c2fd4b4ba3384e41",
+      "ffprobe": "272f6ebc634a63d9c8b4ca68e964119d980f25154e5aa2c35e5487da48e9a58f",
+      "libavcodec.so": "5086c1058b497732273c3f71519d54b80a5e16b4e831c35246da87ddd93a6e56",
+      "libavutil.so": "11b0836441b899e1b2183fc10eda5a5f637c03547fdfe5b97774e2cbd5aeb72c",
+      "libswscale.so": "a2122c6342e9457a9b7faab2d3f7018f3634fdac4d0b25b8ea974eae0277d78c",
+      "libx264.so.164": "e8d6174800d71680cdd48a4d4cd21eadc57bddf67115beccf583a47b5470162f",
+      "preflight.c": "52f442f5f0fea6b9b5fe23cb1a69ae50345f666b66762d22bf0d1afb9c3bd992",
+      "run.sh": "738925d33914782a6c53a82d2f3881f3a32d94720c6eb33043532a5efbebe15b"
+    }
+  },
+  "schema_version": 1,
+  "scope": "Local exact-4K Intel VA-API read-only direct CPU NV12 compatibility",
+  "source_and_tool_sha256": {
+    "ffmpeg": "ed16af623947494a72e284b6eb8ff225f2da22b38b5d5069c2fd4b4ba3384e41",
+    "ffprobe": "272f6ebc634a63d9c8b4ca68e964119d980f25154e5aa2c35e5487da48e9a58f",
+    "libavcodec.so": "5086c1058b497732273c3f71519d54b80a5e16b4e831c35246da87ddd93a6e56",
+    "libavutil.so": "11b0836441b899e1b2183fc10eda5a5f637c03547fdfe5b97774e2cbd5aeb72c",
+    "libswscale.so": "a2122c6342e9457a9b7faab2d3f7018f3634fdac4d0b25b8ea974eae0277d78c",
+    "libx264.so.164": "e8d6174800d71680cdd48a4d4cd21eadc57bddf67115beccf583a47b5470162f",
+    "preflight.c": "52f442f5f0fea6b9b5fe23cb1a69ae50345f666b66762d22bf0d1afb9c3bd992",
+    "run.sh": "738925d33914782a6c53a82d2f3881f3a32d94720c6eb33043532a5efbebe15b"
+  }
+}

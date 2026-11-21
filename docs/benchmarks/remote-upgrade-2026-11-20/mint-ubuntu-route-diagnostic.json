@@ -1,0 +1,1485 @@
+{
+  "status": "failed",
+  "scope": "Independent IPv4 measurement of the existing authorized Wi-Fi/Ethernet lab route.",
+  "icmp": {
+    "configuration": {
+      "count_each_direction": 100,
+      "interpacket_seconds": 0.2,
+      "variation": "absolute difference across consecutive successful exact sequence pairs"
+    },
+    "mint_to_ubuntu": {
+      "transmitted": 100,
+      "unique_echo_replies": 100,
+      "unanswered_sequences": [],
+      "echo_loss_fraction": 0.0,
+      "duplicate_replies": 0,
+      "rtt_exact_count": 100,
+      "rtt_upper_bound_count": 0,
+      "rtt_ms": {
+        "min": 1.64,
+        "p50_nearest_rank": 7.64,
+        "p95_nearest_rank": 149.0,
+        "max": 189.0
+      },
+      "consecutive_exact_success_pairs": 99,
+      "absolute_consecutive_rtt_difference_ms": {
+        "min": 0.0,
+        "p50_nearest_rank": 9.100000000000001,
+        "p95_nearest_rank": 144.24,
+        "max": 184.64
+      },
+      "raw_numeric_echoes": [
+        {
+          "sequence": 1,
+          "arrival_realtime_ns": 1795236876895802000,
+          "rtt_ms": 3.12,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 2,
+          "arrival_realtime_ns": 1795236877095734000,
+          "rtt_ms": 2.49,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 3,
+          "arrival_realtime_ns": 1795236877297848000,
+          "rtt_ms": 3.65,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 4,
+          "arrival_realtime_ns": 1795236877497813000,
+          "rtt_ms": 2.54,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 5,
+          "arrival_realtime_ns": 1795236877715901000,
+          "rtt_ms": 19.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 6,
+          "arrival_realtime_ns": 1795236877899743000,
+          "rtt_ms": 2.44,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 7,
+          "arrival_realtime_ns": 1795236878101785000,
+          "rtt_ms": 3.59,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 8,
+          "arrival_realtime_ns": 1795236878334815000,
+          "rtt_ms": 35.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 9,
+          "arrival_realtime_ns": 1795236878510787000,
+          "rtt_ms": 10.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 10,
+          "arrival_realtime_ns": 1795236878703812000,
+          "rtt_ms": 2.54,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 11,
+          "arrival_realtime_ns": 1795236878904851000,
+          "rtt_ms": 2.65,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 12,
+          "arrival_realtime_ns": 1795236879105730000,
+          "rtt_ms": 2.46,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 13,
+          "arrival_realtime_ns": 1795236879311683000,
+          "rtt_ms": 7.64,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 14,
+          "arrival_realtime_ns": 1795236879507907000,
+          "rtt_ms": 2.84,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 15,
+          "arrival_realtime_ns": 1795236879709880000,
+          "rtt_ms": 3.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 16,
+          "arrival_realtime_ns": 1795236879910792000,
+          "rtt_ms": 3.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 17,
+          "arrival_realtime_ns": 1795236880111760000,
+          "rtt_ms": 3.55,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 18,
+          "arrival_realtime_ns": 1795236880311701000,
+          "rtt_ms": 2.58,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 19,
+          "arrival_realtime_ns": 1795236880516694000,
+          "rtt_ms": 6.66,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 20,
+          "arrival_realtime_ns": 1795236880713666000,
+          "rtt_ms": 2.65,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 21,
+          "arrival_realtime_ns": 1795236880914678000,
+          "rtt_ms": 2.67,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 22,
+          "arrival_realtime_ns": 1795236881118737000,
+          "rtt_ms": 5.79,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 23,
+          "arrival_realtime_ns": 1795236881321738000,
+          "rtt_ms": 7.64,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 24,
+          "arrival_realtime_ns": 1795236881661736000,
+          "rtt_ms": 147.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 25,
+          "arrival_realtime_ns": 1795236881720768000,
+          "rtt_ms": 4.81,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 26,
+          "arrival_realtime_ns": 1795236881920781000,
+          "rtt_ms": 3.64,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 27,
+          "arrival_realtime_ns": 1795236882120619000,
+          "rtt_ms": 2.49,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 28,
+          "arrival_realtime_ns": 1795236882328722000,
+          "rtt_ms": 9.83,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 29,
+          "arrival_realtime_ns": 1795236882522795000,
+          "rtt_ms": 2.76,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 30,
+          "arrival_realtime_ns": 1795236882723765000,
+          "rtt_ms": 2.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 31,
+          "arrival_realtime_ns": 1795236882924733000,
+          "rtt_ms": 2.47,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 32,
+          "arrival_realtime_ns": 1795236883127826000,
+          "rtt_ms": 4.61,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 33,
+          "arrival_realtime_ns": 1795236883326694000,
+          "rtt_ms": 2.35,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 34,
+          "arrival_realtime_ns": 1795236883531813000,
+          "rtt_ms": 6.67,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 35,
+          "arrival_realtime_ns": 1795236883728790000,
+          "rtt_ms": 2.55,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 36,
+          "arrival_realtime_ns": 1795236883929810000,
+          "rtt_ms": 2.62,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 37,
+          "arrival_realtime_ns": 1795236884129699000,
+          "rtt_ms": 1.64,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 38,
+          "arrival_realtime_ns": 1795236884331731000,
+          "rtt_ms": 2.66,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 39,
+          "arrival_realtime_ns": 1795236884534670000,
+          "rtt_ms": 4.65,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 40,
+          "arrival_realtime_ns": 1795236884738670000,
+          "rtt_ms": 7.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 41,
+          "arrival_realtime_ns": 1795236884934762000,
+          "rtt_ms": 2.81,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 42,
+          "arrival_realtime_ns": 1795236885310858000,
+          "rtt_ms": 178.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 43,
+          "arrival_realtime_ns": 1795236885336807000,
+          "rtt_ms": 2.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 44,
+          "arrival_realtime_ns": 1795236885537827000,
+          "rtt_ms": 2.56,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 45,
+          "arrival_realtime_ns": 1795236885738846000,
+          "rtt_ms": 2.61,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 46,
+          "arrival_realtime_ns": 1795236885941715000,
+          "rtt_ms": 4.36,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 47,
+          "arrival_realtime_ns": 1795236886326946000,
+          "rtt_ms": 189.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 48,
+          "arrival_realtime_ns": 1795236886359820000,
+          "rtt_ms": 20.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 49,
+          "arrival_realtime_ns": 1795236886567766000,
+          "rtt_ms": 27.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 50,
+          "arrival_realtime_ns": 1795236886743806000,
+          "rtt_ms": 2.63,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 51,
+          "arrival_realtime_ns": 1795236886951687000,
+          "rtt_ms": 9.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 52,
+          "arrival_realtime_ns": 1795236887148665000,
+          "rtt_ms": 5.65,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 53,
+          "arrival_realtime_ns": 1795236887346710000,
+          "rtt_ms": 2.67,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 54,
+          "arrival_realtime_ns": 1795236887549641000,
+          "rtt_ms": 4.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 55,
+          "arrival_realtime_ns": 1795236887749698000,
+          "rtt_ms": 3.78,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 56,
+          "arrival_realtime_ns": 1795236887952702000,
+          "rtt_ms": 5.72,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 57,
+          "arrival_realtime_ns": 1795236888150654000,
+          "rtt_ms": 2.67,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 58,
+          "arrival_realtime_ns": 1795236888383809000,
+          "rtt_ms": 34.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 59,
+          "arrival_realtime_ns": 1795236888552654000,
+          "rtt_ms": 2.55,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 60,
+          "arrival_realtime_ns": 1795236888754653000,
+          "rtt_ms": 3.71,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 61,
+          "arrival_realtime_ns": 1795236889044756000,
+          "rtt_ms": 92.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 62,
+          "arrival_realtime_ns": 1795236889239689000,
+          "rtt_ms": 86.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 63,
+          "arrival_realtime_ns": 1795236889362660000,
+          "rtt_ms": 8.76,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 64,
+          "arrival_realtime_ns": 1795236889707729000,
+          "rtt_ms": 153.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 65,
+          "arrival_realtime_ns": 1795236889768668000,
+          "rtt_ms": 12.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 66,
+          "arrival_realtime_ns": 1795236889958643000,
+          "rtt_ms": 1.66,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 67,
+          "arrival_realtime_ns": 1795236890237793000,
+          "rtt_ms": 79.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 68,
+          "arrival_realtime_ns": 1795236890390745000,
+          "rtt_ms": 31.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 69,
+          "arrival_realtime_ns": 1795236890701704000,
+          "rtt_ms": 142.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 70,
+          "arrival_realtime_ns": 1795236890792734000,
+          "rtt_ms": 31.9,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 71,
+          "arrival_realtime_ns": 1795236891114840000,
+          "rtt_ms": 153.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 72,
+          "arrival_realtime_ns": 1795236891185737000,
+          "rtt_ms": 22.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 73,
+          "arrival_realtime_ns": 1795236891377888000,
+          "rtt_ms": 13.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 74,
+          "arrival_realtime_ns": 1795236891647847000,
+          "rtt_ms": 82.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 75,
+          "arrival_realtime_ns": 1795236891812780000,
+          "rtt_ms": 46.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 76,
+          "arrival_realtime_ns": 1795236892044798000,
+          "rtt_ms": 77.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 77,
+          "arrival_realtime_ns": 1795236892270799000,
+          "rtt_ms": 103.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 78,
+          "arrival_realtime_ns": 1795236892517816000,
+          "rtt_ms": 149.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 79,
+          "arrival_realtime_ns": 1795236892613759000,
+          "rtt_ms": 43.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 80,
+          "arrival_realtime_ns": 1795236892776787000,
+          "rtt_ms": 5.65,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 81,
+          "arrival_realtime_ns": 1795236893081822000,
+          "rtt_ms": 110.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 82,
+          "arrival_realtime_ns": 1795236893208988000,
+          "rtt_ms": 35.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 83,
+          "arrival_realtime_ns": 1795236893523665000,
+          "rtt_ms": 150.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 84,
+          "arrival_realtime_ns": 1795236893600756000,
+          "rtt_ms": 26.9,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 85,
+          "arrival_realtime_ns": 1795236893777640000,
+          "rtt_ms": 2.57,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 86,
+          "arrival_realtime_ns": 1795236894113699000,
+          "rtt_ms": 138.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 87,
+          "arrival_realtime_ns": 1795236894190791000,
+          "rtt_ms": 13.9,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 88,
+          "arrival_realtime_ns": 1795236894439652000,
+          "rtt_ms": 61.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 89,
+          "arrival_realtime_ns": 1795236894618715000,
+          "rtt_ms": 39.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 90,
+          "arrival_realtime_ns": 1795236894790845000,
+          "rtt_ms": 10.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 91,
+          "arrival_realtime_ns": 1795236895011752000,
+          "rtt_ms": 30.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 92,
+          "arrival_realtime_ns": 1795236895221719000,
+          "rtt_ms": 39.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 93,
+          "arrival_realtime_ns": 1795236895409759000,
+          "rtt_ms": 26.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 94,
+          "arrival_realtime_ns": 1795236895643686000,
+          "rtt_ms": 59.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 95,
+          "arrival_realtime_ns": 1795236895852940000,
+          "rtt_ms": 67.9,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 96,
+          "arrival_realtime_ns": 1795236896019862000,
+          "rtt_ms": 34.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 97,
+          "arrival_realtime_ns": 1795236896318835000,
+          "rtt_ms": 133.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 98,
+          "arrival_realtime_ns": 1795236896509849000,
+          "rtt_ms": 123.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 99,
+          "arrival_realtime_ns": 1795236896689908000,
+          "rtt_ms": 102.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 100,
+          "arrival_realtime_ns": 1795236896912786000,
+          "rtt_ms": 124.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        }
+      ]
+    },
+    "ubuntu_to_mint": {
+      "transmitted": 100,
+      "unique_echo_replies": 97,
+      "unanswered_sequences": [
+        36,
+        40,
+        42
+      ],
+      "echo_loss_fraction": 0.03,
+      "duplicate_replies": 0,
+      "rtt_exact_count": 97,
+      "rtt_upper_bound_count": 0,
+      "rtt_ms": {
+        "min": 1.32,
+        "p50_nearest_rank": 2.47,
+        "p95_nearest_rank": 174.0,
+        "max": 347.0
+      },
+      "consecutive_exact_success_pairs": 93,
+      "absolute_consecutive_rtt_difference_ms": {
+        "min": 0.0,
+        "p50_nearest_rank": 1.1700000000000002,
+        "p95_nearest_rank": 169.61,
+        "max": 323.45
+      },
+      "raw_numeric_echoes": [
+        {
+          "sequence": 1,
+          "arrival_realtime_ns": 1795236898157946000,
+          "rtt_ms": 4.12,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 2,
+          "arrival_realtime_ns": 1795236898417643000,
+          "rtt_ms": 63.3,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 3,
+          "arrival_realtime_ns": 1795236898576361000,
+          "rtt_ms": 21.3,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 4,
+          "arrival_realtime_ns": 1795236898769777000,
+          "rtt_ms": 14.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 5,
+          "arrival_realtime_ns": 1795236899011214000,
+          "rtt_ms": 55.1,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 6,
+          "arrival_realtime_ns": 1795236899174313000,
+          "rtt_ms": 17.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 7,
+          "arrival_realtime_ns": 1795236899365623000,
+          "rtt_ms": 7.91,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 8,
+          "arrival_realtime_ns": 1795236899561952000,
+          "rtt_ms": 3.84,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 9,
+          "arrival_realtime_ns": 1795236899768786000,
+          "rtt_ms": 9.36,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 10,
+          "arrival_realtime_ns": 1795236900071638000,
+          "rtt_ms": 111.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 11,
+          "arrival_realtime_ns": 1795236900163663000,
+          "rtt_ms": 2.84,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 12,
+          "arrival_realtime_ns": 1795236900370595000,
+          "rtt_ms": 8.51,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 13,
+          "arrival_realtime_ns": 1795236900577305000,
+          "rtt_ms": 14.4,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 14,
+          "arrival_realtime_ns": 1795236900766400000,
+          "rtt_ms": 2.77,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 15,
+          "arrival_realtime_ns": 1795236900976440000,
+          "rtt_ms": 11.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 16,
+          "arrival_realtime_ns": 1795236901211936000,
+          "rtt_ms": 46.2,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 17,
+          "arrival_realtime_ns": 1795236901479012000,
+          "rtt_ms": 113.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 18,
+          "arrival_realtime_ns": 1795236901584016000,
+          "rtt_ms": 16.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 19,
+          "arrival_realtime_ns": 1795236901770864000,
+          "rtt_ms": 2.41,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 20,
+          "arrival_realtime_ns": 1795236902138644000,
+          "rtt_ms": 170.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 21,
+          "arrival_realtime_ns": 1795236902255852000,
+          "rtt_ms": 87.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 22,
+          "arrival_realtime_ns": 1795236902374681000,
+          "rtt_ms": 5.46,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 23,
+          "arrival_realtime_ns": 1795236902572848000,
+          "rtt_ms": 2.76,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 24,
+          "arrival_realtime_ns": 1795236902773415000,
+          "rtt_ms": 2.14,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 25,
+          "arrival_realtime_ns": 1795236902973272000,
+          "rtt_ms": 1.6,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 26,
+          "arrival_realtime_ns": 1795236903174243000,
+          "rtt_ms": 1.65,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 27,
+          "arrival_realtime_ns": 1795236903375620000,
+          "rtt_ms": 2.08,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 28,
+          "arrival_realtime_ns": 1795236903576065000,
+          "rtt_ms": 2.15,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 29,
+          "arrival_realtime_ns": 1795236903775813000,
+          "rtt_ms": 1.32,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 30,
+          "arrival_realtime_ns": 1795236903977121000,
+          "rtt_ms": 1.91,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 31,
+          "arrival_realtime_ns": 1795236904178563000,
+          "rtt_ms": 3.03,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 32,
+          "arrival_realtime_ns": 1795236904377667000,
+          "rtt_ms": 1.71,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 33,
+          "arrival_realtime_ns": 1795236904578664000,
+          "rtt_ms": 1.61,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 34,
+          "arrival_realtime_ns": 1795236904780491000,
+          "rtt_ms": 2.25,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 35,
+          "arrival_realtime_ns": 1795236904981021000,
+          "rtt_ms": 2.18,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 37,
+          "arrival_realtime_ns": 1795236905700191000,
+          "rtt_ms": 314.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 38,
+          "arrival_realtime_ns": 1795236905704429000,
+          "rtt_ms": 110.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 39,
+          "arrival_realtime_ns": 1795236905867832000,
+          "rtt_ms": 72.2,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 41,
+          "arrival_realtime_ns": 1795236906549630000,
+          "rtt_ms": 347.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 43,
+          "arrival_realtime_ns": 1795236906794608000,
+          "rtt_ms": 184.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 44,
+          "arrival_realtime_ns": 1795236906841450000,
+          "rtt_ms": 29.7,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 45,
+          "arrival_realtime_ns": 1795236907014466000,
+          "rtt_ms": 1.76,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 46,
+          "arrival_realtime_ns": 1795236907219721000,
+          "rtt_ms": 5.78,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 47,
+          "arrival_realtime_ns": 1795236907417381000,
+          "rtt_ms": 2.2,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 48,
+          "arrival_realtime_ns": 1795236907618174000,
+          "rtt_ms": 2.36,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 49,
+          "arrival_realtime_ns": 1795236907820114000,
+          "rtt_ms": 3.52,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 50,
+          "arrival_realtime_ns": 1795236908019986000,
+          "rtt_ms": 2.41,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 51,
+          "arrival_realtime_ns": 1795236908223114000,
+          "rtt_ms": 4.77,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 52,
+          "arrival_realtime_ns": 1795236908421871000,
+          "rtt_ms": 2.28,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 53,
+          "arrival_realtime_ns": 1795236908621749000,
+          "rtt_ms": 1.61,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 54,
+          "arrival_realtime_ns": 1795236908823111000,
+          "rtt_ms": 1.91,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 55,
+          "arrival_realtime_ns": 1795236909025610000,
+          "rtt_ms": 4.08,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 56,
+          "arrival_realtime_ns": 1795236909224459000,
+          "rtt_ms": 2.52,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 57,
+          "arrival_realtime_ns": 1795236909425191000,
+          "rtt_ms": 2.26,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 58,
+          "arrival_realtime_ns": 1795236909625585000,
+          "rtt_ms": 2.2,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 59,
+          "arrival_realtime_ns": 1795236909826382000,
+          "rtt_ms": 2.35,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 60,
+          "arrival_realtime_ns": 1795236910026706000,
+          "rtt_ms": 2.14,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 61,
+          "arrival_realtime_ns": 1795236910229193000,
+          "rtt_ms": 4.1,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 62,
+          "arrival_realtime_ns": 1795236910427605000,
+          "rtt_ms": 2.07,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 63,
+          "arrival_realtime_ns": 1795236910629039000,
+          "rtt_ms": 3.1,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 64,
+          "arrival_realtime_ns": 1795236910832045000,
+          "rtt_ms": 5.59,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 65,
+          "arrival_realtime_ns": 1795236911028793000,
+          "rtt_ms": 1.49,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 66,
+          "arrival_realtime_ns": 1795236911232442000,
+          "rtt_ms": 4.39,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 67,
+          "arrival_realtime_ns": 1795236911602484000,
+          "rtt_ms": 174.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 68,
+          "arrival_realtime_ns": 1795236911630701000,
+          "rtt_ms": 2.03,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 69,
+          "arrival_realtime_ns": 1795236911831240000,
+          "rtt_ms": 2.1,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 70,
+          "arrival_realtime_ns": 1795236912032044000,
+          "rtt_ms": 2.48,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 71,
+          "arrival_realtime_ns": 1795236912232286000,
+          "rtt_ms": 1.81,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 72,
+          "arrival_realtime_ns": 1795236912433174000,
+          "rtt_ms": 1.5,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 73,
+          "arrival_realtime_ns": 1795236912634298000,
+          "rtt_ms": 1.65,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 74,
+          "arrival_realtime_ns": 1795236912835180000,
+          "rtt_ms": 1.54,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 75,
+          "arrival_realtime_ns": 1795236913036157000,
+          "rtt_ms": 1.54,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 76,
+          "arrival_realtime_ns": 1795236913237586000,
+          "rtt_ms": 2.07,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 77,
+          "arrival_realtime_ns": 1795236913437922000,
+          "rtt_ms": 1.92,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 78,
+          "arrival_realtime_ns": 1795236913638463000,
+          "rtt_ms": 2.05,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 79,
+          "arrival_realtime_ns": 1795236913838691000,
+          "rtt_ms": 1.81,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 80,
+          "arrival_realtime_ns": 1795236914039661000,
+          "rtt_ms": 1.46,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 81,
+          "arrival_realtime_ns": 1795236914240624000,
+          "rtt_ms": 1.54,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 82,
+          "arrival_realtime_ns": 1795236914441664000,
+          "rtt_ms": 1.68,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 83,
+          "arrival_realtime_ns": 1795236914642980000,
+          "rtt_ms": 1.96,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 84,
+          "arrival_realtime_ns": 1795236914843898000,
+          "rtt_ms": 2.47,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 85,
+          "arrival_realtime_ns": 1795236915044214000,
+          "rtt_ms": 1.87,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 86,
+          "arrival_realtime_ns": 1795236915245219000,
+          "rtt_ms": 2.62,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 87,
+          "arrival_realtime_ns": 1795236915445094000,
+          "rtt_ms": 1.45,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 88,
+          "arrival_realtime_ns": 1795236915646201000,
+          "rtt_ms": 1.64,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 89,
+          "arrival_realtime_ns": 1795236915847137000,
+          "rtt_ms": 1.55,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 90,
+          "arrival_realtime_ns": 1795236916371243000,
+          "rtt_ms": 325.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 91,
+          "arrival_realtime_ns": 1795236916376424000,
+          "rtt_ms": 126.0,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 92,
+          "arrival_realtime_ns": 1795236916475465000,
+          "rtt_ms": 24.8,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 93,
+          "arrival_realtime_ns": 1795236916655780000,
+          "rtt_ms": 3.85,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 94,
+          "arrival_realtime_ns": 1795236916854959000,
+          "rtt_ms": 1.75,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 95,
+          "arrival_realtime_ns": 1795236917057154000,
+          "rtt_ms": 2.79,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 96,
+          "arrival_realtime_ns": 1795236917257677000,
+          "rtt_ms": 2.08,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 97,
+          "arrival_realtime_ns": 1795236917457577000,
+          "rtt_ms": 1.45,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 98,
+          "arrival_realtime_ns": 1795236917658522000,
+          "rtt_ms": 1.61,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 99,
+          "arrival_realtime_ns": 1795236917860599000,
+          "rtt_ms": 2.58,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        },
+        {
+          "sequence": 100,
+          "arrival_realtime_ns": 1795236918063471000,
+          "rtt_ms": 4.35,
+          "rtt_comparison": "=",
+          "duplicate_reported": false
+        }
+      ]
+    }
+  },
+  "tcp": {
+    "configuration": {
+      "sender_target_seconds": 8,
+      "sender_maximum_bytes": 268435456,
+      "transport": "private OpenSSH forward with compression disabled",
+      "rate_scope": "receiver TCP goodput through SSH including endpoint/cipher effects"
+    },
+    "directions": []
+  },
+  "mint": {
+    "route_before": {
+      "interface": "eno1",
+      "classification": "ethernet",
+      "carrier": 1,
+      "operstate": "up",
+      "reported_ethernet_link_speed_mbps": 1000,
+      "reported_ethernet_duplex": "full"
+    },
+    "iperf3_available": false
+  },
+  "ubuntu": {
+    "route_before": {
+      "interface": "wlp3s0",
+      "classification": "wifi",
+      "carrier": 1,
+      "operstate": "up",
+      "reported_ethernet_link_speed_mbps": null,
+      "reported_ethernet_duplex": null
+    },
+    "iperf3_available": false
+  },
+  "failed_stage": "mint_to_ubuntu_ssh_goodput",
+  "error_category": "TimeoutError",
+  "archive": {
+    "path": "mint-ubuntu-route-diagnostic-raw.zip",
+    "sha256": "5379efd0b58cacb1629bee6b22190c29537df10f82037918953b9efb8eac4bdb",
+    "entries": {
+      "fixture/characterize.py": "1e26e26449516e094852d629559abd5ba2bcd043cfc37e9ab29460b14852ea69",
+      "fixture/net_probe.py": "9a10b63dafde7a6139261f653ca057e32a9bb6ea9c5fa0c539c476c8d8c46ab5",
+      "fixture/test_offline.py": "70b30627e547e1583470e3e8b08aefe59fe02066401be925b9f120939d14c87e",
+      "trace/result.json": "b7335dc6b54d6fc81f08fede937ffb49b56598487fa380cbda8257856cd68e30"
+    }
+  }
+}

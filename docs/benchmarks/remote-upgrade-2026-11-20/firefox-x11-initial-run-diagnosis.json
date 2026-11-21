@@ -1,0 +1,118 @@
+{
+  "failed_batch": "/tmp/jwm-firefox-browser-baseline.AQt8OcMI/scored.x92fzxo8",
+  "cause": "Firefox first-run data reporting infobar after the offline privacy page failed to load in a background tab.",
+  "time_attribution": "The approximate epoch loss time maps monotonic observer end to static-scope.json mtime. Raw raster times are on the observer monotonic clock.",
+  "packaged_firefox": {
+    "archive": "/usr/lib/firefox/omni.ja",
+    "policy_module": {
+      "member": "modules/TelemetryReportingPolicy.sys.mjs",
+      "sha256": "2cb0028ec463b3cc97d20ab5bb2723df89832e64f979d36c2a1a478619dcd9da",
+      "line_references": {
+        "first_run_notification_delay": 51,
+        "disabled_data_submission_guard": 849,
+        "detect_offline_load_failure": 1074,
+        "open_privacy_tab_in_background": 1093,
+        "schedule_infobar": 1221
+      }
+    },
+    "preference_module": {
+      "member": "modules/TelemetryUtils.sys.mjs",
+      "sha256": "3ed5624a6f5619d6894f9fab2cebf80b4c42a918610e10bed627e484beb60a19",
+      "line_references": {
+        "data_submission_preference": 86
+      }
+    }
+  },
+  "recovery": {
+    "runner": "/tmp/jwm-firefox-browser-recovery.Tty09B/run_baseline.py",
+    "private_profile_prefs": {
+      "datareporting.policy.dataSubmissionEnabled": false
+    },
+    "original_fixture_sha256": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+    "trial_fixture_sha256_unchanged": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+    "runner_observations": [
+      "save terminal static source raster",
+      "verify original layout before clicking",
+      "save source raster if click readiness fails"
+    ]
+  },
+  "trials": [
+    {
+      "trial": "trial-01",
+      "status": "failed_post_static_motion_readiness",
+      "pre_click_sessionstore_backup_sha256": "33fb7f3d9ae9113be09ebc29a73988123489f9dbaad0d8da73e071cfe73243ab",
+      "pre_click_backup_updated_epoch_ms": 1795234549010,
+      "pre_click_selected_tab_index": 1,
+      "privacy_background_tab_last_accessed_epoch_ms": 1795234531825,
+      "data_policy_notified_epoch_ms": 1795234592057,
+      "raster_trace_sha256": "d4d541dc99a9d46cc1c87ee6f0ced88aa021e9532e3bb1a807d6995f5e5a8d33",
+      "first_missing_source_tile_monotonic_ns": 51283833776549,
+      "first_missing_viewer_tile_monotonic_ns": 51283890527078,
+      "first_missing_source_tile_since_static_start_ms": 59855.750237,
+      "first_missing_source_tile_before_static_observer_end_ms": 38144.354074,
+      "first_missing_source_tile_approx_epoch_ms": 1795234592150.1584,
+      "notification_to_source_tile_loss_approx_ms": 93.158447265625
+    },
+    {
+      "trial": "trial-02",
+      "status": "failed_post_static_motion_readiness",
+      "pre_click_sessionstore_backup_sha256": "7dab46822f58f30ec5908a11d3bca0726d6ec4f7abccfeb5106afef0874466f5",
+      "pre_click_backup_updated_epoch_ms": 1795234654660,
+      "pre_click_selected_tab_index": 1,
+      "privacy_background_tab_last_accessed_epoch_ms": 1795234637623,
+      "data_policy_notified_epoch_ms": 1795234697867,
+      "raster_trace_sha256": "8a93648a6e6b015feb22a9515bd5994579f00bba8284ad0ae2acdc46db36b74f",
+      "first_missing_source_tile_monotonic_ns": 51389633701326,
+      "first_missing_viewer_tile_monotonic_ns": 51389690140164,
+      "first_missing_source_tile_since_static_start_ms": 59800.183815,
+      "first_missing_source_tile_before_static_observer_end_ms": 38200.067933,
+      "first_missing_source_tile_approx_epoch_ms": 1795234697951.2603,
+      "notification_to_source_tile_loss_approx_ms": 84.26025390625
+    },
+    {
+      "trial": "trial-03",
+      "status": "failed_post_static_motion_readiness",
+      "pre_click_sessionstore_backup_sha256": "b7fcccfd1fda6a9a59a98a962dbb277bcd78e18af094ca9bf66e2634a56aa57a",
+      "pre_click_backup_updated_epoch_ms": 1795234760913,
+      "pre_click_selected_tab_index": 1,
+      "privacy_background_tab_last_accessed_epoch_ms": 1795234743885,
+      "data_policy_notified_epoch_ms": 1795234804215,
+      "raster_trace_sha256": "e0805c5c93a9ace4fcfe6b2765a8cd4192f980016c21daf847686f9836e3c913",
+      "first_missing_source_tile_monotonic_ns": 51495998474093,
+      "first_missing_viewer_tile_monotonic_ns": 51496055097924,
+      "first_missing_source_tile_since_static_start_ms": 59900.084051,
+      "first_missing_source_tile_before_static_observer_end_ms": 38100.109451,
+      "first_missing_source_tile_approx_epoch_ms": 1795234804316.0525,
+      "notification_to_source_tile_loss_approx_ms": 101.052490234375
+    }
+  ],
+  "archive": {
+    "path": "firefox-x11-initial-run-diagnosis-raw.zip",
+    "sha256": "6ad828704acc7d5e1aba15c99cb441f0c6e6c5fc1fb42a2e8e1eacdda6109092",
+    "entries": {
+      "fixture/original-runner.py": "79184a7ca5278665d64b6c62290fe59ff41bd933868395e95b5d2d0b1d2b4fdd",
+      "fixture/recovery-runner.py": "1c37af85c534a8930fd373cacfd7db699b4e47db1a45d994b633036125cbd5dd",
+      "fixture/browser-original.html": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+      "fixture/browser-trial.html": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+      "fixture/manifest.json": "b3ad4bac6df43044599c5399a08c47f8bffa5a0a19debf51f121ba25c3a923d7",
+      "trace/trial-01/failure.log": "950b47baee826883e51a4e9162f74fd7981eee10cbb8faab625b78e25840e270",
+      "trace/trial-01/static-pixels.jsonl": "d4d541dc99a9d46cc1c87ee6f0ced88aa021e9532e3bb1a807d6995f5e5a8d33",
+      "trace/trial-01/static-scope.json": "88354ea41712cda550638908e792cf9601a715a0749048515ebd61f34aaed76c",
+      "trace/trial-01/source-static.json": "453e534bb4f16f5175ee247e627d7e9677ad8315466266f2676da26361f9b62b",
+      "trace/trial-01/host-clocked-telemetry.jsonl": "7c7b0b6ddd55bd24d8c052061d87cf342b15d5137a3455b1eb1cb2632c27da2e",
+      "trace/trial-01/viewer-clocked-telemetry.jsonl": "fddb7c8e38d39f2011559285369c18eddca7e04049e6fb55e9dbe5a32c37010e",
+      "trace/trial-02/failure.log": "950b47baee826883e51a4e9162f74fd7981eee10cbb8faab625b78e25840e270",
+      "trace/trial-02/static-pixels.jsonl": "8a93648a6e6b015feb22a9515bd5994579f00bba8284ad0ae2acdc46db36b74f",
+      "trace/trial-02/static-scope.json": "317dd981492190b8587294d789ae34f8490011f5c49e02d248d87013448a43aa",
+      "trace/trial-02/source-static.json": "453e534bb4f16f5175ee247e627d7e9677ad8315466266f2676da26361f9b62b",
+      "trace/trial-02/host-clocked-telemetry.jsonl": "c9d95a8072a4006b53f87b8d27564bb817eb8aa2587f681a7bc70ed10387cfa8",
+      "trace/trial-02/viewer-clocked-telemetry.jsonl": "7d979dd022e645ae124cd6517521c8d1531d9efa687112e54722762cf15c95ea",
+      "trace/trial-03/failure.log": "950b47baee826883e51a4e9162f74fd7981eee10cbb8faab625b78e25840e270",
+      "trace/trial-03/static-pixels.jsonl": "e0805c5c93a9ace4fcfe6b2765a8cd4192f980016c21daf847686f9836e3c913",
+      "trace/trial-03/static-scope.json": "db81beb0958e159903808a67d9a01870da23fa595c48f1186f7b2a3518890fd0",
+      "trace/trial-03/source-static.json": "453e534bb4f16f5175ee247e627d7e9677ad8315466266f2676da26361f9b62b",
+      "trace/trial-03/host-clocked-telemetry.jsonl": "8867f84ea22fd0b235fbcae5f7e6e067a408f91f3eb4d6d87f08b1b8ce4a571c",
+      "trace/trial-03/viewer-clocked-telemetry.jsonl": "a024105334f0cc812c16f2e992b1b74d7a9b28111adb20a1844ad8c5fad17c60"
+    }
+  }
+}

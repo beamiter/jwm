@@ -28,8 +28,20 @@ pub(super) struct NativeControl {
     deadline: Option<Instant>,
     scroll_enabled: bool,
     horizontal_enabled: bool,
+    gestures: bool,
 }
 impl NativeControl {
+    pub(super) fn awaiting_arm(&self) -> bool {
+        self.enabled && !self.requested
+    }
+
+    pub(super) fn clear_for_new_source(&mut self) {
+        *self = Self {
+            manager: self.manager.take(),
+            global: self.global,
+            ..Self::default()
+        };
+    }
     /// Consume remaining time from the one authenticated negotiation budget.
     /// This does not create a new budget at native request or acknowledgement.
     fn prepare_resumable_request(
@@ -131,12 +143,13 @@ impl WaylandCapture {
         &mut self,
         scroll_enabled: bool,
         horizontal_enabled: bool,
+        gestures: bool,
     ) -> RemoteResult<()> {
         if self.state.interactive_popup.enabled
             || self.state.text.enabled
             || self.state.resize_follow
             || self.state.popups
-            || self.state.frame_serial != 0
+            || (self.state.frame_serial != 0 && self.grants.is_empty())
             || self.state.control.enabled
             || self.state.keyboard.enabled
             || self.state.pointer.enabled
@@ -153,9 +166,15 @@ impl WaylandCapture {
                 invalid("control horizontal scroll requires native manager version 3").into(),
             );
         }
+        if gestures && self.state.control.manager.as_ref().unwrap().version() < 6 {
+            return Err(
+                invalid(super::super::wayland_control_wire::GESTURE_NATIVE_V6_REQUIRED).into(),
+            );
+        }
         self.state.control.horizontal_enabled = horizontal_enabled;
         self.state.control.scroll_enabled = scroll_enabled;
         self.state.control.enabled = true;
+        self.state.control.gestures = gestures;
         Ok(())
     }
 
@@ -240,6 +259,12 @@ impl WaylandCapture {
         let _ = self.conn.backend().flush();
     }
 
+    pub(in crate::remote) fn confirm_control_released(&mut self) -> RemoteResult<()> {
+        // The compositor processes destroy and releases the target's held
+        // input before the following sync completes on this same connection.
+        self.sync_until(Instant::now() + Duration::from_secs(2))
+    }
+
     pub(in crate::remote) fn expire_control(&mut self) {
         if self
             .state
@@ -308,7 +333,14 @@ impl WaylandCapture {
         let manager = self.state.control.manager.as_ref().unwrap();
         let axes = u32::from(self.state.control.scroll_enabled)
             | (u32::from(self.state.control.horizontal_enabled) << 1);
-        let lease = if let Some((use_timed, ttl_ms)) = timed {
+        let lease = if self.state.control.gestures {
+            let source = self.source.as_ref().unwrap();
+            if manager.version() >= 7 {
+                manager.create_window_gesture_lease(source, axes, &self.queue.handle(), ())
+            } else {
+                manager.create_gesture_lease(source, axes, &self.queue.handle(), ())
+            }
+        } else if let Some((use_timed, ttl_ms)) = timed {
             if use_timed {
                 manager.create_timed_resumable_lease(
                     self.source.as_ref().unwrap(),
@@ -480,6 +512,7 @@ impl WaylandCapture {
         let epoch = u32::try_from(action.lease_epoch)?;
         let sequence = u32::try_from(action.sequence)?;
         if self.control_revoked()
+            || (action.kind.is_gesture_edge() && !self.state.control.gestures)
             || !self.state.control.armed
             || self.state.control.paused
             || self.state.control.transition.is_some()
@@ -502,12 +535,19 @@ impl WaylandCapture {
                 }
                 lease.key(epoch, sequence, u32::from(code), u32::from(pressed));
             }
+            ControlActionKind::DragMotion { x, y } => {
+                lease.drag_motion(epoch, sequence, u32::from(x), u32::from(y));
+            }
+            ControlActionKind::DragRelease => {
+                lease.drag_release(epoch, sequence);
+            }
             ControlActionKind::Motion { x, y }
             | ControlActionKind::ClickLeft { x, y }
             | ControlActionKind::ScrollUp { x, y }
             | ControlActionKind::ScrollDown { x, y }
             | ControlActionKind::ScrollLeft { x, y }
-            | ControlActionKind::ScrollRight { x, y } => {
+            | ControlActionKind::ScrollRight { x, y }
+            | ControlActionKind::DragStart { x, y } => {
                 if matches!(
                     action.kind,
                     ControlActionKind::ScrollUp { .. } | ControlActionKind::ScrollDown { .. }
@@ -541,6 +581,7 @@ impl WaylandCapture {
                         ControlActionKind::ScrollDown { .. } => 3,
                         ControlActionKind::ScrollLeft { .. } => 4,
                         ControlActionKind::ScrollRight { .. } => 5,
+                        ControlActionKind::DragStart { .. } => 6,
                         _ => unreachable!(),
                     },
                     u32::from(x),

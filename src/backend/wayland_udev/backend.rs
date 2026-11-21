@@ -827,6 +827,7 @@ struct SharedState {
     preferred_device_id: Option<u64>,
 
     kms_needs_reinit: bool,
+    kms_connectors_need_probe: bool,
     session_active: bool,
 
     /// True while the WM screenshot region-select grab is active.
@@ -870,6 +871,7 @@ impl Default for SharedState {
             preferred_device_id: None,
 
             kms_needs_reinit: false,
+            kms_connectors_need_probe: false,
             session_active: true,
             screenshot_grab_active: false,
             scroll_capture_active: false,
@@ -1885,6 +1887,7 @@ pub struct UdevBackend {
     color_allocator: Box<dyn ColorAllocator>,
 
     compositor: Option<WaylandCompositor>,
+    deferred_fbo_presentation: Option<fbo_presentation::Prepared>,
     // JWM is constructed and performs its initial arrange before Backend::run
     // creates the GL compositor. Keep the durable part of that command stream
     // here so initial creation, hot enable, and KMS-context recreation all
@@ -2261,6 +2264,10 @@ impl UdevBackend {
 
     fn drop_kms(&mut self) {
         if let Some(old) = self.kms.take() {
+            self.state.invalidate_presentation_generation();
+            // A fresh EGL context can reuse the old raw texture name. A
+            // deferred import receipt cannot survive that context boundary.
+            self.deferred_fbo_presentation = None;
             // A retained device/reference must not retain pending capture replies.
             old.borrow_mut().cancel_routed_screenshots();
             if let Some(token) = old.borrow_mut().registration_token.take() {
@@ -2268,6 +2275,8 @@ impl UdevBackend {
             }
             let device = old.borrow().drm_device_fd.device_fd();
             self.retired_kms_devices.push(device);
+            drop(old);
+            self.request_flush();
         }
     }
 
@@ -2307,6 +2316,9 @@ impl UdevBackend {
         let previous_outputs = std::mem::take(&mut self.state.outputs);
         let Some(kms) = self.kms.as_ref() else {
             self.state.gamma_sizes.clear();
+            if self.state.output_power.sync(std::iter::empty()) {
+                self.request_flush();
+            }
             self.state.refresh_output_dependent_state();
             if stop_capture_sessions_of_departed_outputs(&previous_outputs, &self.state.outputs) {
                 self.request_flush();
@@ -2316,6 +2328,13 @@ impl UdevBackend {
 
         self.state.outputs = kms.borrow().outputs();
         self.state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
+        if self
+            .state
+            .output_power
+            .sync(kms.borrow().output_power_modes())
+        {
+            self.request_flush();
+        }
         // Gamma controls of a replaced or resized output learn it now, lock
         // surfaces follow a changed output size, and a pending session lock
         // stops waiting on an unplugged output.
@@ -2529,6 +2548,32 @@ impl UdevBackend {
         self.release_retired_kms_devices();
         if !self.shared.lock_safe().session_active {
             return;
+        }
+
+        let probe = std::mem::take(&mut self.shared.lock_safe().kms_connectors_need_probe);
+        if probe {
+            // GETCONNECTOR on a separate fd can only read cached status while
+            // KMS owns DRM master. Refresh that cache before the policy scan.
+            if let Some(kms) = &self.kms {
+                kms.borrow_mut().probe_connectors();
+            }
+            match rebuild_outputs(&self.shared, &self.pending_events) {
+                Ok(true) => {
+                    self.state.invalidate_presentation_generation();
+                    sync_output_rects(&mut self.state, &self.shared);
+                    if let Some(grab_win) = self.state.popup_grab_toplevel {
+                        self.state.reconstrain_popups_for_toplevel(grab_win);
+                    }
+                    queue_kms_reinit(&self.shared);
+                    self.pending_events
+                        .lock_safe()
+                        .push_back(BackendEvent::ScreenLayoutChanged);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("failed to rebuild outputs after connector reprobe: {error}")
+                }
+            }
         }
 
         let should = {
@@ -3070,6 +3115,7 @@ impl UdevBackend {
         if let Some(kms) = &kms {
             state.outputs = kms.borrow().outputs();
             state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
+            state.output_power.sync(kms.borrow().output_power_modes());
             attach_edid_caps_to_outputs(
                 &state.outputs,
                 &shared.lock_safe().outputs,
@@ -4360,9 +4406,9 @@ impl UdevBackend {
                                 .insert(device_id, path.to_path_buf());
                             true
                         }
-                        UdevEvent::Changed { device_id } => {
-                            let _ = device_id;
-                            false
+                        UdevEvent::Changed { .. } => {
+                            shared.lock_safe().kms_connectors_need_probe = true;
+                            return;
                         }
                         UdevEvent::Removed { device_id } => {
                             shared.lock_safe().device_paths.remove(&device_id);
@@ -4390,6 +4436,9 @@ impl UdevBackend {
                         });
 
                     if outputs_changed {
+                        // This callback precedes the later KMS rebuild and
+                        // can share dispatch with a flip from the old layout.
+                        _state.invalidate_presentation_generation();
                         sync_output_rects(_state, &shared);
                         if let Some(grab_win) = _state.popup_grab_toplevel {
                             _state.reconstrain_popups_for_toplevel(grab_win);
@@ -4477,6 +4526,7 @@ impl UdevBackend {
             color_allocator: Box::new(DummyColorAllocator),
 
             compositor: None,
+            deferred_fbo_presentation: None,
             compositor_desired: CompositorDesiredState::default(),
             drag: None,
             last_inactive_session_log: None,
@@ -6475,15 +6525,44 @@ impl Backend for UdevBackend {
         // Capture callbacks only from a real current import. The owned candidate
         // discards on every failed/unproven path; this function never dispatches
         // client commits between import, compositor sampling and receipt binding.
+        let mut deferred = self.deferred_fbo_presentation.take();
+        let deferred_commit = deferred.as_ref().map(|prepared| {
+            let candidate = prepared.candidate();
+            (candidate.window, candidate.token)
+        });
+        let mut waiting_for_output = false;
         let mut fbo_candidate = self.kms.as_ref().and_then(|kms| {
+            let &[(_, x, y, width, height)] = scene else {
+                return None;
+            };
+            let screen_size = self.compositor.as_ref()?.screen_size();
             let mut kms = kms.borrow_mut();
-            if !kms.single_presentation_output() {
+            // Own the current callback even while an animated quad crosses
+            // the output seam. Stage a proof draw when the scene has a route.
+            let rect = (x, y, width, height);
+            let output = kms.fbo_presentation_output(&self.state, rect, screen_size);
+            let blocked = match output {
+                Some(route) => !kms.presentation_output_ready(route),
+                None => kms.presentation_scene_is_dark(&self.state, rect),
+            };
+            if blocked {
+                waiting_for_output = true;
                 return None;
             }
             kms.with_gles_renderer(|renderer| {
-                fbo_presentation::prepare(&self.state, renderer, scene)
+                deferred
+                    .take()
+                    .and_then(|candidate| candidate.resume(&self.state, renderer, scene))
+                    .or_else(|| fbo_presentation::prepare(&self.state, renderer, scene))
             })
+            .map(|prepared| (prepared, output))
         });
+        if waiting_for_output {
+            // A recovery completion or a power-on requests the redraw.
+            // A parked output does not need a zero-time renderer retry.
+            self.deferred_fbo_presentation =
+                deferred.and_then(|prepared| prepared.defer(&self.state, false));
+        }
         if let Some(kms) = &self.kms {
             kms.borrow_mut().set_fbo_presentation(None);
         }
@@ -6779,7 +6858,10 @@ impl Backend for UdevBackend {
                                                 .and_then(|b| buffer_has_alpha(&**b))
                                                 .unwrap_or(true);
                                             let tex_size = t.size();
-                                            (t.clone(), t.is_y_inverted(), has_alpha, tex_size)
+                                            (
+                                                t.clone(), t.is_y_inverted(), has_alpha, tex_size,
+                                                locked.buffer_scale(),
+                                            )
                                         });
                                     let log_buf = if crf_log_this {
                                         let buf = locked.buffer();
@@ -6806,15 +6888,15 @@ impl Backend for UdevBackend {
                                 let (has_buf, buf_type_str) = log_buf.unwrap_or((false, "no_rsd"));
                                 log::debug!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?} alpha={:?}",
                                     import_result.is_ok(),
-                                    tex_info.as_ref().map(|(texture, _, _, _)| texture.tex_id()),
-                                    tex_info.as_ref().map(|(_, yi, _, _)| *yi),
-                                    tex_info.as_ref().map(|(_, _, alpha, _)| *alpha));
+                                    tex_info.as_ref().map(|(texture, ..)| texture.tex_id()),
+                                    tex_info.as_ref().map(|(_, yi, ..)| *yi),
+                                    tex_info.as_ref().map(|(_, _, alpha, ..)| *alpha));
                             }
                             tex_info
                         });
                         tex
                     });
-                    if let Some((texture, y_inverted, has_alpha, tex_size)) = tid {
+                    if let Some((texture, y_inverted, has_alpha, tex_size, buffer_scale)) = tid {
                         // Compute content UV sub-rect from xdg geometry offset and texture size
                         let geo_offset = with_states(&surface, |states| {
                             let mut cached = states.cached_state.get::<SurfaceCachedState>();
@@ -6826,11 +6908,15 @@ impl Backend for UdevBackend {
                         });
                         let tex_w = tex_size.w as f32;
                         let tex_h = tex_size.h as f32;
+                        // xdg geometry and the window quad describe surface
+                        // units. Convert them to the attachment's texel units
+                        // before cropping a high-DPI native buffer.
+                        let buffer_scale = buffer_scale.max(1) as f32;
                         let content_uv = if tex_w > 0.0 && tex_h > 0.0 {
-                            let u = geo_offset.0 as f32 / tex_w;
-                            let v = geo_offset.1 as f32 / tex_h;
-                            let uw = w as f32 / tex_w;
-                            let uh = h as f32 / tex_h;
+                            let u = geo_offset.0 as f32 * buffer_scale / tex_w;
+                            let v = geo_offset.1 as f32 * buffer_scale / tex_h;
+                            let uw = w as f32 * buffer_scale / tex_w;
+                            let uh = h as f32 * buffer_scale / tex_h;
                             [u, v, uw.min(1.0 - u), uh.min(1.0 - v)]
                         } else {
                             [0.0, 0.0, 1.0, 1.0]
@@ -7488,8 +7574,11 @@ impl Backend for UdevBackend {
                     staged_external_draws,
                     internalized_classes[kms::ExternalElementClass::Cursor.index()],
                 );
-                compositor
-                    .set_presentation_candidate(fbo_candidate.as_ref().map(|p| p.candidate()));
+                compositor.set_presentation_candidate(
+                    fbo_candidate
+                        .as_ref()
+                        .and_then(|(prepared, output)| output.map(|_| prepared.candidate())),
+                );
                 let rendered = kms
                     .borrow_mut()
                     .with_renderer(|gl| {
@@ -7508,10 +7597,24 @@ impl Backend for UdevBackend {
                 if crf_log_this {
                     log::debug!("[crf] render_frame returned {rendered}");
                 }
-                let proof = fbo_candidate.take().and_then(|prepared| {
-                    compositor
-                        .take_presentation_receipt()
-                        .and_then(|receipt| prepared.finish(receipt, &self.state))
+                let proof = fbo_candidate.take().and_then(|(prepared, output)| {
+                    if let (Some(output), Some(receipt)) =
+                        (output, compositor.take_presentation_receipt())
+                    {
+                        prepared.finish(receipt, &self.state)?.bind_output(output)
+                    } else {
+                        // Wait for a changed scene when it has no route. A
+                        // routed frame can retry on its own as effects settle.
+                        let candidate = prepared.candidate();
+                        if deferred_commit != Some((candidate.window, candidate.token)) {
+                            log::debug!(target: "jwm::kms::presentation",
+                                "fbo_feedback_deferred window={} commit={} source={:?} output={output:?} focused={focused_window:?}",
+                                candidate.window, candidate.token, candidate.rect);
+                        }
+                        self.deferred_fbo_presentation =
+                            prepared.defer(&self.state, output.is_some());
+                        None
+                    }
                 });
                 kms.borrow_mut().set_fbo_presentation(proof);
 
@@ -7651,31 +7754,48 @@ impl Backend for UdevBackend {
                         on,
                     }) => {
                         handled_any = true;
-                        let mut power_changed = false;
-                        if let Some(ref kms) = self.kms {
-                            let mut kms = kms.borrow_mut();
-                            let idx = kms.output_index_by_name(output_name);
-                            if let Some(idx) = idx {
-                                match kms
-                                    .set_dpms_for_output(idx, on, self.state.color_manager.as_ref())
-                                    .backend_context(
-                                        "wayland-udev",
-                                        ErrorBoundary::Device,
-                                        "set DPMS output power state",
-                                    ) {
-                                    Ok(()) => power_changed = true,
-                                    Err(e) => log::warn!("{e}"),
+                        if let Some(request) = self.state.output_power.pending.pop_front()
+                            && let Some(output) = request.output.upgrade()
+                        {
+                            let result = (|| {
+                                let kms = self.kms.as_ref().ok_or("KMS is unavailable")?;
+                                let mut kms = kms.borrow_mut();
+                                let idx = kms
+                                    .output_index_by_identity(&output)
+                                    .ok_or("output is no longer available")?;
+                                let before = kms
+                                    .output_power_is_on(idx)
+                                    .ok_or("output does not support DPMS")?;
+                                if before != on {
+                                    kms.set_dpms_for_output(
+                                        idx,
+                                        on,
+                                        self.state.color_manager.as_ref(),
+                                    )?;
+                                }
+                                Ok::<_, String>(before != on)
+                            })();
+                            match result {
+                                Ok(changed) => {
+                                    if changed {
+                                        // A queued proof from before the power
+                                        // transition cannot describe the new state.
+                                        self.state.invalidate_presentation_generation();
+                                        self.state.needs_redraw = true;
+                                    }
+                                    if self.state.output_power.confirm(&output, on) {
+                                        self.request_flush();
+                                    }
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        "[udev/wayland] DPMS request failed for {output_name}: {error}"
+                                    );
+                                    if self.state.output_power.fail(request) {
+                                        self.request_flush();
+                                    }
                                 }
                             }
-                        }
-                        if power_changed {
-                            // Participation and color-delivery ownership both
-                            // change across DPMS. Persist the request until KMS
-                            // can present, then force a full common-scene redraw
-                            // so a power-on never exposes a buffer prepared for
-                            // the previous LUT/CTM state.
-                            self.state.needs_redraw = true;
-                            self.request_flush();
                         }
                     }
                     Some(BackendEvent::GammaSet {
@@ -7989,7 +8109,12 @@ impl Backend for UdevBackend {
                         // Refresh advertised outputs, publish the resulting
                         // layout to policy and trigger a relayout.
                         self.sync_wayland_state_from_kms(true);
-                        self.publish_kms_output_layout();
+                        let layout_changed = self.publish_kms_output_layout();
+                        if rollback_attempted || layout_changed {
+                            // A rollback may restore the same advertised
+                            // geometry after briefly retiring a scanout.
+                            self.state.invalidate_presentation_generation();
+                        }
                         let outputs_after = output_management_snapshot(
                             &self.shared.lock_safe().outputs,
                             &self.state.soft_disabled_outputs,
@@ -8061,24 +8186,42 @@ impl Backend for UdevBackend {
             // Lost page-flip events must be retired before `can_present` is
             // computed. Otherwise the pending flag suppresses the very render
             // method that previously contained the recovery path.
+            let session_active = self.shared.lock_safe().session_active;
             if let Some(kms) = &self.kms {
-                kms.borrow_mut().recover_stale_frames();
+                let mut kms = kms.borrow_mut();
+                kms.recover_stale_frames(&self.state);
                 // Routed screenshots must terminate even while session/DPMS/
                 // frame-pending gates prevent all rendering.
-                kms.borrow_mut()
-                    .poll_routed_screenshots(&self.state.soft_disabled_outputs);
+                kms.poll_routed_screenshots(&self.state.soft_disabled_outputs);
+                if session_active && kms.recover_presentation_outputs(&self.state) {
+                    // Request a fresh draw of the same commit. The recovery
+                    // commit did not render it or take its feedback.
+                    self.state.needs_redraw = true;
+                }
             }
 
             // Only run compositor + animation work when KMS can actually
             // accept a new frame. This prevents the GPU from doing expensive
             // rendering that will be discarded because the previous page-flip
             // hasn't completed yet.
-            let session_active = self.shared.lock_safe().session_active;
             let can_present = session_active
                 && self
                     .kms
                     .as_ref()
                     .map_or(true, |k| !k.borrow().any_frame_pending());
+
+            if let Some(deferred) = &self.deferred_fbo_presentation {
+                let now = Instant::now();
+                if self.compositor.is_none()
+                    || self.kms.is_none()
+                    || !deferred.may_retry(&self.state, now)
+                {
+                    self.deferred_fbo_presentation = None;
+                    self.request_flush();
+                } else if can_present && deferred.next_wakeup(true) <= now {
+                    self.state.needs_redraw = true;
+                }
+            }
 
             let needs_redraw = self.state.needs_redraw;
             if needs_redraw && can_present {
@@ -8216,11 +8359,17 @@ impl Backend for UdevBackend {
                         .and_then(|compositor| compositor.next_wakeup())
                 })
                 .flatten();
+            let deferred_wakeup = self.deferred_fbo_presentation.as_ref().map(|candidate| {
+                candidate
+                    .next_wakeup(can_present)
+                    .saturating_duration_since(Instant::now())
+            });
             let frame_watchdog_wakeup = self.kms.as_ref().and_then(|kms| {
                 let kms = kms.borrow();
                 [
                     kms.next_frame_watchdog_wakeup(),
                     kms.next_routed_screenshot_wakeup(),
+                    deferred_wakeup,
                 ]
                 .into_iter()
                 .flatten()
@@ -10832,7 +10981,7 @@ mod touchpad_swipe_owner_tests {
 #[cfg(test)]
 pub(crate) use self::kms::{
     KmsRenderElement, composite_fbo_elements_for_test, compositor_frame_element_for_test,
-    fbo_cursor_composition_for_test,
+    fbo_cursor_composition_for_test, physical_cursor_element_for_test,
 };
 
 #[cfg(test)]

@@ -728,6 +728,10 @@ impl TileEncoder {
         self.encode_timings
     }
 
+    pub(crate) fn pending_scroll_dy(&self) -> Option<i16> {
+        self.pending_scroll.map(|scroll| scroll.dy)
+    }
+
     fn encode_with_clock(
         &mut self,
         payload: &mut Vec<u8>,
@@ -1590,8 +1594,8 @@ impl TileHeader {
     }
 }
 
-/// Fixed search budget: at most 128 * 64 * 3 pixels. Choose one displacement,
-/// then inspect at most one image of raw RGB for its longest exact row run.
+/// Sample at most 128 * 64 full-width RGB rows. Choose one displacement,
+/// then inspect its overlap for the longest exact row run.
 /// A failed candidate never triggers another full-image verification.
 fn find_scroll_copy(current: &RgbImage, previous: &RgbImage) -> Option<ScrollCopy> {
     if current.dimensions() != previous.dimensions() {
@@ -1602,6 +1606,12 @@ fn find_scroll_copy(current: &RgbImage, previous: &RgbImage) -> Option<ScrollCop
     if width == 0 || height < 2 {
         return None;
     }
+    let stride = width * 3;
+    let current = current.as_raw();
+    let previous = previous.as_raw();
+    let rows_match = |y: usize, source: usize| {
+        current[y * stride..(y + 1) * stride] == previous[source * stride..(source + 1) * stride]
+    };
     let mut best = None;
     let mut best_run = 0;
     for magnitude in 1..=(height / 2).min(MAX_SCROLL_DY as usize) {
@@ -1613,11 +1623,7 @@ fn find_scroll_copy(current: &RgbImage, previous: &RgbImage) -> Option<ScrollCop
             for sample in 0..count {
                 let y = first + sample * rows / count;
                 let source = (y as isize + dy as isize) as usize;
-                let matches = [0, width / 2, width - 1].into_iter().all(|x| {
-                    current.get_pixel(x as u32, y as u32)
-                        == previous.get_pixel(x as u32, source as u32)
-                });
-                run = if matches { run + 1 } else { 0 };
+                run = if rows_match(y, source) { run + 1 } else { 0 };
                 if run > best_run {
                     best_run = run;
                     best = Some(dy);
@@ -1628,14 +1634,11 @@ fn find_scroll_copy(current: &RgbImage, previous: &RgbImage) -> Option<ScrollCop
     let dy = best?;
     let amount = usize::from(dy.unsigned_abs());
     let first = if dy < 0 { amount } else { 0 };
-    let stride = width * 3;
     let mut run = 0;
     let mut longest = (0, 0);
     for y in first..first + height - amount {
         let source = (y as isize + dy as isize) as usize;
-        if current.as_raw()[y * stride..(y + 1) * stride]
-            == previous.as_raw()[source * stride..(source + 1) * stride]
-        {
+        if rows_match(y, source) {
             run += 1;
             if run > longest.1 {
                 longest = (y + 1 - run, run);
@@ -1849,6 +1852,27 @@ mod tests {
     use super::*;
     use crate::remote::frame::{MAX_PIXELS, new_decode_buffer_pool};
     use image::Rgb;
+
+    #[test]
+    fn scroll_copy_finds_moving_text_between_blank_columns() {
+        let raster = |offset| {
+            RgbImage::from_fn(96, 160, |x, y| {
+                if matches!(x, 0 | 48 | 95) {
+                    return Rgb([0; 3]);
+                }
+                let row = y + offset;
+                Rgb([(x * 17 + row * 29) as u8, (row * 53 + x * 3) as u8, 0])
+            })
+        };
+        let initial = raster(0);
+        let scrolled = raster(20);
+        let forward = find_scroll_copy(&scrolled, &initial).unwrap();
+        assert_eq!(forward.dy, 20);
+        assert_eq!(scroll_ranges(forward), (0, 20, 140));
+        let backward = find_scroll_copy(&initial, &scrolled).unwrap();
+        assert_eq!(backward.dy, -20);
+        assert_eq!(scroll_ranges(backward), (20, 0, 140));
+    }
 
     #[test]
     fn jpeg_payload_cap_reserves_source_epoch_and_padding() {

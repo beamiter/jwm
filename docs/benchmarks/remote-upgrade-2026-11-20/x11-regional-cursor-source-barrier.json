@@ -1,0 +1,399 @@
+{
+  "archive": {
+    "file": "x11-regional-cursor-source-barrier-raw.zip",
+    "member_sha256": {
+      "fixture/REPLAY.md": "73f93bbb3d678d779dc07244be89ad88508457a0cf3bd3140f4b02c85c3d08f5",
+      "fixture/check.py": "599c14864c39f1ecc753b4e4e5384ffe63163f44dba657765d956f4cd3e116cd",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/replay.py": "189decf3ddcc1072736dd34e28042e67f3b1ad18c9c41dcbe6fe397c70be540c",
+      "fixture/run.py": "459442fc3c1b3d24402883d366b11229606e4b8186bfc4b9c1be86615e8c06fc",
+      "fixture/test_offline.py": "6b71eb5a55a13ce083d5e86a8e4a6176cba009b7812b8744eef0dd53697a4727",
+      "fixture/x11-fixture.c": "ce4016eb89db7ba8c205a969efad475256f70657f75f96ef640c06db8262efcb",
+      "fixture/x11_delay.py": "da2768e342aa08784a20478227a695451078b64bbe343bdaeede3333e7428afe",
+      "trace/controller.log": "02f0c8a2585fd1d61582c5b9e21c5af31c4fa7e98076afb66b8e91bfa6ccf39d",
+      "trace/events.jsonl": "83d063486d97a50f5440366a5d5ec46c649288510cebd19b13d46d945d41492c",
+      "trace/evidence.json": "ebb59955aad76ab0a3ba28773134d8e1234abd4e3f59e5cd888c45a81f406276",
+      "trace/host.log": "ebdcbffd5e90466c8a792262040d20575d91bc3de7c753eba7a04d1ee83e2095",
+      "trace/result.json": "571f2e83f1907c73224b78d5de07e41876eb2f87a2e94813230351f82036a94d",
+      "trace/source.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trace/toggle-close.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trace/toggle-switch.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "trace/viewer.log": "6c9de3ab6adc1a1cee7b028bd87ab78d0736a88b0ba944a1a9efdf177258d602",
+      "trace/xvfb.log": "2d5c6e184dd23b33dfd619a02b2b821d03b2ee6d364c270371b896b0e491b16c",
+      "validated-evidence.json": "c5f206f0bee38bbe8d4bcfffd3af9f10c8f5d893a2a0a6ee45c2786e86be3bc4"
+    },
+    "sha256": "1a4cd2c3d1a674e25c11cb9265d5d9c38f81ea893f41593515d3a8cc4aff088c"
+  },
+  "date": "2026-11-21",
+  "endpoints": {
+    "JWM_REMOTE_CURSOR_WORKER": "1",
+    "clipboard_enabled": false,
+    "codec": "fixed JPEG",
+    "host_capture": "CPU full active region via core X11 GetImage",
+    "pinned_binary_sha256": {
+      "jwm-remote": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+      "x11-fixture": "afe56ec71d6b7f47d61b3533686642baaa4e588d7a333513869f716af1ebe652"
+    },
+    "quality": 85,
+    "source_and_viewer_display": "separate owned Xvfb servers",
+    "source_region_encoded_and_viewer_size": [
+      320,
+      320
+    ],
+    "source_root_size": [
+      800,
+      560
+    ],
+    "transport": "authenticated loopback TCP",
+    "view_only": true,
+    "viewer_backend": "X11 RGB"
+  },
+  "limits": [
+    "One local software session over private Xvfb",
+    "Five actual viewer raster points at each sampled instant",
+    "The old A sprite remained visible in all six hold samples",
+    "The fixture records full authorized region reads and does not time screen emission or qualify damage-subrectangle optimization"
+  ],
+  "log_redactions": [
+    "ephemeral loopback endpoint port",
+    "private scratch batch path",
+    "owned test Xvfb process IDs"
+  ],
+  "original_trace_sha256": {
+    "controller.log": "3cb9113f02546cf6d9d6b34e95c9239692a108988ec017b19adcf00fb3e8e679",
+    "events.jsonl": "7a304b37425d906a1fb728766ee43b51f15d1aab2f79ba62887fb381f3bc60de",
+    "evidence.json": "130f9e61faae19f80b5dc3b9e3694a9a0c012cad4d88124fabd8cb215b33b058",
+    "host.log": "de277272cdccd3805a931a67a54f2cb376956887ade106a6ebdb760b09ab208a",
+    "result.json": "571f2e83f1907c73224b78d5de07e41876eb2f87a2e94813230351f82036a94d",
+    "viewer.log": "0624f18e9364a9ce17765c1338cd477d1745eb73688ce7fdcec4488abb5674ff"
+  },
+  "pixels": {
+    "A_and_B_cursor_movement": {
+      "A_before_switch": {
+        "pixels": {
+          "A_motion": 2048095,
+          "A_old": 16777215,
+          "B_initial": 2048095,
+          "B_motion": 2048095,
+          "background": 2048095
+        },
+        "source_root_xy": [
+          94,
+          150
+        ],
+        "viewer_xy": [
+          70,
+          86
+        ]
+      },
+      "A_follow": {
+        "pixels": {
+          "A_motion": 16777215,
+          "A_old": 2048095,
+          "B_initial": 2048095,
+          "B_motion": 2048095,
+          "background": 2048095
+        },
+        "source_root_xy": [
+          163,
+          211
+        ],
+        "viewer_xy": [
+          139,
+          147
+        ]
+      },
+      "B_first": {
+        "pixels": {
+          "A_motion": 10108240,
+          "A_old": 10108240,
+          "B_initial": 16777215,
+          "B_motion": 10108240,
+          "background": 10108240
+        },
+        "source_root_xy": [
+          618,
+          307
+        ],
+        "viewer_xy": [
+          186,
+          203
+        ]
+      },
+      "B_follow": {
+        "pixels": {
+          "A_motion": 10108240,
+          "A_old": 10108240,
+          "B_initial": 10108240,
+          "B_motion": 16777215,
+          "background": 10108240
+        },
+        "source_root_xy": [
+          683,
+          330
+        ],
+        "viewer_xy": [
+          251,
+          226
+        ]
+      }
+    },
+    "background_test_rgb": {
+      "A": "#204060",
+      "B": "#9a3d50"
+    },
+    "held_samples": [
+      {
+        "move_label": "A_motion",
+        "move_witness_ns": 58994179886082,
+        "rgb": {
+          "A_motion": 2048095,
+          "A_old": 16777215,
+          "B_initial": 2048095,
+          "B_motion": 2048095,
+          "background": 2048095
+        },
+        "sample_ns": 58994237965953,
+        "title": "127.0.0.1:<ephemeral-port> - JWM Remote - view-only; clipboard off | switching to 320x320+432+104"
+      },
+      {
+        "move_label": "A_motion",
+        "move_witness_ns": 58994179886082,
+        "rgb": {
+          "A_motion": 2048095,
+          "A_old": 16777215,
+          "B_initial": 2048095,
+          "B_motion": 2048095,
+          "background": 2048095
+        },
+        "sample_ns": 58994294698519,
+        "title": "127.0.0.1:<ephemeral-port> - JWM Remote - view-only; clipboard off | switching to 320x320+432+104"
+      },
+      {
+        "move_label": "A_motion",
+        "move_witness_ns": 58994179886082,
+        "rgb": {
+          "A_motion": 2048095,
+          "A_old": 16777215,
+          "B_initial": 2048095,
+          "B_motion": 2048095,
+          "background": 2048095
+        },
+        "sample_ns": 58994351574283,
+        "title": "127.0.0.1:<ephemeral-port> - JWM Remote - view-only; clipboard off | switching to 320x320+432+104"
+      },
+      {
+        "move_label": "B_initial",
+        "move_witness_ns": 58994353933579,
+        "rgb": {
+          "A_motion": 2048095,
+          "A_old": 16777215,
+          "B_initial": 2048095,
+          "B_motion": 2048095,
+          "background": 2048095
+        },
+        "sample_ns": 58994409822404,
+        "title": "127.0.0.1:<ephemeral-port> - JWM Remote - view-only; clipboard off | switching to 320x320+432+104"
+      },
+      {
+        "move_label": "B_initial",
+        "move_witness_ns": 58994353933579,
+        "rgb": {
+          "A_motion": 2048095,
+          "A_old": 16777215,
+          "B_initial": 2048095,
+          "B_motion": 2048095,
+          "background": 2048095
+        },
+        "sample_ns": 58994467347280,
+        "title": "127.0.0.1:<ephemeral-port> - JWM Remote - view-only; clipboard off | switching to 320x320+432+104"
+      },
+      {
+        "move_label": "B_initial",
+        "move_witness_ns": 58994353933579,
+        "rgb": {
+          "A_motion": 2048095,
+          "A_old": 16777215,
+          "B_initial": 2048095,
+          "B_motion": 2048095,
+          "background": 2048095
+        },
+        "sample_ns": 58994523423401,
+        "title": "127.0.0.1:<ephemeral-port> - JWM Remote - view-only; clipboard off | switching to 320x320+432+104"
+      }
+    ],
+    "viewer_witness_points": {
+      "A_motion": [
+        139,
+        147
+      ],
+      "A_old": [
+        70,
+        86
+      ],
+      "B_initial": [
+        186,
+        203
+      ],
+      "B_motion": [
+        251,
+        226
+      ],
+      "background": [
+        35,
+        35
+      ]
+    }
+  },
+  "schema_version": 1,
+  "scope": "P05 independent cursor sampling with an authenticated source-region switch on one local machine",
+  "shutdown": {
+    "close_toggle_asserted_ok_before_endpoint_waits": true,
+    "host_exit": 0,
+    "switch_toggle_exit": 0,
+    "viewer_exit": 0
+  },
+  "source_barrier": {
+    "A_origin": [
+      24,
+      64
+    ],
+    "B_origin": [
+      432,
+      104
+    ],
+    "additional_core_GetImage_requests_inside_hold": 0,
+    "authenticated_frame_scopes": [
+      {
+        "geometry_epoch": 3,
+        "host_drawn_acks_in_window": 2,
+        "host_scope": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            320,
+            320
+          ],
+          "geometry_epoch": 3,
+          "sequence": 1,
+          "source_dimensions": [
+            320,
+            320
+          ],
+          "source_epoch": 1
+        },
+        "session_id": "311d632bf0220217a5da633813bb988c",
+        "source_epoch": 1,
+        "viewer_acks_in_window": 2,
+        "viewer_scope": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            320,
+            320
+          ],
+          "geometry_epoch": 3,
+          "sequence": 1,
+          "source_dimensions": [
+            320,
+            320
+          ],
+          "source_epoch": 1
+        }
+      },
+      {
+        "geometry_epoch": 4,
+        "host_drawn_acks_in_window": 1,
+        "host_scope": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            320,
+            320
+          ],
+          "geometry_epoch": 4,
+          "sequence": 2,
+          "source_dimensions": [
+            320,
+            320
+          ],
+          "source_epoch": 2
+        },
+        "session_id": "311d632bf0220217a5da633813bb988c",
+        "source_epoch": 2,
+        "viewer_acks_in_window": 1,
+        "viewer_scope": {
+          "codec": "JPEG",
+          "encoded_dimensions": [
+            320,
+            320
+          ],
+          "geometry_epoch": 4,
+          "sequence": 2,
+          "source_dimensions": [
+            320,
+            320
+          ],
+          "source_epoch": 2
+        }
+      }
+    ],
+    "capture_connection_ordinal": 3,
+    "exact_gated_request": {
+      "all_planes": true,
+      "connection": 3,
+      "format": "ZPixmap",
+      "observed_ns": 58994178642635,
+      "opcode": 73,
+      "release_ns": 58995681243950,
+      "target": [
+        935,
+        432,
+        104,
+        320,
+        320
+      ]
+    },
+    "observed_A_and_B_capture_rectangles": [
+      [
+        935,
+        24,
+        64,
+        320,
+        320
+      ],
+      [
+        935,
+        432,
+        104,
+        320,
+        320
+      ]
+    ],
+    "raw_core_GetImage_counts_A_then_B": [
+      149,
+      103
+    ],
+    "root_xid": 935,
+    "viewer_xid_after": 6291456,
+    "viewer_xid_before": 6291456
+  },
+  "timing_and_epochs": {
+    "B_visible_after_gate_ms": 38.394153,
+    "cursor_on_last_A_raster_while_gated": [
+      "frozen_sprite",
+      "frozen_sprite",
+      "frozen_sprite",
+      "frozen_sprite",
+      "frozen_sprite",
+      "frozen_sprite"
+    ],
+    "gate_hold_ms": 1502.601315,
+    "geometry_epochs": [
+      3,
+      4
+    ],
+    "session_id": "311d632bf0220217a5da633813bb988c",
+    "source_epochs": [
+      1,
+      2
+    ]
+  }
+}

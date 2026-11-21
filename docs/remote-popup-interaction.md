@@ -13,6 +13,13 @@ match and rejects older peers rather than falling back to ordinary input.
 Transport v3 is unchanged; the host compositor must provide the native popup
 protocol v2 capability. Both helpers need native Wayland support.
 
+At startup JWM checks dynamic global creation and removal on a private Wayland
+display. The popup input manager is available only when the active runtime
+filters both events. Upstream libwayland 1.20 broadcasts newly created globals
+without consulting the filter. Upstream 1.21 applies the filter to the
+broadcast. On an unsupported runtime the compositor reports the unavailable
+capability before any popup seat can be created. [Wayland 1.20 server source](https://github.com/wayland-mirror/wayland/blob/1.20.0/src/wayland-server.c#L1149-L1188) · [Wayland 1.21 server source](https://github.com/wayland-mirror/wayland/blob/1.21.0/src/wayland-server.c#L1156-L1195)
+
 Application v35 retains the v34 popup terminal-delivery and orderly-close
 contracts described below; it adds duration negotiation only for separately
 opted-in resumable combined control. **Popup leases remain nonrenewable and
@@ -212,3 +219,10 @@ executes three production FFI-free guard tests; a separate real owned-display
 regression checks callback reentrancy and registered handler retrieval in CI.
 The registry visibility assertions remain strict. At that stage, these fixes required successful real CI before validation; this
 historical failure is not evidence that the new v34 network candidate has passed.
+
+The development run with libwayland 1.22 and Qt 6.4.2 verified a real Qt Widgets
+menu on the isolated seat. It checked captured menu pixels, item activation and
+seat retirement. Two separate authenticated popup tests covered presentation
+and endpoint permission. Ubuntu's libwayland 1.20 withheld the popup manager, and
+the isolated 1.21 test process passed the compositor regression suite.
+[Test environments and assertions](benchmarks/remote-upgrade-2026-11-20/wayland-gestures-popup-runtime-smoke.json)

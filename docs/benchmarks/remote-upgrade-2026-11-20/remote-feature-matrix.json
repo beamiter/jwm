@@ -1,0 +1,194 @@
+{
+  "archive": {
+    "entries_sha256": {
+      "cargo-version.txt": "b6ef6807dd96d18b833474ad68e7a23a29e562a29c67afa71a59fb9a73df0068",
+      "owned-x11-recovery/after-cli-lint-fixes/build.log": "bcb07057dd85a521dbfe0b3751f36184fcf5f38ee4df0dc31e8ae5a6c592ee62",
+      "owned-x11-recovery/after-cli-lint-fixes/ci-binary-sha256.txt": "0840b8b70816490c703c0d3c8633d438298cc62c57aa56ed3b92deadba0442bf",
+      "owned-x11-recovery/after-cli-lint-fixes/doctor-after.txt": "d97f539f04cad70c14748150920349c7a5a8acc4e23694e804279245cf2393de",
+      "owned-x11-recovery/after-cli-lint-fixes/fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "owned-x11-recovery/after-cli-lint-fixes/recovery.log": "c5adf35a7960a737e4a82415cf7b71bb8c7fd4a75916294d53a73823922d7476",
+      "owned-x11-recovery/after-cli-lint-fixes/source-sha256.txt": "26300e71547f14fec225e8a19a38f1e6e47173668191d049eab84a1b72e17b2a",
+      "owned-x11-recovery/after-cli-lint-fixes/x11-backends-lint.log": "13438207dc0ae3848bfd12ddf4b25717cb1fac1dfa47608e0d4d8c0e6bd16b15",
+      "owned-x11-recovery/after-cli-lint-fixes/x11-cli-tests.log": "b6a7ac6f1a538c1e909ce8b4ef7a3e71ff39db9246614d1c265b7c597198e9d7",
+      "owned-x11-recovery/after-cli-lint-fixes/x11-lint.log": "8f7ddbfe238ab25d79821fbeba7f7868241d9239061dc9b3f9ddb2f7948309f4",
+      "owned-x11-recovery/ci-build.log": "2361aab8caaaa54a5e466517ac10614be659a2b75abd9ba99a96dc151d4f4b96",
+      "owned-x11-recovery/ci-recovery.log": "71035c65acdb0d06b746ff9170441e60abd46cb424bd897305494bfddfcbc4cb",
+      "owned-x11-recovery/ci-sha256.txt": "c409b18ccd542b281554ba4ca538050d023295039e2f1998bc1024282981ba47",
+      "run-output.log": "4ef0cd1c32f47bf4a01aa6c57dde253daf0c579945d0cda3c5816402fb16193a",
+      "run.sh": "91006c6acabe53c6bef9313966b5574965de978f1d4acf19a69f2eb6114c1de6",
+      "rustc-version.txt": "f64c55ed9f210d80a9b248206104a47175faf5ec94a093e4ad132549209089fc",
+      "source-sha256.txt": "3daa3fc382b60124c72686570762910b2ce13c08229c3b95132b0cd89349d38a",
+      "wayland-cli.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "wayland-cli.log": "950ea0729f85af304c7a79097632ddb182a014f4283ba7b5e009232e00f42971",
+      "wayland-h264-library.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "wayland-h264-library.log": "8c440da0aabe84900cf52fbb431baa0da1894f697c135b980ca80950eeaee7f3",
+      "x11-cli.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "x11-cli.log": "103d563faed0cfd22e1e41bcf29a3604ff43da451f722baaa2175fa028802db2",
+      "x11-h264.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "x11-h264.log": "b7f5d6c1722c4d0896ea557e82e9a591c6491f4215f4181e9e78a0880c655e9d",
+      "x11-library.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "x11-library.log": "f29206957e3bf4d41a47a355f20cd18be4e9c99ab35635b007227fbf95bcbbcf"
+    },
+    "path": "remote-feature-matrix-raw.zip",
+    "sha256": "2aafc738a035976e2624cb011ea9075a830a4166994d53c99757fd27a7a4b7fc"
+  },
+  "checks": [
+    {
+      "exit_code": 0,
+      "features": [
+        "remote-x11"
+      ],
+      "ignored": 0,
+      "name": "x11-cli",
+      "passed": 71,
+      "target": "CLI"
+    },
+    {
+      "exit_code": 0,
+      "features": [
+        "remote-x11"
+      ],
+      "ignored": 29,
+      "name": "x11-library",
+      "passed": 1104,
+      "target": "remote:: library"
+    },
+    {
+      "exit_code": 0,
+      "features": [
+        "remote-h264"
+      ],
+      "name": "x11-h264",
+      "target": "library and CLI compiler check"
+    },
+    {
+      "exit_code": 0,
+      "features": [
+        "remote-wayland",
+        "backend-wayland-udev"
+      ],
+      "ignored": 0,
+      "name": "wayland-cli",
+      "passed": 71,
+      "target": "CLI"
+    },
+    {
+      "exit_code": 0,
+      "features": [
+        "remote-wayland",
+        "backend-wayland-udev",
+        "remote-h264"
+      ],
+      "ignored": 65,
+      "name": "wayland-h264-library",
+      "passed": 1399,
+      "target": "remote:: library"
+    }
+  ],
+  "command_environment": [
+    "stable toolchain",
+    "no default features",
+    "locked dependencies",
+    "private XDG runtime",
+    "headless GL available",
+    "four remote library test workers"
+  ],
+  "local_x11_recovery_ci_replay": {
+    "after_cli_lint_fixes": {
+      "clippy_remote_x11_both_backends_with_denied_warnings": "passed",
+      "clippy_remote_x11_with_denied_warnings": "passed",
+      "doctor_options_and_combined_local_probe_output": "unchanged",
+      "owned_recovery_cases_passed": 4,
+      "results": [
+        {
+          "close_event": "WM_DELETE_WINDOW",
+          "close_to_exit_ms": 77.55807,
+          "initial_session_id": "d4470e73b30e417a3563a4e2fcf77451",
+          "proxy_total_connections": 2,
+          "scenario": "stalled-retry-close",
+          "stalled_retry_socket_closed": true
+        },
+        {
+          "accepted_connections": 2,
+          "confirmed_clipboard": "clipboard restriction confirmed: text + images, to host",
+          "fault": "server_to_viewer_fin",
+          "scenario": "clipboard-recovery",
+          "session_ids": [
+            "b50a72a585b2df3e7bd9ef5acab8d502",
+            "f2a5ace1cedfb7bc2bf723d00414f494"
+          ],
+          "terminal": {
+            "category": "protocol_io",
+            "cleanup": "unknown",
+            "command": "connect",
+            "io_kind": "unexpected_eof",
+            "outcome": "error",
+            "peer_close_code": null,
+            "reconnect_certified": false,
+            "schema_version": 2,
+            "stage": "session",
+            "type": "jwm_remote_command_result"
+          }
+        }
+      ],
+      "rustfmt": "passed",
+      "x11_cli_passed": 71
+    },
+    "build_features": [
+      "remote-x11",
+      "backend-x11rb"
+    ],
+    "build_targets": [
+      "jwm",
+      "jwm-remote"
+    ],
+    "fixture": "scripts/test-remote-recovery-window.py",
+    "passed": 4,
+    "results": [
+      {
+        "close_event": "WM_DELETE_WINDOW",
+        "close_to_exit_ms": 76.617277,
+        "initial_session_id": "af544f3579177b7e3230635d03fca67a",
+        "proxy_total_connections": 2,
+        "scenario": "stalled-retry-close",
+        "stalled_retry_socket_closed": true
+      },
+      {
+        "accepted_connections": 2,
+        "confirmed_clipboard": "clipboard restriction confirmed: text + images, to host",
+        "fault": "server_to_viewer_fin",
+        "scenario": "clipboard-recovery",
+        "session_ids": [
+          "4f517ea6e3ab17364c487c63195da661",
+          "d0d753a514e338c3bb28edbf929b7d4d"
+        ],
+        "terminal": {
+          "category": "protocol_io",
+          "cleanup": "unknown",
+          "command": "connect",
+          "io_kind": "unexpected_eof",
+          "outcome": "error",
+          "peer_close_code": null,
+          "reconnect_certified": false,
+          "schema_version": 2,
+          "stage": "session",
+          "type": "jwm_remote_command_result"
+        }
+      }
+    ],
+    "scope": "The new CI command replayed locally with the workflow build features and two owned Xvfb screens per case.",
+    "workflow": ".github/workflows/remote-window-safety.yml"
+  },
+  "pinned_source_sha256": {
+    "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+    "Cargo.toml": "3f92e16e8e92633965fc783bf194420c49e01c923439e801421d4f3b9e8f250e",
+    "src/remote/client.rs": "c5aa6903caaa19ac59e4c6ee7f18b08b81c87183f787500c7b4e4d9238dd7382",
+    "src/remote/client_decode_queue.rs": "012ab3d4c6c8c37436d3029b478ad17b13b353bbd903a78c6c2dfa6479bb790e",
+    "src/remote/client_native_video.rs": "f07bf963a242776b3e67a332d28c21b02fc8f9f4bf6d365257bb4aae4905602a",
+    "src/remote/gpu_present.rs": "fad4eea8d1a5ec6c28f0894e3dbd55910aea6f47e9f36f831a2c011410563bf5",
+    "src/remote/host.rs": "93cdbc4f0d7c05968509b43de130e2532f15f7988d0df4dd74f8aecec05d2f7a"
+  },
+  "schema_version": 1,
+  "scope": "Offline Rust tests and feature compilation on Mint. Explicitly ignored tests remain outside this matrix.",
+  "toolchain": "rustc 1.96.0 (ac68faa20 2026-05-25)"
+}

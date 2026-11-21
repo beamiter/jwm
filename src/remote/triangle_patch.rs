@@ -141,6 +141,39 @@ impl TrianglePatch {
         destination: (u16, u16),
         rect: Rect,
     ) -> &RgbImage {
+        let (_, _, w, h) = rect;
+        let mut output = std::mem::take(&mut self.output).into_raw();
+        output.resize(usize::from(w) * usize::from(h) * 3, 0);
+        self.render_into(source, destination, rect, &mut output);
+        self.output = RgbImage::from_raw(u32::from(w), u32::from(h), output)
+            .expect("prepared RGB dimensions");
+        &self.output
+    }
+
+    #[cfg(feature = "remote-wayland")]
+    pub(super) fn resize_into(
+        &mut self,
+        source: &RgbImage,
+        destination: (u16, u16),
+        output: &mut [u8],
+    ) {
+        // The caller already validated the image dimensions and reserved the
+        // output. Scratch is bounded by the axes rather than the frame area.
+        self.render_into(
+            source,
+            destination,
+            (0, 0, destination.0, destination.1),
+            output,
+        );
+    }
+
+    fn render_into(
+        &mut self,
+        source: &RgbImage,
+        destination: (u16, u16),
+        rect: Rect,
+        output: &mut [u8],
+    ) {
         let (x, y, w, h) = rect;
         let (sw, sh) = source.dimensions();
         let (dw, dh) = destination;
@@ -157,8 +190,6 @@ impl TrianglePatch {
         let &(last, _, count) = self.horizontal.last().expect("nonempty patch");
         let end = last + count as u32;
         self.row.resize((end - first) as usize, [0.0; 3]);
-        let mut output = std::mem::take(&mut self.output).into_raw();
-        output.resize(usize::from(w) * usize::from(h) * 3, 0);
         for row in 0..u32::from(h) {
             let range = bounds(sh, u32::from(dh), u32::from(y) + row);
             self.vertical.clear();
@@ -188,9 +219,6 @@ impl TrianglePatch {
                 }
             }
         }
-        self.output = RgbImage::from_raw(u32::from(w), u32::from(h), output)
-            .expect("prepared RGB dimensions");
-        &self.output
     }
 }
 
@@ -209,6 +237,21 @@ mod tests {
                 (*seed >> 24) as u8
             }))
         })
+    }
+
+    #[cfg(feature = "remote-wayland")]
+    #[test]
+    fn full_resize_into_caller_storage_matches_triangle_after_geometry_changes() {
+        let mut scratch = TrianglePatch::default();
+        let mut output = Vec::new();
+        let mut seed = 17;
+        for (sw, sh, width, height) in [(83, 61, 37, 23), (39, 17, 6, 1), (83, 61, 37, 23)] {
+            let source = fixture(sw, sh, &mut seed);
+            output.resize(usize::from(width) * usize::from(height) * 3, 0xff);
+            scratch.resize_into(&source, (width, height), &mut output);
+            let expected = resize(&source, width.into(), height.into(), FilterType::Triangle);
+            assert_eq!(&output, expected.as_raw());
+        }
     }
 
     fn compare(

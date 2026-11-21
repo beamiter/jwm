@@ -1,21 +1,21 @@
 //! Best-effort SSH diagnostics must not backpressure the control reader.
 //!
 //! A supervised `cat` process owns blocking stderr writes. This process only
-//! writes atomic, bounded records to its own nonblocking pipe. Unlike changing
+//! sends atomic, bounded records through a private Unix packet socket. Unlike changing
 //! fd 2's flags or reopening /proc/self/fd/2, this preserves redirected file
 //! offsets, append behavior, and terminal flags. No output thread is detached.
 
 use std::io::{self, Write};
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError, Weak, mpsc};
 use std::time::{Duration, Instant};
 
-// Linux PIPE_BUF: one write is either accepted whole or returns WouldBlock.
-const RECORD_BYTES: usize = libc::PIPE_BUF as usize;
+pub(super) const LINE_BYTES: usize = 16 * 1024;
+const RECORD_BYTES: usize = LINE_BYTES + 1;
 const DRAIN_GRACE: Duration = Duration::from_millis(200);
 
 pub(super) struct DiagnosticPump {
@@ -27,7 +27,7 @@ pub(super) struct DiagnosticPump {
 }
 
 pub(super) struct DiagnosticWriter {
-    pipe: ChildStdin,
+    socket: OwnedFd,
     dropped: u64,
 }
 
@@ -49,15 +49,35 @@ static ACTIVE: Mutex<Active> = Mutex::new(Active {
 });
 
 pub(super) fn emit(arguments: std::fmt::Arguments<'_>) {
-    emit_impl(arguments, false);
+    emit_impl(DiagnosticLine::Text(arguments), false);
 }
 
 // Telemetry historically ignores stderr errors, including in its Drop path.
 pub(super) fn emit_best_effort(arguments: std::fmt::Arguments<'_>) {
-    emit_impl(arguments, true);
+    emit_impl(DiagnosticLine::Text(arguments), true);
 }
 
-fn emit_impl(arguments: std::fmt::Arguments<'_>, best_effort: bool) {
+pub(super) fn emit_json_line(line: &str) {
+    if line.len() <= LINE_BYTES {
+        emit_impl(DiagnosticLine::Json(line), true);
+    }
+}
+
+enum DiagnosticLine<'a> {
+    Text(std::fmt::Arguments<'a>),
+    Json(&'a str),
+}
+
+impl std::fmt::Display for DiagnosticLine<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(arguments) => formatter.write_fmt(*arguments),
+            Self::Json(line) => formatter.write_str(line),
+        }
+    }
+}
+
+fn emit_impl(line: DiagnosticLine<'_>, best_effort: bool) {
     let output = match ACTIVE.try_lock() {
         Ok(active) => active.output.upgrade(),
         Err(TryLockError::Poisoned(error)) => error.into_inner().output.upgrade(),
@@ -67,7 +87,14 @@ fn emit_impl(arguments: std::fmt::Arguments<'_>, best_effort: bool) {
         if !output.accepting.load(Ordering::Acquire) {
             return;
         }
-        let record = DiagnosticRecord::format(arguments);
+        let formatted;
+        let message = match line {
+            DiagnosticLine::Text(arguments) => {
+                formatted = DiagnosticRecord::format(arguments);
+                formatted.as_str()
+            }
+            DiagnosticLine::Json(line) => line,
+        };
         let mut writer = match output.writer.try_lock() {
             Ok(writer) => writer,
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
@@ -76,12 +103,12 @@ fn emit_impl(arguments: std::fmt::Arguments<'_>, best_effort: bool) {
         if output.accepting.load(Ordering::Acquire)
             && let Some(writer) = writer.as_mut()
         {
-            writer.emit(record.as_str());
+            writer.emit(message);
         }
     } else if best_effort {
-        let _ = writeln!(io::stderr().lock(), "{arguments}");
+        let _ = writeln!(io::stderr().lock(), "{line}");
     } else {
-        std::eprintln!("{arguments}");
+        std::eprintln!("{line}");
     }
 }
 
@@ -185,9 +212,10 @@ impl DiagnosticPump {
 fn spawn_helper(program: &str, output: Stdio) -> io::Result<(Child, DiagnosticWriter)> {
     #[cfg(target_os = "linux")]
     let parent = std::process::id() as libc::pid_t;
+    let (socket, helper_input) = record_socket_pair()?;
     let mut command = Command::new(program);
     command
-        .stdin(Stdio::piped())
+        .stdin(Stdio::from(helper_input))
         .stdout(output)
         .stderr(Stdio::null());
     // SAFETY: this post-fork callback only uses async-signal-safe system calls.
@@ -209,31 +237,30 @@ fn spawn_helper(program: &str, output: Stdio) -> io::Result<(Child, DiagnosticWr
         io::ErrorKind::Unsupported,
         "bounded SSH diagnostics require Linux",
     ));
-    let mut child = command.spawn()?;
-    let setup = (|| {
-        let pipe = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("diagnostic helper stdin was not captured"))?;
-        // SAFETY: pipe owns this fresh descriptor for both fcntl calls. It is
-        // our private write end, not stderr or a duplicate of stderr's OFD.
-        let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
-        if flags == -1
-            || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
-                == -1
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(DiagnosticWriter { pipe, dropped: 0 })
-    })();
-    match setup {
-        Ok(writer) => Ok((child, writer)),
-        Err(error) => {
-            drop(child.stdin.take());
-            stop_helper(&mut child);
-            Err(error)
-        }
+    Ok((command.spawn()?, DiagnosticWriter { socket, dropped: 0 }))
+}
+
+fn record_socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut descriptors = [-1; 2];
+    // SAFETY: descriptors has space for both returned descriptors. Successful
+    // creation gives exclusive ownership of two close-on-exec sockets.
+    let result = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            descriptors.as_mut_ptr(),
+        )
+    };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
     }
+    Ok(unsafe {
+        (
+            OwnedFd::from_raw_fd(descriptors[0]),
+            OwnedFd::from_raw_fd(descriptors[1]),
+        )
+    })
 }
 
 fn stop_helper(child: &mut Child) {
@@ -348,7 +375,18 @@ impl DiagnosticWriter {
             record[length..length + suffix.len()].copy_from_slice(suffix);
             length + suffix.len()
         };
-        matches!(self.pipe.write(&record[..length]), Ok(count) if count == length)
+        // SAFETY: the descriptor and the record remain live during send.
+        // SOCK_SEQPACKET accepts the entire record or fails without a partial
+        // write. DONTWAIT avoids backpressure and NOSIGNAL covers helper exit.
+        let count = unsafe {
+            libc::send(
+                self.socket.as_raw_fd(),
+                record.as_ptr().cast(),
+                length,
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        count == length as isize
     }
 }
 
@@ -648,6 +686,29 @@ mod tests {
         assert!(bytes.len() <= RECORD_BYTES);
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(text.ends_with("... [truncated]\n"));
+    }
+
+    #[test]
+    fn large_telemetry_record_reaches_stderr_intact() {
+        let (mut reader, output) = UnixStream::pair().unwrap();
+        let mut pump =
+            DiagnosticPump::start_to("/bin/cat", Stdio::from(std::os::fd::OwnedFd::from(output)))
+                .unwrap();
+        let mut json =
+            serde_json::json!({"type": "jwm_remote_host_stats", "stage": ""}).to_string();
+        let payload_offset = json.find("\"\"").unwrap() + 1;
+        json.insert_str(payload_offset, &"x".repeat(LINE_BYTES - json.len()));
+        assert_eq!(json.len(), LINE_BYTES);
+        pump.writer().emit(&json);
+        reader
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(&mut reader)
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.strip_suffix('\n'), Some(json.as_str()));
+        assert!(serde_json::from_str::<serde_json::Value>(&line).is_ok());
     }
 
     #[test]

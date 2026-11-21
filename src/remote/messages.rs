@@ -6,12 +6,14 @@ use super::protocol::MessageKind;
 use super::x11_input::InputEvent;
 use super::x11_keymap::{KeymapTable, MAX_ENCODED_KEYMAP_LEN};
 use std::io;
+use std::time::Duration;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
 /// v35 adds exact, mutually authorized resumable-control duration negotiation.
 /// Native action receipts and proof-gated repair phases remain mandatory.
 /// Both peers must upgrade; no fallback to an older authorization contract.
 pub const APPLICATION_VERSION: u16 = 35;
+const VIDEO_FEEDBACK_VERSION: u16 = 36;
 const HELLO_PREFIX_LEN: usize = 11;
 const STREAM_CAPABILITIES_LEN: usize = 36;
 const SERVER_HELLO_LEN: usize = HELLO_PREFIX_LEN + STREAM_CAPABILITIES_LEN;
@@ -25,6 +27,38 @@ const FLAG_CLIPBOARD: u8 = 1 << 2;
 const FLAG_CLIPBOARD_FILES: u8 = 1 << 3;
 const INPUT_FLAGS: u8 = FLAG_POINTER | FLAG_KEYBOARD;
 const KNOWN_FLAGS: u8 = INPUT_FLAGS | FLAG_CLIPBOARD | FLAG_CLIPBOARD_FILES;
+
+/// The acknowledged version selects the frame ACK layout for the whole session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ApplicationProfile {
+    Standard,
+    VideoFeedback,
+}
+
+impl ApplicationProfile {
+    fn from_prefix(payload: &[u8], allow_video_feedback: bool) -> Self {
+        if allow_video_feedback && payload.get(8..10) == Some(&VIDEO_FEEDBACK_VERSION.to_be_bytes())
+        {
+            Self::VideoFeedback
+        } else {
+            Self::Standard
+        }
+    }
+
+    fn version(self) -> u16 {
+        match self {
+            Self::Standard => APPLICATION_VERSION,
+            Self::VideoFeedback => VIDEO_FEEDBACK_VERSION,
+        }
+    }
+
+    fn check_stream(self, stream: StreamCapabilities) -> RemoteResult<()> {
+        if self == Self::VideoFeedback && (!stream.codec.is_hardware() || stream.window_resize) {
+            return Err(invalid_data("viewer feedback requires ordinary hardware video").into());
+        }
+        Ok(())
+    }
+}
 const INPUT_TAG_POINTER: u8 = 1;
 const INPUT_TAG_KEY: u8 = 2;
 const INPUT_TAG_BUTTON: u8 = 3;
@@ -206,6 +240,19 @@ impl CursorMode {
 pub enum InputMode {
     #[default]
     X11Keycodes = 1,
+    /// One-shot Wayland control whose terminal revoke follows native cleanup.
+    WaylandControlWithConfirmedRelease = 2,
+    /// Confirmed-release Wayland control with explicitly negotiated compound gestures.
+    WaylandControlWithGestures = 3,
+}
+
+impl InputMode {
+    pub(super) fn managed_wayland(self) -> bool {
+        matches!(
+            self,
+            Self::WaylandControlWithConfirmedRelease | Self::WaylandControlWithGestures
+        )
+    }
 }
 
 impl StreamCapabilities {
@@ -244,13 +291,24 @@ impl StreamCapabilities {
                 invalid_data("extended duration requires explicit resumable control").into(),
             );
         }
-        let (codec, cursor) = match &payload[..3] {
-            [1, 1, 1] => (FrameCodec::JpegTiles, CursorMode::Composited),
-            [1, 2, 1] => (FrameCodec::JpegTiles, CursorMode::Independent),
-            [2, 1, 1] => (FrameCodec::H264, CursorMode::Composited),
-            [2, 2, 1] => (FrameCodec::H264, CursorMode::Independent),
-            [3, 1, 1] => (FrameCodec::Hevc444, CursorMode::Composited),
-            [3, 2, 1] => (FrameCodec::Hevc444, CursorMode::Independent),
+        let input = match payload[2] {
+            1 => InputMode::X11Keycodes,
+            2 if payload[30] == 1 && payload[32] == 0 => {
+                InputMode::WaylandControlWithConfirmedRelease
+            }
+            3 if payload[30] == 1 && payload[32] == 0 => InputMode::WaylandControlWithGestures,
+            2 | 3 => {
+                return Err(invalid_data("managed input requires one-shot Wayland control").into());
+            }
+            _ => return Err(invalid_data("unsupported remote codec, cursor or input mode").into()),
+        };
+        let (codec, cursor) = match &payload[..2] {
+            [1, 1] => (FrameCodec::JpegTiles, CursorMode::Composited),
+            [1, 2] => (FrameCodec::JpegTiles, CursorMode::Independent),
+            [2, 1] => (FrameCodec::H264, CursorMode::Composited),
+            [2, 2] => (FrameCodec::H264, CursorMode::Independent),
+            [3, 1] => (FrameCodec::Hevc444, CursorMode::Composited),
+            [3, 2] => (FrameCodec::Hevc444, CursorMode::Independent),
             _ => return Err(invalid_data("unsupported remote codec, cursor or input mode").into()),
         };
         if codec.is_hardware() && payload[26..34].iter().any(|byte| *byte != 0) {
@@ -301,6 +359,7 @@ impl StreamCapabilities {
             frame_limits,
             codec,
             cursor,
+            input,
             clipboard_file_limit: u64::from_be_bytes(payload[3..11].try_into().unwrap()),
             clipboard_content: payload[23],
             clipboard_directions: payload[24],
@@ -412,6 +471,10 @@ pub struct ServerHello {
 impl ClientHello {
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_with_profile(ApplicationProfile::Standard)
+    }
+
+    pub(super) fn encode_with_profile(&self, profile: ApplicationProfile) -> Vec<u8> {
         let mut flags = if self.request_input { INPUT_FLAGS } else { 0 };
         if self.request_clipboard {
             flags |= FLAG_CLIPBOARD;
@@ -421,6 +484,7 @@ impl ClientHello {
         }
         let mut payload = Vec::with_capacity(MAX_CLIENT_HELLO_LEN);
         payload.extend_from_slice(&encode_hello(flags, self.stream));
+        payload[8..10].copy_from_slice(&profile.version().to_be_bytes());
         let (width, height) = self.initial_viewport.unwrap_or((0, 0));
         payload.extend_from_slice(&encode_viewport(width, height));
         self.keymap.encode_into(&mut payload);
@@ -428,13 +492,22 @@ impl ClientHello {
     }
 
     pub fn decode(payload: &[u8]) -> RemoteResult<Self> {
+        Self::decode_with_profile(payload, ApplicationProfile::Standard)
+    }
+
+    pub(super) fn decode_offer(payload: &[u8]) -> RemoteResult<(Self, ApplicationProfile)> {
+        let profile = ApplicationProfile::from_prefix(payload, true);
+        Ok((Self::decode_with_profile(payload, profile)?, profile))
+    }
+
+    fn decode_with_profile(payload: &[u8], profile: ApplicationProfile) -> RemoteResult<Self> {
         if payload.len() < HELLO_PREFIX_LEN {
             return Err(invalid_data("client hello has an invalid length").into());
         }
         // Check the stable prefix before version-specific size limits. A newer
         // viewer's larger capabilities header can exceed this version's maximum
         // when it sends a full keymap; report the version mismatch in that case.
-        let flags = decode_prefix(&payload[..HELLO_PREFIX_LEN])?;
+        let flags = decode_prefix(&payload[..HELLO_PREFIX_LEN], profile)?;
         if payload.len() > MAX_CLIENT_HELLO_LEN {
             return Err(invalid_data("client hello has an invalid length").into());
         }
@@ -442,6 +515,7 @@ impl ClientHello {
             return Err(invalid_data("client hello header is truncated").into());
         }
         let stream = StreamCapabilities::decode(&payload[HELLO_PREFIX_LEN..SERVER_HELLO_LEN])?;
+        profile.check_stream(stream)?;
         validate_clipboard_flags(flags, stream)?;
         let viewport = &payload[SERVER_HELLO_LEN..CLIENT_HELLO_HEADER_LEN];
         let initial_viewport = if viewport == [0; 4] {
@@ -464,6 +538,10 @@ impl ClientHello {
 impl ServerHello {
     #[must_use]
     pub fn encode(self) -> [u8; SERVER_HELLO_LEN] {
+        self.encode_with_profile(ApplicationProfile::Standard)
+    }
+
+    pub(super) fn encode_with_profile(self, profile: ApplicationProfile) -> [u8; SERVER_HELLO_LEN] {
         let mut flags = 0;
         if self.pointer_enabled {
             flags |= FLAG_POINTER;
@@ -477,26 +555,41 @@ impl ServerHello {
                 flags |= FLAG_CLIPBOARD_FILES;
             }
         }
-        encode_hello(flags, self.stream)
+        let mut payload = encode_hello(flags, self.stream);
+        payload[8..10].copy_from_slice(&profile.version().to_be_bytes());
+        payload
     }
 
     pub fn decode(payload: &[u8]) -> RemoteResult<Self> {
+        Self::decode_response(payload, ApplicationProfile::Standard).map(|(hello, _)| hello)
+    }
+
+    pub(super) fn decode_response(
+        payload: &[u8],
+        offered: ApplicationProfile,
+    ) -> RemoteResult<(Self, ApplicationProfile)> {
         if payload.len() < HELLO_PREFIX_LEN {
             return Err(invalid_data("server hello header is truncated").into());
         }
-        let flags = decode_prefix(&payload[..HELLO_PREFIX_LEN])?;
+        let profile =
+            ApplicationProfile::from_prefix(payload, offered == ApplicationProfile::VideoFeedback);
+        let flags = decode_prefix(&payload[..HELLO_PREFIX_LEN], profile)?;
         if payload.len() != SERVER_HELLO_LEN {
             return Err(invalid_data("server hello has an invalid length").into());
         }
         let stream = StreamCapabilities::decode(&payload[HELLO_PREFIX_LEN..])?;
+        profile.check_stream(stream)?;
         validate_clipboard_flags(flags, stream)?;
-        Ok(Self {
-            stream,
-            pointer_enabled: flags & FLAG_POINTER != 0,
-            keyboard_enabled: flags & FLAG_KEYBOARD != 0,
-            clipboard_enabled: flags & FLAG_CLIPBOARD != 0,
-            clipboard_files_enabled: flags & FLAG_CLIPBOARD_FILES != 0,
-        })
+        Ok((
+            Self {
+                stream,
+                pointer_enabled: flags & FLAG_POINTER != 0,
+                keyboard_enabled: flags & FLAG_KEYBOARD != 0,
+                clipboard_enabled: flags & FLAG_CLIPBOARD != 0,
+                clipboard_files_enabled: flags & FLAG_CLIPBOARD_FILES != 0,
+            },
+            profile,
+        ))
     }
 }
 
@@ -527,14 +620,15 @@ fn encode_hello(flags: u8, stream: StreamCapabilities) -> [u8; SERVER_HELLO_LEN]
     payload
 }
 
-fn decode_prefix(payload: &[u8]) -> RemoteResult<u8> {
+fn decode_prefix(payload: &[u8], profile: ApplicationProfile) -> RemoteResult<u8> {
     if payload.len() != HELLO_PREFIX_LEN || &payload[..8] != APPLICATION_MAGIC {
         return Err(invalid_data("peer is not using the JWM remote protocol").into());
     }
     let version = u16::from_be_bytes(payload[8..10].try_into().unwrap());
-    if version != APPLICATION_VERSION {
+    if version != profile.version() {
+        let expected = profile.version();
         return Err(invalid_data(format!(
-            "unsupported JWM remote application version {version}; expected {APPLICATION_VERSION}"
+            "unsupported JWM remote application version {version}; expected {expected}"
         ))
         .into());
     }
@@ -743,6 +837,135 @@ pub fn decode_source_frame_ack(payload: &[u8]) -> RemoteResult<(u64, u64)> {
     let sequence = u64::from_be_bytes(payload[8..].try_into().unwrap());
     encode_source_frame_ack(epoch, sequence)?;
     Ok((epoch, sequence))
+}
+
+/// Durations for the frame named by the ACK, all measured on the viewer clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ViewerFrameFeedback {
+    pub(super) decode: Duration,
+    pub(super) presentation_queue: Duration,
+    pub(super) presentation: Duration,
+}
+
+impl ViewerFrameFeedback {
+    pub(super) const ACK_LEN: usize = 22;
+
+    pub(super) fn encode_ack(
+        self,
+        source_epoch: u64,
+        sequence: u64,
+    ) -> RemoteResult<[u8; Self::ACK_LEN]> {
+        let mut payload = [0; Self::ACK_LEN];
+        payload[..16].copy_from_slice(&encode_source_frame_ack(source_epoch, sequence)?);
+        for (field, elapsed) in payload[16..].chunks_exact_mut(2).zip([
+            self.decode,
+            self.presentation_queue,
+            self.presentation,
+        ]) {
+            let units = u16::try_from(elapsed.as_micros() / 100).unwrap_or(u16::MAX);
+            field.copy_from_slice(&units.to_be_bytes());
+        }
+        Ok(payload)
+    }
+
+    pub(super) fn decode_ack(payload: &[u8]) -> RemoteResult<(u64, u64, Self)> {
+        if payload.len() != Self::ACK_LEN {
+            return Err(invalid_data("invalid viewer-feedback acknowledgement length").into());
+        }
+        let (epoch, sequence) = decode_source_frame_ack(&payload[..16])?;
+        let duration = |offset| {
+            let units = u16::from_be_bytes(payload[offset..offset + 2].try_into().unwrap());
+            Duration::from_micros(u64::from(units) * 100)
+        };
+        Ok((
+            epoch,
+            sequence,
+            Self {
+                decode: duration(16),
+                presentation_queue: duration(18),
+                presentation: duration(20),
+            },
+        ))
+    }
+}
+
+#[cfg(test)]
+mod video_feedback_tests {
+    use super::*;
+
+    #[test]
+    fn feedback_hello_keeps_standard_profile_and_requires_hardware_video() {
+        let client = ClientHello {
+            stream: StreamCapabilities {
+                codec: FrameCodec::H264,
+                ..StreamCapabilities::default()
+            },
+            initial_viewport: None,
+            request_input: false,
+            request_clipboard: false,
+            request_clipboard_files: false,
+            keymap: KeymapTable::empty(),
+        };
+        let feedback = ApplicationProfile::VideoFeedback;
+        let standard = ApplicationProfile::Standard;
+        assert_eq!(
+            ClientHello::decode_offer(&client.encode()).unwrap(),
+            (client.clone(), standard)
+        );
+        let offer = client.encode_with_profile(feedback);
+        assert_eq!(
+            ClientHello::decode_offer(&offer).unwrap(),
+            (client.clone(), feedback)
+        );
+        assert!(ClientHello::decode(&offer).is_err());
+        let mut server = ServerHello {
+            stream: client.stream,
+            pointer_enabled: false,
+            keyboard_enabled: false,
+            clipboard_enabled: false,
+            clipboard_files_enabled: false,
+        };
+        assert_eq!(
+            ServerHello::decode_response(&server.encode_with_profile(feedback), feedback).unwrap(),
+            (server, feedback)
+        );
+        assert!(
+            ServerHello::decode_response(&server.encode_with_profile(feedback), standard).is_err()
+        );
+        server.stream.codec = FrameCodec::JpegTiles;
+        assert_eq!(
+            ServerHello::decode_response(&server.encode(), feedback).unwrap(),
+            (server, standard)
+        );
+        assert!(
+            ServerHello::decode_response(&server.encode_with_profile(feedback), feedback).is_err()
+        );
+    }
+
+    #[test]
+    fn feedback_ack_has_a_distinct_bounded_layout() {
+        let feedback = ViewerFrameFeedback {
+            decode: Duration::from_micros(279),
+            presentation_queue: Duration::from_millis(12),
+            presentation: Duration::from_secs(30),
+        };
+        let ack = feedback.encode_ack(3, 15).unwrap();
+        assert_eq!(
+            ViewerFrameFeedback::decode_ack(&ack).unwrap(),
+            (
+                3,
+                15,
+                ViewerFrameFeedback {
+                    decode: Duration::from_micros(200),
+                    presentation_queue: Duration::from_millis(12),
+                    presentation: Duration::from_micros(u64::from(u16::MAX) * 100),
+                }
+            )
+        );
+        assert!(ViewerFrameFeedback::decode_ack(&ack[..16]).is_err());
+        assert!(decode_source_frame_ack(&ack).is_err());
+        assert!(ViewerFrameFeedback::decode_ack(&[0; ViewerFrameFeedback::ACK_LEN]).is_err());
+    }
 }
 
 /// Encode input operations as one version-3 atomic input batch.
@@ -1877,6 +2100,33 @@ mod tests {
         let decoded = ServerHello::decode(&payload).unwrap();
         assert!(decoded.pointer_enabled);
         assert!(!decoded.keyboard_enabled);
+    }
+
+    #[test]
+    fn managed_selectors_require_exclusive_one_shot_wayland_control() {
+        let mut stream = StreamCapabilities {
+            wayland_control: true,
+            ..Default::default()
+        };
+        let existing = stream.encode();
+        assert_eq!(existing[2], 1);
+        assert_eq!(StreamCapabilities::decode(&existing).unwrap(), stream);
+        for (mode, tag) in [
+            (InputMode::WaylandControlWithConfirmedRelease, 2),
+            (InputMode::WaylandControlWithGestures, 3),
+        ] {
+            stream.input = mode;
+            let encoded = stream.encode();
+            assert_eq!(encoded[2], tag);
+            assert_eq!(encoded.len(), 36);
+            assert_eq!(StreamCapabilities::decode(&encoded).unwrap(), stream);
+            for (control, lossless) in [(0, 0), (3, 0), (1, 1)] {
+                let mut prohibited = encoded;
+                prohibited[30] = control;
+                prohibited[32] = lossless;
+                assert!(StreamCapabilities::decode(&prohibited).is_err());
+            }
+        }
     }
 }
 

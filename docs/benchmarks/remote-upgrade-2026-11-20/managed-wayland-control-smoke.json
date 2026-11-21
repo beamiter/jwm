@@ -1,0 +1,77 @@
+{
+  "fixture": {
+    "compositors": "Two private JWM/Smithay Wayland displays with software GLES",
+    "presentation_evidence": "Production GL pixel readback and matching Wayland presentation feedback",
+    "source_dimensions": [200, 150],
+    "transport": "Authenticated loopback TCP on each test machine"
+  },
+  "runs": {
+    "development": {
+      "features": ["remote-wayland", "backend-wayland-udev"],
+      "tests_passed": 4,
+      "release_triggers_completed": ["controller command", "pointer leave", "keyboard leave", "window deactivation"]
+    },
+    "ubuntu_192_168_0_78": {
+      "features": ["remote-wayland", "backend-wayland-udev"],
+      "tests_passed": 4,
+      "release_triggers_completed": ["controller command", "pointer leave", "keyboard leave", "window deactivation"]
+    }
+  },
+  "assertions_for_each_trigger": {
+    "host_received_shift_down_before_release": true,
+    "releasing_while_host_compositor_dispatch_is_withheld": true,
+    "host_received_shift_up_at_confirmed_release": true,
+    "local_keyboard_and_pointer_resources_released": true,
+    "read_only_view_resized_from": [400, 300],
+    "read_only_view_resized_to": [320, 240],
+    "same_viewer_surface_presented_after_resize": true,
+    "compositor_lease_attempts": 1,
+    "viewer_and_host_disconnected_cleanly": true
+  },
+  "managed_resize": {
+    "runs": ["development", "ubuntu_192_168_0_78"],
+    "additional_development_runs_with_both_resize_tests_passed": 8,
+    "resize_before_first_grant": {
+      "viewer_dimensions": [[400, 300], [320, 240]],
+      "obsolete_first_feedback_acknowledged": false,
+      "grant_attempts_before_current_presentation": 0,
+      "grant_attempts_after_current_presentation": 1
+    },
+    "resize_after_grant": {
+      "viewer_dimensions": [[400, 300], [320, 240], [480, 360]],
+      "obsolete_feedback_advanced_completion": false,
+      "host_shift_released_through_original_lease": true,
+      "split_click_native_actions": 0,
+      "fresh_click_local_position": [160, 120],
+      "fresh_click_native_position": [66, 50],
+      "original_surface_lease_and_deadline_retained": true,
+      "grant_attempts": 1,
+      "viewer_and_host_disconnected_cleanly": true
+    },
+    "standalone_cli_presented_resized_buffer_with_original_lease_held": [320, 240]
+  },
+  "terminal_adapters_built": ["Forge", "Anvil", "Ember", "Frost", "Aether"],
+  "viewer_gui_regressions": {
+    "x11_view_only_source_switch_same_viewer": ["Forge", "Anvil", "Ember", "Frost", "Aether"],
+    "x11_host_release_on_terminal_close": "Aether",
+    "wayland_view_only_source_switch_same_viewer": "Aether on headless Weston with Pixman"
+  },
+  "mixed_builds": {
+    "previous_build": "Same v35 helper before the confirmed-release input selector",
+    "managed_control_refused_before_activation": true,
+    "host_update_diagnostic_reported": true,
+    "x11_view_only_and_disconnect_passed_in_both_directions": true
+  },
+  "aether_tests": {
+    "frontend_passed": 160,
+    "tauri_ipc_passed": 3
+  },
+  "standalone_cli_process_tests_passed": 5,
+  "cli_unit_tests_passed": 70,
+  "remote_suite": {"passed": 1368, "failed": 0, "ignored": 47},
+  "cli_build_checks": [
+    "remote-wayland,backend-wayland-udev,remote-h264",
+    "remote-x11"
+  ],
+  "physical_display_latency_measured": false
+}

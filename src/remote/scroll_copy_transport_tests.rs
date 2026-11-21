@@ -333,7 +333,12 @@ fn authenticated_tcp_scroll_copy_permission_and_source_reset() {
                 )
                 .unwrap();
             writer.flush().unwrap();
-            let hello = read_server_hello(&mut reader, FrameCodec::JpegTiles).unwrap();
+            let (hello, _) = read_server_hello(
+                &mut reader,
+                FrameCodec::JpegTiles,
+                ApplicationProfile::Standard,
+            )
+            .unwrap();
             assert_eq!(hello.stream.scroll_copy, enabled);
             assert!(!hello.pointer_enabled && !hello.keyboard_enabled && !hello.clipboard_enabled);
             let mut initial = ReceiveState::new();
@@ -350,13 +355,17 @@ fn authenticated_tcp_scroll_copy_permission_and_source_reset() {
                 |payload, _remaining| {
                     // Observe only after the production receive loop handled the prior
                     // record. This does not feed authority or forge presentation ACKs.
-                    if let Some(queued) = state.latest.lock().unwrap().as_ref() {
+                    if let Some(queued) = state.latest.lock().unwrap().latest.as_ref() {
                         let key = (queued.frame.source_epoch(), queued.frame.sequence());
                         if observed
                             .last()
                             .is_none_or(|(epoch, seq, _)| (*epoch, *seq) != key)
                         {
-                            observed.push((key.0, key.1, queued.frame.image().as_raw().clone()));
+                            observed.push((
+                                key.0,
+                                key.1,
+                                queued.frame.cpu().unwrap().image().as_raw().clone(),
+                            ));
                         }
                     }
                     reader
@@ -390,10 +399,10 @@ fn authenticated_tcp_scroll_copy_permission_and_source_reset() {
                 assert!(error.to_string().contains(reason), "case={case:?}: {error}");
                 if malformed {
                     let latest = state.latest.lock().unwrap();
-                    let frame = &latest.as_ref().unwrap().frame;
+                    let frame = &latest.latest.as_ref().unwrap().frame;
                     assert_eq!(frame.sequence(), 1);
                     assert_eq!(frame.source_epoch(), 1);
-                    assert_eq!(frame.image().as_raw(), &expected[0].2);
+                    assert_eq!(frame.cpu().unwrap().image().as_raw(), &expected[0].2);
                 }
                 if matches!(case, Case::OldBaseAfterReset) {
                     assert_eq!(state.source_epoch.load(Ordering::Acquire), 2);
@@ -402,6 +411,7 @@ fn authenticated_tcp_scroll_copy_permission_and_source_reset() {
                             .latest
                             .lock()
                             .unwrap()
+                            .latest
                             .as_ref()
                             .unwrap()
                             .frame

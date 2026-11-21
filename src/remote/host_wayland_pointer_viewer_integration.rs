@@ -71,6 +71,7 @@ fn options(scroll: bool, horizontal_scroll: bool) -> host::HostOptions {
         allow_wayland_keyboard: false,
         allow_wayland_pointer: true,
         allow_wayland_control: false,
+        allow_wayland_gestures: false,
         allow_resumable_control: false,
         allow_wayland_text: false,
         allow_static_lossless: false,
@@ -422,12 +423,14 @@ impl Harness {
         let (client_tx, client_done) = mpsc::channel();
         let client = thread::spawn(move || {
             let opts = ClientOptions {
+                stats_json: false,
                 control_duration: Default::default(),
                 viewer_backend: ViewerBackend::Wayland,
                 viewer_wayland_display: None,
                 wayland_keyboard: false,
                 wayland_pointer: true,
                 wayland_control: false,
+                wayland_gestures: false,
                 resumable_control: false,
                 wayland_seamless_input: false,
                 wayland_text: None,
@@ -442,6 +445,7 @@ impl Harness {
                     height: viewer_size.1 as u16,
                 }),
                 window_position: None,
+                x11_parent_window: None,
                 frame_limits: Default::default(),
                 address: address.to_string(),
                 peer_label: "owned native pointer".into(),

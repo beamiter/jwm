@@ -1,0 +1,108 @@
+{
+  "date": "2026-11-21",
+  "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+  "binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+  "renderer": "two owned 640x480 Xvfb displays. X11 JPEG quality 85 and exact size viewer",
+  "fixture": "The private X11 proxy held exactly one core GetImage request on the capture connection. It forwarded replies and other client connections. A 16x16 white cursor moved to two known coordinates while the source requested a background repaint.",
+  "observations": "Viewer XGetImage sampled target pixels and a stable background pixel during each hold. The old frame remained visible in both arms. The independent worker visibly moved the cursor to both targets before capture resumed.",
+  "hold_method": "The capture-loop control paused at each target before reading back pixels. The independent case released the gate after both cursor moves were visible. The holds were different lengths and test cursor progress without a latency comparison.",
+  "post_release_witness": "Both arms observed the new background within per-channel tolerance and the final cursor position.",
+  "raw_archive": {
+    "file": "x11-cursor-readback-raw.zip",
+    "sha256": "90d313a897109641cead44896232c739128e3372acb33604282323abe7bb17ff"
+  },
+  "trials": [
+    {
+      "arm": "capture-loop",
+      "baseline_observed_ns": 47248432489435,
+      "core_readback": {
+        "opcode": 73,
+        "width": 640,
+        "height": 480,
+        "start_ns": 47248432715784,
+        "release_ns": 47248969575041
+      },
+      "source_and_viewer_dimensions": [
+        640,
+        480
+      ],
+      "during_readback": [
+        {
+          "checked_ns": 47248688882189,
+          "target_xy": [
+            280,
+            190
+          ],
+          "target_rgb_hex": "1f405f",
+          "last_cursor_xy": [
+            120,
+            160
+          ],
+          "frame_rgb_hex": "1f405f"
+        },
+        {
+          "checked_ns": 47248954746096,
+          "target_xy": [
+            425,
+            250
+          ],
+          "target_rgb_hex": "1f405f",
+          "last_cursor_xy": [
+            120,
+            160
+          ],
+          "frame_rgb_hex": "1f405f"
+        }
+      ],
+      "post_release_rgb_hex": "9a3d50",
+      "source_cursor_reached_final_position": true,
+      "graceful_host_and_viewer_exit": true
+    },
+    {
+      "arm": "independent",
+      "baseline_observed_ns": 47249720435725,
+      "core_readback": {
+        "opcode": 73,
+        "width": 640,
+        "height": 480,
+        "start_ns": 47249738726430,
+        "release_ns": 47249834602098
+      },
+      "source_and_viewer_dimensions": [
+        640,
+        480
+      ],
+      "during_readback": [
+        {
+          "checked_ns": 47249776486713,
+          "target_xy": [
+            280,
+            190
+          ],
+          "target_rgb_hex": "ffffff",
+          "last_cursor_xy": [
+            280,
+            190
+          ],
+          "frame_rgb_hex": "1f405f"
+        },
+        {
+          "checked_ns": 47249822770250,
+          "target_xy": [
+            425,
+            250
+          ],
+          "target_rgb_hex": "ffffff",
+          "last_cursor_xy": [
+            425,
+            250
+          ],
+          "frame_rgb_hex": "1f405f"
+        }
+      ],
+      "post_release_rgb_hex": "9a3d50",
+      "source_cursor_reached_final_position": true,
+      "graceful_host_and_viewer_exit": true
+    }
+  ]
+}

@@ -1,0 +1,1549 @@
+{
+  "archive": {
+    "file": "firefox-x11-dual-tcp-diagnostic-raw.zip",
+    "members_sha256": {
+      "fixtures/analyze_tcp_trial.py": "479dbaca1b89bc6256ffd9c405a6bdf792c9af13931c5b2ddf5de6cab3bb03a3",
+      "fixtures/browser-trial.html": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+      "fixtures/dual_browser.py": "012d3fda3cfc536af4201ef06d214df88e4b2e49405198c1e411f730fc60be07",
+      "fixtures/firefox-profile-user.js": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+      "fixtures/peer/dual_browser.py": "536dcdba618644b8954fd3adeaf13cd6581b7a4a311e8ad54cc04f8c60935d62",
+      "fixtures/peer/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixtures/peer/run_baseline.py": "5bd348c562da0f6381ca45aca1072a1765d5e8f33b257d0647721e6e87825d46",
+      "fixtures/peer/score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3",
+      "fixtures/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixtures/replay_partial.py": "35c533a7ba3f0fcf058fca4c6cab62dadfbfa61069a0701e7409c778eabe7179",
+      "fixtures/run_baseline.py": "5bd348c562da0f6381ca45aca1072a1765d5e8f33b257d0647721e6e87825d46",
+      "fixtures/score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3",
+      "fixtures/ssh_tcp_sampler.py": "84eb0cd66180c6d9516696822b3f6f4e6141f6807237f2263cdeac1ce229020f",
+      "fixtures/staged-peer-sha256.txt": "d9c2dd974afcbc68a5401b381bfb8c39e281380749aa4ccef6e2e449fb5d9db0",
+      "historical-scored-outage.json": "8cc871490f99f0079f75b1724b86596f0b58e8f57cfb481bdf91258db8f6ae3e",
+      "manifest.json": "4e199a7b0674a6ab44e089c15f8121f71b9886a6f5e7a91b7ac657c13cf99050",
+      "outcomes.json": "c372e6aa9de2617b1b36c4269f4ad39ec2148573f77b6354fa86310870ab26b9",
+      "trial-01/host-clocked-telemetry.jsonl": "0a8959ad2f0ba26b697dc880377904db1643d711a5943bd1467386261056f5a6",
+      "trial-01/host.log": "5964500560cdb20906c67d43e4f01f1b0444b220805c89acb4b520dc71af0e34",
+      "trial-01/identity.json": "90a91625f117a020e9122aea3e504db1d3a7aeeb3f3425a52e1a022240383651",
+      "trial-01/motion-pixels.jsonl": "2600072be3ec6dee662cc1a9427957c2064366b8ce946276fd15644cafb3b043",
+      "trial-01/motion-scope.json": "6333b7f9816d3c3900d7b9049df12c7fb1133a7711ca613a46411e2444f341fc",
+      "trial-01/peer-events-redacted.jsonl": "c9a260b5a8c295c3dc4ccac1d1329b6937658b9f01409bc68b0b331b21304ec6",
+      "trial-01/source-static-end.ppm": "34ea24e615f5debfc97fefc9047114b69ace3694654cf24b02bfcd17f69dd93e",
+      "trial-01/source-static.ppm": "d05dca2f599b4cfa159c95533947cdf99e221fb5ab01827949b265fbd18bdecf",
+      "trial-01/ssh-tcp.jsonl": "e70f8dc83cac896c7bf7029d120a699de8609a9fe4546b13d223d900d07b7a42",
+      "trial-01/static-pixels.jsonl": "2efd93e4fce82dc2172a177325d04ef2735b8f15b59490396fa49533bbad928e",
+      "trial-01/static-scope.json": "7eaa035879d7ade6623de1f4065e676b9c3df3eabe10c71c8cb50693e3052d9b",
+      "trial-01/validated-attempt.json": "40342b769fc5acbe8a2e9de9e8345e61e5b1bb19c2d67af4c815608e25c235d1",
+      "trial-01/viewer/control-in-redacted.jsonl": "403dd512815147381e8dd5ed6602a3450fb7d1d12bfd8ee21aba5786c02fe1db",
+      "trial-01/viewer/motion-pixels.jsonl": "0b892e77fd0f68477ea2c7dfdb5155265c8f20a12080d519059f2c8227899da3",
+      "trial-01/viewer/motion-scope.json": "af57ce953ec60f603ab5b3037dba9a60e92147ff8a5f25363b58c038c777a633",
+      "trial-01/viewer/static-pixels.jsonl": "72e538e2868b1d6740dcd58b77e3e34c1068e1e7f9eaf095b71f623152751219",
+      "trial-01/viewer/static-scope.json": "fe751fd8b49456c685730d019ab1a36e3f012169ff3023d27716c98f6149b37a",
+      "trial-01/viewer/viewer-clocked-telemetry.jsonl": "73a24985715650e9a1d5e6dab965db49c0e10396e9b1936201ebdee538a6ed1e",
+      "trial-01/viewer/viewer-static.ppm": "14a6438032a99cbd1e82525db3b974566a85c932cc275b61148cf5a16e7be90b",
+      "trial-01/viewer/viewer.log": "68f3209ed60e848c5d2a6ef4983860334e8643217552843e5ab4d44cf4566fae",
+      "trial-02/analysis.json": "3cdc5bfb1aecf4d985e4a04fd945243e76aaed7efa8aed77f678a27f2ffc4255",
+      "trial-02/host-clocked-telemetry.jsonl": "2cce0a1b8e412c0b70b89c9d39f48989c6cb5fc90027771d6e28fcd6a0bcc843",
+      "trial-02/host.log": "8703e48c72b2852d5cb54a9ba4b7f6f6e0f7e46211060e42da4679cc57d6a4b4",
+      "trial-02/identity-digests.json": "04a0e0627482abd023734b8d11921ec9c8bc25d9005051344fb978b3f62de0cf",
+      "trial-02/identity.json": "303cb4e0978d3cdc1a74fec99f85f76ab7d8c1f65aae018c404ec44934083c85",
+      "trial-02/motion-host.jsonl": "d3cbdf40688fc54eca9516c9674457a33044e2951f5f17c00a4f40a063c0ea46",
+      "trial-02/motion-pixels.jsonl": "4dbe30a39fa6148906bbb3b3c4f2cb1e0eef05b07f93dd3cf8256a352ef183c3",
+      "trial-02/motion-scope.json": "c20346e30c051d3bec7ae04e40a3995a032b064da29a61ba1b43dfa089a93955",
+      "trial-02/peer-events-redacted.jsonl": "453fd0ebf0d2ac4e042f56cf5217cfb8c23953a32e0d2e5cb18ad308578f581c",
+      "trial-02/result.json": "eb8fe23ef953b15039ae5809763db2427218f6a0e59e87fe28b7a58359558e89",
+      "trial-02/source-motion-end.ppm": "01d4e64fadfce45a716593546bc9c7eed0c3115be17befe5fba438046a725ecc",
+      "trial-02/source-static-end.ppm": "34ea24e615f5debfc97fefc9047114b69ace3694654cf24b02bfcd17f69dd93e",
+      "trial-02/source-static.ppm": "35a2495817c0e0d93ee77cabfcd537ebdf0f8a6d53039f40c63802c4b984c6f6",
+      "trial-02/ssh-tcp.jsonl": "f4bcd2932988c18fc8410c5c0fe2ed69b44cf43bb95066f1a86c913607b980c1",
+      "trial-02/static-host.jsonl": "acd0e17836c5e5f5f6f3ba76a1cad7c5211d50cc6e78c36ebd5d2eeccb6537d8",
+      "trial-02/static-pixels.jsonl": "febcdc99f2f1a3f16b39dcfc43b6747438f88b26520f04f6b8f93f55f5b5520c",
+      "trial-02/static-scope.json": "df2ce59181bdba6ae38a08f7cf8a6486878d9d504d89318b797ff558ab9f9393",
+      "trial-02/validated-attempt.json": "698d0c35a499febf704cebade9f391f9e9dda75a38fd4965032ac1c3174514d0",
+      "trial-02/viewer/control-in-redacted.jsonl": "0666a379c334556f1f0afb5ce67708e6ed01f9ae217e822225f92acc1c2b7865",
+      "trial-02/viewer/final-session.jsonl": "2b1747edf5e221a35e98328c3ce1e78593381cde85b484df88d7e7c618f6abaf",
+      "trial-02/viewer/motion-pixels.jsonl": "5f8bd06c98024b560692270baf1f10832348c7b189f62bfe8bd25ac96ae31bc0",
+      "trial-02/viewer/motion-scope.json": "c072a395f967ed9be4234566fc662d8074b69498469f2de87951a44aea7693d9",
+      "trial-02/viewer/motion-viewer.jsonl": "a00798bcf9b98550cc9954d3f8a2318e6043fc419b2c0a282d37c074f809c3a6",
+      "trial-02/viewer/session-ended.txt": "d33df52d6e08150ae6d10488de78c81b5f490384682519f554717e64de6e693a",
+      "trial-02/viewer/static-pixels.jsonl": "36ffbcbdaf5dc2571270d0b5fde2eaef7d70922ebfdb7adf4deeb6ad3f30b10b",
+      "trial-02/viewer/static-scope.json": "fc0ed8f0567e3ff4a72eda7ab436eb8f5d614fb2a87c981634cb062900e5fb09",
+      "trial-02/viewer/static-viewer.jsonl": "a89f345cf66a14b807c82a26adcfe35165da0cea51c2d80d2f3009800c787a97",
+      "trial-02/viewer/viewer-clocked-telemetry.jsonl": "cad8679b1f73b5d3d26a8ca78f7e013919a0c57b85fd7d5d498cda1ca0fe7b89",
+      "trial-02/viewer/viewer-motion-end.ppm": "35432a4c87df76702b43f46bfb3e73a5f4e029755cdffb26075851c1fdd2401e",
+      "trial-02/viewer/viewer-static.ppm": "14a6438032a99cbd1e82525db3b974566a85c932cc275b61148cf5a16e7be90b",
+      "trial-02/viewer/viewer.log": "38f524d3d22c8b1305827612bee9ccf60161e0acaff4f3644a34b8e7cc11bdeb",
+      "validated-batch.json": "208501a386fe17ff63b568b414401c6b648263ff60c7654af3860758294a139f"
+    },
+    "replay_by_attempt": {
+      "trial-01": "python3 fixtures/replay_partial.py trial-01",
+      "trial-02": "python3 fixtures/analyze_tcp_trial.py trial-02"
+    },
+    "sha256": "e00719eaec15238061739a0f9ff9125674c889eefae94e3bcdc0f886432acbcc"
+  },
+  "attribution": "The new attempts recorded TCP delivery impairment on their own SSH connections. The completed attempt links the longest viewer raster gap to nearby host application sequences and host-local TCP observations. The sampling does not assign the full viewer gap to TCP, identify the failing network element, or determine the TCP state of the separate historical interruption.",
+  "clock_and_counter_policy": [
+    "Host TCP samples and host application telemetry use the source-local monotonic clock. Viewer ROI and application telemetry use the viewer-local monotonic clock.",
+    "Same authenticated session and source/geometry epochs constrain cross-endpoint application frame sequence associations. These are sampled positions in application windows.",
+    "TCP bytes ACKed are cumulative for the encrypted multiplexed SSH transport. Host drawn acknowledgements and viewer ACK counts are separate application records.",
+    "The routed interface class is a local selected-route observation at the sampled socket. This does not locate the cause or link of a stall."
+  ],
+  "controller_terminal_state": "controller_exited",
+  "date": "2026-11-21",
+  "historical_scored_outage": {
+    "archive_sha256": "d8812c7865950d10018bc58e6851d4cda01ca537397b428215bdbf3a88f098fc",
+    "max_roi_sample_interval_ms": 11.656115,
+    "nearby_host_sequence_snapshot": {
+      "counts": {
+        "backpressure_skipped": 109,
+        "bytes": 532959,
+        "captured": 38,
+        "drawn_acks": 4,
+        "max_outstanding": 2,
+        "outstanding": 2,
+        "sent": 4,
+        "viewer_superseded": 0
+      },
+      "frame_sequence": 794,
+      "p95_ms": {
+        "credit_wait_ms": 2434.825,
+        "send_to_ack_ms": 3510.346,
+        "socket_write_ms": 0.798
+      },
+      "quantile_samples": 4
+    },
+    "reference": "firefox-x11-dual-scored.json, trial 2",
+    "scope": "Separate scored session. Nearby host and viewer snapshots share frame epochs/sequences, with independent endpoint clocks. The stall location remains unresolved.",
+    "source_motion_fps": 58.95,
+    "tcp_sampling": "unrecorded",
+    "valid_tile_and_text_observations_in_gap": [
+      439,
+      439
+    ],
+    "viewer_empty_one_second_bins": 3,
+    "viewer_longest_roi_gap_ms": 4866.640981,
+    "viewer_motion_fps": 26.35,
+    "viewer_overlap_application_sequence_samples": [
+      {
+        "counts": {
+          "acked": 4,
+          "decoded": 4,
+          "drawn": 4,
+          "received": 4,
+          "replaced": 0
+        },
+        "decode_p95_ms": 3.677,
+        "frame_sequence": 792
+      },
+      {
+        "counts": {
+          "acked": 39,
+          "decoded": 39,
+          "drawn": 39,
+          "received": 39,
+          "replaced": 0
+        },
+        "decode_p95_ms": 6.648,
+        "frame_sequence": 831
+      }
+    ]
+  },
+  "manifest": {
+    "baseline_pins": {
+      "firefox_profile_sha256": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+      "firefox_sha256": "ddf58d7cb36bd35e8e9dab7bc70ce31e17340ce87fc7c0fe81e495ccbd863965",
+      "host_release_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+      "viewer_release_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3"
+    },
+    "diagnostic_batch": true,
+    "dimensions": [
+      1920,
+      1080
+    ],
+    "fixture_digests": {
+      "browser-trial.html": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+      "dual_browser.py": "012d3fda3cfc536af4201ef06d214df88e4b2e49405198c1e411f730fc60be07",
+      "firefox-profile-user.js": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+      "peer/dual_browser.py": "536dcdba618644b8954fd3adeaf13cd6581b7a4a311e8ad54cc04f8c60935d62",
+      "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "run_baseline.py": "5bd348c562da0f6381ca45aca1072a1765d5e8f33b257d0647721e6e87825d46",
+      "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3",
+      "ssh_tcp_sampler.py": "84eb0cd66180c6d9516696822b3f6f4e6141f6807237f2263cdeac1ce229020f"
+    },
+    "passive_owned_ssh_tcp": true,
+    "requested_fps": 30,
+    "requested_trials": 2,
+    "score_seconds": 60,
+    "source": "Mint Firefox source and original X11 capture policy",
+    "target": "owned Ubuntu X11 viewer, JPEG at 1:1",
+    "telemetry_tail_seconds": 8,
+    "transport": "loopback-only OpenSSH -R",
+    "warm_seconds": 30,
+    "workload": {
+      "motion_visible_label_unchanged": "Motion stops after 30 s.",
+      "original_sha256": "13733ff044b7a86fd6b6033200bc51fafbba869cdabb8d6c8e3bfcdaaf387cbd",
+      "sole_trial_change": {
+        "after": "elapsed >= 105000",
+        "before": "elapsed >= 30000"
+      },
+      "source_fixture": "tests/fixtures/remote-workloads/browser.html",
+      "static_uses_inactive_motion_handler": true,
+      "trial_sha256": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c"
+    }
+  },
+  "outcomes": [
+    {
+      "error_type": "RuntimeError",
+      "failure_log_sha256": "d67a474747a6ddd45d9bfd294a106efa3e1befb3de6b95acba8775268482c430",
+      "status": "failed",
+      "trial": 1
+    },
+    {
+      "result": {
+        "authenticated_session_ids": [
+          "e7b4f0aeeed1eb6867d8d20517bfe133"
+        ],
+        "codec": "JPEG",
+        "jpeg_quality": 85,
+        "scope": "independent X11 software raster observations on separate machines over OpenSSH",
+        "source_and_requested_viewer_dimensions": [
+          1920,
+          1080
+        ],
+        "source_motion_fps": 58.983333333333334,
+        "source_qualified": true,
+        "telemetry_complete": true,
+        "viewer_motion_fps": 26.216666666666665,
+        "viewer_motion_gate_met": false
+      },
+      "status": "completed",
+      "trial": 2
+    }
+  ],
+  "scope": "Two passive TCP diagnostics repeating the clean Mint Firefox to Ubuntu X11 view-only JPEG workload. The existing scored 1080p baseline retains separate outcomes.",
+  "trials": [
+    {
+      "authenticated_session_id": "8ac39f0d53d762577753ed992e0a4bcc",
+      "clean_controller_completion": false,
+      "controller_status": "failed",
+      "endpoint_terminal_observation": {
+        "host": {
+          "final_stats": null,
+          "last_authenticated_session_id": "8ac39f0d53d762577753ed992e0a4bcc",
+          "last_stats_window_seconds": 1.901889921,
+          "protocol_io_eagain_reported": true
+        },
+        "viewer": {
+          "final_stats": true,
+          "last_authenticated_session_id": "8ac39f0d53d762577753ed992e0a4bcc",
+          "last_stats_window_seconds": 1.209943507,
+          "protocol_io_eagain_reported": true
+        }
+      },
+      "error_type": "RuntimeError",
+      "failure_category": "endpoint_exited_before_full_observation",
+      "failure_log_sha256": "d67a474747a6ddd45d9bfd294a106efa3e1befb3de6b95acba8775268482c430",
+      "failure_stage": "motion",
+      "host_local_tcp_ack_plateau": {
+        "cwnd_first_last": [
+          92,
+          1
+        ],
+        "first_monotonic_ns": 57299126974729,
+        "last_monotonic_ns": 57307129344308,
+        "motion_local_offsets_ms": [
+          44689.606222,
+          52691.975801
+        ],
+        "observed_span_ms": 8002.369579,
+        "observed_tx_queue_bytes_range": [
+          230604,
+          230656
+        ],
+        "overlapping_host_local_application_windows": [
+          {
+            "counts": {
+              "backpressure_skipped": 45,
+              "drawn_acks": 86,
+              "max_outstanding": 2,
+              "outstanding": 2,
+              "sent": 88
+            },
+            "last_sent_sequence": 1326,
+            "local_window_end_from_motion_ms": 46371.685051,
+            "session_id": "8ac39f0d53d762577753ed992e0a4bcc",
+            "window_seconds": 5.003357612
+          },
+          {
+            "counts": {
+              "backpressure_skipped": 110,
+              "drawn_acks": 0,
+              "max_outstanding": 0,
+              "outstanding": 2,
+              "sent": 0
+            },
+            "last_sent_sequence": null,
+            "local_window_end_from_motion_ms": 51373.604986,
+            "session_id": "8ac39f0d53d762577753ed992e0a4bcc",
+            "window_seconds": 5.002170724
+          },
+          {
+            "counts": {
+              "backpressure_skipped": 42,
+              "drawn_acks": 0,
+              "max_outstanding": 0,
+              "outstanding": 2,
+              "sent": 0
+            },
+            "last_sent_sequence": null,
+            "local_window_end_from_motion_ms": 53275.495448,
+            "session_id": "8ac39f0d53d762577753ed992e0a4bcc",
+            "window_seconds": 1.901889921
+          }
+        ],
+        "peer_to_host_bytes_received_delta": 132,
+        "rto_first_last": [
+          588,
+          4704
+        ],
+        "rtt_ms_first_last": [
+          193.03,
+          193.03
+        ],
+        "sample_count": 9,
+        "snd_wnd_first_last": [
+          803456,
+          803456
+        ],
+        "source_raster_during_host_clock_interval": {
+          "observations": 721,
+          "observed_distinct_tile_transitions": 469,
+          "valid_tile_samples": 721
+        },
+        "tcp_retransmitted_bytes_delta": 4344,
+        "total_retransmissions_delta": 3,
+        "unchanged_bytes_acked": 172219664
+      },
+      "identities": {
+        "host": {
+          "boot_id_sha256": "b77b9c1dfef9e0c0b4257bab9c5c7c08a72b9d61e3486eab8ca33960aef5c315",
+          "clock": "CLOCK_MONOTONIC",
+          "cpu": "Intel(R) Core(TM) Ultra 7 270K Plus",
+          "drawable_size": [
+            1920,
+            1080
+          ],
+          "endpoint_process_identity_sha256": "564cb86673eb758263e450783f85c6e7cb5caef633bdc02a73c955362475b79d",
+          "firefox": {
+            "BuildID": "20260706120035",
+            "Version": "152.0.5",
+            "binary_sha256": "ddf58d7cb36bd35e8e9dab7bc70ce31e17340ce87fc7c0fe81e495ccbd863965",
+            "process_identity_sha256": "c30bfcca712ea5611e99c706299da9518e7f600b7ccb80f87e50dc8834c1c7c7"
+          },
+          "hostname_sha256": "a75835f418c0297c0d16dea175d8efbf36d8c22f385ced447ff218a9fdbc79b1",
+          "kernel": "6.17.0-35-generic",
+          "release_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "role": "host",
+          "xvfb_identity_sha256": "4aa8302980257c34368cc6696398a8ecd60a1d8013d1b272bf515087c0a297bc"
+        },
+        "ssh_master_identity_sha256": "ce5b93ff8099db42b8d75f68a86b136f7d11e142a81bd336552ee131d367a13f",
+        "viewer": {
+          "boot_id_sha256": "bdd73b18b778d4d2f93ccdefe82b315bc9f828176721edc385d7fef1ffd98595",
+          "clock": "CLOCK_MONOTONIC",
+          "cpu": "13th Gen Intel(R) Core(TM) i7-13650HX",
+          "drawable_size": [
+            1920,
+            1080
+          ],
+          "endpoint_process_identity_sha256": "8be1b0e8b0f3475f0cb61dd9df00c77b6a77e5a191e9c9c19d55fded4489e0ff",
+          "hostname_sha256": "18a53e5697c601294e7fe56546a0a76e0bc69474e3af537480c93aa38e049d22",
+          "kernel": "6.8.0-149-generic",
+          "release_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "role": "viewer",
+          "xvfb_identity_sha256": "9c770fc69aa5f1dc2b5330154dc3b647ea0e87dfa77ba8f63122b15f36bd1c70"
+        }
+      },
+      "last_controller_event": "viewer_motion_armed",
+      "partial_motion_evidence": {
+        "host": {
+          "completed_full_requested_motion_scope": false,
+          "last_observed_motion_monotonic_ns": 57307750862529,
+          "local_elapsed_from_phase_start_ms": 53313.494022,
+          "local_motion_start_monotonic_ns": 57254437368507,
+          "raster_reads": 4799,
+          "requested_measurement_end_monotonic_ns": 57344437368507
+        },
+        "viewer": {
+          "completed_full_requested_motion_scope": false,
+          "last_observed_motion_monotonic_ns": 57388633116929,
+          "last_viewer_local_application_windows": [
+            {
+              "counts": {
+                "acked": 147,
+                "decoded": 147,
+                "drawn": 147,
+                "received": 147
+              },
+              "last_frame_sequence": 1232,
+              "local_window_end_from_motion_ms": 41041.782828,
+              "session_id": "8ac39f0d53d762577753ed992e0a4bcc"
+            },
+            {
+              "counts": {
+                "acked": 92,
+                "decoded": 92,
+                "drawn": 92,
+                "received": 92
+              },
+              "last_frame_sequence": 1324,
+              "local_window_end_from_motion_ms": 46042.63161,
+              "session_id": "8ac39f0d53d762577753ed992e0a4bcc"
+            },
+            {
+              "counts": {
+                "acked": 0,
+                "decoded": 0,
+                "drawn": 0,
+                "received": 0
+              },
+              "last_frame_sequence": null,
+              "local_window_end_from_motion_ms": 51042.813263,
+              "session_id": "8ac39f0d53d762577753ed992e0a4bcc"
+            }
+          ],
+          "local_elapsed_from_phase_start_ms": 51723.400991,
+          "local_motion_start_monotonic_ns": 57336909715938,
+          "raster_reads": 4656,
+          "requested_measurement_end_monotonic_ns": 57426909715938
+        }
+      },
+      "transport": {
+        "fixture_digests": {
+          "browser-trial.html": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+          "dual_browser.py": "012d3fda3cfc536af4201ef06d214df88e4b2e49405198c1e411f730fc60be07",
+          "firefox-profile-user.js": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+          "peer/dual_browser.py": "536dcdba618644b8954fd3adeaf13cd6581b7a4a311e8ad54cc04f8c60935d62",
+          "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+          "run_baseline.py": "5bd348c562da0f6381ca45aca1072a1765d5e8f33b257d0647721e6e87825d46",
+          "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3",
+          "ssh_tcp_sampler.py": "84eb0cd66180c6d9516696822b3f6f4e6141f6807237f2263cdeac1ce229020f"
+        },
+        "routes": [
+          {
+            "address_family": "ipv4",
+            "end_monotonic_ns": 57156150414542,
+            "netns_matches_master": true,
+            "run_id": "bffd245e9e224f44ac1cbdd4091e1f9c",
+            "schema_version": 1,
+            "selected": {
+              "gateway_present": false,
+              "interface_class": "ethernet_driver",
+              "route_type": null,
+              "source_matches_socket": true,
+              "status": "observed"
+            },
+            "socket_inode": 19088409,
+            "stage": "first_socket",
+            "start_monotonic_ns": 57156139876174,
+            "type": "firefox_ssh_route"
+          },
+          {
+            "address_family": "ipv4",
+            "end_monotonic_ns": 57307767599779,
+            "netns_matches_master": true,
+            "run_id": "bffd245e9e224f44ac1cbdd4091e1f9c",
+            "schema_version": 1,
+            "selected": {
+              "gateway_present": false,
+              "interface_class": "ethernet_driver",
+              "route_type": null,
+              "source_matches_socket": true,
+              "status": "observed"
+            },
+            "socket_inode": 19088409,
+            "stage": "sampling_end",
+            "start_monotonic_ns": 57307760237760,
+            "type": "firefox_ssh_route"
+          }
+        ],
+        "sample_count": 152,
+        "status": "recorded",
+        "terminal_summary": {
+          "clock": "monotonic",
+          "counts": {
+            "tcp_info": 152
+          },
+          "end_monotonic_ns": 57307767731202,
+          "end_reason": "closed",
+          "interval_seconds": 1,
+          "max_sample_slots": 300,
+          "missed_slots": 0,
+          "remote_port": 22,
+          "run_id": "bffd245e9e224f44ac1cbdd4091e1f9c",
+          "schema_version": 1,
+          "socket_inode": 19088409,
+          "ssh_exe_device": 2050,
+          "ssh_exe_inode": 3020620,
+          "ssh_pid": 920860,
+          "ssh_start_ticks": 5715482,
+          "start_monotonic_ns": 57156074349980,
+          "type": "firefox_ssh_tcp_summary"
+        }
+      },
+      "trial": 1,
+      "viewer_motion_gate_met": null
+    },
+    {
+      "authenticated_session_id": "e7b4f0aeeed1eb6867d8d20517bfe133",
+      "controller_status": "completed",
+      "geometry_epoch": 2,
+      "host": {
+        "motion": {
+          "acknowledgements_in_whole_windows": 1723,
+          "local_observer_end_monotonic_ns": 57513822344792,
+          "local_phase_start_monotonic_ns": 57415822207169,
+          "local_score_end_monotonic_ns": 57505822207169,
+          "local_score_start_monotonic_ns": 57445822207169,
+          "raster": {
+            "distinct_scroll_signatures": 2820,
+            "gap_ms": {
+              "max": 25.08701,
+              "p50": 20.658852,
+              "p95": 22.524444
+            },
+            "invalid_scroll_reads": 0,
+            "invalid_tile_reads": 0,
+            "observer_max_read_ms": 6.265438,
+            "one_second_scroll_bins": [
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              58,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59
+            ],
+            "one_second_unique_bins": [
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              58,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59,
+              59
+            ],
+            "scroll_changes_seen": 3539,
+            "unique_content_fps": 58.983333333333334,
+            "unique_tile_changes": 3539,
+            "valid_and_invalid_sample_reads": 5400,
+            "zero_unique_bins": 0
+          },
+          "telemetry": {
+            "first_window_end_monotonic_ns": 57452437176556,
+            "frame_scopes_match_requested_jpeg": true,
+            "frame_scopes_observed": 13,
+            "last_window_end_monotonic_ns": 57512504476196,
+            "routes": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "session_ids": [
+              "e7b4f0aeeed1eb6867d8d20517bfe133"
+            ],
+            "viewer_backends": [],
+            "whole_windows": 13,
+            "window_seconds": 65.079596593
+          }
+        },
+        "static": {
+          "acknowledgements_in_whole_windows": 15,
+          "local_observer_end_monotonic_ns": 57415529642763,
+          "local_phase_start_monotonic_ns": 57317529467938,
+          "local_score_end_monotonic_ns": 57407529467938,
+          "local_score_start_monotonic_ns": 57347529467938,
+          "raster": {
+            "distinct_scroll_signatures": 1,
+            "gap_ms": {
+              "max": 60000.0,
+              "p50": 60000.0,
+              "p95": 60000.0
+            },
+            "invalid_scroll_reads": 0,
+            "invalid_tile_reads": 0,
+            "observer_max_read_ms": 6.282924,
+            "one_second_scroll_bins": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "one_second_unique_bins": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "scroll_changes_seen": 0,
+            "unique_content_fps": 0.0,
+            "unique_tile_changes": 0,
+            "valid_and_invalid_sample_reads": 5400,
+            "zero_unique_bins": 60
+          },
+          "telemetry": {
+            "first_window_end_monotonic_ns": 57357327152383,
+            "frame_scopes_match_requested_jpeg": true,
+            "frame_scopes_observed": 12,
+            "last_window_end_monotonic_ns": 57412387029922,
+            "routes": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "session_ids": [
+              "e7b4f0aeeed1eb6867d8d20517bfe133"
+            ],
+            "viewer_backends": [],
+            "whole_windows": 12,
+            "window_seconds": 60.075173058000004
+          }
+        }
+      },
+      "host_local_tcp_in_score_windows": {
+        "motion": {
+          "first_monotonic_ns": 57446526980123,
+          "last_monotonic_ns": 57505551604243,
+          "max_receive_queue_bytes": 0,
+          "max_transmit_queue_bytes": 271712,
+          "same_ack_with_pending_tx_observations": [
+            {
+              "first_monotonic_ns": 57485580837194,
+              "last_monotonic_ns": 57487580692075,
+              "observed_span_ms": 1999.854881,
+              "unchanged_bytes_acked": 253959492
+            },
+            {
+              "first_monotonic_ns": 57483581823893,
+              "last_monotonic_ns": 57484580677531,
+              "observed_span_ms": 998.853638,
+              "unchanged_bytes_acked": 253824380
+            }
+          ],
+          "samples": 60,
+          "span_ms": 59024.62412,
+          "tcp_deltas": {
+            "bytes_acked": 205171724,
+            "bytes_received": 305868,
+            "bytes_retrans": 90120,
+            "bytes_sent": 205308144,
+            "data_segs_in": 3585,
+            "data_segs_out": 143179,
+            "total_retransmissions": 73
+          }
+        },
+        "static": {
+          "first_monotonic_ns": 57348527375673,
+          "last_monotonic_ns": 57406582126486,
+          "max_receive_queue_bytes": 0,
+          "max_transmit_queue_bytes": 0,
+          "same_ack_with_pending_tx_observations": [],
+          "samples": 59,
+          "span_ms": 58054.750813,
+          "tcp_deltas": {
+            "bytes_acked": 16980,
+            "bytes_received": 40128,
+            "bytes_retrans": null,
+            "bytes_sent": 16980,
+            "data_segs_in": 305,
+            "data_segs_out": 15,
+            "total_retransmissions": null
+          }
+        }
+      },
+      "identities": {
+        "host": {
+          "boot_id_sha256": "b77b9c1dfef9e0c0b4257bab9c5c7c08a72b9d61e3486eab8ca33960aef5c315",
+          "clock": "CLOCK_MONOTONIC",
+          "cpu": "Intel(R) Core(TM) Ultra 7 270K Plus",
+          "drawable_size": [
+            1920,
+            1080
+          ],
+          "endpoint_process_identity_sha256": "dc2d3249ff5a293d53785d78d97f26927fc3517c3d58c54fc92f437106765131",
+          "firefox": {
+            "BuildID": "20260706120035",
+            "Version": "152.0.5",
+            "binary_sha256": "ddf58d7cb36bd35e8e9dab7bc70ce31e17340ce87fc7c0fe81e495ccbd863965",
+            "process_identity_sha256": "8c8ce6aaa0c0b5a8042ea35c314aae5be7ef2e5174afc7ba8412c10449392238"
+          },
+          "hostname_sha256": "a75835f418c0297c0d16dea175d8efbf36d8c22f385ced447ff218a9fdbc79b1",
+          "kernel": "6.17.0-35-generic",
+          "release_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+          "role": "host",
+          "xvfb_identity_sha256": "06a8114b01e43a24943da63282388203062c7abf537e87e6506027acd1700e38"
+        },
+        "ssh_master_identity_sha256": "787e3146104db7dd7a799e36406822a53fdcd9c928f5c37228bf10e475d4b650",
+        "viewer": {
+          "boot_id_sha256": "bdd73b18b778d4d2f93ccdefe82b315bc9f828176721edc385d7fef1ffd98595",
+          "clock": "CLOCK_MONOTONIC",
+          "cpu": "13th Gen Intel(R) Core(TM) i7-13650HX",
+          "drawable_size": [
+            1920,
+            1080
+          ],
+          "endpoint_process_identity_sha256": "1a6b01f929df6f6e23017fca8e7f368ed6bb4fbd99d3b4b0f39fb78052058b0e",
+          "hostname_sha256": "18a53e5697c601294e7fe56546a0a76e0bc69474e3af537480c93aa38e049d22",
+          "kernel": "6.8.0-149-generic",
+          "release_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+          "role": "viewer",
+          "xvfb_identity_sha256": "1a5f25339512301e763c7c0581c8ade4db871cc3e2f53bd751950544d1402b78"
+        }
+      },
+      "largest_gap_host_context_by_application_sequence": [
+        {
+          "host_last_sent_at_or_above": {
+            "application_counts": {
+              "backpressure_skipped": 110,
+              "bytes": 403155,
+              "captured": 38,
+              "drawn_acks": 2,
+              "max_outstanding": 2,
+              "outstanding": 2,
+              "sent": 3,
+              "viewer_superseded": 0
+            },
+            "host_local_window_end_monotonic_ns": 57487476716540,
+            "host_local_window_start_monotonic_ns": 57482472997386,
+            "last_sent_frame_sequence": 1945,
+            "owned_ssh_tcp_progress_within_host_local_window": {
+              "first_monotonic_ns": 57482527385832,
+              "last_monotonic_ns": 57486581199166,
+              "max_receive_queue_bytes": 0,
+              "max_transmit_queue_bytes": 271712,
+              "same_ack_with_pending_tx_observations": [
+                {
+                  "first_monotonic_ns": 57485580837194,
+                  "last_monotonic_ns": 57486581199166,
+                  "observed_span_ms": 1000.361972,
+                  "unchanged_bytes_acked": 253959492
+                },
+                {
+                  "first_monotonic_ns": 57483581823893,
+                  "last_monotonic_ns": 57484580677531,
+                  "observed_span_ms": 998.853638,
+                  "unchanged_bytes_acked": 253824380
+                }
+              ],
+              "samples": 5,
+              "span_ms": 4053.813334,
+              "tcp_deltas": {
+                "bytes_acked": 310740,
+                "bytes_received": 3012,
+                "bytes_retrans": 52128,
+                "bytes_sent": 412588,
+                "data_segs_in": 22,
+                "data_segs_out": 287,
+                "total_retransmissions": 36
+              }
+            }
+          },
+          "host_last_sent_at_or_below": {
+            "application_counts": {
+              "backpressure_skipped": 13,
+              "bytes": 17467187,
+              "captured": 135,
+              "drawn_acks": 132,
+              "max_outstanding": 2,
+              "outstanding": 1,
+              "sent": 132,
+              "viewer_superseded": 0
+            },
+            "host_local_window_end_monotonic_ns": 57482473133596,
+            "host_local_window_start_monotonic_ns": 57477463636244,
+            "last_sent_frame_sequence": 1942,
+            "owned_ssh_tcp_progress_within_host_local_window": {
+              "first_monotonic_ns": 57477526977128,
+              "last_monotonic_ns": 57481551161461,
+              "max_receive_queue_bytes": 0,
+              "max_transmit_queue_bytes": 131484,
+              "same_ack_with_pending_tx_observations": [],
+              "samples": 5,
+              "span_ms": 4024.184333,
+              "tcp_deltas": {
+                "bytes_acked": 15644648,
+                "bytes_received": 22996,
+                "bytes_retrans": 1352,
+                "bytes_sent": 15646260,
+                "data_segs_in": 270,
+                "data_segs_out": 10914,
+                "total_retransmissions": 2
+              }
+            }
+          },
+          "shared_source_and_geometry_epochs": [
+            1,
+            2
+          ],
+          "viewer_window_end_frame_sequence": 1943
+        },
+        {
+          "host_last_sent_at_or_above": {
+            "application_counts": {
+              "backpressure_skipped": 23,
+              "bytes": 15646439,
+              "captured": 123,
+              "drawn_acks": 119,
+              "max_outstanding": 2,
+              "outstanding": 1,
+              "sent": 118,
+              "viewer_superseded": 0
+            },
+            "host_local_window_end_monotonic_ns": 57492483931125,
+            "host_local_window_start_monotonic_ns": 57487477395440,
+            "last_sent_frame_sequence": 2063,
+            "owned_ssh_tcp_progress_within_host_local_window": {
+              "first_monotonic_ns": 57487527245800,
+              "last_monotonic_ns": 57491551313306,
+              "max_receive_queue_bytes": 0,
+              "max_transmit_queue_bytes": 136600,
+              "same_ack_with_pending_tx_observations": [],
+              "samples": 5,
+              "span_ms": 4024.067506,
+              "tcp_deltas": {
+                "bytes_acked": 12098036,
+                "bytes_received": 18492,
+                "bytes_retrans": 2336,
+                "bytes_sent": 11963772,
+                "data_segs_in": 215,
+                "data_segs_out": 8338,
+                "total_retransmissions": 3
+              }
+            }
+          },
+          "host_last_sent_at_or_below": {
+            "application_counts": {
+              "backpressure_skipped": 110,
+              "bytes": 403155,
+              "captured": 38,
+              "drawn_acks": 2,
+              "max_outstanding": 2,
+              "outstanding": 2,
+              "sent": 3,
+              "viewer_superseded": 0
+            },
+            "host_local_window_end_monotonic_ns": 57487476716540,
+            "host_local_window_start_monotonic_ns": 57482472997386,
+            "last_sent_frame_sequence": 1945,
+            "owned_ssh_tcp_progress_within_host_local_window": {
+              "first_monotonic_ns": 57482527385832,
+              "last_monotonic_ns": 57486581199166,
+              "max_receive_queue_bytes": 0,
+              "max_transmit_queue_bytes": 271712,
+              "same_ack_with_pending_tx_observations": [
+                {
+                  "first_monotonic_ns": 57485580837194,
+                  "last_monotonic_ns": 57486581199166,
+                  "observed_span_ms": 1000.361972,
+                  "unchanged_bytes_acked": 253959492
+                },
+                {
+                  "first_monotonic_ns": 57483581823893,
+                  "last_monotonic_ns": 57484580677531,
+                  "observed_span_ms": 998.853638,
+                  "unchanged_bytes_acked": 253824380
+                }
+              ],
+              "samples": 5,
+              "span_ms": 4053.813334,
+              "tcp_deltas": {
+                "bytes_acked": 310740,
+                "bytes_received": 3012,
+                "bytes_retrans": 52128,
+                "bytes_sent": 412588,
+                "data_segs_in": 22,
+                "data_segs_out": 287,
+                "total_retransmissions": 36
+              }
+            }
+          },
+          "shared_source_and_geometry_epochs": [
+            1,
+            2
+          ],
+          "viewer_window_end_frame_sequence": 2057
+        }
+      ],
+      "shutdown": {
+        "clean_controller_completion": true,
+        "controller_events": [
+          "viewer_ready",
+          "viewer_static_started",
+          "viewer_static_done",
+          "viewer_motion_armed",
+          "viewer_motion_done",
+          "viewer_disconnected"
+        ],
+        "final_viewer_stats": true,
+        "toggle_stderr_empty": true,
+        "viewer_control": [
+          "static",
+          "motion",
+          "disconnect"
+        ],
+        "viewer_session_ended": true
+      },
+      "source_epoch": 1,
+      "source_qualified": true,
+      "transport": {
+        "fixture_digests": {
+          "browser-trial.html": "3a104c1d365f224f07c388c66478d843ea29e56dfd52cde5b10b4acd51038c2c",
+          "dual_browser.py": "012d3fda3cfc536af4201ef06d214df88e4b2e49405198c1e411f730fc60be07",
+          "firefox-profile-user.js": "5b6d7fa4a2fae76978dddd3835bf9ed330e53e125a5d20ad5d67e2817c7bd771",
+          "peer/dual_browser.py": "536dcdba618644b8954fd3adeaf13cd6581b7a4a311e8ad54cc04f8c60935d62",
+          "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+          "run_baseline.py": "5bd348c562da0f6381ca45aca1072a1765d5e8f33b257d0647721e6e87825d46",
+          "score.py": "15f9e47b05e2fc90c12df8ee34ec0a20c643b4e4bd963856b0015c7f56d144d3",
+          "ssh_tcp_sampler.py": "84eb0cd66180c6d9516696822b3f6f4e6141f6807237f2263cdeac1ce229020f"
+        },
+        "routes": [
+          {
+            "address_family": "ipv4",
+            "end_monotonic_ns": 57317554815233,
+            "netns_matches_master": true,
+            "run_id": "852fba821cea44bd970af9692f98f652",
+            "schema_version": 1,
+            "selected": {
+              "gateway_present": false,
+              "interface_class": "ethernet_driver",
+              "route_type": null,
+              "source_matches_socket": true,
+              "status": "observed"
+            },
+            "socket_inode": 19148444,
+            "stage": "first_socket",
+            "start_monotonic_ns": 57317551725813,
+            "type": "firefox_ssh_route"
+          },
+          {
+            "address_family": "ipv4",
+            "end_monotonic_ns": 57513945545198,
+            "netns_matches_master": true,
+            "run_id": "852fba821cea44bd970af9692f98f652",
+            "schema_version": 1,
+            "selected": {
+              "gateway_present": false,
+              "interface_class": "ethernet_driver",
+              "route_type": null,
+              "source_matches_socket": true,
+              "status": "observed"
+            },
+            "socket_inode": 19148444,
+            "stage": "sampling_end",
+            "start_monotonic_ns": 57513938057927,
+            "type": "firefox_ssh_route"
+          }
+        ],
+        "sample_count": 197,
+        "status": "recorded",
+        "terminal_summary": {
+          "clock": "monotonic",
+          "counts": {
+            "tcp_info": 197
+          },
+          "end_monotonic_ns": 57513945668842,
+          "end_reason": "closed",
+          "interval_seconds": 1,
+          "max_sample_slots": 300,
+          "missed_slots": 0,
+          "remote_port": 22,
+          "run_id": "852fba821cea44bd970af9692f98f652",
+          "schema_version": 1,
+          "socket_inode": 19148444,
+          "ssh_exe_device": 2050,
+          "ssh_exe_inode": 3020620,
+          "ssh_pid": 923392,
+          "ssh_start_ticks": 5731672,
+          "start_monotonic_ns": 57317526650667,
+          "type": "firefox_ssh_tcp_summary"
+        }
+      },
+      "trial": 2,
+      "viewer": {
+        "motion": {
+          "acknowledgements_in_whole_windows": 1721,
+          "local_observer_end_monotonic_ns": 57596254155825,
+          "local_phase_start_monotonic_ns": 57498254043374,
+          "local_score_end_monotonic_ns": 57588254043374,
+          "local_score_start_monotonic_ns": 57528254043374,
+          "raster": {
+            "distinct_scroll_signatures": 1503,
+            "gap_ms": {
+              "max": 5756.228386,
+              "p50": 33.351646,
+              "p95": 44.400299
+            },
+            "invalid_scroll_reads": 0,
+            "invalid_tile_reads": 0,
+            "observer_max_read_ms": 4.069608,
+            "one_second_scroll_bins": [
+              30,
+              29,
+              29,
+              30,
+              29,
+              30,
+              29,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              29,
+              27,
+              27,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              24,
+              7,
+              0,
+              0,
+              0,
+              0,
+              0,
+              16,
+              28,
+              29,
+              29,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              30,
+              29,
+              30,
+              29
+            ],
+            "one_second_unique_bins": [
+              30,
+              29,
+              29,
+              30,
+              29,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              30,
+              29,
+              30,
+              29,
+              29,
+              30,
+              29,
+              27,
+              27,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              24,
+              7,
+              0,
+              0,
+              0,
+              0,
+              0,
+              16,
+              28,
+              29,
+              29,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              29,
+              30,
+              30,
+              29,
+              30,
+              29
+            ],
+            "scroll_changes_seen": 1573,
+            "unique_content_fps": 26.216666666666665,
+            "unique_tile_changes": 1573,
+            "valid_and_invalid_sample_reads": 5400,
+            "zero_unique_bins": 5
+          },
+          "telemetry": {
+            "first_window_end_monotonic_ns": 57534629092872,
+            "frame_scopes_match_requested_jpeg": true,
+            "frame_scopes_observed": 13,
+            "last_window_end_monotonic_ns": 57594634477353,
+            "routes": [
+              "rgb"
+            ],
+            "session_ids": [
+              "e7b4f0aeeed1eb6867d8d20517bfe133"
+            ],
+            "viewer_backends": [
+              "x11"
+            ],
+            "whole_windows": 13,
+            "window_seconds": 65.00588095500001
+          }
+        },
+        "static": {
+          "acknowledgements_in_whole_windows": 15,
+          "local_observer_end_monotonic_ns": 57497875191228,
+          "local_phase_start_monotonic_ns": 57399874956596,
+          "local_score_end_monotonic_ns": 57489874956596,
+          "local_score_start_monotonic_ns": 57429874956596,
+          "raster": {
+            "distinct_scroll_signatures": 1,
+            "gap_ms": {
+              "max": 60000.0,
+              "p50": 60000.0,
+              "p95": 60000.0
+            },
+            "invalid_scroll_reads": 0,
+            "invalid_tile_reads": 0,
+            "observer_max_read_ms": 1.575522,
+            "one_second_scroll_bins": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "one_second_unique_bins": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "scroll_changes_seen": 0,
+            "unique_content_fps": 0.0,
+            "unique_tile_changes": 0,
+            "valid_and_invalid_sample_reads": 5400,
+            "zero_unique_bins": 60
+          },
+          "telemetry": {
+            "first_window_end_monotonic_ns": 57439619024477,
+            "frame_scopes_match_requested_jpeg": true,
+            "frame_scopes_observed": 12,
+            "last_window_end_monotonic_ns": 57494625294987,
+            "routes": [
+              "rgb"
+            ],
+            "session_ids": [
+              "e7b4f0aeeed1eb6867d8d20517bfe133"
+            ],
+            "viewer_backends": [
+              "x11"
+            ],
+            "whole_windows": 12,
+            "window_seconds": 60.007069581999986
+          }
+        }
+      },
+      "viewer_longest_roi_gap": {
+        "duration_ms": 5756.228386,
+        "includes_score_boundary": false,
+        "max_roi_sample_interval_ms": 11.519991,
+        "roi_reads": 519,
+        "valid_scroll_reads": 519,
+        "valid_tile_reads": 519,
+        "viewer_end_monotonic_ns": 57570666610730,
+        "viewer_start_monotonic_ns": 57564910382344
+      },
+      "viewer_motion_gate_met": false,
+      "viewer_windows_overlapping_largest_gap": [
+        {
+          "counts": {
+            "acked": 4,
+            "decoded": 4,
+            "drawn": 4,
+            "received": 4,
+            "replaced": 0
+          },
+          "decode_p95_ms": 3.591,
+          "frame_sequence": 1943
+        },
+        {
+          "counts": {
+            "acked": 114,
+            "decoded": 114,
+            "drawn": 114,
+            "received": 114,
+            "replaced": 0
+          },
+          "decode_p95_ms": 3.602,
+          "frame_sequence": 2057
+        }
+      ]
+    }
+  ]
+}

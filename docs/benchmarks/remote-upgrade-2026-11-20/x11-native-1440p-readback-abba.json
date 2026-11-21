@@ -1,0 +1,1907 @@
+{
+  "schema_version": 1,
+  "label": "readback-1440p",
+  "status": "completed",
+  "role": "single host-side core GetImage versus direct MIT-SHM",
+  "dimensions": [
+    2560,
+    1440
+  ],
+  "requested_fps": 30,
+  "order": [
+    "cpu",
+    "auto",
+    "auto",
+    "cpu",
+    "cpu",
+    "auto",
+    "auto",
+    "cpu"
+  ],
+  "binary_pins": {
+    "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+    "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+    "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+    "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+  },
+  "trials": [
+    {
+      "block": 1,
+      "order": 1,
+      "arm": "cpu",
+      "accepted_case": "readback-1440p-01-cpu-fixed",
+      "attempts": [
+        {
+          "case": "readback-1440p-01-cpu-fixed",
+          "raw_directory": "readback-1440p-01-cpu-fixed",
+          "failure_log": null,
+          "status": "valid",
+          "result": {
+            "case": "readback-1440p-01-cpu-fixed",
+            "host_scaling_policy": "cpu",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.104467592,
+              "viewer": 60.031947937
+            },
+            "unique_fps": 22.25,
+            "p95_gap_ms": 77.992292,
+            "max_gap_ms": 237.624261,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 237.624261,
+                "measured_start_offset_ms": 9531.3699,
+                "from_marker": 2488,
+                "to_marker": 2494
+              },
+              {
+                "gap_ms": 173.794387,
+                "measured_start_offset_ms": 9892.601647,
+                "from_marker": 2503,
+                "to_marker": 2521
+              },
+              {
+                "gap_ms": 157.507383,
+                "measured_start_offset_ms": 8653.715822,
+                "from_marker": 2434,
+                "to_marker": 2445
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1341,
+              "window_p50_ms": {
+                "minimum": 23.226,
+                "median": 27.186500000000002,
+                "maximum": 31.364
+              },
+              "window_p95_ms": {
+                "minimum": 38.805,
+                "median": 40.203500000000005,
+                "maximum": 41.691
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-01-cpu-fixed",
+                "window": 5,
+                "p99_ms": 46.232
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1341,
+              "window_p50_ms": {
+                "minimum": 18.65,
+                "median": 22.615000000000002,
+                "maximum": 26.021
+              },
+              "window_p95_ms": {
+                "minimum": 33.986,
+                "median": 35.577,
+                "maximum": 37.013
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-01-cpu-fixed",
+                "window": 2,
+                "p99_ms": 40.964
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 1341,
+              "shm_readback_ms": 0,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/cpu-resize/core-getimage/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 12.653139948971532,
+            "source_submit_fps": 60.010825799529535,
+            "source_deadline_skips": 0,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "order": 2,
+      "arm": "auto",
+      "accepted_case": "readback-1440p-02-auto-fixed",
+      "attempts": [
+        {
+          "case": "readback-1440p-02-auto-fixed",
+          "raw_directory": "readback-1440p-02-auto-fixed",
+          "failure_log": null,
+          "status": "valid",
+          "result": {
+            "case": "readback-1440p-02-auto-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.088127281,
+              "viewer": 60.020280014
+            },
+            "unique_fps": 25.666666666666668,
+            "p95_gap_ms": 61.2835,
+            "max_gap_ms": 287.96744,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 287.96744,
+                "measured_start_offset_ms": 23432.307942,
+                "from_marker": 3301,
+                "to_marker": 3310
+              },
+              {
+                "gap_ms": 250.624801,
+                "measured_start_offset_ms": 22879.63824,
+                "from_marker": 3269,
+                "to_marker": 3277
+              },
+              {
+                "gap_ms": 250.517167,
+                "measured_start_offset_ms": 22209.709314,
+                "from_marker": 3234,
+                "to_marker": 3244
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1487,
+              "window_p50_ms": {
+                "minimum": 4.655,
+                "median": 4.974,
+                "maximum": 5.041
+              },
+              "window_p95_ms": {
+                "minimum": 5.677,
+                "median": 6.069,
+                "maximum": 7.318
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-02-auto-fixed",
+                "window": 11,
+                "p99_ms": 10.689
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1487,
+              "window_p50_ms": {
+                "minimum": 1.635,
+                "median": 1.6549999999999998,
+                "maximum": 1.674
+              },
+              "window_p95_ms": {
+                "minimum": 2.21,
+                "median": 2.6975,
+                "maximum": 4.015
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-02-auto-fixed",
+                "window": 3,
+                "p99_ms": 4.708
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 1549,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 14.595149619137953,
+            "source_submit_fps": 60.00968717931401,
+            "source_deadline_skips": 0,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "order": 3,
+      "arm": "auto",
+      "accepted_case": "readback-1440p-03-auto-fixed",
+      "attempts": [
+        {
+          "case": "readback-1440p-03-auto-fixed",
+          "raw_directory": "readback-1440p-03-auto-fixed",
+          "failure_log": null,
+          "status": "valid",
+          "result": {
+            "case": "readback-1440p-03-auto-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.115315754,
+              "viewer": 60.011715882000004
+            },
+            "unique_fps": 25.65,
+            "p95_gap_ms": 65.26997,
+            "max_gap_ms": 2932.901705,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 2932.901705,
+                "measured_start_offset_ms": 36662.423816,
+                "from_marker": 4095,
+                "to_marker": 4099
+              },
+              {
+                "gap_ms": 498.212277,
+                "measured_start_offset_ms": 35997.14139,
+                "from_marker": 4052,
+                "to_marker": 4077
+              },
+              {
+                "gap_ms": 224.866425,
+                "measured_start_offset_ms": 2473.944643,
+                "from_marker": 2046,
+                "to_marker": 2063
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1448,
+              "window_p50_ms": {
+                "minimum": 4.483,
+                "median": 4.76,
+                "maximum": 5.027
+              },
+              "window_p95_ms": {
+                "minimum": 5.47,
+                "median": 5.775499999999999,
+                "maximum": 6.704
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-03-auto-fixed",
+                "window": 1,
+                "p99_ms": 10.742
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1448,
+              "window_p50_ms": {
+                "minimum": 1.582,
+                "median": 1.6275,
+                "maximum": 1.676
+              },
+              "window_p95_ms": {
+                "minimum": 2.012,
+                "median": 2.6109999999999998,
+                "maximum": 3.419
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-03-auto-fixed",
+                "window": 1,
+                "p99_ms": 4.299
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 1570,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 14.608049562503842,
+            "source_submit_fps": 60.01123272724075,
+            "source_deadline_skips": 0,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 1,
+      "order": 4,
+      "arm": "cpu",
+      "accepted_case": "readback-1440p-04-cpu-fixed",
+      "attempts": [
+        {
+          "case": "readback-1440p-04-cpu-fixed",
+          "raw_directory": "readback-1440p-04-cpu-fixed",
+          "failure_log": null,
+          "status": "valid",
+          "result": {
+            "case": "readback-1440p-04-cpu-fixed",
+            "host_scaling_policy": "cpu",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.113622655,
+              "viewer": 60.025691333
+            },
+            "unique_fps": 23.15,
+            "p95_gap_ms": 77.453703,
+            "max_gap_ms": 440.075698,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 440.075698,
+                "measured_start_offset_ms": 47703.243763,
+                "from_marker": 4761,
+                "to_marker": 4781
+              },
+              {
+                "gap_ms": 158.995086,
+                "measured_start_offset_ms": 48420.700008,
+                "from_marker": 4798,
+                "to_marker": 4808
+              },
+              {
+                "gap_ms": 148.824116,
+                "measured_start_offset_ms": 48964.035958,
+                "from_marker": 4835,
+                "to_marker": 4839
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1389,
+              "window_p50_ms": {
+                "minimum": 24.299,
+                "median": 28.450000000000003,
+                "maximum": 30.423
+              },
+              "window_p95_ms": {
+                "minimum": 38.427,
+                "median": 39.941500000000005,
+                "maximum": 40.476
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-04-cpu-fixed",
+                "window": 10,
+                "p99_ms": 45.857
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1389,
+              "window_p50_ms": {
+                "minimum": 19.324,
+                "median": 23.7025,
+                "maximum": 26.043
+              },
+              "window_p95_ms": {
+                "minimum": 34.143,
+                "median": 35.2505,
+                "maximum": 35.901
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-04-cpu-fixed",
+                "window": 10,
+                "p99_ms": 41.138
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 1395,
+              "shm_readback_ms": 0,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/cpu-resize/core-getimage/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 13.160163255178551,
+            "source_submit_fps": 60.01072126175221,
+            "source_deadline_skips": 0,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "order": 5,
+      "arm": "cpu",
+      "accepted_case": "readback-1440p-05-cpu-fixed",
+      "attempts": [
+        {
+          "case": "readback-1440p-05-cpu-fixed",
+          "raw_directory": "readback-1440p-05-cpu-fixed",
+          "failure_log": null,
+          "status": "valid",
+          "result": {
+            "case": "readback-1440p-05-cpu-fixed",
+            "host_scaling_policy": "cpu",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.086200367,
+              "viewer": 60.016836955
+            },
+            "unique_fps": 26.083333333333332,
+            "p95_gap_ms": 63.628144,
+            "max_gap_ms": 214.332404,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 214.332404,
+                "measured_start_offset_ms": 2229.93531,
+                "from_marker": 2027,
+                "to_marker": 2035
+              },
+              {
+                "gap_ms": 172.630876,
+                "measured_start_offset_ms": 3386.105243,
+                "from_marker": 2102,
+                "to_marker": 2113
+              },
+              {
+                "gap_ms": 171.177691,
+                "measured_start_offset_ms": 1186.937049,
+                "from_marker": 1972,
+                "to_marker": 1974
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1495,
+              "window_p50_ms": {
+                "minimum": 9.639,
+                "median": 10.6075,
+                "maximum": 10.965
+              },
+              "window_p95_ms": {
+                "minimum": 16.796,
+                "median": 17.156,
+                "maximum": 18.177
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-05-cpu-fixed",
+                "window": 6,
+                "p99_ms": 23.113
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1495,
+              "window_p50_ms": {
+                "minimum": 6.334,
+                "median": 7.4105,
+                "maximum": 7.9
+              },
+              "window_p95_ms": {
+                "minimum": 13.528,
+                "median": 13.859,
+                "maximum": 15.113
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-05-cpu-fixed",
+                "window": 6,
+                "p99_ms": 19.738
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 1573,
+              "shm_readback_ms": 0,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/cpu-resize/core-getimage/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 14.85132430657229,
+            "source_submit_fps": 60.00957363839143,
+            "source_deadline_skips": 0,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "order": 6,
+      "arm": "auto",
+      "accepted_case": "readback-1440p-06-auto-fixed",
+      "attempts": [
+        {
+          "case": "readback-1440p-06-auto-fixed",
+          "raw_directory": "readback-1440p-06-auto-fixed",
+          "failure_log": null,
+          "status": "valid",
+          "result": {
+            "case": "readback-1440p-06-auto-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.062585606,
+              "viewer": 60.013303868
+            },
+            "unique_fps": 25.016666666666666,
+            "p95_gap_ms": 64.186722,
+            "max_gap_ms": 374.504399,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 374.504399,
+                "measured_start_offset_ms": 16603.604489,
+                "from_marker": 2889,
+                "to_marker": 2897
+              },
+              {
+                "gap_ms": 261.097426,
+                "measured_start_offset_ms": 15904.895322,
+                "from_marker": 2846,
+                "to_marker": 2854
+              },
+              {
+                "gap_ms": 167.580411,
+                "measured_start_offset_ms": 16978.108888,
+                "from_marker": 2897,
+                "to_marker": 2899
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1491,
+              "window_p50_ms": {
+                "minimum": 4.544,
+                "median": 5.0045,
+                "maximum": 5.032
+              },
+              "window_p95_ms": {
+                "minimum": 5.446,
+                "median": 6.181,
+                "maximum": 8.537
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-06-auto-fixed",
+                "window": 8,
+                "p99_ms": 11.153
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1491,
+              "window_p50_ms": {
+                "minimum": 1.611,
+                "median": 1.667,
+                "maximum": 1.696
+              },
+              "window_p95_ms": {
+                "minimum": 1.918,
+                "median": 2.8985,
+                "maximum": 4.124
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-06-auto-fixed",
+                "window": 12,
+                "p99_ms": 5.613
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 1509,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 14.241141159173692,
+            "source_submit_fps": 60.00965076193134,
+            "source_deadline_skips": 0,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "order": 7,
+      "arm": "auto",
+      "accepted_case": "readback-1440p-07-auto-fixed",
+      "attempts": [
+        {
+          "case": "readback-1440p-07-auto-fixed",
+          "raw_directory": "readback-1440p-07-auto-fixed",
+          "failure_log": null,
+          "status": "valid",
+          "result": {
+            "case": "readback-1440p-07-auto-fixed",
+            "host_scaling_policy": "auto",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.079950545,
+              "viewer": 60.024957592
+            },
+            "unique_fps": 25.466666666666665,
+            "p95_gap_ms": 60.185855,
+            "max_gap_ms": 377.076571,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 377.076571,
+                "measured_start_offset_ms": 30837.290076,
+                "from_marker": 3758,
+                "to_marker": 3767
+              },
+              {
+                "gap_ms": 278.277814,
+                "measured_start_offset_ms": 29973.491757,
+                "from_marker": 3706,
+                "to_marker": 3724
+              },
+              {
+                "gap_ms": 255.862288,
+                "measured_start_offset_ms": 31716.80554,
+                "from_marker": 3817,
+                "to_marker": 3827
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1498,
+              "window_p50_ms": {
+                "minimum": 4.922,
+                "median": 4.9855,
+                "maximum": 5.043
+              },
+              "window_p95_ms": {
+                "minimum": 5.855,
+                "median": 6.7844999999999995,
+                "maximum": 8.132
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-07-auto-fixed",
+                "window": 7,
+                "p99_ms": 11.649
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1498,
+              "window_p50_ms": {
+                "minimum": 1.632,
+                "median": 1.6604999999999999,
+                "maximum": 1.688
+              },
+              "window_p95_ms": {
+                "minimum": 2.567,
+                "median": 3.423,
+                "maximum": 4.211
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-07-auto-fixed",
+                "window": 7,
+                "p99_ms": 6.841
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 0,
+              "shm_readback_ms": 1535,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/xrender/shm/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 14.471519502147085,
+            "source_submit_fps": 60.0092643785094,
+            "source_deadline_skips": 0,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    },
+    {
+      "block": 2,
+      "order": 8,
+      "arm": "cpu",
+      "accepted_case": "readback-1440p-08-cpu-fixed",
+      "attempts": [
+        {
+          "case": "readback-1440p-08-cpu-fixed",
+          "raw_directory": "readback-1440p-08-cpu-fixed",
+          "failure_log": null,
+          "status": "valid",
+          "result": {
+            "case": "readback-1440p-08-cpu-fixed",
+            "host_scaling_policy": "cpu",
+            "binary_pins": {
+              "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5",
+              "observer_sha256": "b79b433f17f1e061d30dc9fc4d5bb7cf867535c8ed4ca002987cc30640a21706",
+              "painter_sha256": "717de249d87d7d824356890b1b7d2a1407c0832ca9e28347f03f736c8ea50136"
+            },
+            "observation_seconds": 60,
+            "telemetry_seconds": {
+              "host": 60.085087823,
+              "viewer": 60.024164243
+            },
+            "unique_fps": 26.05,
+            "p95_gap_ms": 60.210429,
+            "max_gap_ms": 395.677702,
+            "longest_observer_gaps": [
+              {
+                "gap_ms": 395.677702,
+                "measured_start_offset_ms": 43529.886873,
+                "from_marker": 4503,
+                "to_marker": 4522
+              },
+              {
+                "gap_ms": 165.103135,
+                "measured_start_offset_ms": 42964.051841,
+                "from_marker": 4469,
+                "to_marker": 4479
+              },
+              {
+                "gap_ms": 165.015892,
+                "measured_start_offset_ms": 44384.349643,
+                "from_marker": 4554,
+                "to_marker": 4564
+              }
+            ],
+            "capture": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1493,
+              "window_p50_ms": {
+                "minimum": 8.808,
+                "median": 10.684999999999999,
+                "maximum": 12.06
+              },
+              "window_p95_ms": {
+                "minimum": 15.759,
+                "median": 17.548000000000002,
+                "maximum": 18.848
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-08-cpu-fixed",
+                "window": 1,
+                "p99_ms": 24.931
+              }
+            },
+            "readback": {
+              "windows_with_samples": 12,
+              "recent_samples_in_windows": 1493,
+              "window_p50_ms": {
+                "minimum": 5.68,
+                "median": 7.583,
+                "maximum": 8.652
+              },
+              "window_p95_ms": {
+                "minimum": 12.873,
+                "median": 14.1175,
+                "maximum": 15.462
+              },
+              "largest_window_p99": {
+                "case": "readback-1440p-08-cpu-fixed",
+                "window": 1,
+                "p99_ms": 21.5
+              }
+            },
+            "actual_route_observations": {
+              "core_readback_ms": 1568,
+              "shm_readback_ms": 0,
+              "cpu_resize_ms": 0
+            },
+            "capture_mode_labels": [
+              "root/cpu-resize/core-getimage/no-damage/cursor-events"
+            ],
+            "host_zero_frame_windows": 0,
+            "viewer_zero_drawn_windows": 0,
+            "payload_mbps": 14.782293846627402,
+            "source_submit_fps": 60.009470133965436,
+            "source_deadline_skips": 0,
+            "existing_27_fps_gate_met": false
+          }
+        }
+      ]
+    }
+  ],
+  "arm_summaries": {
+    "cpu": {
+      "trial_count": 4,
+      "trial_unique_fps": {
+        "minimum": 22.25,
+        "median": 24.6,
+        "maximum": 26.083333333333332
+      },
+      "trial_observer_gap_p95_ms": {
+        "minimum": 60.210429,
+        "median": 70.5409235,
+        "maximum": 77.992292
+      },
+      "trial_observer_longest_gap_ms": {
+        "minimum": 214.332404,
+        "median": 316.6509815,
+        "maximum": 440.075698
+      },
+      "trial_capture_window_p50_medians_ms": {
+        "minimum": 10.6075,
+        "median": 18.93575,
+        "maximum": 28.450000000000003
+      },
+      "trial_readback_window_p50_medians_ms": {
+        "minimum": 7.4105,
+        "median": 15.099,
+        "maximum": 23.7025
+      },
+      "trials_meeting_existing_27_unique_fps_target": 0,
+      "stages": {
+        "host": {
+          "capture": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5718,
+            "window_p50_ms": {
+              "minimum": 8.808,
+              "median": 17.643,
+              "maximum": 31.364
+            },
+            "window_p95_ms": {
+              "minimum": 15.759,
+              "median": 28.6375,
+              "maximum": 41.691
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-01-cpu-fixed",
+              "window": 5,
+              "p99_ms": 46.232
+            }
+          },
+          "core_getimage": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5718,
+            "window_p50_ms": {
+              "minimum": 5.68,
+              "median": 13.651,
+              "maximum": 26.043
+            },
+            "window_p95_ms": {
+              "minimum": 12.873,
+              "median": 24.723999999999997,
+              "maximum": 37.013
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 10,
+              "p99_ms": 41.138
+            }
+          },
+          "shm_getimage": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "x11_rgb_conversion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5718,
+            "window_p50_ms": {
+              "minimum": 2.835,
+              "median": 3.8225,
+              "maximum": 4.744
+            },
+            "window_p95_ms": {
+              "minimum": 3.43,
+              "median": 4.3105,
+              "maximum": 5.552
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 10,
+              "p99_ms": 7.435
+            }
+          },
+          "x11_cpu_resize": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "mailbox_age": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5700,
+            "window_p50_ms": {
+              "minimum": 0.08,
+              "median": 0.0885,
+              "maximum": 14.688
+            },
+            "window_p95_ms": {
+              "minimum": 0.13,
+              "median": 26.0405,
+              "maximum": 95.9
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 10,
+              "p99_ms": 116.467
+            }
+          },
+          "h264_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5703,
+            "window_p50_ms": {
+              "minimum": 14.895,
+              "median": 15.3975,
+              "maximum": 15.663
+            },
+            "window_p95_ms": {
+              "minimum": 15.663,
+              "median": 16.3525,
+              "maximum": 19.395
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 10,
+              "p99_ms": 26.986
+            }
+          },
+          "nvenc_rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5703,
+            "window_p50_ms": {
+              "minimum": 1.142,
+              "median": 1.1755,
+              "maximum": 1.201
+            },
+            "window_p95_ms": {
+              "minimum": 1.341,
+              "median": 1.4945,
+              "maximum": 3.198
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 2,
+              "p99_ms": 3.344
+            }
+          },
+          "nvenc_rgb_to_yuv": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5703,
+            "window_p50_ms": {
+              "minimum": 10.13,
+              "median": 10.703,
+              "maximum": 10.831
+            },
+            "window_p95_ms": {
+              "minimum": 10.814,
+              "median": 11.363,
+              "maximum": 14.559
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 10,
+              "p99_ms": 19.778
+            }
+          },
+          "nvenc_submit": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5703,
+            "window_p50_ms": {
+              "minimum": 3.435,
+              "median": 3.4524999999999997,
+              "maximum": 3.482
+            },
+            "window_p95_ms": {
+              "minimum": 3.564,
+              "median": 3.6225,
+              "maximum": 3.742
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-01-cpu-fixed",
+              "window": 3,
+              "p99_ms": 5.302
+            }
+          },
+          "nvenc_output": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5703,
+            "window_p50_ms": {
+              "minimum": 0.003,
+              "median": 0.003,
+              "maximum": 0.003
+            },
+            "window_p95_ms": {
+              "minimum": 0.003,
+              "median": 0.005,
+              "maximum": 0.006
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-01-cpu-fixed",
+              "window": 4,
+              "p99_ms": 0.01
+            }
+          },
+          "writer_lock": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5703,
+            "window_p50_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.0
+            },
+            "window_p95_ms": {
+              "minimum": 0.0,
+              "median": 0.001,
+              "maximum": 0.001
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-05-cpu-fixed",
+              "window": 1,
+              "p99_ms": 0.002
+            }
+          },
+          "socket_write": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5703,
+            "window_p50_ms": {
+              "minimum": 0.151,
+              "median": 0.154,
+              "maximum": 0.158
+            },
+            "window_p95_ms": {
+              "minimum": 0.183,
+              "median": 0.2285,
+              "maximum": 0.6
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-01-cpu-fixed",
+              "window": 5,
+              "p99_ms": 0.76
+            }
+          },
+          "credit_wait": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5700,
+            "window_p50_ms": {
+              "minimum": 4.255,
+              "median": 15.3695,
+              "maximum": 25.186
+            },
+            "window_p95_ms": {
+              "minimum": 16.195,
+              "median": 41.492,
+              "maximum": 236.667
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 10,
+              "p99_ms": 369.716
+            }
+          },
+          "send_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5698,
+            "window_p50_ms": {
+              "minimum": 37.138,
+              "median": 58.8405,
+              "maximum": 69.897
+            },
+            "window_p95_ms": {
+              "minimum": 45.074,
+              "median": 75.6585,
+              "maximum": 260.985
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-08-cpu-fixed",
+              "window": 9,
+              "p99_ms": 395.839
+            }
+          },
+          "capture_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5698,
+            "window_p50_ms": {
+              "minimum": 63.845,
+              "median": 100.892,
+              "maximum": 122.227
+            },
+            "window_p95_ms": {
+              "minimum": 76.59,
+              "median": 130.86450000000002,
+              "maximum": 367.809
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-08-cpu-fixed",
+              "window": 9,
+              "p99_ms": 529.556
+            }
+          }
+        },
+        "viewer": {
+          "decode_path_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5725,
+            "window_p50_ms": {
+              "minimum": 18.597,
+              "median": 31.197,
+              "maximum": 39.344
+            },
+            "window_p95_ms": {
+              "minimum": 21.327,
+              "median": 40.932,
+              "maximum": 41.602
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-01-cpu-fixed",
+              "window": 2,
+              "p99_ms": 43.786
+            }
+          },
+          "vaapi_decode_call": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5725,
+            "window_p50_ms": {
+              "minimum": 0.539,
+              "median": 0.7745,
+              "maximum": 0.837
+            },
+            "window_p95_ms": {
+              "minimum": 0.647,
+              "median": 0.909,
+              "maximum": 0.948
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 9,
+              "p99_ms": 1.005
+            }
+          },
+          "vaapi_download": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5725,
+            "window_p50_ms": {
+              "minimum": 6.013,
+              "median": 9.5705,
+              "maximum": 10.27
+            },
+            "window_p95_ms": {
+              "minimum": 6.586,
+              "median": 10.8565,
+              "maximum": 12.068
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-01-cpu-fixed",
+              "window": 2,
+              "p99_ms": 13.499
+            }
+          },
+          "yuv_to_rgb": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5725,
+            "window_p50_ms": {
+              "minimum": 10.779,
+              "median": 18.790999999999997,
+              "maximum": 25.92
+            },
+            "window_p95_ms": {
+              "minimum": 12.758,
+              "median": 26.955,
+              "maximum": 27.088
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 1,
+              "p99_ms": 27.464
+            }
+          },
+          "rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5725,
+            "window_p50_ms": {
+              "minimum": 1.146,
+              "median": 1.568,
+              "maximum": 2.023
+            },
+            "window_p95_ms": {
+              "minimum": 1.377,
+              "median": 3.093,
+              "maximum": 3.159
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-08-cpu-fixed",
+              "window": 5,
+              "p99_ms": 3.203
+            }
+          },
+          "decode_queue": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "presentation_queue": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5724,
+            "window_p50_ms": {
+              "minimum": 0.102,
+              "median": 0.1535,
+              "maximum": 0.2
+            },
+            "window_p95_ms": {
+              "minimum": 0.143,
+              "median": 0.2275,
+              "maximum": 0.264
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-08-cpu-fixed",
+              "window": 6,
+              "p99_ms": 0.3
+            }
+          },
+          "presentation_completion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5724,
+            "window_p50_ms": {
+              "minimum": 8.844,
+              "median": 15.405,
+              "maximum": 22.153
+            },
+            "window_p95_ms": {
+              "minimum": 10.849,
+              "median": 22.0075,
+              "maximum": 24.715
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-04-cpu-fixed",
+              "window": 10,
+              "p99_ms": 39.667
+            }
+          },
+          "native_submit": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          }
+        }
+      }
+    },
+    "auto": {
+      "trial_count": 4,
+      "trial_unique_fps": {
+        "minimum": 25.016666666666666,
+        "median": 25.55833333333333,
+        "maximum": 25.666666666666668
+      },
+      "trial_observer_gap_p95_ms": {
+        "minimum": 60.185855,
+        "median": 62.735111,
+        "maximum": 65.26997
+      },
+      "trial_observer_longest_gap_ms": {
+        "minimum": 287.96744,
+        "median": 375.790485,
+        "maximum": 2932.901705
+      },
+      "trial_capture_window_p50_medians_ms": {
+        "minimum": 4.76,
+        "median": 4.97975,
+        "maximum": 5.0045
+      },
+      "trial_readback_window_p50_medians_ms": {
+        "minimum": 1.6275,
+        "median": 1.6577499999999998,
+        "maximum": 1.667
+      },
+      "trials_meeting_existing_27_unique_fps_target": 0,
+      "stages": {
+        "host": {
+          "capture": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5924,
+            "window_p50_ms": {
+              "minimum": 4.483,
+              "median": 4.974,
+              "maximum": 5.043
+            },
+            "window_p95_ms": {
+              "minimum": 5.446,
+              "median": 6.1434999999999995,
+              "maximum": 8.537
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-07-auto-fixed",
+              "window": 7,
+              "p99_ms": 11.649
+            }
+          },
+          "core_getimage": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "shm_getimage": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5924,
+            "window_p50_ms": {
+              "minimum": 1.582,
+              "median": 1.6509999999999998,
+              "maximum": 1.696
+            },
+            "window_p95_ms": {
+              "minimum": 1.918,
+              "median": 2.7995,
+              "maximum": 4.211
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-07-auto-fixed",
+              "window": 7,
+              "p99_ms": 6.841
+            }
+          },
+          "x11_rgb_conversion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5924,
+            "window_p50_ms": {
+              "minimum": 2.849,
+              "median": 3.2865,
+              "maximum": 3.325
+            },
+            "window_p95_ms": {
+              "minimum": 3.426,
+              "median": 3.6849999999999996,
+              "maximum": 4.388
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-07-auto-fixed",
+              "window": 7,
+              "p99_ms": 7.328
+            }
+          },
+          "x11_cpu_resize": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "mailbox_age": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 0.079,
+              "median": 8.163499999999999,
+              "maximum": 19.121
+            },
+            "window_p95_ms": {
+              "minimum": 7.445,
+              "median": 36.650999999999996,
+              "maximum": 108.006
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-03-auto-fixed",
+              "window": 8,
+              "p99_ms": 132.101
+            }
+          },
+          "h264_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 14.797,
+              "median": 15.402000000000001,
+              "maximum": 15.647
+            },
+            "window_p95_ms": {
+              "minimum": 15.62,
+              "median": 15.77,
+              "maximum": 19.05
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-07-auto-fixed",
+              "window": 7,
+              "p99_ms": 24.251
+            }
+          },
+          "nvenc_rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 1.143,
+              "median": 1.204,
+              "maximum": 1.221
+            },
+            "window_p95_ms": {
+              "minimum": 1.298,
+              "median": 1.366,
+              "maximum": 3.101
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-02-auto-fixed",
+              "window": 5,
+              "p99_ms": 3.432
+            }
+          },
+          "nvenc_rgb_to_yuv": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 10.084,
+              "median": 10.713000000000001,
+              "maximum": 10.776
+            },
+            "window_p95_ms": {
+              "minimum": 10.78,
+              "median": 10.8805,
+              "maximum": 12.857
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-07-auto-fixed",
+              "window": 7,
+              "p99_ms": 17.37
+            }
+          },
+          "nvenc_submit": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 3.431,
+              "median": 3.455,
+              "maximum": 3.474
+            },
+            "window_p95_ms": {
+              "minimum": 3.54,
+              "median": 3.5905,
+              "maximum": 3.724
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-02-auto-fixed",
+              "window": 5,
+              "p99_ms": 4.369
+            }
+          },
+          "nvenc_output": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 0.003,
+              "median": 0.003,
+              "maximum": 0.003
+            },
+            "window_p95_ms": {
+              "minimum": 0.003,
+              "median": 0.005,
+              "maximum": 0.007
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-06-auto-fixed",
+              "window": 4,
+              "p99_ms": 0.012
+            }
+          },
+          "writer_lock": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.0
+            },
+            "window_p95_ms": {
+              "minimum": 0.0,
+              "median": 0.0,
+              "maximum": 0.001
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-03-auto-fixed",
+              "window": 8,
+              "p99_ms": 0.006
+            }
+          },
+          "socket_write": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 0.151,
+              "median": 0.154,
+              "maximum": 0.157
+            },
+            "window_p95_ms": {
+              "minimum": 0.167,
+              "median": 0.1795,
+              "maximum": 0.313
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-02-auto-fixed",
+              "window": 5,
+              "p99_ms": 0.339
+            }
+          },
+          "credit_wait": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5886,
+            "window_p50_ms": {
+              "minimum": 4.769,
+              "median": 17.259,
+              "maximum": 22.257
+            },
+            "window_p95_ms": {
+              "minimum": 20.368,
+              "median": 40.147000000000006,
+              "maximum": 575.602
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-03-auto-fixed",
+              "window": 8,
+              "p99_ms": 2402.485
+            }
+          },
+          "send_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5885,
+            "window_p50_ms": {
+              "minimum": 38.919,
+              "median": 60.4255,
+              "maximum": 72.163
+            },
+            "window_p95_ms": {
+              "minimum": 57.544,
+              "median": 75.72749999999999,
+              "maximum": 2434.338
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-03-auto-fixed",
+              "window": 8,
+              "p99_ms": 2993.427
+            }
+          },
+          "capture_to_ack": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5885,
+            "window_p50_ms": {
+              "minimum": 59.727,
+              "median": 91.443,
+              "maximum": 111.107
+            },
+            "window_p95_ms": {
+              "minimum": 81.396,
+              "median": 123.453,
+              "maximum": 2474.898
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-03-auto-fixed",
+              "window": 8,
+              "p99_ms": 3022.526
+            }
+          }
+        },
+        "viewer": {
+          "decode_path_total": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5883,
+            "window_p50_ms": {
+              "minimum": 18.349,
+              "median": 31.101,
+              "maximum": 38.837
+            },
+            "window_p95_ms": {
+              "minimum": 22.116,
+              "median": 40.933499999999995,
+              "maximum": 41.852
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-07-auto-fixed",
+              "window": 11,
+              "p99_ms": 42.371
+            }
+          },
+          "vaapi_decode_call": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5883,
+            "window_p50_ms": {
+              "minimum": 0.537,
+              "median": 0.7555000000000001,
+              "maximum": 0.837
+            },
+            "window_p95_ms": {
+              "minimum": 0.653,
+              "median": 0.898,
+              "maximum": 0.942
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-02-auto-fixed",
+              "window": 1,
+              "p99_ms": 0.987
+            }
+          },
+          "vaapi_download": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5883,
+            "window_p50_ms": {
+              "minimum": 5.938,
+              "median": 9.05,
+              "maximum": 10.247
+            },
+            "window_p95_ms": {
+              "minimum": 6.776,
+              "median": 10.8005,
+              "maximum": 11.79
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-07-auto-fixed",
+              "window": 7,
+              "p99_ms": 12.501
+            }
+          },
+          "yuv_to_rgb": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5883,
+            "window_p50_ms": {
+              "minimum": 10.645,
+              "median": 19.1655,
+              "maximum": 25.652
+            },
+            "window_p95_ms": {
+              "minimum": 13.243,
+              "median": 27.012999999999998,
+              "maximum": 27.202
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-06-auto-fixed",
+              "window": 7,
+              "p99_ms": 27.631
+            }
+          },
+          "rgb_copy": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5883,
+            "window_p50_ms": {
+              "minimum": 1.133,
+              "median": 1.5590000000000002,
+              "maximum": 1.987
+            },
+            "window_p95_ms": {
+              "minimum": 1.385,
+              "median": 3.0465,
+              "maximum": 3.161
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-06-auto-fixed",
+              "window": 3,
+              "p99_ms": 3.194
+            }
+          },
+          "decode_queue": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          },
+          "presentation_queue": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5884,
+            "window_p50_ms": {
+              "minimum": 0.104,
+              "median": 0.1475,
+              "maximum": 0.17
+            },
+            "window_p95_ms": {
+              "minimum": 0.178,
+              "median": 0.2195,
+              "maximum": 0.25
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-02-auto-fixed",
+              "window": 2,
+              "p99_ms": 0.29
+            }
+          },
+          "presentation_completion": {
+            "windows_with_samples": 48,
+            "recent_samples_in_windows": 5884,
+            "window_p50_ms": {
+              "minimum": 8.659,
+              "median": 14.6195,
+              "maximum": 18.801
+            },
+            "window_p95_ms": {
+              "minimum": 10.333,
+              "median": 22.484,
+              "maximum": 36.019
+            },
+            "largest_window_p99": {
+              "case": "readback-1440p-07-auto-fixed",
+              "window": 10,
+              "p99_ms": 40.196
+            }
+          },
+          "native_submit": {
+            "windows_with_samples": 0,
+            "recent_samples_in_windows": 0,
+            "window_p50_ms": null,
+            "window_p95_ms": null,
+            "largest_window_p99": null
+          }
+        }
+      }
+    }
+  },
+  "method": "Unique content is counted in an exact 60-second observer interval after warmup. Capture statistics describe window p50 and p95 values, not pooled frame quantiles. Invalid, failed and retried attempts are retained with raw artifact paths. Per-arm statistics use the first valid result for each planned position.",
+  "link_notes": [
+    "readback-1440p-link-before.txt",
+    "readback-1440p-link-after.txt"
+  ],
+  "build": {
+    "features": [
+      "remote-x11",
+      "remote-wayland",
+      "remote-h264"
+    ],
+    "profile": "release, locked, no default features",
+    "working_tree_base": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "host_binary_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+    "viewer_binary_sha256": "5e1951ed8bbc23f41db5b5918931d91a37baa1e9fa213c8ef9067a214a1511e5"
+  },
+  "date": "2026-11-21",
+  "archive": {
+    "path": "x11-native-1440p-readback-abba-raw.zip",
+    "sha256": "55bb7e6b639164ee343848da4597930509379f9ce349c6e52745fa9b2c050ab2",
+    "entries": {
+      "fixture/benchmark.py": "ea833e8a8c1dd120145a1276ada60678a028e45b421a4f92c856629f4599edbb",
+      "fixture/source.py": "f71c60e20a755e598f813a572bfc5ebe9cd4141374197f51ce3f08d202b2a153",
+      "fixture/processes.py": "bcaf5dd5c6982f2180ad5c38cbc198acafe0360875913f37a151daf6adbd0717",
+      "fixture/run-1440-after-candidate-pilots.sh": "b5889cd98238b2527fddbd6ede14c04901cc62795952ca3a612fdd6b60f57d6d",
+      "fixture/finalize_abba.py": "1708f31e4a001459de567309e734c85edba4274a11c8b49e911ffc0427f19e0b",
+      "fixture/stages.py": "325f4821b950f4742e3c3f9dfa8ed460c8a5968b037443171144519a1059854c",
+      "fixture/p09-workload.c": "47f6fd3ad8606673e78680846dad7b749598238153e9abddf328d2cdea89e06e",
+      "run/readback-1440p-link-before.txt": "4e066eb5d36338e92acb4584dcdcbeb6991651e93e2aecf59277166020b10c50",
+      "run/readback-1440p-link-after.txt": "586f8d6096a56e67454cf2092cb26ba71bf4a91ff5b474cd3fa8b952eb138c83",
+      "run/readback-1440p-01-cpu-fixed/result.json": "35cbcdd352428ca711c16f766e120a2b1884fd546bb62f6fff42288b3d02001c",
+      "run/readback-1440p-01-cpu-fixed/observed.jsonl": "08165863b03e840b76a70a062141e4921771ca8ddfe6a5f9e2ee1c48d05c43e8",
+      "run/readback-1440p-01-cpu-fixed/viewer-clock.jsonl": "8a22bbb11b226d76009b04652810cd82b57ea0cf22cbf9800f9802405d9b319c",
+      "run/readback-1440p-01-cpu-fixed/retained-host.jsonl": "1129e20a7a4ec34fa8db788ec8a6776a5715c0944d1479ac840e4dabd35cc613",
+      "run/readback-1440p-01-cpu-fixed/retained-viewer.jsonl": "743bfd13f0625f8a288776be46fc145f45e5bbc62bb18dd667db50babe23e2ff",
+      "run/readback-1440p-01-cpu-fixed/retained-markers.jsonl": "7397673c8a14ed358d841511255a5fea22aee35b502a35028b88fc36bde8b0a6",
+      "run/readback-1440p-01-cpu-fixed/remote/paint.jsonl": "771a3151e9705e3c9bb337c12d368d2b09fc9efaa4859b0ac815945bebd5ded3",
+      "run/readback-1440p-01-cpu-fixed/viewer.log": "137f1146a44852e5f48b423a08316e4dac8ed07e22f6de9970347c4da35cdff6",
+      "run/readback-1440p-01-cpu-fixed/remote/host.log": "3d68d4494b2a561684fc6887ee10e1ee53759b195bedc68948db711176deff53",
+      "run/readback-1440p-01-cpu-fixed/observer-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-01-cpu-fixed/remote/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-02-auto-fixed/result.json": "38fecf24759770f09c1253ae2b4a5e8cdc6d1c94b6e3ca7ca889dbc10dbfc973",
+      "run/readback-1440p-02-auto-fixed/observed.jsonl": "1f620be006b50a049cca43eaf6548eebfc3da7df6c1a11948d7ac803036a05d8",
+      "run/readback-1440p-02-auto-fixed/viewer-clock.jsonl": "34faeae73095f1022b1b93277cb59d3155ebb19c964fe5417f33285dbf021c8e",
+      "run/readback-1440p-02-auto-fixed/retained-host.jsonl": "59af28c1484519e40b4c82d64e72a3f33e35175f68fbfc41b7e836beaf1e3b8a",
+      "run/readback-1440p-02-auto-fixed/retained-viewer.jsonl": "5baf12e1bca97302e461b48697b7edd25fb088eb6f13cbea21446e2044781520",
+      "run/readback-1440p-02-auto-fixed/retained-markers.jsonl": "046a78ab7586c07fd238c891e1ca59ce3b2d2c8ad443fea32ee3037162edfe56",
+      "run/readback-1440p-02-auto-fixed/remote/paint.jsonl": "7ebbbd81ef542f32de27ed714abc47195c5f064ab7549a56596c02b95650e5d8",
+      "run/readback-1440p-02-auto-fixed/viewer.log": "dc4790737add8fc88b03cb55ee22e296c01e6f52dea842a49911d124fa066072",
+      "run/readback-1440p-02-auto-fixed/remote/host.log": "4b15fc03644a67421c98cce55766339dd1c9b8db76b305eb9e54dae28b54a270",
+      "run/readback-1440p-02-auto-fixed/observer-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-02-auto-fixed/remote/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-03-auto-fixed/result.json": "ff41aee7597566e1651c56510514d2717631c09c89703a68d9d762a4c5eb1264",
+      "run/readback-1440p-03-auto-fixed/observed.jsonl": "f6be6c56ab38c088af6fd712983fa1152e855fa447f198b6a61af52e5e9a3f5b",
+      "run/readback-1440p-03-auto-fixed/viewer-clock.jsonl": "047079cac7f014819e91fff6bf2651804041b7a62ed7e0f29b68231a3709282c",
+      "run/readback-1440p-03-auto-fixed/retained-host.jsonl": "3dba71a742c6858e9f7509a0af768a4598f5415021e262e0682bd2ee943cbaad",
+      "run/readback-1440p-03-auto-fixed/retained-viewer.jsonl": "90dffe3a036287a9406d273e40f0cd743a0a95945479ea3f12d833f871357c52",
+      "run/readback-1440p-03-auto-fixed/retained-markers.jsonl": "2753e444ca72ac41b89a9e32120fe83cde18b26248681c837b9e2b86bca36a04",
+      "run/readback-1440p-03-auto-fixed/remote/paint.jsonl": "bf532eb95be3bff4b79076e901fabea36b552f1d0c9f0a3d56e664cd1db87734",
+      "run/readback-1440p-03-auto-fixed/viewer.log": "95e238e35f31914c819fbead0cbf1f2f8c22774253807a28aad3ace3cfa24dcd",
+      "run/readback-1440p-03-auto-fixed/remote/host.log": "6226fbc5450194448c0eaab0a7a64bf189cb6d8f6d020bc1d794624c6bf15737",
+      "run/readback-1440p-03-auto-fixed/observer-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-03-auto-fixed/remote/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-04-cpu-fixed/result.json": "35c60968b90d51aa4e3a9ff764b0cdb0daee2d5c9401824f1e632e158f859671",
+      "run/readback-1440p-04-cpu-fixed/observed.jsonl": "8df1b580f1229c305007d61d0e3a8fd71bb2024e5fef25189e1530db2fbf448f",
+      "run/readback-1440p-04-cpu-fixed/viewer-clock.jsonl": "dafec259fb52d5763e684d6d287ec59544c12f551344ec2ccf75fb06e7b8ec9a",
+      "run/readback-1440p-04-cpu-fixed/retained-host.jsonl": "9f54c5ed65585e3e0db28bed3df3c8c78cebec2090a6ac163336ecbfd1c1fec8",
+      "run/readback-1440p-04-cpu-fixed/retained-viewer.jsonl": "909f173aa3dced7374186eda2612967e256134a79d6377cfa3db6f65beee6f84",
+      "run/readback-1440p-04-cpu-fixed/retained-markers.jsonl": "0ce36e42f073a4fc384575208607825c5cf26ad3882fdeffcdec65ad1490b50d",
+      "run/readback-1440p-04-cpu-fixed/remote/paint.jsonl": "b109164f6509ab31244195cb5e5f4da07446811d18dc842070f1ed63d67d329b",
+      "run/readback-1440p-04-cpu-fixed/viewer.log": "9044b3a9313b77dc2db91e5cc3a96ba945fe8cbcb90d1ddd2af8f7d835596da3",
+      "run/readback-1440p-04-cpu-fixed/remote/host.log": "01943188d96648b6cb092934573b63803d8b717428b7c4d0da4507204f3fa01a",
+      "run/readback-1440p-04-cpu-fixed/observer-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-04-cpu-fixed/remote/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-05-cpu-fixed/result.json": "985f6dea48c3b34fc3caa56d7d00eae04551f11ad12d99e3b867d9022300bfe0",
+      "run/readback-1440p-05-cpu-fixed/observed.jsonl": "1a5f87ed698abc06f67c8cc27992b10f22001919a3fc73972fdc4fdee7f0dcae",
+      "run/readback-1440p-05-cpu-fixed/viewer-clock.jsonl": "64330dccef6518b8e7a5da7921c4bbdf6694911925667c6db6d9437f1f5ff4df",
+      "run/readback-1440p-05-cpu-fixed/retained-host.jsonl": "06b90ccad0ee1688152ed9d8b1953160a53e26c0624d772e8b312d6dff7cbafb",
+      "run/readback-1440p-05-cpu-fixed/retained-viewer.jsonl": "467e1b6e56d943b82ac6387e61444c92fab46206f18b2c3fd0396e838dcac7c7",
+      "run/readback-1440p-05-cpu-fixed/retained-markers.jsonl": "2b925157ccf864fbfaae9f1f1bab5a3841e1d21906043d8d85c54d40cc3b1a09",
+      "run/readback-1440p-05-cpu-fixed/remote/paint.jsonl": "4f8f25a8c759d7317c3d0f0a35f5a86637b0292edda33199c7fad3f863faef09",
+      "run/readback-1440p-05-cpu-fixed/viewer.log": "90e636ad377fb0cc8e3415641e00863ada196e9e8540f5d872cf925c69fa4550",
+      "run/readback-1440p-05-cpu-fixed/remote/host.log": "0459c06846289036e56d3ec5c1622fc0ac5673a21ed6cff8ee4dba5198d06682",
+      "run/readback-1440p-05-cpu-fixed/observer-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-05-cpu-fixed/remote/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-06-auto-fixed/result.json": "4a56c20873805d9b017e612521cd917c1f92221e743a82c95a52d09d912d74d9",
+      "run/readback-1440p-06-auto-fixed/observed.jsonl": "60115ab507df9ca7de5d0da3488307d800f74a8ac7e3cbd9c7c9757c76bbbc8e",
+      "run/readback-1440p-06-auto-fixed/viewer-clock.jsonl": "e7c2b8dc0a7b17e0437768075b0c7bde68b29057034e007289b37b31182ab093",
+      "run/readback-1440p-06-auto-fixed/retained-host.jsonl": "6d0cdede473edc51133b1a9ea880bdb4e023daa13c70b1e9e01f1640ec817451",
+      "run/readback-1440p-06-auto-fixed/retained-viewer.jsonl": "d437e545e99fc892735f8fea52750894f10d16fbc8ce9e9d24c4f63ed6a3acf4",
+      "run/readback-1440p-06-auto-fixed/retained-markers.jsonl": "8e854802beda37c6b285b7291658849544fbba1f37aa0d9d266b9f64be4b6ee1",
+      "run/readback-1440p-06-auto-fixed/remote/paint.jsonl": "946bc9d43d0d1becf6fa77f49ef462e66a4c7218d8ba0181d446881aa0b881bf",
+      "run/readback-1440p-06-auto-fixed/viewer.log": "67dee23c5082bde8718b47d197b5ff347e5815030e2142f847832ec4bb3ce994",
+      "run/readback-1440p-06-auto-fixed/remote/host.log": "2fce38f75d21a1cc58df107f209927ea6f5927ae34ded7b4767e28e13c9dcac9",
+      "run/readback-1440p-06-auto-fixed/observer-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-06-auto-fixed/remote/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-07-auto-fixed/result.json": "2e3902ccaeccc0fce65cb2b2c47d683eb39c4182afb9fb471733605fe98534ef",
+      "run/readback-1440p-07-auto-fixed/observed.jsonl": "78e38606c5c6f2117924c487758b3173b0526689d2687967f24705d6f9105ac7",
+      "run/readback-1440p-07-auto-fixed/viewer-clock.jsonl": "a2d55868fd5564fd41600c0c0c5dbb4eff6dfbc0f1aed4c58f99d47609f90638",
+      "run/readback-1440p-07-auto-fixed/retained-host.jsonl": "02eeb6de1da1d7f976016fb0d39532db23cfa48c8f1e3ab764a6a4e1b6937bab",
+      "run/readback-1440p-07-auto-fixed/retained-viewer.jsonl": "fddce9558b9972a4445731a5e6a573fed79cb7ad43d5f45c957562370333b489",
+      "run/readback-1440p-07-auto-fixed/retained-markers.jsonl": "5c212d64effdac9f7a198d009777eb95d46658029ac920fd53bd13f1ff81d335",
+      "run/readback-1440p-07-auto-fixed/remote/paint.jsonl": "30d19fcd3edc8d00e1a034e948d49b5f34db810904fe883841e3e2970a4fecce",
+      "run/readback-1440p-07-auto-fixed/viewer.log": "5aafad623098e94add44e6391f5031c89dd7da7cbf88ed9ed3e786c5384dfd42",
+      "run/readback-1440p-07-auto-fixed/remote/host.log": "b16d436ed482c1571346d66185c29a94757e6c493396e974f374ee38a902c4db",
+      "run/readback-1440p-07-auto-fixed/observer-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-07-auto-fixed/remote/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-08-cpu-fixed/result.json": "adb1f2af15193856a437598c55db27cca9d8a72783223b6ca6d67ba4355b8d99",
+      "run/readback-1440p-08-cpu-fixed/observed.jsonl": "7e21226489f428cf3d014852bda757c8445b91be5bb73f0443067112c40aacfd",
+      "run/readback-1440p-08-cpu-fixed/viewer-clock.jsonl": "22351384d9b5fef9c98587549e2f0cb974276532d67e1ab4cdd6695f21e5a61b",
+      "run/readback-1440p-08-cpu-fixed/retained-host.jsonl": "9fdcfbe0cfeec12718848c1bb390872e1cc821f4fb68fd170dc05557f44385fc",
+      "run/readback-1440p-08-cpu-fixed/retained-viewer.jsonl": "1c3cca6357960b04c9424c953b4b4db43056298c4eb8db5166fb57a401623384",
+      "run/readback-1440p-08-cpu-fixed/retained-markers.jsonl": "2e987a942945927d5044690f461609cbf8a7980a04a57e543db2523a112adc8b",
+      "run/readback-1440p-08-cpu-fixed/remote/paint.jsonl": "3e6dead5f73c08e2b65d1d0f3e41d6477123808a2d8f4014f2ff94091d936c55",
+      "run/readback-1440p-08-cpu-fixed/viewer.log": "0fe568f95a0211a4250d2fa80d00dbc4e87806c0cf044671604cf3abe7abeeb4",
+      "run/readback-1440p-08-cpu-fixed/remote/host.log": "82af71f46e8704e59fd14ca10e84342cc1fc6c3e77afcab87e5d1b627530277f",
+      "run/readback-1440p-08-cpu-fixed/observer-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "run/readback-1440p-08-cpu-fixed/remote/paint-stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

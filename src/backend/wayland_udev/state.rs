@@ -388,6 +388,8 @@ pub struct JwmWaylandState {
 
     pub dmabuf_state: DmabufState,
     pub dmabuf_global: Option<DmabufGlobal>,
+    #[cfg(test)]
+    pub(crate) reject_test_dmabuf_import: bool,
     /// DRM device node (dev_t) backing the renderer, and the renderable dmabuf
     /// formats. Captured when the dmabuf global is created so the
     /// ext-image-copy-capture session can advertise dmabuf buffers to clients.
@@ -509,6 +511,9 @@ pub struct JwmWaylandState {
 
     /// KMS-backed outputs currently available for mapping layer surfaces.
     pub outputs: Vec<Output>,
+
+    /// Confirmed KMS output power modes and per-output protocol controls.
+    pub(crate) output_power: crate::backend::wayland_udev::output_power::OutputPowerState,
 
     /// Runtime bind counters for JWM-owned Wayland globals. Smithay-managed
     /// core globals are not counted here; this tracks the custom desktop,
@@ -1495,6 +1500,11 @@ delegate_dispatch2!(JwmWaylandState);
 // ---------------------------------------------------------------------------
 impl PointerConstraintsHandler for JwmWaylandState {
     fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if crate::backend::wayland_udev::remote_control::defer_drag_confinement(
+            self, surface, pointer,
+        ) {
+            return;
+        }
         crate::backend::wayland_udev::remote_popup::revoke(
             self,
             crate::backend::wayland_udev::remote_popup::SEAT,
@@ -3710,6 +3720,8 @@ impl JwmWaylandState {
 
                 dmabuf_state,
                 dmabuf_global: None,
+                #[cfg(test)]
+                reject_test_dmabuf_import: false,
                 dmabuf_main_device: None,
                 dmabuf_render_formats: Vec::new(),
 
@@ -3773,6 +3785,7 @@ impl JwmWaylandState {
                 layer_keyboard_restore: HashMap::new(),
 
                 outputs: Vec::new(),
+                output_power: Default::default(),
                 protocol_bind_counts: HashMap::new(),
                 pending_output_acks: std::collections::VecDeque::new(),
                 soft_disabled_outputs: HashSet::new(),
@@ -5222,6 +5235,11 @@ impl DmabufHandler for JwmWaylandState {
         _dmabuf: Dmabuf,
         notifier: ImportNotifier,
     ) {
+        #[cfg(test)]
+        if self.reject_test_dmabuf_import {
+            notifier.failed();
+            return;
+        }
         // Create the wl_buffer resource for the client. The actual renderer import happens
         // later when rendering the surface (via RendererSurfaceState).
         let _ = notifier.successful::<JwmWaylandState>();

@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-21",
+  "scope": "Single unscored 4K native Wayland phase diagnostic with real P09 drawn markers.",
+  "result": {
+    "source_artifact": "P09 moving markers on an owned Ubuntu Xvfb",
+    "scope": "Isolated actual 4K H.264 native Intel Wayland with uncapped SSH",
+    "diagnostic_only": true,
+    "run_id": 86,
+    "warmup_seconds": 10,
+    "requested_observe_seconds": 18,
+    "unique_markers": 660,
+    "scored_unique_markers": 412,
+    "unique_markers_per_second": 22.88888888888889,
+    "longest_gap_ms": 414.464,
+    "source_submitted_frames_per_second": 60.03344177835952,
+    "source_qualified_for_30_fps_request": true,
+    "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "viewer_binary_sha256": "4d67e932484edf4e7770b9833367e8ce4c518c0f0188fee7235403b0e0328913",
+    "viewer_test_binary_sha256": "8fec3c61add3b1a1189d9646d6addad2fb5ada8a995eea548c755f5aa7ab61de",
+    "observer_start": {
+      "backend": "private-wayland-dmabuf",
+      "height": 2160,
+      "monotonic_ns": 54030887817793,
+      "render_node_device": 57984,
+      "roi": [
+        16,
+        16,
+        96,
+        96
+      ],
+      "roi_bytes": 36864,
+      "role": "observer",
+      "run_id": 86,
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "cd1c9fc63e0fdea04d850f0a60f306fb",
+        "source_epoch": 1
+      },
+      "score_end_ns": 54058887817793,
+      "score_start_ns": 54040887817793,
+      "type": "p09_start",
+      "width": 3840
+    },
+    "observer_end": {
+      "duplicates": 0,
+      "interrupted": false,
+      "invalid": 0,
+      "longest_scored_gap_ns": 414464000,
+      "monotonic_ns": 54058888423946,
+      "reads": 766,
+      "reordered": 0,
+      "role": "observer",
+      "run_id": 86,
+      "scope": {
+        "geometry_epoch": 2,
+        "session_id": "cd1c9fc63e0fdea04d850f0a60f306fb",
+        "source_epoch": 1
+      },
+      "score_end_ns": 54058887817793,
+      "score_start_ns": 54040887817793,
+      "scored_unique": 412,
+      "target_lost": false,
+      "type": "p09_end",
+      "unique": 660,
+      "wrong_run": 0
+    },
+    "host_h264_frames": 768,
+    "host_drawn_acks": 766
+  },
+  "phase_diagnostic": {
+    "diagnostic_only": true,
+    "marker_scope": {
+      "geometry_epoch": 2,
+      "session_id": "cd1c9fc63e0fdea04d850f0a60f306fb",
+      "source_epoch": 1
+    },
+    "extent": [
+      3840,
+      2160
+    ],
+    "codec": "H.264",
+    "presentation": "wayland-vaapi-dmabuf",
+    "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "viewer_binary_sha256": "4d67e932484edf4e7770b9833367e8ce4c518c0f0188fee7235403b0e0328913",
+    "observer_binary_sha256": "8fec3c61add3b1a1189d9646d6addad2fb5ada8a995eea548c755f5aa7ab61de",
+    "matching_scored_roi_markers": 412,
+    "observer_interval_monotonic_ns": [
+      54040887817793,
+      54058887817793
+    ],
+    "raw_windows": 7,
+    "managed_metric_snapshots": 8,
+    "matched_distinct_raw_windows": 7,
+    "matched_whole_observer_windows": 2,
+    "matched_whole_coverage_seconds": 10.004163468,
+    "hardware_rgb_download_observations_all_raw_windows": 0,
+    "native_wayland_stages": {
+      "va_surface_wait_ms": {
+        "windows": 2,
+        "observations": 229,
+        "median_window_p50_ms": 4.252,
+        "window_p95_range_ms": [
+          5.735,
+          5.774
+        ]
+      },
+      "va_frame_export_ms": {
+        "windows": 2,
+        "observations": 229,
+        "median_window_p50_ms": 0.0245,
+        "window_p95_range_ms": [
+          0.03,
+          0.03
+        ]
+      },
+      "rgb_target_allocation_ms": {
+        "windows": 2,
+        "observations": 229,
+        "median_window_p50_ms": 13.4985,
+        "window_p95_range_ms": [
+          14.143,
+          14.153
+        ]
+      },
+      "egl_prepare_and_submit_ms": {
+        "windows": 2,
+        "observations": 229,
+        "median_window_p50_ms": 0.222,
+        "window_p95_range_ms": [
+          0.26,
+          0.275
+        ]
+      },
+      "egl_fence_wait_ms": {
+        "windows": 2,
+        "observations": 229,
+        "median_window_p50_ms": 16.3165,
+        "window_p95_range_ms": [
+          16.548,
+          16.576
+        ]
+      },
+      "wayland_dmabuf_import_ms": {
+        "windows": 2,
+        "observations": 229,
+        "median_window_p50_ms": 0.9225,
+        "window_p95_range_ms": [
+          1.398,
+          1.527
+        ]
+      }
+    },
+    "scope_note": "Raw viewer and managed clock arrivals belong to the observer machine. Whole-window boundaries are estimated from viewer stderr receipt and the reported duration. No timestamp subtraction across endpoints. Stage quantiles describe the recent samples in each raw viewer window."
+  },
+  "matched_windows": [
+    {
+      "viewer_receive_start_estimate_monotonic_ns": 54045847317758,
+      "viewer_receive_end_monotonic_ns": 54050850999738,
+      "native_session_snapshot_arrival_monotonic_ns": 54050919413347,
+      "session_id": "cd1c9fc63e0fdea04d850f0a60f306fb",
+      "window_seconds": 5.00368198,
+      "last_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          3840,
+          2160
+        ],
+        "geometry_epoch": 2,
+        "sequence": 603,
+        "source_dimensions": [
+          3840,
+          2160
+        ],
+        "source_epoch": 1
+      },
+      "native_presented": 125,
+      "acked": 125
+    },
+    {
+      "viewer_receive_start_estimate_monotonic_ns": 54050850876804,
+      "viewer_receive_end_monotonic_ns": 54055851358292,
+      "native_session_snapshot_arrival_monotonic_ns": 54055929076399,
+      "session_id": "cd1c9fc63e0fdea04d850f0a60f306fb",
+      "window_seconds": 5.000481488,
+      "last_frame": {
+        "codec": "H.264",
+        "encoded_dimensions": [
+          3840,
+          2160
+        ],
+        "geometry_epoch": 2,
+        "sequence": 706,
+        "source_dimensions": [
+          3840,
+          2160
+        ],
+        "source_epoch": 1
+      },
+      "native_presented": 105,
+      "acked": 105
+    }
+  ],
+  "repository_workload_parser": {
+    "scope": "Full raw session. It includes startup and final windows outside the matched ROI slice.",
+    "host_windows": 7,
+    "viewer_windows": 7,
+    "matched_sessions": 1,
+    "native_wayland_stage_names": [
+      "egl_fence_wait_ms",
+      "egl_prepare_and_submit_ms",
+      "rgb_target_allocation_ms",
+      "va_frame_export_ms",
+      "va_surface_wait_ms",
+      "wayland_dmabuf_import_ms"
+    ],
+    "hardware_download_observations": 0,
+    "archive_member": "reports/repository-workload-parser-full-session.json"
+  },
+  "provenance": {
+    "trial": {
+      "run_id": 86,
+      "warmup_seconds": 10,
+      "observed_seconds": 18,
+      "extent": [
+        3840,
+        2160
+      ],
+      "render_node": "/dev/dri/renderD128"
+    },
+    "source": {
+      "path": "Ubuntu private Xvfb root with Auto scaling and MIT-SHM readback",
+      "codec": "H.264 NVENC fixed 30 FPS",
+      "painter_target_fps": 60,
+      "parallel_yuv420_host": true,
+      "transport": "uncapped OpenSSH forward"
+    },
+    "build": {
+      "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+      "host_binary_reference": "Previously pinned resolution candidate and scored P09 Wayland host.",
+      "viewer_binary_sha256": "4d67e932484edf4e7770b9833367e8ce4c518c0f0188fee7235403b0e0328913",
+      "viewer_profile": "Cargo release, locked, no default features",
+      "viewer_features": [
+        "remote-x11",
+        "remote-wayland",
+        "remote-h264"
+      ],
+      "viewer_selected_release_source_sha256": {
+        "Cargo.toml": "3f92e16e8e92633965fc783bf194420c49e01c923439e801421d4f3b9e8f250e",
+        "Cargo.lock": "511b8202d2d5793e5eac4c409d8cfcd0a512d5d4bb1cb212e5e28420e53a3eec",
+        "src/remote/gpu_present.rs": "4f769cf877dcd9573eb5bacde17b809aa9f5bc87a5f862386d5285841bbc470e",
+        "src/remote/wayland_viewer_gpu.rs": "879925da737af5e026cf14f5e58d3b106844caf8b58daac6a207e4af0199ffd6",
+        "src/remote/client_native_video.rs": "6c07b24a4debf0b41562f5dd3591438981b4253fff8c399e2b8e142edba2334a",
+        "src/remote/client.rs": "5c4fd2f3f777de7bf6bc7e8a1478a5c0c6caa21f0de1aaecdabd9dca3745936d",
+        "src/remote/telemetry.rs": "6710ecdcc9b197fe5cb6c1db624b50dfd6516bf2d139877a8caff99d7e07f3de",
+        "tools/jwm_remote_session.rs": "820045fecb43b5bee4eb2d5b22f981f95f25ccaec0d4bee00509d669697ef717"
+      },
+      "observer_binary_sha256": "8fec3c61add3b1a1189d9646d6addad2fb5ada8a995eea548c755f5aa7ab61de",
+      "observer_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "observer_features": [
+        "backend-wayland-udev",
+        "remote-h264",
+        "remote-wayland",
+        "remote-x11",
+        "wayland-backends"
+      ],
+      "observer_test_selector": "remote::host::wayland_viewer_integration::host_control_integration::cli_process_integration::source_switching::gpu_4k::marker::native_cli_wayland_gpu_viewer_observes_p09_4k_marker"
+    },
+    "runtime_fixture": {
+      "viewer_command": "session --viewer-backend wayland --window-size 3840x2160 --scaling gpu --stats-json",
+      "launcher_digest_note": "The release viewer, observer, and wrapper are separate. Source launcher archive copies replace the private workstation checkout and configured SSH peer with explicit environment variables.",
+      "preflight_original_sha256": "d599ab7324a8de187ab17c3e61c48eba32c4f82c85a2f3a7477d0fa114a4572c",
+      "run_phase_original_sha256": "1eda6198322d7036be9e2e579195c7ac41772df34dbfbc1556a64b088f56a26a",
+      "viewer_stderr_wrapper_sha256": "ac2854e16165615a12eb485947492b73bc240250539aaf3be0ad92c71283744c",
+      "validator_sha256": "03e991464140c037855dbd61acbc6c62c12448b4fb07b060cf700cc3a7ff7a3b",
+      "workload_parser_sha256": "22b31d176f35e58003890dee55ff18affb24183a8e7e0351368308db07cdc45d"
+    },
+    "offline_revalidation": {
+      "raw_phase_validator": "Regenerated byte-identical phase result and matched-window JSONL from retained files.",
+      "repository_workload_parser": "read_windows and read_viewer_windows accepted mixed stderr, and summarize_viewer paired both endpoints. A P09 diagnostic workload label is kept because it is outside the CLI workload choices."
+    }
+  },
+  "archive": {
+    "path": "native-wayland-4k-phase-diagnostic-raw.zip",
+    "sha256": "890ac28af431ceb9dc4f6bee82138cf0fe210e5ffd5876f65846fa4630fcdfd9",
+    "entries": {
+      "trace/result.json": "1caf306b6a74f4184c4912dbc7ee34fc6c74b1530cd8445042b8bfb4905c6c4b",
+      "trace/phase-diagnostic.json": "f23345fe2b924b4c1b8b0d2c23635016daf62c136abb8064a3557397116b03af",
+      "trace/matched-native-windows.jsonl": "4d12d20f6cb57bcc9b44dcafcab60841c9c326d82fffba1b35f86929fda56985",
+      "trace/marker-test.log": "50238d72a3e4dab93d8f0a21036c892990c581b82ad82e2e08cc0db892d3ae78",
+      "trace/source/host.log": "30511d85713840497ae5be681b563384ee7c6d138fb69736b907a607ad556130",
+      "trace/source/paint.jsonl": "f188e33512660f403db7ff844e457a17e2eb2bd47bcb6d5adf6a48703cd7526d",
+      "trace/viewer/observed.jsonl": "568b35c1d103a2bf16a0d2e434edac1022c8620cf60a4826b2faf85f26646563",
+      "trace/viewer/viewer-clock.jsonl": "ac6cbff83342f2065c4d4eaef3369659bbb68a093bb7cd0758f6a8e4faa72fef",
+      "trace/viewer/viewer-events.jsonl": "3c504d02b1c26b821bda3113ad9b7fc64dfb4a63d0750368fd6fc819f333dab5",
+      "trace/viewer/viewer-stage-windows.jsonl": "c66d633cae7e46f7bde1c96ea8f97292d027b4b55694f522643bb54de9d432e7",
+      "trace/viewer/viewer-complete-stderr.log": "d9dede16014ccd60620f24a3755d533aa98d4a906f9a714578c2bc7873b108ab",
+      "trace/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "fixture/validate_phases.py": "03e991464140c037855dbd61acbc6c62c12448b4fb07b060cf700cc3a7ff7a3b",
+      "fixture/tee_stderr.py": "a6da4ec18277a78fefcf308a7b87bd04bc66ee4f547a1903b05dc91019547e79",
+      "fixture/viewer-stats-wrapper.sh": "ac2854e16165615a12eb485947492b73bc240250539aaf3be0ad92c71283744c",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/preflight.py": "3ee40871e1b030d16c807b35c45c29d3d4dcb82180f92393f17aa74dc82c55ae",
+      "fixture/provenance.json": "058d9a819e4da61b1b96ede231e1a20da4785245a005bb3bb0bbf59c0f5e630e",
+      "reports/repository-workload-parser-full-session.json": "12c332b82b22a204f8a54620ca6c5085eef06c28683941e365b2208f10d2c8a8"
+    }
+  }
+}

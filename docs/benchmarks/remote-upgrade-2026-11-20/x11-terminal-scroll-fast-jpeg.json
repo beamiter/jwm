@@ -1,0 +1,830 @@
+{
+  "schema_version": 1,
+  "scope": "Candidate-only 1080p XTerm software raster diagnostic, using JPEG Q85.",
+  "manifest": {
+    "dimensions": [
+      1920,
+      1080
+    ],
+    "codec": "JPEG",
+    "jpeg_quality": 85,
+    "requested_fps": 30,
+    "source_fps": 60,
+    "xterm_sha256": "5415c1445d44e4c347fe51e30dd8f014de7e489873cfc82fe32af628dc01d4c4",
+    "font": "10x20",
+    "grid": [
+      192,
+      54
+    ],
+    "host_a_sha256": "eed601e1919e4d3ae93ee4fea074d2243eb9bf9412af63cc1da5b42de24e6893",
+    "host_b_sha256": "f225688d4612dfe1ca008d41c45fea449d74e35ce2346200b72ef17b0b6bf21a",
+    "viewer_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+    "fixture_sha256": {
+      "dual_terminal.py": "f405085428eeae8fff1422e90d2193e868138ff55a83e99c4248d0ac1f65283d",
+      "run_baseline.py": "570efd9e7406ee8e621a8f758dd2c98fae805f394f3fc9755ed09fcfc32fcb20",
+      "terminal_scroll.py": "96a27c3d69d694e5a2187d0b257551442cea0757c149925c700090d9959c1b47",
+      "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "score.py": "69cc11fb2c4b49757a7ea8bdf6c37c1f0c6eb607282ff715e6b9a46a033056ca"
+    },
+    "reported_host_features": {
+      "A": {
+        "reported_features": {
+          "remote-x11": true,
+          "remote-wayland": false,
+          "remote-h264": false,
+          "remote-fast-jpeg": false
+        },
+        "protocol": "Local protocol: transport 3, application 35"
+      },
+      "B": {
+        "reported_features": {
+          "remote-x11": true,
+          "remote-wayland": false,
+          "remote-h264": false,
+          "remote-fast-jpeg": true
+        },
+        "protocol": "Local protocol: transport 3, application 35"
+      }
+    },
+    "pair_order": [
+      [
+        "A",
+        "B"
+      ],
+      [
+        "B",
+        "A"
+      ],
+      [
+        "A",
+        "B"
+      ]
+    ],
+    "timings_warm_score_tail_seconds": {
+      "pilot": [
+        5,
+        15,
+        8
+      ],
+      "scored": [
+        30,
+        60,
+        8
+      ]
+    },
+    "marker_tag_policy": "pilot 96, paired comparison 97\u201399 shared within each pair",
+    "pilot_only": false
+  },
+  "terminal_progress": {
+    "pilot_gate_passed": false
+  },
+  "comparison": {
+    "result_kind": "pilot-only",
+    "attempt_status_counts": {
+      "completed": 1
+    },
+    "trials": [
+      {
+        "controller": {
+          "trial": "pilot-B",
+          "arm": "B",
+          "pair": null,
+          "marker_tag": 96,
+          "timing": "pilot",
+          "host_release_sha256": "f225688d4612dfe1ca008d41c45fea449d74e35ce2346200b72ef17b0b6bf21a",
+          "status": "completed",
+          "result": {
+            "scope": "independent X11 software raster observations on separate machines over OpenSSH",
+            "source_and_requested_viewer_dimensions": [
+              1920,
+              1080
+            ],
+            "codec": "JPEG",
+            "jpeg_quality": 85,
+            "authenticated_session_ids": [
+              "4ae2c1bb95ac6009257bc98fdd0a60b0"
+            ],
+            "telemetry_complete": true,
+            "source_motion_fps": 60.0,
+            "viewer_motion_fps": 24.333333333333332,
+            "static_unchanged": true,
+            "source_qualified": true,
+            "viewer_motion_gate_met": false
+          },
+          "evidence": {
+            "arm": "B",
+            "host_release_sha256": "f225688d4612dfe1ca008d41c45fea449d74e35ce2346200b72ef17b0b6bf21a",
+            "viewer_release_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+            "marker_tag": 96,
+            "capture_routes": {
+              "static": {
+                "host": [
+                  "root/xrender/shm/no-damage/cursor-events"
+                ],
+                "viewer": [
+                  "rgb"
+                ]
+              },
+              "motion": {
+                "host": [
+                  "root/xrender/shm/no-damage/cursor-events"
+                ],
+                "viewer": [
+                  "rgb"
+                ]
+              }
+            },
+            "session_ids": [
+              "4ae2c1bb95ac6009257bc98fdd0a60b0"
+            ],
+            "viewer_motion_gap_ms": {
+              "p50": 33.353362,
+              "p95": 166.573939,
+              "max": 313.234355
+            },
+            "viewer_motion_zero_bins": 0,
+            "viewer_motion_invalid_marker_reads": 0,
+            "viewer_motion_reordered_marker_reads": 0,
+            "host_codec_p95_max_window_ms": 71.848
+          }
+        },
+        "replayed": {
+          "endpoints": {
+            "run_id": "e5f34d319876454da130aef01dff2460",
+            "host": {
+              "role": "host",
+              "kernel": "6.17.0-35-generic",
+              "cpu": "Intel(R) Core(TM) Ultra 7 270K Plus",
+              "drawable_size": [
+                1920,
+                1080
+              ],
+              "clock": "CLOCK_MONOTONIC",
+              "release_sha256": "f225688d4612dfe1ca008d41c45fea449d74e35ce2346200b72ef17b0b6bf21a",
+              "endpoint_executable_sha256": "f225688d4612dfe1ca008d41c45fea449d74e35ce2346200b72ef17b0b6bf21a",
+              "hostname_sha256": "a75835f418c0297c0d16dea175d8efbf36d8c22f385ced447ff218a9fdbc79b1",
+              "boot_id_sha256": "b77b9c1dfef9e0c0b4257bab9c5c7c08a72b9d61e3486eab8ca33960aef5c315",
+              "xterm": {
+                "sha256": "5415c1445d44e4c347fe51e30dd8f014de7e489873cfc82fe32af628dc01d4c4",
+                "version": "XTerm(390)",
+                "font": "10x20",
+                "grid": [
+                  192,
+                  54
+                ]
+              }
+            },
+            "viewer": {
+              "role": "viewer",
+              "kernel": "6.8.0-149-generic",
+              "cpu": "13th Gen Intel(R) Core(TM) i7-13650HX",
+              "drawable_size": [
+                1920,
+                1080
+              ],
+              "clock": "CLOCK_MONOTONIC",
+              "release_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "endpoint_executable_sha256": "aaa1ed44223181963b3463fb169d56c9a76b31a514f29915f7ad5d47002690a3",
+              "hostname_sha256": "18a53e5697c601294e7fe56546a0a76e0bc69474e3af537480c93aa38e049d22",
+              "boot_id_sha256": "bdd73b18b778d4d2f93ccdefe82b315bc9f828176721edc385d7fef1ffd98595"
+            }
+          },
+          "phases": {
+            "host": {
+              "static": {
+                "raster": {
+                  "unique_marker_changes": 0,
+                  "unique_content_fps": 0.0,
+                  "one_second_unique_bins": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "zero_unique_bins": 15,
+                  "scroll_changes_seen": 0,
+                  "one_second_scroll_bins": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "distinct_scroll_signatures": 1,
+                  "valid_and_invalid_sample_reads": 1350,
+                  "invalid_marker_reads": 0,
+                  "reordered_marker_reads": 0,
+                  "invalid_scroll_reads": 0,
+                  "observer_max_read_ms": 3.761369,
+                  "gap_ms": {
+                    "p50": 15000.0,
+                    "p95": 15000.0,
+                    "max": 15000.0
+                  }
+                },
+                "clock_scope": {
+                  "phase_start_monotonic_ns": 61230298127806,
+                  "score_start_monotonic_ns": 61235298127806,
+                  "score_end_monotonic_ns": 61250298127806,
+                  "telemetry_phase_end_monotonic_ns": 61258298127806,
+                  "observer_end_monotonic_ns": 61258298603148
+                },
+                "telemetry": {
+                  "whole_windows": 3,
+                  "window_seconds": 15.013685184,
+                  "session_ids": [
+                    "4ae2c1bb95ac6009257bc98fdd0a60b0"
+                  ],
+                  "routes": [
+                    "root/xrender/shm/no-damage/cursor-events"
+                  ],
+                  "frame_scopes_observed": 3,
+                  "viewer_backends": [],
+                  "frame_scopes_match_requested_jpeg": true,
+                  "first_window_end_monotonic_ns": 61244928423921,
+                  "last_window_end_monotonic_ns": 61254937896006
+                },
+                "max_recent_window_p95_ms": {
+                  "codec_ms": null,
+                  "jpeg_ms": null,
+                  "capture_ms": 7.478,
+                  "socket_write_ms": 0.13,
+                  "send_to_ack_ms": 71.6
+                },
+                "frame_epochs": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "motion": {
+                "raster": {
+                  "unique_marker_changes": 900,
+                  "unique_content_fps": 60.0,
+                  "one_second_unique_bins": [
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60
+                  ],
+                  "zero_unique_bins": 0,
+                  "scroll_changes_seen": 900,
+                  "one_second_scroll_bins": [
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60,
+                    60
+                  ],
+                  "distinct_scroll_signatures": 900,
+                  "valid_and_invalid_sample_reads": 1350,
+                  "invalid_marker_reads": 0,
+                  "reordered_marker_reads": 0,
+                  "invalid_scroll_reads": 0,
+                  "observer_max_read_ms": 3.852193,
+                  "gap_ms": {
+                    "p50": 12.65284,
+                    "p95": 22.65959,
+                    "max": 24.159256
+                  }
+                },
+                "clock_scope": {
+                  "phase_start_monotonic_ns": 61258447061396,
+                  "score_start_monotonic_ns": 61263447061396,
+                  "score_end_monotonic_ns": 61278447061396,
+                  "telemetry_phase_end_monotonic_ns": 61286447061396,
+                  "observer_end_monotonic_ns": 61286447271289
+                },
+                "telemetry": {
+                  "whole_windows": 4,
+                  "window_seconds": 20.027478869,
+                  "session_ids": [
+                    "4ae2c1bb95ac6009257bc98fdd0a60b0"
+                  ],
+                  "routes": [
+                    "root/xrender/shm/no-damage/cursor-events"
+                  ],
+                  "frame_scopes_observed": 4,
+                  "viewer_backends": [],
+                  "frame_scopes_match_requested_jpeg": true,
+                  "first_window_end_monotonic_ns": 61269952687646,
+                  "last_window_end_monotonic_ns": 61284980902270
+                },
+                "max_recent_window_p95_ms": {
+                  "codec_ms": 71.848,
+                  "jpeg_ms": 71.848,
+                  "capture_ms": 7.422,
+                  "socket_write_ms": 2.087,
+                  "send_to_ack_ms": 160.224
+                },
+                "frame_epochs": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              }
+            },
+            "viewer": {
+              "static": {
+                "raster": {
+                  "unique_marker_changes": 0,
+                  "unique_content_fps": 0.0,
+                  "one_second_unique_bins": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "zero_unique_bins": 15,
+                  "scroll_changes_seen": 0,
+                  "one_second_scroll_bins": [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                  ],
+                  "distinct_scroll_signatures": 1,
+                  "valid_and_invalid_sample_reads": 1350,
+                  "invalid_marker_reads": 0,
+                  "reordered_marker_reads": 0,
+                  "invalid_scroll_reads": 0,
+                  "observer_max_read_ms": 1.56438,
+                  "gap_ms": {
+                    "p50": 15000.0,
+                    "p95": 15000.0,
+                    "max": 15000.0
+                  }
+                },
+                "clock_scope": {
+                  "phase_start_monotonic_ns": 61312697844549,
+                  "score_start_monotonic_ns": 61317697844549,
+                  "score_end_monotonic_ns": 61332697844549,
+                  "telemetry_phase_end_monotonic_ns": 61340697844549,
+                  "observer_end_monotonic_ns": 61340698097207
+                },
+                "telemetry": {
+                  "whole_windows": 3,
+                  "window_seconds": 15.002475705999998,
+                  "session_ids": [
+                    "4ae2c1bb95ac6009257bc98fdd0a60b0"
+                  ],
+                  "routes": [
+                    "rgb"
+                  ],
+                  "frame_scopes_observed": 3,
+                  "viewer_backends": [
+                    "x11"
+                  ],
+                  "frame_scopes_match_requested_jpeg": true,
+                  "first_window_end_monotonic_ns": 61327319861404,
+                  "last_window_end_monotonic_ns": 61337321250700
+                },
+                "max_recent_window_p95_ms": {
+                  "decode_ms": 0.016,
+                  "presentation_completion_ms": 1.135
+                },
+                "frame_epochs": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              },
+              "motion": {
+                "raster": {
+                  "unique_marker_changes": 365,
+                  "unique_content_fps": 24.333333333333332,
+                  "one_second_unique_bins": [
+                    26,
+                    26,
+                    21,
+                    27,
+                    26,
+                    27,
+                    26,
+                    22,
+                    28,
+                    26,
+                    22,
+                    28,
+                    25,
+                    22,
+                    13
+                  ],
+                  "zero_unique_bins": 0,
+                  "scroll_changes_seen": 365,
+                  "one_second_scroll_bins": [
+                    26,
+                    26,
+                    21,
+                    27,
+                    26,
+                    27,
+                    26,
+                    22,
+                    28,
+                    26,
+                    22,
+                    28,
+                    25,
+                    22,
+                    13
+                  ],
+                  "distinct_scroll_signatures": 365,
+                  "valid_and_invalid_sample_reads": 1350,
+                  "invalid_marker_reads": 0,
+                  "reordered_marker_reads": 0,
+                  "invalid_scroll_reads": 0,
+                  "observer_max_read_ms": 2.892668,
+                  "gap_ms": {
+                    "p50": 33.353362,
+                    "p95": 166.573939,
+                    "max": 313.234355
+                  }
+                },
+                "clock_scope": {
+                  "phase_start_monotonic_ns": 61341090528455,
+                  "score_start_monotonic_ns": 61346090528455,
+                  "score_end_monotonic_ns": 61361090528455,
+                  "telemetry_phase_end_monotonic_ns": 61369090528455,
+                  "observer_end_monotonic_ns": 61369090682084
+                },
+                "telemetry": {
+                  "whole_windows": 4,
+                  "window_seconds": 20.002608725,
+                  "session_ids": [
+                    "4ae2c1bb95ac6009257bc98fdd0a60b0"
+                  ],
+                  "routes": [
+                    "rgb"
+                  ],
+                  "frame_scopes_observed": 4,
+                  "viewer_backends": [
+                    "x11"
+                  ],
+                  "frame_scopes_match_requested_jpeg": true,
+                  "first_window_end_monotonic_ns": 61352323490397,
+                  "last_window_end_monotonic_ns": 61367325118836
+                },
+                "max_recent_window_p95_ms": {
+                  "decode_ms": 13.702,
+                  "presentation_completion_ms": 5.087
+                },
+                "frame_epochs": [
+                  [
+                    1,
+                    2
+                  ]
+                ]
+              }
+            }
+          },
+          "static_crop": {
+            "rectangle": [
+              0,
+              20,
+              1200,
+              200
+            ],
+            "examined_pixels": 240000,
+            "green_channel_threshold": 128,
+            "source_foreground_pixels": 33416,
+            "viewer_foreground_pixels": 33416,
+            "matching_foreground_pixels": 33416,
+            "foreground_recall": 1.0,
+            "foreground_precision": 1.0,
+            "mean_absolute_green_difference": 1.65375,
+            "rgb_channel_errors": {
+              "red": {
+                "mean_absolute_difference": 1.65375,
+                "root_mean_squared_difference": 3.476915539190831,
+                "max_absolute_difference": 25,
+                "exact_equal_samples": 155876
+              },
+              "green": {
+                "mean_absolute_difference": 1.65375,
+                "root_mean_squared_difference": 3.476915539190831,
+                "max_absolute_difference": 25,
+                "exact_equal_samples": 155876
+              },
+              "blue": {
+                "mean_absolute_difference": 1.65375,
+                "root_mean_squared_difference": 3.476915539190831,
+                "max_absolute_difference": 25,
+                "exact_equal_samples": 155876
+              }
+            },
+            "exact_equal_rgb_pixels": 155876,
+            "source_initial_and_end_full_raster_identical": true
+          },
+          "snapshot_marker_and_glyph": {
+            "host/source-static.ppm": [
+              0,
+              "c2ed9cd61ee6def9"
+            ],
+            "host/source-static-end.ppm": [
+              0,
+              "c2ed9cd61ee6def9"
+            ],
+            "host/source-motion-end.ppm": [
+              1683,
+              "d4125f6d662bb191"
+            ],
+            "viewer/viewer-static.ppm": [
+              0,
+              "c2ed9cd61ee6def9"
+            ],
+            "viewer/viewer-motion-end.ppm": [
+              1695,
+              "c7ccd878318c6074"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "historical_1080p_reference": {
+    "original_report_sha256": "41df20f74228285caadd0e5330c97d273bfcafed672d5d1514b11ea16cfa7c47",
+    "original_archive_sha256": "c1349470d0225ee120ab33e0eb230ea554cd06ca0bfb43cb31c172a02e87202e",
+    "exact_formal_endpoint_phases_reproduced": 12,
+    "trials": [
+      {
+        "trial": 1,
+        "viewer_fps": 23.7,
+        "gap_ms": {
+          "p50": 33.342315,
+          "p95": 188.931862,
+          "max": 444.337169
+        },
+        "static_crop": {
+          "rectangle": [
+            0,
+            20,
+            1200,
+            200
+          ],
+          "examined_pixels": 240000,
+          "green_channel_threshold": 128,
+          "source_foreground_pixels": 33416,
+          "viewer_foreground_pixels": 33416,
+          "matching_foreground_pixels": 33416,
+          "foreground_recall": 1.0,
+          "foreground_precision": 1.0,
+          "mean_absolute_green_difference": 1.7368291666666666,
+          "rgb_channel_errors": {
+            "red": {
+              "mean_absolute_difference": 1.7368291666666666,
+              "root_mean_squared_difference": 3.572381908475072,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153370
+            },
+            "green": {
+              "mean_absolute_difference": 1.7368291666666666,
+              "root_mean_squared_difference": 3.572381908475072,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153370
+            },
+            "blue": {
+              "mean_absolute_difference": 1.7368291666666666,
+              "root_mean_squared_difference": 3.572381908475072,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153370
+            }
+          },
+          "exact_equal_rgb_pixels": 153370
+        }
+      },
+      {
+        "trial": 2,
+        "viewer_fps": 22.283333333333335,
+        "gap_ms": {
+          "p50": 33.346575,
+          "p95": 211.428367,
+          "max": 980.079947
+        },
+        "static_crop": {
+          "rectangle": [
+            0,
+            20,
+            1200,
+            200
+          ],
+          "examined_pixels": 240000,
+          "green_channel_threshold": 128,
+          "source_foreground_pixels": 33416,
+          "viewer_foreground_pixels": 33416,
+          "matching_foreground_pixels": 33416,
+          "foreground_recall": 1.0,
+          "foreground_precision": 1.0,
+          "mean_absolute_green_difference": 1.7373333333333334,
+          "rgb_channel_errors": {
+            "red": {
+              "mean_absolute_difference": 1.7373333333333334,
+              "root_mean_squared_difference": 3.5727720330298154,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153333
+            },
+            "green": {
+              "mean_absolute_difference": 1.7373333333333334,
+              "root_mean_squared_difference": 3.5727720330298154,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153333
+            },
+            "blue": {
+              "mean_absolute_difference": 1.7373333333333334,
+              "root_mean_squared_difference": 3.5727720330298154,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153333
+            }
+          },
+          "exact_equal_rgb_pixels": 153333
+        }
+      },
+      {
+        "trial": 3,
+        "viewer_fps": 23.05,
+        "gap_ms": {
+          "p50": 33.352849,
+          "p95": 199.762274,
+          "max": 489.070902
+        },
+        "static_crop": {
+          "rectangle": [
+            0,
+            20,
+            1200,
+            200
+          ],
+          "examined_pixels": 240000,
+          "green_channel_threshold": 128,
+          "source_foreground_pixels": 33416,
+          "viewer_foreground_pixels": 33416,
+          "matching_foreground_pixels": 33416,
+          "foreground_recall": 1.0,
+          "foreground_precision": 1.0,
+          "mean_absolute_green_difference": 1.73735,
+          "rgb_channel_errors": {
+            "red": {
+              "mean_absolute_difference": 1.73735,
+              "root_mean_squared_difference": 3.5726169213430463,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153318
+            },
+            "green": {
+              "mean_absolute_difference": 1.73735,
+              "root_mean_squared_difference": 3.5726169213430463,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153318
+            },
+            "blue": {
+              "mean_absolute_difference": 1.73735,
+              "root_mean_squared_difference": 3.5726169213430463,
+              "max_absolute_difference": 26,
+              "exact_equal_samples": 153318
+            }
+          },
+          "exact_equal_rgb_pixels": 153318
+        }
+      }
+    ],
+    "comparison_scope": "Historical independent JPEG sessions, outside the paired AB/BA/AB comparison."
+  },
+  "measurement_limits": [
+    "The pilot is diagnostic and excluded from the formal comparison.",
+    "Decisions use independent local clocks and the existing marker/glyph thresholds.",
+    "RGB crop compares the two 1:1 early static XTerm captures. It is a text raster diagnostic.",
+    "Each stage p95 maximum is the maximum of observed recent-window p95s, without merging quantiles.",
+    "Raw endpoint credentials, boot IDs, addresses and remote runtime paths were omitted."
+  ],
+  "archive": {
+    "file": "x11-terminal-scroll-fast-jpeg-raw.zip",
+    "sha256": "1d49c7762366d9c5e892f2456a7b2feb392c7aaf1cbfc92779a9d1bae94a8cfb",
+    "members_sha256": {
+      "fixture/dual_terminal.py": "f405085428eeae8fff1422e90d2193e868138ff55a83e99c4248d0ac1f65283d",
+      "fixture/paired.py": "c1f2afe638a2c4b06bd5fedb6295e00bcb6531b00713345c7b77f21b58279aa3",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/publish_paired.py": "dff046b9e206c7bdee99bf9325801d4e007b44efe4161b20a11e7aaacd6f7977",
+      "fixture/run_baseline.py": "570efd9e7406ee8e621a8f758dd2c98fae805f394f3fc9755ed09fcfc32fcb20",
+      "fixture/score.py": "69cc11fb2c4b49757a7ea8bdf6c37c1f0c6eb607282ff715e6b9a46a033056ca",
+      "fixture/terminal_scroll.py": "96a27c3d69d694e5a2187d0b257551442cea0757c149925c700090d9959c1b47",
+      "historical-audit.json": "450456b806d0ee276564cfd104434b7112a448e56142944464a102872cd6fd0b",
+      "manifest.json": "9fcbca445187f47171e756c35b866a86536d0ac6fe6d502776871ff4ac3632be",
+      "outcomes.json": "8682f54be524c42b8bd8147132c1e6c708a6db97f8b20f827ad4e353423b62c5",
+      "progress.json": "893af490236f6201741c72652ce6b0aa845c0f6c53ac094c9cde42933210c76c",
+      "trace/pilot-B/endpoints.json": "da382046ac69353ab5704c05e1dabb3974d406326249cec786246949a0731e05",
+      "trace/pilot-B/host-clocked-telemetry.jsonl": "14891dae48bf12dc80f564253c5f59355f85e79246dee131b3fdf417b8493c35",
+      "trace/pilot-B/motion-host.jsonl": "1159fc99442dce68d8b10d164fd4d7db933dcc02a2f598938ff67654b4d10f46",
+      "trace/pilot-B/motion-pixels.jsonl": "5b1d084083befb06e8f818d2417312fe36f380f79055bb227bb1675b373b9c2b",
+      "trace/pilot-B/motion-scope.json": "bcb843b6193ed277ae6964dd6341d7323470ad4ea4c1b1f12495bf2c37cbb3a4",
+      "trace/pilot-B/peer-events.jsonl": "dfbfa5f9d984beef8d25155f171a4ff9937172d559c720e91becaa90b3140e67",
+      "trace/pilot-B/result.json": "5e3efe379e8b0c8e9f8e46fb15107c846f75de53fcc5af1ecb2a5cecd88c58a7",
+      "trace/pilot-B/source-motion-end.ppm": "800525406c51210ad55d0323ed872ac77008b709ce2d477c7cfaeaba8f6c561e",
+      "trace/pilot-B/source-static-end.ppm": "38e4425cb7eee4225a702bd412c2eaad1c8583fc06b0cb3ab6cf166bf34e62f5",
+      "trace/pilot-B/source-static.ppm": "38e4425cb7eee4225a702bd412c2eaad1c8583fc06b0cb3ab6cf166bf34e62f5",
+      "trace/pilot-B/static-host.jsonl": "986e102716ef5c3583423ff3e916000dc9e1435218f146d74e8bddaa9267131f",
+      "trace/pilot-B/static-pixels.jsonl": "fbcc56254dcf6a165adca8a80f6b0a80e8a80031447bc20b305ee9c032cf5ae2",
+      "trace/pilot-B/static-scope.json": "36dc8ebce0fccae07f51b02e3d6fcb6f97b01a4550e5e9d4be3e6d8f53967baa",
+      "trace/pilot-B/terminal-progress.jsonl": "21986a6dd77171cd6a44c83bbbb7b1f3fa59a1ed02c8269140d74f92431e72e8",
+      "trace/pilot-B/viewer/control-in.jsonl": "91952607c791cdd095efff5436c65cf67026f5949c09c462857e919ee377176e",
+      "trace/pilot-B/viewer/final-session.json": "6f2ba38ec0148b821f56b77ef0a88a95143403f828bb28d7b291b9f0b8c62c23",
+      "trace/pilot-B/viewer/motion-pixels.jsonl": "8fd9b581b1cf6b15d40683451d518def3655dd7177763355670390706d0eb56d",
+      "trace/pilot-B/viewer/motion-scope.json": "8747380101db579b34074a4ba3e8f288f68232fd6ba7cc67357dcc9c9d64795a",
+      "trace/pilot-B/viewer/motion-viewer.jsonl": "831c366e82193fd428e3fa332211943ccdcf88e1ef5cf2e9567d35bb28ceea10",
+      "trace/pilot-B/viewer/static-pixels.jsonl": "6cc7e115536e5b51516dbdc9271d3e5b0b49bc3a627819bf79dca6d237384dd0",
+      "trace/pilot-B/viewer/static-scope.json": "9d0ccdb94d11ce37818378880ccf7e381c99df2dfd51dac8bda64bc5108a6dc2",
+      "trace/pilot-B/viewer/static-viewer.jsonl": "b17dbcfbf41933998cb63fd777bd019fe80ace4c387e364781296735c4d6d167",
+      "trace/pilot-B/viewer/viewer-clocked-telemetry.jsonl": "1ecfe20d1b4ec57c1b8227de50b824fd22e7c34cffab6c381ccbdbb8da7f1550",
+      "trace/pilot-B/viewer/viewer-motion-end.ppm": "58d83b7c52e7c7f6ae72ebcd26719ed3016adcb743512d884119bb8c7eba56d3",
+      "trace/pilot-B/viewer/viewer-static.ppm": "7537edc7ff184d155df6737842f5ecd3cb7c93ef44cb08c8a5e90a50c5e20d42",
+      "build/run.sh": "f42d6859a3cd39978a2b2b04ea914fe474b78ee3d653e93fd00938892b2a0115",
+      "build/head.txt": "4e58230cfa9c9ea96d591b9d0a32912d669ed09bc4fbaf023d3b3ec00cc14a0b",
+      "build/rustc-version.txt": "f64c55ed9f210d80a9b248206104a47175faf5ec94a093e4ad132549209089fc",
+      "build/source-sha256.txt": "04c74c30b92ef6ba7d157b13d93ae7054066dba4823ebba4462c661621ebe7e9",
+      "build/jpeg-encoder.sha256": "1bcc88889bfb82f31af4db3af71d68296880d4ae948dae660c7fb950e1bbe740",
+      "build/baseline-features.txt": "dcf1b26ef683404ef90bae03f2cbadd6db6f998adc2fb0a6ead8bd981ca8c683",
+      "build/fast-features.txt": "9e44e4edc37f844095f76b2845e9f8d93c198dd6a70a112957e4fa559eba9070",
+      "build/baseline-build.log": "211ababd848771adfa76cc7f23d482699e4e148a82c2661a64ee0f5b65cedcd6",
+      "build/fast-build.log": "52c878cdd4cf229b81af029be91f89c31d44f901436cc5935aae2bd515ab4526"
+    }
+  },
+  "build_provenance": {
+    "git_head": "9b3974b31566a2ae1bb6fe33cfb9642762434bf6",
+    "toolchain": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "source_manifest": "build/source-sha256.txt",
+    "source_manifest_sha256": "04c74c30b92ef6ba7d157b13d93ae7054066dba4823ebba4462c661621ebe7e9",
+    "candidate_feature": "remote-fast-jpeg",
+    "common_features": [
+      "remote-x11"
+    ],
+    "release_binaries_sha256": {
+      "A": "eed601e1919e4d3ae93ee4fea074d2243eb9bf9412af63cc1da5b42de24e6893",
+      "B": "f225688d4612dfe1ca008d41c45fea449d74e35ce2346200b72ef17b0b6bf21a"
+    }
+  }
+}

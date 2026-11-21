@@ -42,15 +42,15 @@ impl SlotDamage {
 }
 
 #[derive(Clone, Copy)]
-struct Layout {
+pub(super) struct Layout {
     source: (u16, u16),
     destination: (u16, u16),
-    content: (u16, u16),
-    offset: (u16, u16),
+    pub(super) content: (u16, u16),
+    pub(super) offset: (u16, u16),
 }
 
 impl Layout {
-    fn new(source: (u16, u16), destination: (u16, u16)) -> Option<Self> {
+    pub(super) fn new(source: (u16, u16), destination: (u16, u16)) -> Option<Self> {
         let (iw, ih) = (u64::from(source.0), u64::from(source.1));
         let (width, height) = (u64::from(destination.0), u64::from(destination.1));
         if iw == 0 || ih == 0 || width == 0 || height == 0 {
