@@ -398,14 +398,17 @@ impl ApplicationHandler<UserEvent> for Host {
             context.iteration(false);
         }
         while let Ok(paths) = self.requests.try_recv() {
-            if paths.is_empty()
-                && let Some(native) = self.windows.values().next()
-            {
+            let notes = self.id == "org.jwm.Notes";
+            if paths.is_empty() && let Some(native) = self.windows.values().find(|native| {
+                !notes
+                    || matches!(&native.app.document, crate::app::Document::Notes(n) if n.managed)
+            }) {
                 native.window.focus_window();
                 continue;
             }
-            let notes = self.id == "org.jwm.Notes";
-            let groups = if notes {
+            // An empty Notes launch means the managed notebook, not an
+            // arbitrary standalone editor in the same GApplication process.
+            let groups = if notes && !paths.is_empty() {
                 paths.into_iter().map(|p| vec![p]).collect()
             } else {
                 vec![paths]
