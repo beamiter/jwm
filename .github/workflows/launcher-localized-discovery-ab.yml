@@ -173,6 +173,10 @@ jobs:
           config="$scope/config/jwm/config_x11.toml"
           test -f "$config"
           sed -i 's/show_bar = true/show_bar = false/;s/wallpaper_effect = "daily"/wallpaper_effect = "none"/;s/eva_companion_enabled = true/eva_companion_enabled = false/' "$config"
+          # The hosted Xvfb Mesa EGL does not expose EGL_KHR_image_pixmap.
+          # Exercise the real X11 GLX renderer, as the monitor-swap fixture does.
+          sed -i 's/^compositor_api = .*/compositor_api = "glx"/' "$config"
+          grep -Fx 'compositor_api = "glx"' "$config"
           "$jwm" --backend x11rb --check-config
           "$jwm" --backend x11rb > "$repo/evidence/$role-jwm.log" 2>&1 &
           wm=$!
