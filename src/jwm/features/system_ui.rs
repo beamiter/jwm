@@ -1484,6 +1484,14 @@ impl SystemUiState {
         entries: Arc<[LaunchEntry]>,
         windows: Vec<crate::jwm::features::launcher::WindowEntry>,
         indexing: bool,
+    ) -> Self {
+        Self::open_launcher_with_scenes(entries, windows, indexing, Vec::new())
+    }
+
+    pub(crate) fn open_launcher_with_scenes(
+        entries: Arc<[LaunchEntry]>,
+        windows: Vec<crate::jwm::features::launcher::WindowEntry>,
+        indexing: bool,
         scenes: Vec<super::workscenes::Workscene>,
     ) -> Self {
         let usage = crate::jwm::features::launcher::UsageStore::load();
