@@ -1137,6 +1137,11 @@ fn native_cli_wayland_gestures_hold_through_video_release_on_resize_and_switch()
             .unwrap()
             .success()
     );
+    let host_log = session.fixture.host.text();
+    assert!(
+        !host_log.contains("encoding to fit "),
+        "local resizing must not change host geometry between managed grants: {host_log}"
+    );
     eprintln!(
         "Wayland gestures: modifier drag, continued video, resize cancellation, confirmed source switch and explicit gesture regrant"
     );

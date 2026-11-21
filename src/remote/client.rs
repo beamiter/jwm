@@ -3587,15 +3587,17 @@ fn viewer_loop(
                 // local viewport for the invalidation check, never request
                 // remote scaling through the ordinary viewport protocol.
                 reported_viewport = Some(viewport);
-            } else if !fixed_control_geometry
-                || (viewer.managed_wayland_layout_generation().is_none() && {
-                    let control = state.wayland_control.lock().unwrap();
-                    !control.configured() || control.ended
-                })
+            } else if !managed_source_control
+                && (!fixed_control_geometry
+                    || (viewer.managed_wayland_layout_generation().is_none() && {
+                        let control = state.wayland_control.lock().unwrap();
+                        !control.configured() || control.ended
+                    }))
             {
-                // Native keys and capture proofs are anchored to the lease's
-                // host geometry. The managed viewer scales locally until the
-                // host confirms that input authority has ended.
+                // A source-switching control session keeps viewport scaling
+                // local even between grants. A delayed host resize could
+                // retire the presentation needed for explicit reauthorization.
+                // Other managed viewers can resume viewport fit after release.
                 wrote |= viewport_policy.report(writer, &mut reported_viewport, viewport)?;
             }
         }
