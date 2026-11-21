@@ -343,7 +343,8 @@ pub(crate) fn present(
     panel.switch.set_sensitive(false);
     panel.release.set_sensitive(false);
     panel.refresh();
-    let callbacks: [(&gtk::Button, fn(&Panel)); 5] = [
+    type PanelAction = fn(&Panel);
+    let callbacks: [(&gtk::Button, PanelAction); 5] = [
         (&panel.connect, Panel::start),
         (&panel.switch, Panel::switch_source),
         (&panel.release, |panel| {
