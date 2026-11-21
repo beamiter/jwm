@@ -318,12 +318,10 @@ impl Jwm {
                     return Err("Unlock scene outputs first".into());
                 }
                 for (key, mask, layout) in &plan.outputs {
-                    self.switch_to_monitor(backend, *key)
-                        .map_err(|e| e.to_string())?;
-                    self.view(backend, &WMArgEnum::UInt(*mask))
+                    self.view_on_monitor(backend, *key, *mask)
                         .map_err(|e| e.to_string())?;
                     if let Some(layout) = layout {
-                        self.setlayout(backend, &WMArgEnum::Layout(Rc::new(layout.clone())))
+                        self.set_layout_on_monitor(backend, *key, Rc::new(layout.clone()))
                             .map_err(|e| e.to_string())?;
                     }
                 }
@@ -405,6 +403,85 @@ mod tests {
                 .unwrap_err()
                 .contains("disconnected")
         );
+    }
+
+    #[test]
+    fn scene_layout_keeps_the_active_screen_and_uses_its_visible_fallback() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        // The output order should not determine where the next key goes.
+        for reverse in [false, true] {
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, 0, 0, 1920, 1080),
+                output(2, 1920, 0, 1280, 800),
+            ]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let active = jwm.state.sel_mon.unwrap();
+            let background = *jwm
+                .state
+                .monitor_order
+                .iter()
+                .find(|&&m| m != active)
+                .unwrap();
+            let mut add_window = |id, monitor, tags| {
+                let mut client = WMClient::new(WindowId::from_raw(id));
+                client.mon = Some(monitor);
+                client.state.tags = tags;
+                let key = jwm.insert_client(client);
+                jwm.attach_to_monitor(key, monitor);
+                key
+            };
+            let old = add_window(20, active, 1);
+            let visible = add_window(21, active, 2);
+            let other = add_window(22, background, 4);
+            jwm.focus(&mut backend, Some(old)).unwrap();
+            assert_eq!(jwm.state.monitors[active].sel, Some(old));
+            let mut outputs = vec![
+                SceneOutput {
+                    output: jwm.output_connector_for_monitor(&backend, active).unwrap(),
+                    tag: 2,
+                    layout: "float".into(),
+                },
+                SceneOutput {
+                    output: jwm
+                        .output_connector_for_monitor(&backend, background)
+                        .unwrap(),
+                    tag: 3,
+                    layout: "monocle".into(),
+                },
+            ];
+            if reverse {
+                outputs.reverse();
+            }
+            let scene = Workscene {
+                name: "Preserve focus".into(),
+                outputs,
+                sessions: Vec::new(),
+                applications: Vec::new(),
+            };
+            let expected = Some(jwm.state.clients[visible].win);
+            let never = Some(jwm.state.clients[other].win);
+            for reapply in [false, true] {
+                jwm.open_workscene_preview(&mut backend, scene.clone())
+                    .unwrap();
+                backend.focus_requests.clear();
+                jwm.activate_workscene_action(&mut backend).unwrap();
+                assert_eq!(jwm.state.sel_mon, Some(active));
+                assert_eq!(jwm.state.monitors[active].sel, Some(visible));
+                assert_eq!(jwm.state.monitors[active].get_active_tags(), 2);
+                assert_eq!(jwm.state.monitors[background].get_active_tags(), 4);
+                assert_eq!(*jwm.state.monitors[active].lt, LayoutEnum::FLOAT);
+                assert_eq!(*jwm.state.monitors[background].lt, LayoutEnum::MONOCLE);
+                assert!(!backend.focus_requests.contains(&never));
+                if reapply {
+                    assert!(backend.focus_requests.is_empty());
+                } else {
+                    assert!(backend.focus_requests.contains(&expected));
+                }
+            }
+        }
     }
 
     #[test]

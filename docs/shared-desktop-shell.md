@@ -192,6 +192,8 @@ layout = "tile"
 `tag` is a one-based workspace number. Layout is optional;
 omitting it preserves the workspace's layout. Each preview offers workspace
 layout, session reveal and missing-application startup as separate actions.
+Applying the layout keeps your active display; if its new workspace hides the
+focused window, focus moves to a visible window on that display if there is one.
 Only a specifically selected missing application is started, once per preview;
 existing matching applications and registered terminal sessions are reused.
 A configuration publication or disconnected output invalidates the preview.
