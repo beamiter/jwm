@@ -1,0 +1,607 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-11-21",
+  "run_id": 11,
+  "scope": "One owned Ubuntu NVENC 4K H.264 source over the uncapped SSH route to a physical Intel GPU and private Wayland viewer compositor. The run measures visible compositor markers and one viewer process over 30 s warmup and 3600 s observation.",
+  "diagnostic_only": true,
+  "viewer_source_commit": "dbce5c4085a046cc536a686af27d5ff584ffb6d0",
+  "viewer_build_features": [
+    "remote-x11",
+    "remote-wayland",
+    "remote-h264"
+  ],
+  "observer_build_features": [
+    "remote-wayland",
+    "backend-wayland-udev",
+    "remote-h264"
+  ],
+  "request_fps": 30,
+  "source_painter_request_fps": 60,
+  "route": {
+    "mint_interface": "eno1",
+    "ubuntu_interface": "wlp3s0",
+    "address_family": "IPv4",
+    "tunnel": "SSH compression disabled, no rate cap"
+  },
+  "pins": {
+    "host": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "source_controller": "8517136f81dafdd22185590d3e7b546276b189389e26671a28b16f0907530b6f",
+    "source_process_helpers": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+    "painter": "b91721e939976bd007cd8eea6d46b9eac12def6d9ef63997734b2c28ddee45ef",
+    "viewer": "8675a2cb01e652dd6360a01f4e83805e87b35929b43a03711ed2b64412bc203f",
+    "observer": "6c9dc98e05d0e2bebc408256a456cf090dc3ecda20519fc2c0b78b7760970b4d",
+    "fixture": {
+      "preflight.py": "8b0b549d3d6d1bd7fb0b648333cb36163f424b14600e6881930d8dc8f6b9272e",
+      "processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "p09-workload.c": "b0a8f444049e7ace923911d7f4ea6180a3e4df613941dd97b63dff6389e479b2",
+      "test-remote-wayland-4k-marker.sh": "483396121959414a9024bb85ef8d674c2743c3fe8bf563ce7d36d6a9450ea3ba",
+      "viewer_resources.py": "366ff78172a31b28b25e5cbbf7180abb92fec891b7ce973612690b030dec4613",
+      "viewer-stats-wrapper.sh": "833c5b457b72df7fedab461ee7a3431364b4a8c928b2968be3fe3526f58f59e1",
+      "tee_stderr.py": "13cd1287b5153116f3d62fa49464f77bdb5d50f76fc7fe41d555b9b63c425c2c",
+      "validate_phases.py": "0b3c5e069512672a897639c72f01da2eb1aac171a3aa5a1d61694468b0e88151",
+      "validate_reuse.py": "9243ee1cbd543eba032f847ac5ca9a30372cb383163d2e7334112a011f74417d",
+      "observer-duration.patch": "17c2fe2daf91cb5a1d31bec47ca880ab823ddb4e5c1edebe8dc811b050f86b1b"
+    }
+  },
+  "offline_validator": {
+    "sha256": "5a62012002bf08c663f456967de34e7c727ba8479be96beda51dd169a8ed459e",
+    "change": "Recognize the additive VA-API map counter group and verify its zero values."
+  },
+  "complete": true,
+  "warmup_seconds": 30,
+  "observation_seconds": 3600,
+  "runtime_identity": {
+    "type": "identity",
+    "monotonic_ns": 102997472285408,
+    "pid": 1638578,
+    "start_ticks": 10299741,
+    "exe_device": 2050,
+    "exe_inode": 9082245,
+    "viewer_binary_sha256": "8675a2cb01e652dd6360a01f4e83805e87b35929b43a03711ed2b64412bc203f"
+  },
+  "controller": {
+    "controller_pid": 1638524,
+    "controller_pid_ended": true,
+    "exact_viewer_pid_ended": true,
+    "terminal_viewer_state": "closed",
+    "observer_test_passed": true,
+    "observer_test_duration_seconds": 3639.13,
+    "temporary_key_absent": true,
+    "viewer_stderr_relay_drained": true
+  },
+  "motion": {
+    "visible_unique_frames": 103226,
+    "visible_unique_fps": 28.67388888888889,
+    "p95_visible_gap_ms": 41.275,
+    "longest_visible_gap_ms": 676.735,
+    "elapsed_minute_visible_counts": [
+      1720,
+      1717,
+      1717,
+      1723,
+      1724,
+      1716,
+      1718,
+      1710,
+      1716,
+      1715,
+      1723,
+      1723,
+      1725,
+      1716,
+      1724,
+      1724,
+      1718,
+      1722,
+      1723,
+      1723,
+      1721,
+      1722,
+      1725,
+      1713,
+      1726,
+      1722,
+      1720,
+      1713,
+      1720,
+      1720,
+      1712,
+      1723,
+      1719,
+      1723,
+      1713,
+      1717,
+      1712,
+      1716,
+      1726,
+      1721,
+      1722,
+      1717,
+      1718,
+      1727,
+      1740,
+      1738,
+      1723,
+      1721,
+      1712,
+      1722,
+      1719,
+      1715,
+      1721,
+      1724,
+      1725,
+      1718,
+      1724,
+      1718,
+      1714,
+      1727
+    ],
+    "source_submitted_fps": 60.00015305269729,
+    "last_source_frame": 218349,
+    "wrong_run_reads": 0,
+    "invalid_reads": 34,
+    "reordered_reads": 0
+  },
+  "warmup": {
+    "samples": 30,
+    "one_second_bins_with_a_sample": 30,
+    "maximum_sample_gap_seconds_including_boundaries": 1.000147835,
+    "coverage_sufficient": true,
+    "drm_clients_reported": {
+      "drm-client-2": {
+        "drm-total-system0": {
+          "samples": 30,
+          "first": 54382592,
+          "last": 54448128,
+          "minimum": 54382592,
+          "median": 54448128.0,
+          "maximum": 54513664,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": 122469.67554
+        },
+        "drm-shared-system0": {
+          "samples": 30,
+          "first": 46137344,
+          "last": 46137344,
+          "minimum": 46137344,
+          "median": 46137344.0,
+          "maximum": 46137344,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-resident-system0": {
+          "samples": 30,
+          "first": 54382592,
+          "last": 54448128,
+          "minimum": 54382592,
+          "median": 54448128.0,
+          "maximum": 54513664,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": 122469.67554
+        },
+        "drm-purgeable-system0": {
+          "samples": 30,
+          "first": 921600,
+          "last": 790528,
+          "minimum": 790528,
+          "median": 921600.0,
+          "maximum": 987136,
+          "last_minus_first": -131072,
+          "least_squares_units_per_minute": 111097.60109
+        },
+        "drm-active-system0": {
+          "samples": 21,
+          "first": 52768768,
+          "last": 52834304,
+          "minimum": 12582912,
+          "median": 52834304,
+          "maximum": 52899840,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": -65779245.5501
+        }
+      },
+      "drm-client-4": {
+        "drm-total-system0": {
+          "samples": 30,
+          "first": 279511040,
+          "last": 279511040,
+          "minimum": 279511040,
+          "median": 279511040.0,
+          "maximum": 279511040,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-shared-system0": {
+          "samples": 30,
+          "first": 50331648,
+          "last": 50331648,
+          "minimum": 50331648,
+          "median": 50331648.0,
+          "maximum": 50331648,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-resident-system0": {
+          "samples": 30,
+          "first": 73895936,
+          "last": 73895936,
+          "minimum": 73895936,
+          "median": 73895936.0,
+          "maximum": 73895936,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-purgeable-system0": {
+          "samples": 30,
+          "first": 225280,
+          "last": 225280,
+          "minimum": 225280,
+          "median": 225280.0,
+          "maximum": 225280,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-active-system0": {
+          "samples": 16,
+          "first": 12582912,
+          "last": 64086016,
+          "minimum": 12582912,
+          "median": 12582912.0,
+          "maximum": 64086016,
+          "last_minus_first": 51503104,
+          "least_squares_units_per_minute": 47151333.43002
+        }
+      }
+    },
+    "fdinfo_observable_samples": 30,
+    "rss_kib": {
+      "samples": 30,
+      "first": 187348,
+      "last": 187480,
+      "minimum": 187348,
+      "median": 187476.0,
+      "maximum": 187480,
+      "last_minus_first": 132,
+      "least_squares_units_per_minute": 360.08036
+    },
+    "rss_anon_kib": {
+      "samples": 30,
+      "first": 62624,
+      "last": 62756,
+      "minimum": 62624,
+      "median": 62752.0,
+      "maximum": 62756,
+      "last_minus_first": 132,
+      "least_squares_units_per_minute": 360.08036
+    },
+    "rss_shmem_kib": {
+      "samples": 30,
+      "first": 0,
+      "last": 0,
+      "minimum": 0,
+      "median": 0.0,
+      "maximum": 0,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "threads": {
+      "samples": 30,
+      "first": 13,
+      "last": 13,
+      "minimum": 13,
+      "median": 13.0,
+      "maximum": 13,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "fds": {
+      "samples": 30,
+      "first": 42,
+      "last": 43,
+      "minimum": 42,
+      "median": 42.0,
+      "maximum": 43,
+      "last_minus_first": 1,
+      "least_squares_units_per_minute": -0.60067
+    },
+    "acquisition_ns": {
+      "samples": 30,
+      "first": 3328862,
+      "last": 3324666,
+      "minimum": 3231744,
+      "median": 3308427.5,
+      "maximum": 3466787,
+      "last_minus_first": -4196,
+      "least_squares_units_per_minute": 58545.19781
+    },
+    "drm_fds": {
+      "samples": 30,
+      "first": 9,
+      "last": 9,
+      "minimum": 9,
+      "median": 9.0,
+      "maximum": 9,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "fdinfo_readable": {
+      "samples": 30,
+      "first": 9,
+      "last": 9,
+      "minimum": 9,
+      "median": 9.0,
+      "maximum": 9,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    }
+  },
+  "observation": {
+    "samples": 3600,
+    "one_second_bins_with_a_sample": 3600,
+    "maximum_sample_gap_seconds_including_boundaries": 1.002005486,
+    "coverage_sufficient": true,
+    "drm_clients_reported": {
+      "drm-client-2": {
+        "drm-total-system0": {
+          "samples": 3600,
+          "first": 54448128,
+          "last": 54513664,
+          "minimum": 54358016,
+          "median": 54448128.0,
+          "maximum": 100651008,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": 4463.37591
+        },
+        "drm-shared-system0": {
+          "samples": 3600,
+          "first": 46137344,
+          "last": 46137344,
+          "minimum": 46137344,
+          "median": 46137344.0,
+          "maximum": 92274688,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 4428.71287
+        },
+        "drm-active-system0": {
+          "samples": 2337,
+          "first": 48304128,
+          "last": 52834304,
+          "minimum": 2101248,
+          "median": 52834304,
+          "maximum": 52899840,
+          "last_minus_first": 4530176,
+          "least_squares_units_per_minute": 9792.70296
+        },
+        "drm-resident-system0": {
+          "samples": 3600,
+          "first": 54448128,
+          "last": 54513664,
+          "minimum": 54358016,
+          "median": 54448128.0,
+          "maximum": 100651008,
+          "last_minus_first": 65536,
+          "least_squares_units_per_minute": 4462.69606
+        },
+        "drm-purgeable-system0": {
+          "samples": 3600,
+          "first": 921600,
+          "last": 856064,
+          "minimum": 790528,
+          "median": 921600.0,
+          "maximum": 3088384,
+          "last_minus_first": -65536,
+          "least_squares_units_per_minute": 36.98032
+        }
+      },
+      "drm-client-4": {
+        "drm-total-system0": {
+          "samples": 3600,
+          "first": 279511040,
+          "last": 282664960,
+          "minimum": 279511040,
+          "median": 282664960.0,
+          "maximum": 282664960,
+          "last_minus_first": 3153920,
+          "least_squares_units_per_minute": 78841.77787
+        },
+        "drm-shared-system0": {
+          "samples": 3600,
+          "first": 50331648,
+          "last": 50331648,
+          "minimum": 50331648,
+          "median": 50331648.0,
+          "maximum": 50331648,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": 0.0
+        },
+        "drm-active-system0": {
+          "samples": 1899,
+          "first": 12582912,
+          "last": 12582912,
+          "minimum": 32768,
+          "median": 12582912,
+          "maximum": 64086016,
+          "last_minus_first": 0,
+          "least_squares_units_per_minute": -29186.19112
+        },
+        "drm-resident-system0": {
+          "samples": 3600,
+          "first": 73895936,
+          "last": 77049856,
+          "minimum": 73895936,
+          "median": 77049856.0,
+          "maximum": 77049856,
+          "last_minus_first": 3153920,
+          "least_squares_units_per_minute": 78841.77787
+        },
+        "drm-purgeable-system0": {
+          "samples": 3600,
+          "first": 225280,
+          "last": 233472,
+          "minimum": 225280,
+          "median": 233472.0,
+          "maximum": 233472,
+          "last_minus_first": 8192,
+          "least_squares_units_per_minute": 204.78384
+        }
+      }
+    },
+    "fdinfo_observable_samples": 3600,
+    "rss_kib": {
+      "samples": 3600,
+      "first": 187480,
+      "last": 187696,
+      "minimum": 187480,
+      "median": 187524.0,
+      "maximum": 187696,
+      "last_minus_first": 216,
+      "least_squares_units_per_minute": 3.48345
+    },
+    "rss_anon_kib": {
+      "samples": 3600,
+      "first": 62756,
+      "last": 62972,
+      "minimum": 62756,
+      "median": 62800.0,
+      "maximum": 62972,
+      "last_minus_first": 216,
+      "least_squares_units_per_minute": 3.48345
+    },
+    "rss_shmem_kib": {
+      "samples": 3600,
+      "first": 0,
+      "last": 0,
+      "minimum": 0,
+      "median": 0.0,
+      "maximum": 0,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "threads": {
+      "samples": 3600,
+      "first": 13,
+      "last": 13,
+      "minimum": 13,
+      "median": 13.0,
+      "maximum": 13,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "fds": {
+      "samples": 3600,
+      "first": 42,
+      "last": 43,
+      "minimum": 42,
+      "median": 42.0,
+      "maximum": 43,
+      "last_minus_first": 1,
+      "least_squares_units_per_minute": -0.00013
+    },
+    "acquisition_ns": {
+      "samples": 3600,
+      "first": 3431434,
+      "last": 2920274,
+      "minimum": 944302,
+      "median": 2850363.5,
+      "maximum": 4238126,
+      "last_minus_first": -511160,
+      "least_squares_units_per_minute": -776.33626
+    },
+    "drm_fds": {
+      "samples": 3600,
+      "first": 9,
+      "last": 9,
+      "minimum": 9,
+      "median": 9.0,
+      "maximum": 9,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    },
+    "fdinfo_readable": {
+      "samples": 3600,
+      "first": 9,
+      "last": 9,
+      "minimum": 9,
+      "median": 9.0,
+      "maximum": 9,
+      "last_minus_first": 0,
+      "least_squares_units_per_minute": 0.0
+    }
+  },
+  "native_evidence": {
+    "codec": "H.264",
+    "presentation": "wayland-vaapi-dmabuf",
+    "extent": [
+      3840,
+      2160
+    ],
+    "host_binary_sha256": "59572059a51aae67c91eff3013012352b932850806647cb81ccda2756522b47b",
+    "viewer_binary_sha256": "8675a2cb01e652dd6360a01f4e83805e87b35929b43a03711ed2b64412bc203f",
+    "observer_binary_sha256": "6c9dc98e05d0e2bebc408256a456cf090dc3ecda20519fc2c0b78b7760970b4d",
+    "matching_roi_markers_in_observation": 103226,
+    "matched_whole_observer_windows": 717,
+    "hardware_rgb_download_observations": 0,
+    "reuse": {
+      "arm": "B",
+      "successful_reuse_activation_log_lines": 1,
+      "confirmed_activation": true,
+      "whole_session": {
+        "native_preparations": 104235,
+        "rgb_target_allocations": 2,
+        "egl_fence_waits": 104235,
+        "fresh_wayland_dmabuf_imports": 104235
+      },
+      "matched_steady_windows": {
+        "native_preparations": 103000,
+        "rgb_target_allocations": 0,
+        "egl_fence_waits": 103000,
+        "fresh_wayland_dmabuf_imports": 103000
+      },
+      "allocations_outside_matched_steady_windows": 2,
+      "steady_allocations_per_native_preparation": 0.0,
+      "scope": "Counts are actual GBM backing allocations and separate native preparation, fence, and fresh Wayland DMA-BUF import observations. Missing allocation phase in a matched steady window contributes zero only after the same session proves allocations elsewhere."
+    }
+  },
+  "archive": {
+    "path": "native-wayland-4k-reuse-hour-soak-raw.zip",
+    "sha256": "0ff1fda912bc7a121076bafaf26cfca5b6ef48c36838a5ec72148c62d2785de8",
+    "entries": {
+      "README.md": "7548d6ae286b74f7f0427aa633fbe119fee97bce00c075aed91b4ea6dbd7fbf6",
+      "evidence/binary-pins.json": "cb4e297cf185170fbba03c017baba9b312ba637a50f12fd0f1c13927b58a9298",
+      "evidence/live-process-witness.json": "408691bd740987e178731d38af98314658185b432f0b23982b5950655f390d99",
+      "evidence/live-validator-before-replay.log": "04573284ad2f92ec05ba5e889c080c751f553daee98f6a445bfc40c2a62e33d6",
+      "evidence/local-environment.txt": "a507c96070aa473bf6f7f43536e9da5a288da804c73aaed2bd79965e043348b2",
+      "evidence/marker-test.log": "e24dd1ee4738467badd4ee8cd64c6097b89b6df8763b316199e3ae4e649a4753",
+      "evidence/matched-native-windows.jsonl": "e86178226907797bc83a4fd23cb8de8c108654af51630e95c4ee558d4ae926f7",
+      "evidence/phase-diagnostic.json": "802dbaee397e905662ee8a22ca33c8721b90b06efe6ea5656bcd1ccc1e3c43e4",
+      "evidence/remote-environment.txt": "3d0857a92cbb928debf463b39f1edbe3cbea2060d3bd412af0f10e357ec58ce3",
+      "evidence/resource-diagnostic.json": "54988fed50c6652267497ad9b17542cecd9cb35228b7d4fec4b8cb58caab6923",
+      "evidence/result.json": "c93907e0292ccf931f131665227a4d372807eb04628936c252b588394a4b376f",
+      "evidence/source/host.log": "902b8f59f8a5e77062424151dbb06f4383bee60ba16efd475f3f62c1cee8660b",
+      "evidence/source/paint.jsonl": "83aa07fbf073ace677759c3dbce3019d7401832abee79db612c202685ac39be7",
+      "evidence/source-pins.json": "dae868f131da3ef791498d56dad2f6449253e1bcb8b175a2f2bbe91867d4f9d9",
+      "evidence/terminal-proof.json": "57ad307b98900ac0488046c1e3d1089b594799e49214b2ca92dcd4e837070203",
+      "evidence/viewer/observed.jsonl": "9885cdb9c0e6788f0869cb86f96d970c688ab6210e1836ccbeba718d67f8710c",
+      "evidence/viewer/viewer-clock.jsonl": "659c8c96fb2945d1f6f02593ea2ae1e558efab1d45e048f2b7f1db208a42acd4",
+      "evidence/viewer/viewer-complete-stderr.log": "7563823edd2793c7d179c3fc8d702a04401b55e49a2492938948ef6b6d4525df",
+      "evidence/viewer/viewer-events.jsonl": "17e67ca7decdf00d8789278fe2705916c620f4b960f2a1d0f72414cd23b1f530",
+      "evidence/viewer/viewer-resources.jsonl": "44aac773d0a5018b16b4d8ec44dc053cb49fa6190a5615d9045e86a98d37e9fa",
+      "evidence/viewer/viewer-stage-windows.jsonl": "f9f2e8b9c0d0b69efbbd40baff95ac4782f5ee45b679d1862e8f52126a1b4699",
+      "evidence/viewer/viewer-stderr-relay-complete": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "fixture/observer-duration.patch": "17c2fe2daf91cb5a1d31bec47ca880ab823ddb4e5c1edebe8dc811b050f86b1b",
+      "fixture/p09-workload.c": "b0a8f444049e7ace923911d7f4ea6180a3e4df613941dd97b63dff6389e479b2",
+      "fixture/preflight.py": "8b0b549d3d6d1bd7fb0b648333cb36163f424b14600e6881930d8dc8f6b9272e",
+      "fixture/processes.py": "b1628dc5f7ec4ae82b98f1c18fc9415a5435d7f6d1fc3a7083a6421a3c78b494",
+      "fixture/run-phase.sh": "b79bd94a9fc9a9391acb2eb544b86c16478384f63327ee666e431d7c970bd9ef",
+      "fixture/source.py": "8517136f81dafdd22185590d3e7b546276b189389e26671a28b16f0907530b6f",
+      "fixture/tee_stderr.py": "13cd1287b5153116f3d62fa49464f77bdb5d50f76fc7fe41d555b9b63c425c2c",
+      "fixture/test-remote-wayland-4k-marker.sh": "483396121959414a9024bb85ef8d674c2743c3fe8bf563ce7d36d6a9450ea3ba",
+      "fixture/validate_phases-original.py": "0b3c5e069512672a897639c72f01da2eb1aac171a3aa5a1d61694468b0e88151",
+      "fixture/validate_phases.py": "5a62012002bf08c663f456967de34e7c727ba8479be96beda51dd169a8ed459e",
+      "fixture/validate_reuse.py": "9243ee1cbd543eba032f847ac5ca9a30372cb383163d2e7334112a011f74417d",
+      "fixture/viewer-stats-wrapper.sh": "833c5b457b72df7fedab461ee7a3431364b4a8c928b2968be3fe3526f58f59e1",
+      "fixture/viewer_resources.py": "366ff78172a31b28b25e5cbbf7180abb92fec891b7ce973612690b030dec4613",
+      "replay.py": "bab5bafdb046de34d7ecd2a903768384729d70c9e2706036f322de5bb4b7f9e0"
+    }
+  }
+}
