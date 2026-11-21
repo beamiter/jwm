@@ -941,6 +941,17 @@ mod tests {
         let script = tree.join("run.sh");
         fs::write(&script, b"#!/bin/sh\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o4755)).unwrap();
+        // File creation observes the receiver's umask, including its execute bits.
+        let local_executable_bits = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(source.0.join("local-mode-probe"))
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .mode()
+            & 0o111;
         std::os::unix::fs::symlink("/etc/passwd", tree.join("link")).unwrap();
         let single = source.0.join("note.md");
         fs::write(&single, b"# note").unwrap();
@@ -970,7 +981,11 @@ mod tests {
             assert_eq!(fs::read(root.join("sub/deeper/big.bin")).unwrap(), big);
             assert_eq!(fs::read(destination.0.join("note.md")).unwrap(), b"# note");
             let mode = fs::metadata(root.join("run.sh")).unwrap().mode() & 0o7777;
-            assert_eq!(mode & 0o111, 0o111, "executable bits survive");
+            assert_eq!(
+                mode & 0o111,
+                local_executable_bits,
+                "executable bits permitted by local file creation survive"
+            );
             assert_eq!(mode & 0o7000, 0, "set-id bits never do");
             assert!(fs::symlink_metadata(root.join("link")).is_err());
             let modified = fs::metadata(root.join("readme.txt")).unwrap().mtime();
