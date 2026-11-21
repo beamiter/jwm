@@ -1,5 +1,5 @@
-//! The tags overview: a GNOME-style grid showing every tag of the selected
-//! monitor at once.
+//! The tags overview: a grid of every output's tags, hosted on the selected
+//! monitor.
 //!
 //! One cell per tag, each carrying the tag's number and a line-drawn
 //! wireframe of its windows. The panel itself is drawn by the compositors
@@ -8,7 +8,8 @@
 //!
 //! Unlike the layout picker nothing is previewed: the desktop behind the
 //! panel never changes while the grid is up, so cancelling is simply closing
-//! and confirming is an ordinary tag jump (`Jwm::view`).
+//! and confirming an explicit selection is an ordinary tag jump (`Jwm::view`).
+//! Confirming the untouched opening highlight closes without changing tags.
 //!
 //! The pointer gesture is a press/release pair. A press on a cell only arms
 //! a [`PendingCellPress`]; the release settles it: released on the same cell
@@ -96,6 +97,9 @@ pub struct TagsOverviewState {
     pub cols: u32,
     /// Highlighted cell: a tag index, stable across rebuilds.
     pub selected: usize,
+    /// Opening only highlights a tag; it does not select that single-tag view.
+    /// Explicit navigation/clicks distinguish a choice from a harmless peek.
+    selection_explicit: bool,
     /// The pointer press waiting for its release, if one is down.
     pub pending: Option<PendingCellPress>,
     /// The monitor the cells describe and the viewport was pushed for.
@@ -137,6 +141,7 @@ impl TagsOverviewState {
             sticky_windows,
             cols,
             selected,
+            selection_explicit: false,
             pending: None,
             monitor: None,
             targets: Vec::new(),
@@ -159,6 +164,7 @@ impl TagsOverviewState {
     /// walk, shared through [`move_expose_selection`]. Returns whether the
     /// selection actually moved, so a clamped arrow costs no redraw.
     pub fn move_selection(&mut self, direction: ExposeNavDirection) -> bool {
+        self.selection_explicit = true;
         match move_expose_selection(Some(self.selected), direction, self.cells.len(), self.cols) {
             Some(next) if next != self.selected => {
                 self.selected = next;
@@ -175,6 +181,7 @@ impl TagsOverviewState {
         if self.cells.is_empty() {
             return false;
         }
+        self.selection_explicit = true;
         let next = if to_end { self.cells.len() - 1 } else { 0 };
         if self.selected == next {
             return false;
@@ -190,6 +197,7 @@ impl TagsOverviewState {
         if self.cells.is_empty() || direction == 0 {
             return false;
         }
+        self.selection_explicit = true;
         let step = self.cols.max(1) as usize;
         let next = if direction < 0 {
             self.selected.saturating_sub(step)
@@ -469,9 +477,9 @@ impl Jwm {
         }
     }
 
-    /// Commit the highlighted tag: an ordinary `view` jump, then the panel
-    /// goes away. The view itself early-outs on the current tag, so opening
-    /// and confirming is a safe no-op round trip.
+    /// Confirm an explicit selection with `view`; an untouched highlight is
+    /// only a peek. Closing that peek must preserve the entire active mask,
+    /// not reduce a multi-tag view to its lowest highlighted tag.
     pub(crate) fn confirm_tags_overview(
         &mut self,
         backend: &mut dyn Backend,
@@ -479,6 +487,10 @@ impl Jwm {
         let Some(overview) = self.features.system_ui.tags_overview() else {
             return Ok(());
         };
+        if !overview.selection_explicit {
+            self.close_system_ui(backend);
+            return Ok(());
+        }
         let target = overview
             .targets
             .get(overview.selected)
@@ -550,6 +562,7 @@ impl Jwm {
             return Ok(());
         }
         overview.selected = index;
+        overview.selection_explicit = true;
         self.confirm_tags_overview(backend)
     }
 
@@ -602,6 +615,7 @@ impl Jwm {
             }
             if overview.selected != index {
                 overview.selected = index;
+                overview.selection_explicit = true;
                 moved = true;
             }
         }
@@ -775,9 +789,8 @@ impl Jwm {
     }
 
     /// Rebuild the cells after window changes while the panel is open (the
-    /// `arrange` tail calls here). The selection is a tag index, so a rebuild
-    /// cannot shift what it means; a tag list shrunk by a config reload
-    /// clamps it instead. A held pointer press survives the rebuild — an
+    /// `arrange` tail calls here). Selection follows output/tag identity;
+    /// a removed target loses explicit-selection permission until new input. A held pointer press survives the rebuild — an
     /// unrelated arrange must not eat a gesture in flight — clamped like the
     /// selection in case its cell went away.
     pub(crate) fn refresh_tags_overview(&mut self) {
@@ -790,6 +803,7 @@ impl Jwm {
         let rebuilt = self.tags_overview_state(sel_mon_key);
         if let Some(overview) = self.features.system_ui.tags_overview_mut() {
             let selected = overview.selected;
+            let selection_explicit = overview.selection_explicit;
             let identity = overview.targets.get(selected).copied();
             let pending = overview.pending.filter(|pending| {
                 overview.monitor == rebuilt.monitor
@@ -801,6 +815,7 @@ impl Jwm {
                     })
             });
             *overview = rebuilt;
+            overview.selection_explicit = selection_explicit;
             overview.selected = identity
                 .and_then(|target| overview.targets.iter().position(|entry| *entry == target))
                 .unwrap_or_else(|| {
@@ -810,6 +825,11 @@ impl Jwm {
                         selected.min(overview.cells.len().saturating_sub(1))
                     }
                 });
+            if overview.selected >= overview.cells.len() {
+                // A removed output/tag is not an implicit choice of another cell.
+                // Preserve this through subsequent rebuilds until new input.
+                overview.selection_explicit = false;
+            }
             overview.pending = pending;
         }
         self.mark_system_ui_dirty();
@@ -964,6 +984,77 @@ mod tests {
     }
 
     #[test]
+    fn untouched_overview_confirm_preserves_combined_tags() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(0b110)).unwrap();
+        let mut client = crate::core::models::WMClient::new(WindowId::from_raw(901));
+        client.mon = Some(monitor);
+        client.state.tags = 0b100;
+        let focused = jwm.insert_client(client);
+        jwm.attach_to_monitor(focused, monitor);
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(focused));
+        jwm.features.system_ui = SystemUiState::TagsOverview(jwm.tags_overview_state(monitor));
+        assert_eq!(jwm.features.system_ui.tags_overview().unwrap().selected, 1);
+        jwm.refresh_tags_overview();
+        jwm.confirm_tags_overview(&mut backend).unwrap();
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 0b110);
+        assert_eq!(jwm.get_selected_client_key(), Some(focused));
+        assert_eq!(jwm.state.sel_mon, Some(monitor));
+        assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
+    fn overview_explicit_choices_and_cancel_keep_their_meaning() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        for choice in 0..5 {
+            let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let monitor = jwm.state.sel_mon.unwrap();
+            jwm.view(&mut backend, &WMArgEnum::UInt(0b110)).unwrap();
+            jwm.features.system_ui = SystemUiState::TagsOverview(jwm.tags_overview_state(monitor));
+            match choice {
+                0 => jwm.digit_tags_overview(&mut backend, 1).unwrap(),
+                1 => jwm.jump_tags_overview(&mut backend, 1).unwrap(), // click-release route
+                2 | 3 => {
+                    jwm.move_tags_overview_selection(&mut backend, ExposeNavDirection::Right);
+                    jwm.refresh_tags_overview();
+                    if choice == 2 {
+                        jwm.confirm_tags_overview(&mut backend).unwrap();
+                    } else {
+                        jwm.cancel_tags_overview(&mut backend);
+                    }
+                }
+                _ => {
+                    let overview = jwm.features.system_ui.tags_overview().unwrap();
+                    let geometry = tags_grid::grid_geometry(
+                        [0., 0., 1920., 1080.],
+                        overview.cells.len(),
+                        overview.cols,
+                    );
+                    let [x, y, w, h] = geometry.cells[2].cell;
+                    jwm.hover_tags_overview(&mut backend, (x + w / 2.) as f64, (y + h / 2.) as f64);
+                    jwm.refresh_tags_overview();
+                    jwm.confirm_tags_overview(&mut backend).unwrap();
+                }
+            }
+            let expected = match choice {
+                0 | 1 => 0b010,
+                3 => 0b110,
+                _ => 0b100,
+            };
+            assert_eq!(
+                jwm.state.monitors[monitor].get_active_tags(),
+                expected,
+                "choice {choice}"
+            );
+            assert!(!jwm.features.system_ui.is_active());
+        }
+    }
+
+    #[test]
     fn desktop_overview_addresses_the_same_tag_on_distinct_outputs() {
         use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
         let mut backend = DisplaySpyBackend::new(vec![
@@ -973,7 +1064,7 @@ mod tests {
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
         let left = jwm.state.monitor_order[0];
         let right = jwm.state.monitor_order[1];
-        let mut overview = jwm.tags_overview_state(left);
+        let overview = jwm.tags_overview_state(left);
         let tags = CONFIG.load().tags_length();
         assert_eq!(overview.cells.len(), tags * 2);
         assert_eq!(overview.targets[0], (left, 0));
@@ -983,11 +1074,49 @@ mod tests {
             overview.cells[tags].display_label()
         );
         assert_eq!(live_cells(&overview).len(), 2);
-        overview.selected = tags + 1;
         jwm.features.system_ui = SystemUiState::TagsOverview(overview);
-        jwm.confirm_tags_overview(&mut backend).unwrap();
+        jwm.jump_tags_overview(&mut backend, tags + 1).unwrap();
         assert_eq!(jwm.state.sel_mon, Some(right));
         assert_eq!(jwm.state.monitors[right].get_active_tags(), 2);
+    }
+
+    #[test]
+    fn overview_target_identity_survives_reorder_and_removed_target_cancels() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        for remove in [false, true] {
+            let mut backend = DisplaySpyBackend::new(vec![
+                output(1, 0, 0, 1920, 1080),
+                output(2, 1920, 0, 1920, 1080),
+            ]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let first = jwm.state.monitor_order[0];
+            let second = jwm.state.monitor_order[1];
+            jwm.state.sel_mon = Some(first);
+            jwm.view(&mut backend, &WMArgEnum::UInt(0b110)).unwrap();
+            jwm.features.system_ui = SystemUiState::TagsOverview(jwm.tags_overview_state(first));
+            jwm.move_tags_overview_selection(&mut backend, ExposeNavDirection::Down);
+            if remove {
+                jwm.state.monitor_order.retain(|key| *key != second);
+                jwm.state.monitors.remove(second);
+            } else {
+                jwm.state.monitor_order.reverse();
+            }
+            jwm.refresh_tags_overview();
+            jwm.refresh_tags_overview();
+            jwm.confirm_tags_overview(&mut backend).unwrap();
+            if remove {
+                assert_eq!(jwm.state.sel_mon, Some(first));
+                assert_eq!(jwm.state.monitors[first].get_active_tags(), 0b110);
+                // A new deliberate choice still works after the conservative cancel.
+                jwm.features.system_ui =
+                    SystemUiState::TagsOverview(jwm.tags_overview_state(first));
+                jwm.digit_tags_overview(&mut backend, 1).unwrap();
+                assert_eq!(jwm.state.monitors[first].get_active_tags(), 0b010);
+            } else {
+                assert_eq!(jwm.state.sel_mon, Some(second));
+                assert_eq!(jwm.state.monitors[second].get_active_tags(), 0b010);
+            }
+        }
     }
 
     #[test]

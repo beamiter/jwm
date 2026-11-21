@@ -1,8 +1,10 @@
 # Tags overview
 
 `Alt+O` (`toggle_tags_overview`) opens a GNOME-style grid of every tag on the
-current monitor at once, so you can see which workspace holds what instead of
-walking tags blind. Each cell carries the tag's number and a line-drawn
+desktop at once, in a panel hosted on the selected monitor. With multiple
+outputs, each output occupies one row and labels distinguish the same tag
+number on different outputs. A single output uses an aspect-adaptive grid.
+Each cell carries the tag's number and a line-drawn
 wireframe of its windows; the tags currently on screen keep a persistent
 accent frame. The key is a toggle — pressing it again closes the grid without
 changing the view. The dim behind the panel fades in on the same `opened²`
@@ -14,9 +16,11 @@ are disabled — while closing stays instant, since no panel fades out.
 tags_overview_enabled = true   # default
 ```
 
-Opening pre-selects the current tag (a multi-tag view pre-selects its lowest
-one), so `Alt+O` then `Return` is a no-op round trip — a safe way to peek at
-the grid. The overview needs the compositor; in a deliberately non-composited
+Opening highlights the current tag (the lowest active tag in a multi-tag
+view). Confirming without explicitly choosing a cell closes the panel without
+changing the view, preserving the complete multi-tag mask. Using keyboard/wheel navigation (even at a clamped edge), moving the pointer
+to a different cell, or explicitly clicking a cell or pressing a digit chooses
+a single tag instead. The overview needs the compositor; in a deliberately non-composited
 session the panel starts one for its own lifetime and hands it back on close,
 like the other shell cards.
 
@@ -27,11 +31,13 @@ like the other shell cards.
 | `Left` / `Right` / `Up` / `Down` | move the highlight through the grid |
 | `Home` / `End` | jump to the first / last cell (no commit) |
 | `Page Up` / `Page Down` | jump by one grid row (no commit) |
-| `Return` / keypad `Enter` | jump to the highlighted tag and close |
-| `1`–`9` | jump straight to that tag and close |
+| `Return` / keypad `Enter` | close unchanged if untouched; otherwise select the highlighted tag and close |
+| `1`–`9` | select that tag on the highlighted output and close |
 | `Esc` | close without switching |
 | `Alt+O` | close without switching (the key is a toggle) |
 
+With multiple outputs, Left/Right move within an output row and Up/Down
+move between output rows. Home/End address the whole grid, not just one output.
 Movement clamps at the grid's edges instead of wrapping, and `Down` from a
 full row into an incomplete bottom row stays put — the highlight only ever
 sits on a real cell, so `Return` never surprises you. The digit keys work
@@ -55,11 +61,12 @@ Left/Right. Middle-click confirms the highlighted tag like `Return`.
   neighbour, the card painted last owns the pixel, which is again what is
   drawn on top.
 - Clicking a cell — press and release on the same cell — jumps to that tag
-  and closes, exactly like `Return`.
-- Middle-click anywhere on the grab (with a highlight) jumps to the
-  highlighted tag and closes, the Enter twin shared with the layout picker.
+  and closes. This is an explicit single-tag choice even on the initial cell.
+- Middle-click anywhere on the grab confirms like `Return`: an untouched
+  highlight closes unchanged; an explicit selection chooses that tag.
 - Dragging a window's wireframe from its cell onto another cell moves the
-  window to that tag and keeps the grid open, so several windows can be
+  window to that tag on the target output and keeps the grid open, so several
+  windows can be
   dealt out in one visit. The move replaces the window's whole tag mask with
   the target tag — the dwm `tag()` semantics of `Mod1+Shift+N`, shared with
   the same code path — so a window that sat on several tags ends up on only
@@ -78,12 +85,10 @@ Left/Right. Middle-click confirms the highlighted tag like `Return`.
 
 ## What the cells show
 
-- The tag currently on screen draws live: its cell swaps the wireframes for
-  the windows' own textures, scaled into the same rectangles (the expose
-  thumbnails' shader path), so a ticking clock or a moving video reads
-  directly in the grid. A window whose texture is unavailable keeps its
-  outline. Every other cell stays a wireframe — a parked window's texture
-  only holds the stale image from before it left the screen.
+- Active tag cells can show the windows' own textures, scaled into their
+  rectangles. This applies across outputs and to multiple active tags. A
+  window whose texture is unavailable keeps its outline. Inactive cells stay
+  wireframes rather than displaying a parked window's stale texture.
 - Windows parked on another tag are drawn at the position they will return
   to, not at their off-screen parking spot.
 - Sticky windows (and clients spanning every tag) draw in every cell but,
@@ -102,39 +107,28 @@ Left/Right. Middle-click confirms the highlighted tag like `Return`.
   at the cell edge rather than poking through the card.
 
 Window changes while the grid is open (a window appears, closes, moves tags)
-rebuild the cells in place; the highlight is a tag index, so a rebuild cannot
-shift what it means. If a config reload shrinks `tags_length` under an open
-grid, an out-of-range highlight commits as a cancel instead of jumping
-nowhere.
+rebuild the cells in place; the highlight retains its output-and-tag identity.
+If an output disappears or a config reload removes the selected tag, confirming
+cancels instead of choosing an unrelated cell. A new explicit selection can
+choose one of the remaining cells.
 
 The grid follows the selected monitor as well. `focus_monitor` over IPC, or
 an activation of a window on the other head, moves the selection without
 arranging anything; the open grid notices on the next frame and rebuilds for
-the monitor it moved to, so the card, its cells and the hit-test never end up
-describing a screen you are not looking at.
+the new host monitor while retaining cells for every output. Changes to the
+output identities or geometry cancel an in-flight pointer gesture.
 
-## Limitations
+## Implementation and validation boundaries
 
-- Only the current monitor's tags are shown; there is no cross-monitor grid.
-  This was re-evaluated and stays a deliberate boundary. Keeping one panel on
-  the selected monitor's `SystemUiViewport` is fine, but everything past the
-  viewport is structural: the flat `TagsGrid` schema (one `cols`, a single
-  `live` cell, one selection), the uniform `grid_geometry`, the rectangular
-  clamping keyboard walk, and a commit that targets `sel_mon` — a
-  cross-screen commit would need `focusmon`+`view`, the digit keys become
-  ambiguous across groups, and a wireframe drag is only defined within the
-  window's own monitor. A minimal design, if it ever lands: `TagsGrid` gains
-  per-monitor sections (label, cell range, per-section `cols`) plus one live
-  cell per monitor; a sectioned geometry variant stacks each monitor's
-  sub-grid with a header band inside the same panel; the selection walk
-  learns section boundaries; commit resolves a cell to (monitor, tag) and
-  runs `focusmon` then `view` when they differ; drags stay same-monitor.
-- Only the on-screen tag's cell is live; a multi-tag view live-draws its
-  primary (lowest) tag, and every other cell identifies windows by position
-  and shape, not by content.
+Cross-output wireframe drops are implemented: the drop resolves the target
+output and tag, moves the client to that output, then replaces its tag mask.
+Unit tests cover multi-output cell identity and confirmation, navigation,
+and same-output drag dispatch. These tests do not establish real multi-monitor
+cross-output drag acceptance or texture availability on every backend.
 
-Confirming a tag runs the ordinary `view` path, which emits `monitor/bar`
-so occupancy subscribers see the new tag, layout knobs, and counts.
+An explicit tag choice runs the ordinary `view` path, which emits `monitor/bar`
+so occupancy subscribers see the new tag, layout knobs, and counts. Untouched
+confirmation only closes the panel.
 
 ## Related surfaces
 
