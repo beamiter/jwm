@@ -48,7 +48,7 @@ enum Action {
     TogglePreview,
     ToggleCodeView,
     Preview,
-    Note(PathBuf),
+    Note(PathBuf, u64),
     Cancel,
     Accept,
     Parent,
@@ -146,6 +146,17 @@ impl App {
             Document::Image(v) => format!("{} — JWM 图片查看器", v.title()),
         }
     }
+    pub fn set_search_wake(&mut self, wake: crate::notes::SearchWake) {
+        if let Document::Notes(notes) = &mut self.document {
+            notes.set_search_wake(wake);
+        }
+    }
+    pub fn poll_search(&mut self) -> bool {
+        match &mut self.document {
+            Document::Notes(notes) => notes.poll_search(),
+            Document::Image(_) => false,
+        }
+    }
     pub fn loading(&self) -> bool {
         matches!(&self.document,Document::Image(v) if v.loading())
     }
@@ -157,7 +168,7 @@ impl App {
         self.dialog = Some(Dialog::Error(error));
     }
     pub fn tick(&mut self) -> bool {
-        let mut dirty = false;
+        let mut dirty = self.poll_search();
         match &mut self.document {
             Document::Notes(n) if n.due.is_some_and(|due| Instant::now() >= due) => {
                 if let Err(error) = n.save() {
@@ -492,7 +503,18 @@ impl App {
                     let _ = cr.save();
                     cr.rectangle(0., body.y + 60., sidebar, body.h - 60.);
                     cr.clip();
-                    for (i, (path, title)) in n.rows.iter().enumerate() {
+                    if n.search_pending() {
+                        ui::text(
+                            cr,
+                            "正在搜索…",
+                            Rect::new(20., body.y + 60., sidebar - 40., 40.),
+                            13.,
+                            ui::muted(),
+                        );
+                    }
+                    let generation = n.current_rows();
+                    let rows = generation.map(|_| n.rows.as_slice()).unwrap_or_default();
+                    for (i, (path, title)) in rows.iter().enumerate() {
                         let rect = Rect::new(
                             8.,
                             body.y + 60. + i as f64 * 48. - n.list_scroll,
@@ -526,7 +548,10 @@ impl App {
                                 rect.w,
                                 rect.h.min((body.y + body.h - rect.y).max(0.)),
                             ),
-                            action: Action::Note(path.clone()),
+                            action: Action::Note(
+                                path.clone(),
+                                generation.expect("displayed rows are current"),
+                            ),
                             label: title.clone(),
                         });
                     }
@@ -916,6 +941,12 @@ impl App {
         }
     }
     fn action(&mut self, action: Action) {
+        if let Action::Note(path, generation) = &action
+            && !matches!(&self.document, Document::Notes(n)
+                if n.current_rows() == Some(*generation) && n.rows.iter().any(|(p, _)| p == path))
+        {
+            return;
+        }
         self.dialog_focus = None;
         match action {
             Action::Minimize => self.effects.push(Effect::Minimize),
@@ -1047,7 +1078,7 @@ impl App {
                             self.focus = Focus::Editor;
                             Ok(())
                         }
-                        Action::Note(path) => {
+                        Action::Note(path, _) => {
                             if n.document.as_ref().and_then(|d| d.file.path()).as_ref()
                                 == Some(&path)
                             {
@@ -1191,6 +1222,7 @@ impl App {
         let Document::Notes(notes) = &self.document else {
             return None;
         };
+        notes.current_rows()?;
         let path = self.result_path.as_ref()?;
         notes.rows.iter().position(|(row, _)| row == path)
     }
@@ -1236,7 +1268,10 @@ impl App {
 
         match key {
             Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp) => {
-                if !notes.search.preedit.is_empty() || notes.rows.is_empty() {
+                if notes.current_rows().is_none()
+                    || !notes.search.preedit.is_empty()
+                    || notes.rows.is_empty()
+                {
                     return true;
                 }
                 let last = notes.rows.len() - 1;
@@ -1262,10 +1297,12 @@ impl App {
                 if !repeat {
                     self.result_enter = true;
                     // A redraw need not have happened since the list was changed.
-                    if let Some(index) = self.result_index() {
+                    if let (Some(index), Some(generation)) =
+                        (self.result_index(), notes.current_rows())
+                    {
                         let top = index as f64 * 48. - notes.list_scroll;
                         if top + 44. > 0. && top < self.body().h - 60. {
-                            self.action(Action::Note(notes.rows[index].0.clone()));
+                            self.action(Action::Note(notes.rows[index].0.clone(), generation));
                         } else {
                             // The user may have scrolled the highlight away.
                             // Reveal it without opening an invisible note.
@@ -1401,7 +1438,7 @@ impl App {
                 if find {
                     n.find.sync(&mut n.editor);
                 } else if search {
-                    n.refresh();
+                    n.update_query();
                     n.list_scroll = 0.;
                 } else {
                     n.edited();
@@ -1483,7 +1520,7 @@ impl App {
                 n.find.sync(&mut n.editor);
             } else if self.focus == Focus::Search {
                 if changed {
-                    n.refresh();
+                    n.update_query();
                     n.list_scroll = 0.;
                 }
             } else {
@@ -1584,6 +1621,130 @@ mod tests {
     use super::*;
 
     #[test]
+    fn asynchronous_query_coalesces_and_rejects_old_hits_before_a_redraw() {
+        let directory =
+            std::env::temp_dir().join(format!("jwm-async-search-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let original = directory.join("current.txt");
+        let result = directory.join("result.txt");
+        std::fs::write(&original, "original").unwrap();
+        std::fs::write(&result, "other note\n你好 ΑΘΉΝΑ").unwrap();
+        let mut app = App::new(true, vec![original.clone()]).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Document::Notes(notes) = &mut app.document {
+            notes.managed = true;
+            notes.directory = directory.clone();
+            notes.refresh();
+            notes.editor.insert("unsaved ");
+            notes.edited();
+        }
+        app.set_search_wake(std::sync::Arc::new(move || {
+            let _ = tx.send(());
+        }));
+        app.action(Action::Search);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 960., 680., false);
+        let old_rect = app
+            .hits
+            .iter()
+            .find_map(|h| {
+                matches!(&h.action, Action::Note(path, _) if path == &result).then_some(h.rect)
+            })
+            .unwrap();
+        #[cfg(feature = "accessibility")]
+        let (mut semantics, old_button) = {
+            use accesskit::{Action, Role};
+            let mut semantics = accessibility::Semantics::default();
+            let tree = semantics.update(&app, 1.);
+            let old_button = tree
+                .nodes
+                .iter()
+                .find_map(|(id, node)| {
+                    (node.role() == Role::Button
+                        && node.label() == Some("other note")
+                        && node.supports_action(Action::Click))
+                    .then_some(*id)
+                })
+                .unwrap();
+            (semantics, old_button)
+        };
+        #[cfg(feature = "accessibility")]
+        let click = |target_node| accesskit::ActionRequest {
+            action: accesskit::Action::Click,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node,
+            data: None,
+        };
+
+        app.ime("你好".into(), false);
+        assert!(matches!(&app.document, Document::Notes(n) if !n.search_pending()));
+        app.ime("missing ".into(), true);
+        if let Document::Notes(notes) = &mut app.document {
+            // Both changes precede the next event-loop tick. Even if the first
+            // worker has finished, it must not publish its now superseded rows.
+            notes.search.select_all();
+        }
+        app.ime("αθήνα".into(), true);
+        app.pointer = (old_rect.x + 5., old_rect.y + 5.);
+        assert!(!app.press(ModifiersState::empty()));
+        assert!(app.notebook_results_key(
+            &Key::Named(NamedKey::ArrowDown),
+            ModifiersState::empty(),
+            false
+        ));
+        assert!(app.focus == Focus::Search);
+        assert!(app.result_path.is_none());
+        #[cfg(feature = "accessibility")]
+        assert!(!semantics.action(&mut app, click(old_button)));
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), "original");
+
+        let mut ready = false;
+        for _ in 0..2 {
+            rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            if app.poll_search() {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready);
+        assert!(
+            matches!(&app.document, Document::Notes(n) if n.rows.len() == 1 && n.rows[0].0 == result)
+        );
+        // The old coordinate and old accessibility ID still must not save
+        // anything or open a note, even though the same path matches again.
+        assert!(!app.press(ModifiersState::empty()));
+        #[cfg(feature = "accessibility")]
+        assert!(!semantics.action(&mut app, click(old_button)));
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), "original");
+        app.draw(&cr, 960., 680., false);
+        #[cfg(feature = "accessibility")]
+        {
+            semantics.update(&app, 1.);
+            assert!(!semantics.action(&mut app, click(old_button)));
+        }
+        assert!(app.notebook_results_key(
+            &Key::Named(NamedKey::ArrowDown),
+            ModifiersState::empty(),
+            false
+        ));
+        assert!(app.notebook_results_key(
+            &Key::Named(NamedKey::Enter),
+            ModifiersState::empty(),
+            false
+        ));
+        assert!(app.focus == Focus::Editor);
+        assert!(
+            matches!(&app.document, Document::Notes(n) if n.document.as_ref().unwrap().file.path() == Some(result))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&original).unwrap(),
+            "unsaved original"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn notebook_keyboard_open_preserves_identity_and_guards_save() {
         let directory =
             std::env::temp_dir().join(format!("jwm-result-keys-{}", std::process::id()));
@@ -1631,7 +1792,7 @@ mod tests {
         assert!(
             app.hits
                 .iter()
-                .any(|hit| hit.action == Action::Note(last.clone()))
+                .any(|hit| matches!(&hit.action, Action::Note(path, _) if path == &last))
         );
         #[cfg(feature = "accessibility")]
         {
@@ -1651,7 +1812,7 @@ mod tests {
         assert!(
             !app.hits
                 .iter()
-                .any(|hit| hit.action == Action::Note(last.clone()))
+                .any(|hit| matches!(&hit.action, Action::Note(path, _) if path == &last))
         );
         #[cfg(feature = "accessibility")]
         {
@@ -1678,7 +1839,7 @@ mod tests {
         assert!(
             app.hits
                 .iter()
-                .any(|hit| hit.action == Action::Note(last.clone()))
+                .any(|hit| matches!(&hit.action, Action::Note(path, _) if path == &last))
         );
 
         assert!(key(&mut app, NamedKey::ArrowDown, true));
@@ -1778,14 +1939,14 @@ mod tests {
         let visible = app
             .hits
             .iter()
-            .filter(|hit| matches!(hit.action, Action::Note(_)))
+            .filter(|hit| matches!(hit.action, Action::Note(..)))
             .count();
         if let Document::Notes(n) = &app.document {
             let first = n.rows[0].0.clone();
             let first_visible = app
                 .hits
                 .iter()
-                .any(|hit| hit.action == Action::Note(first.clone()));
+                .any(|hit| matches!(&hit.action, Action::Note(path, _) if path == &first));
             eprintln!(
                 "IME_SEARCH scroll={} rows={} visible={} first_visible={}",
                 n.list_scroll,

@@ -3,6 +3,11 @@ use gio::{self, glib, prelude::*};
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, TryRecvError},
+};
 use std::time::Instant;
 
 const MAX_TEXT_BYTES: u64 = 8 * 1024 * 1024;
@@ -181,6 +186,36 @@ pub fn create_note(directory: &Path) -> Result<PathBuf, String> {
     Err("无法创建新备忘录。".into())
 }
 
+type NotesRows = Vec<(PathBuf, String)>;
+pub(crate) type SearchWake = Arc<dyn Fn() + Send + Sync>;
+
+struct ActiveSearch {
+    result: Receiver<NotesRows>,
+    cancelled: Arc<AtomicBool>,
+}
+
+fn scan_rows(directory: &Path, query: &str, cancelled: impl Fn() -> bool) -> NotesRows {
+    let mut entries: Vec<_> = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .take_while(|_| !cancelled())
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|s| s == "txt"))
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            if !meta.is_file() || meta.len() > MAX_TEXT_BYTES {
+                return None;
+            }
+            let bytes = read_limited(std::fs::File::open(e.path()).ok()?).ok()?;
+            let text = std::str::from_utf8(&bytes).ok()?;
+            (query.is_empty() || text.to_lowercase().contains(query))
+                .then(|| (e.path(), note_title(text), meta.modified().ok()))
+        })
+        .collect();
+    entries.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    entries.into_iter().map(|(p, t, _)| (p, t)).collect()
+}
+
 pub(crate) struct Notes {
     pub document: Option<TextFile>,
     pub editor: Editor,
@@ -188,7 +223,12 @@ pub(crate) struct Notes {
     pub search: Editor,
     pub find: crate::find::Find,
     pub directory: PathBuf,
-    pub rows: Vec<(PathBuf, String)>,
+    pub rows: NotesRows,
+    query_text: String,
+    query_generation: u64,
+    search_wake: Option<SearchWake>,
+    search_active: Option<ActiveSearch>,
+    pending_search: Option<String>,
     pub managed: bool,
     pub dirty: bool,
     pub due: Option<Instant>,
@@ -208,6 +248,11 @@ impl Notes {
             find: crate::find::Find::default(),
             directory: glib::user_data_dir().join("jwm/notes"),
             rows: vec![],
+            query_text: String::new(),
+            query_generation: 0,
+            search_wake: None,
+            search_active: None,
+            pending_search: None,
             managed: path.is_none(),
             dirty: false,
             due: None,
@@ -364,29 +409,120 @@ impl Notes {
         {
             self.refreshes += 1;
         }
-        let query = self.search.text.to_lowercase();
-        let mut entries: Vec<_> = std::fs::read_dir(&self.directory)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|s| s == "txt"))
-            .filter_map(|e| {
-                let meta = e.metadata().ok()?;
-                if !meta.is_file() || meta.len() > MAX_TEXT_BYTES {
-                    return None;
-                }
-                let bytes = read_limited(std::fs::File::open(e.path()).ok()?).ok()?;
-                let text = std::str::from_utf8(&bytes).ok()?;
-                (query.is_empty() || text.to_lowercase().contains(&query))
-                    .then(|| (e.path(), note_title(text), meta.modified().ok()))
-            })
-            .collect();
-        entries.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-        self.rows = entries.into_iter().map(|(p, t, _)| (p, t)).collect();
+        self.advance_query();
+        self.pending_search = None;
+        self.cancel_scan();
+        let rows = scan_rows(&self.directory, &self.search.text.to_lowercase(), || false);
+        self.publish_rows(rows);
+    }
+
+    fn advance_query(&mut self) {
+        if self.query_text != self.search.text {
+            self.query_text.clone_from(&self.search.text);
+            self.query_generation = self
+                .query_generation
+                .checked_add(1)
+                .expect("search generations exhausted");
+        }
+    }
+
+    fn cancel_scan(&self) {
+        if let Some(active) = &self.search_active {
+            active.cancelled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn set_search_wake(&mut self, wake: SearchWake) {
+        self.search_wake = self.managed.then_some(wake);
+    }
+
+    pub fn current_rows(&self) -> Option<u64> {
+        (!self.search_pending() && self.query_text == self.search.text)
+            .then_some(self.query_generation)
+    }
+
+    pub fn search_pending(&self) -> bool {
+        self.pending_search.is_some()
+            || self
+                .search_active
+                .as_ref()
+                .is_some_and(|active| !active.cancelled.load(Ordering::Relaxed))
+    }
+
+    pub fn update_query(&mut self) {
+        if self.search_wake.is_none() {
+            self.refresh();
+            return;
+        }
+        self.advance_query();
+        self.pending_search = Some(self.search.text.to_lowercase());
+        self.cancel_scan();
+        self.start_scan();
+    }
+
+    fn start_scan(&mut self) {
+        if self.search_active.is_some() {
+            return;
+        }
+        let Some(query) = self.pending_search.take() else {
+            return;
+        };
+        let wake = self
+            .search_wake
+            .as_ref()
+            .expect("search event missing")
+            .clone();
+        let flag = Arc::new(AtomicBool::new(false));
+        let worker_flag = flag.clone();
+        let directory = self.directory.clone();
+        let (tx, rx) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("jwm-notes-search".into())
+            .spawn(move || {
+                let rows = scan_rows(&directory, &query, || worker_flag.load(Ordering::Relaxed));
+                // Publish before waking the event loop. A closed window owns no receiver.
+                let _ = tx.send(rows);
+                wake();
+            }) {
+            Ok(_) => {
+                self.search_active = Some(ActiveSearch {
+                    result: rx,
+                    cancelled: flag,
+                })
+            }
+            Err(_) => self.refresh(),
+        }
+    }
+
+    pub fn poll_search(&mut self) -> bool {
+        let Some(active) = &self.search_active else {
+            return false;
+        };
+        let result = match active.result.try_recv() {
+            Ok(rows) => Some(rows),
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        let active = self.search_active.take().expect("active scan");
+        if active.cancelled.load(Ordering::Relaxed) {
+            self.start_scan();
+            // Start may synchronously recover from a thread creation failure.
+            return !self.search_pending();
+        }
+        match result {
+            Some(rows) => self.publish_rows(rows),
+            None => self.refresh(),
+        }
+        true
+    }
+
+    fn publish_rows(&mut self, rows: NotesRows) {
+        self.rows = rows;
         self.list_scroll = self
             .list_scroll
             .min((self.rows.len() as f64 * 48. - 48.).max(0.));
     }
+
     pub fn new_note(&mut self) -> Result<(), String> {
         self.save()?;
         let path = create_note(&self.directory)?;
@@ -414,9 +550,54 @@ impl Notes {
     }
 }
 
+impl Drop for Notes {
+    fn drop(&mut self) {
+        self.cancel_scan();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_refresh_supersedes_an_already_completed_background_query() {
+        let dir = std::env::temp_dir().join(format!("jwm-bg-save-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let current = dir.join("current.txt");
+        let external = dir.join("external.txt");
+        std::fs::write(&current, "source text").unwrap();
+        let mut notes = Notes::new(Some(current.clone())).unwrap();
+        notes.managed = true;
+        notes.directory = dir.clone();
+        notes.refresh();
+
+        let (wake, ready) = mpsc::channel();
+        notes.set_search_wake(Arc::new(move || {
+            let _ = wake.send(());
+        }));
+        notes.search.text = "needle".into();
+        notes.update_query();
+        ready
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        assert!(notes.current_rows().is_none());
+
+        std::fs::write(&external, "Fresh needle note").unwrap();
+        notes.editor.insert("needle ");
+        notes.edited();
+        notes.save().unwrap();
+        assert_eq!(notes.rows.len(), 2);
+        assert!(notes.current_rows().is_some());
+        let latest = notes.rows.clone();
+        assert!(notes.poll_search());
+        assert_eq!(notes.rows, latest);
+        assert_eq!(
+            std::fs::read_to_string(&current).unwrap(),
+            "needle source text"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn open_result_refreshes_once_and_keeps_save_and_load_failures_distinct() {
