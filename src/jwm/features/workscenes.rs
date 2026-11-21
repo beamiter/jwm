@@ -69,11 +69,13 @@ fn declared_identity_matches(
     desktop_id: Option<&str>,
     startup_wm_class: Option<&str>,
 ) -> bool {
+    // JWM's X11 property layer normalizes WM_CLASS to lowercase. Compare
+    // the whole declared identity, not a case-sensitive form or a suffix.
     [class, instance].iter().any(|identity| {
         [desktop_id, startup_wm_class]
             .into_iter()
             .flatten()
-            .any(|declared| *identity == declared)
+            .any(|declared| identity.eq_ignore_ascii_case(declared))
     })
 }
 
@@ -447,7 +449,7 @@ mod tests {
             .unwrap();
 
         let mut notes = WMClient::new(WindowId::from_raw(12));
-        notes.class = "org.jwm.Notes".into();
+        notes.class = "org.jwm.notes".into();
         jwm.state.clients.insert(notes);
         assert!(
             jwm.activate_workscene_action(&mut backend)
@@ -476,14 +478,14 @@ mod tests {
             "jwm-notes"
         ));
         assert!(declared_identity_matches(
-            "org.jwm.Notes",
+            "org.jwm.notes",
             "",
             notes_id,
             None
         ));
         assert!(declared_identity_matches(
             "LegacyClass",
-            "org.jwm.Notes",
+            "org.jwm.notes",
             None,
             notes_id
         ));

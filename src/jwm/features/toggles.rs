@@ -1466,7 +1466,7 @@ impl Jwm {
             && crate::jwm::features::connectivity::job_in_flight(
                 self.features.launcher_catalog_job.as_ref(),
             );
-        let mut launcher = SystemUiState::open_launcher(
+        let mut launcher = SystemUiState::open_launcher_with_scenes(
             std::sync::Arc::clone(&self.features.launcher_catalog),
             self.launcher_window_snapshot(),
             indexing,
@@ -6338,8 +6338,7 @@ mod shell_entry_tests {
                 .and_hms_opt(12, 0, 0)
                 .unwrap(),
         );
-        let launcher =
-            SystemUiState::open_launcher(std::sync::Arc::from([]), Vec::new(), false, Vec::new());
+        let launcher = SystemUiState::open_launcher(std::sync::Arc::from([]), Vec::new(), false);
         let hub = SystemUiState::control_center(&ControlCenterInputs::default());
 
         assert!(status_bar_shell_is_mine(
@@ -9195,7 +9194,7 @@ pub(crate) mod keyboard_grab_tests {
 
         let mut backend = GrabSpyBackend::new();
         let mut jwm = jwm(&mut backend);
-        let config = CONFIG.load();
+        let config = crate::config::CONFIG.load();
         let scene = config.workscenes().first().expect("default scene").clone();
         drop(config);
 
