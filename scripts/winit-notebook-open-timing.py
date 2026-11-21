@@ -330,20 +330,19 @@ def search_frame(trace, prefix_len, initial_caret, token):
     return None
 
 
-def open_frame(dirty_trace, enter_trace, surface, target):
-    """Validate real editor key, dirty title, return and subsequent owned submit."""
-    key = r"\[(\d+\.\d+)\] wl_keyboard@\d+\.key\(\d+, \d+, {}, 1\)"
-    edit = re.search(key.format(44), dirty_trace)  # physical Z
-    enter = re.search(key.format(28), enter_trace)
-    if not edit or not enter:
+def open_frame(dirty_trace, activation_trace, surface, target):
+    """Validate a real dirty edit and selected row click on the same surface."""
+    edit = re.search(r"\[(\d+\.\d+)\] wl_keyboard@\d+\.key\(\d+, \d+, 44, 1\)", dirty_trace)
+    click = re.search(r"\[(\d+\.\d+)\] wl_pointer@\d+\.button\(\d+, \d+, 272, 1\)", activation_trace)
+    if not edit or not click:
         return None
-    between = dirty_trace[edit.end():] + enter_trace[:enter.start()]
-    if 'set_title("• Active notebook sentinel — JWM 备忘录")' not in between:
+    between = dirty_trace[edit.end():] + activation_trace[:click.start()]
+    dirty_title = 'set_title("• Active notebook sentinel — JWM 备忘录")'
+    if dirty_title not in between:
         return None
-    if 'set_title("Active notebook sentinel — JWM 备忘录")' in dirty_trace.split(
-            'set_title("• Active notebook sentinel — JWM 备忘录")', 1)[-1] + enter_trace[:enter.start()]:
+    if 'set_title("Active notebook sentinel — JWM 备忘录")' in between.split(dirty_title, 1)[1]:
         return None
-    tail = enter_trace[enter.end():]
+    tail = activation_trace[click.end():]
     submit = re.compile(rf"\[(\d+\.\d+)\]\s+-> wl_surface@{surface}\.commit\(\)")
     sent = submit.search(tail)
     title_at = tail.find(f'set_title("{target}")')
@@ -351,11 +350,11 @@ def open_frame(dirty_trace, enter_trace, surface, target):
         return None
     if not re.search(rf"-> wl_surface@{surface}\.attach\(wl_buffer@\d+, 0, 0\)", tail[title_at:sent.start()]):
         return None
-    edit_to_enter_ms = round(float(enter[1]) - float(edit[1]), 3)
-    if not 0 < edit_to_enter_ms < 550:
+    edit_to_click_ms = round(float(click[1]) - float(edit[1]), 3)
+    if not 0 < edit_to_click_ms < 550:
         return None
-    return {"enter_to_owned_result_submit_ms": round(float(sent[1]) - float(enter[1]), 3),
-            "edit_to_enter_ms": edit_to_enter_ms, "editor_key": edit[0], "enter": enter[0], "submit": sent[0]}
+    return {"click_to_owned_result_submit_ms": round(float(sent[1]) - float(click[1]), 3),
+            "edit_to_click_ms": edit_to_click_ms, "editor_key": edit[0], "click": click[0], "submit": sent[0]}
 
 
 
@@ -751,26 +750,22 @@ def run(args, out, report):
             cmd("xdotool", "mousemove", "--window", xid, "350", "180", "click", "1")
             cmd("xdotool", "key", "--clearmodifiers", "--delay", "0", "ctrl+End", "z")
             wait(lambda: title() == "• " + initial, "managed note did not become dirty", 2)
-            down_mark = len(read(notes_log))
-            down_ime_mark = len(read(fcitx_log))
-            cmd("xdotool", "key", "--clearmodifiers", "--delay", "0", "ctrl+f", "Down")
+            # This arm measures the shared open path via a real pointer
+            # click. It is separate from the preceding Return-based replay.
+            hover_mark = len(read(notes_log))
+            cmd("xdotool", "mousemove", "--sync", "--window", xid, "90", "198")
             surf = report["software_frame"]["surface"]
-            selected = re.compile(rf"wl_keyboard@\d+\.key\(\d+, \d+, 108, 1\).*?-> wl_surface@{surf}\.commit\(\)", re.S)
-            wait(lambda: selected.search(read(notes_log)[down_mark:]), "Down did not produce an owned result selection buffer", .35)
-            def inactive_result_target():
-                calls = re.findall(r"zwp_input_method_v2@\d+\.(activate|deactivate)\(\)",
-                                   read(fcitx_log)[down_ime_mark:])
-                return calls and calls[-1] == "deactivate"
-
-            wait(inactive_result_target, "Down did not release the Fcitx text target before Return", .25)
-            require(original_path.read_bytes() == old_bytes, "autosave wrote before the intended Return")
+            hover = re.compile(rf"wl_pointer@\d+\.motion\(.*?-> wl_surface@{surf}\.commit\(\)", re.S)
+            wait(lambda: hover.search(read(notes_log)[hover_mark:]), "result hover did not reach an owned buffer", .35)
+            require(original_path.read_bytes() == old_bytes, "autosave wrote before the intended result click")
             enter_mark = len(read(notes_log))
-            # Use validated #166 physical key sequencing; an immediate XTEST
-            # press/release did not reach either client in the first A/B run.
-            key("Return")
-            wait(lambda: re.search(r"wl_keyboard@\d+\.key\(\d+, \d+, 28, 1\)", read(notes_log)[enter_mark:]),
-                 "Return did not reach Notes; not a product timing sample", 2)
-            wait(lambda: title() == target, "delivered Return did not open the matching note")
+            cmd("xdotool", "mousedown", "1")
+            try:
+                wait(lambda: re.search(r"wl_pointer@\d+\.button\(\d+, \d+, 272, 1\)", read(notes_log)[enter_mark:]),
+                     "left button press did not reach Notes; not a product timing sample", 2)
+                wait(lambda: title() == target, "delivered row click did not open the matching note")
+            finally:
+                cmd("xdotool", "mouseup", "1")
             report["commit"]["opened_image"] = capture("search-result-opened.png")
             trace = read(notes_log)
             report["dirty_open"] = require(
