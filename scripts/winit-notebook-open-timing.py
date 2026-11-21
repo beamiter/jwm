@@ -752,14 +752,25 @@ def run(args, out, report):
             cmd("xdotool", "key", "--clearmodifiers", "--delay", "0", "ctrl+End", "z")
             wait(lambda: title() == "• " + initial, "managed note did not become dirty", 2)
             down_mark = len(read(notes_log))
+            down_ime_mark = len(read(fcitx_log))
             cmd("xdotool", "key", "--clearmodifiers", "--delay", "0", "ctrl+f", "Down")
             surf = report["software_frame"]["surface"]
             selected = re.compile(rf"wl_keyboard@\d+\.key\(\d+, \d+, 108, 1\).*?-> wl_surface@{surf}\.commit\(\)", re.S)
             wait(lambda: selected.search(read(notes_log)[down_mark:]), "Down did not produce an owned result selection buffer", .35)
+            def inactive_result_target():
+                calls = re.findall(r"zwp_input_method_v2@\d+\.(activate|deactivate)\(\)",
+                                   read(fcitx_log)[down_ime_mark:])
+                return calls and calls[-1] == "deactivate"
+
+            wait(inactive_result_target, "Down did not release the Fcitx text target before Return", .25)
             require(original_path.read_bytes() == old_bytes, "autosave wrote before the intended Return")
             enter_mark = len(read(notes_log))
-            cmd("xdotool", "key", "--clearmodifiers", "--delay", "0", "Return")
-            wait(lambda: title() == target, "Down/Enter did not open the matching note")
+            # Use validated #166 physical key sequencing; an immediate XTEST
+            # press/release did not reach either client in the first A/B run.
+            key("Return")
+            wait(lambda: re.search(r"wl_keyboard@\d+\.key\(\d+, \d+, 28, 1\)", read(notes_log)[enter_mark:]),
+                 "Return did not reach Notes; not a product timing sample", 2)
+            wait(lambda: title() == target, "delivered Return did not open the matching note")
             report["commit"]["opened_image"] = capture("search-result-opened.png")
             trace = read(notes_log)
             report["dirty_open"] = require(
