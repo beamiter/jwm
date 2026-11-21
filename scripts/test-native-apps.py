@@ -68,8 +68,9 @@ def main():
             for name in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
                 env.pop(name, None)
 
-            def command(*argv):
-                return subprocess.check_output(list(map(str, argv)), env=env, stderr=subprocess.PIPE).decode().strip()
+            def command(*argv, timeout=None):
+                return subprocess.check_output(list(map(str, argv)), env=env,
+                                               stderr=subprocess.PIPE, timeout=timeout).decode().strip()
 
             def wait(predicate, message):
                 deadline = time.monotonic() + 8
@@ -115,8 +116,9 @@ def main():
                         key("Return")
                     command("xdotool", "type", "--clearmodifiers", "--delay", "1", line)
 
-            def screenshot(identifier):
-                result = subprocess.check_output(["import", "-window", str(identifier), "png:-"], env=env)
+            def screenshot(identifier, *, timeout=None):
+                result = subprocess.check_output(["import", "-window", str(identifier), "png:-"],
+                                                 env=env, timeout=timeout)
                 return Image.open(io.BytesIO(result)).convert("RGB")
 
             def close_button(identifier):
@@ -176,18 +178,83 @@ def main():
                 mixed_app = launch("jwm-notes", mixed)
                 mixed_window = window("mixed-newlines.txt.*JWM 备忘录")
                 focus(mixed_window)
+                mixed_trace = []
+
+                def acknowledge_title(step, file, xid, dirty):
+                    title = ("• " if dirty else "") + file.name + " — JWM 备忘录"
+                    expected = f'_NET_WM_NAME(UTF8_STRING) = "{title}"'
+                    last = None
+
+                    def observed():
+                        nonlocal last
+                        try:
+                            actual = command("xprop", "-id", xid, "_NET_WM_NAME", timeout=1)
+                        except subprocess.TimeoutExpired:
+                            actual = "<title probe timed out>"
+                        if actual != last:
+                            mixed_trace.append(f"{time.monotonic_ns()} {step}: title={actual!r}")
+                            last = actual
+                        return actual == expected
+
+                    try:
+                        wait(observed, f"{step}: window {xid} did not publish title {title!r}")
+                    except AssertionError:
+                        record_mixed_failure(file, xid)
+                        raise
+
+                def record_mixed_failure(file, xid):
+                    if not args.evidence_dir:
+                        return
+                    args.evidence_dir.mkdir(parents=True, exist_ok=True)
+                    detail = "\n".join(mixed_trace) + "\n"
+                    if file.exists():
+                        detail += f"last bytes={file.read_bytes().hex()}\n"
+                    (args.evidence_dir / "mixed-newlines.log").write_text(detail)
+                    log.flush()
+                    shutil.copyfile(work / "apps.log", args.evidence_dir / "mixed-apps.log")
+                    try:
+                        screenshot(xid, timeout=3).save(args.evidence_dir / "mixed-newlines.png")
+                    except (OSError, subprocess.SubprocessError) as error:
+                        print(f"Mixed-newline screenshot unavailable: {error}", flush=True)
+
+                def check_mixed(step, file, xid, expected):
+                    # The title separately proves the edit and synchronous save
+                    # happened. Read the exact bytes once, not until they match.
+                    acknowledge_title(step + " dirty", file, xid, True)
+                    key("ctrl+s")
+                    acknowledge_title(step + " saved", file, xid, False)
+                    got = file.read_bytes()
+                    mixed_trace.append(f"{time.monotonic_ns()} {step}: "
+                                       f"actual={got.hex()} expected={expected.hex()}")
+                    if got != expected:
+                        record_mixed_failure(file, xid)
+                        raise AssertionError("\n".join(mixed_trace))
+
+                acknowledge_title("initial clean", mixed, mixed_window, False)
                 key("End")
                 type_text("X")
-                key("ctrl+s")
-                assert mixed.read_bytes() == b"\xef\xbb\xbfaX\r\nb\nc", "End split or save normalized CRLF"
-                key("Delete", "ctrl+s")
-                assert mixed.read_bytes() == b"\xef\xbb\xbfaXb\nc", "Delete did not consume the whole CRLF"
-                key("ctrl+z", "BackSpace", "ctrl+s")
-                assert mixed.read_bytes() == b"\xef\xbb\xbfaXb\nc", "Backspace did not consume the whole CRLF"
-                key("ctrl+z", "Return", "ctrl+s")
-                assert mixed.read_bytes() == b"\xef\xbb\xbfaX\r\n\nb\nc", "Enter changed existing separators"
+                check_mixed("End/insert/save", mixed, mixed_window, b"\xef\xbb\xbfaX\r\nb\nc")
+                key("Delete")
+                check_mixed("Delete/save", mixed, mixed_window, b"\xef\xbb\xbfaXb\nc")
+                key("ctrl+z", "BackSpace")
+                check_mixed("Undo/Backspace/save", mixed, mixed_window, b"\xef\xbb\xbfaXb\nc")
+                key("ctrl+z", "Return")
+                check_mixed("Undo/Return/save", mixed, mixed_window, b"\xef\xbb\xbfaX\r\n\nb\nc")
                 key("ctrl+w")
                 wait(lambda: mixed_app.poll() is not None, "Mixed-newline editor did not close")
+
+                # Independent Backspace case: the bytes before and after are
+                # different here, unlike the chained Delete/Undo case above.
+                control = work / "mixed-backspace.txt"
+                control.write_bytes(b"\xef\xbb\xbfleft\r\nright\ntail")
+                control_app = launch("jwm-notes", control)
+                control_window = window("mixed-backspace.txt.*JWM 备忘录")
+                focus(control_window)
+                acknowledge_title("Backspace control initial clean", control, control_window, False)
+                key("End", "Right", "BackSpace")
+                check_mixed("Backspace control", control, control_window, b"\xef\xbb\xbfleftright\ntail")
+                key("ctrl+w")
+                wait(lambda: control_app.poll() is not None, "Backspace control editor did not close")
                 print("Mixed newline native editing and BOM preservation: PASS", flush=True)
 
                 external = work / 'file with spaces.txt'
