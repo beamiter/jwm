@@ -43,10 +43,21 @@ pub(crate) struct OutputPowerState {
 
 impl OutputPowerState {
     pub(crate) fn sync(&mut self, modes: impl IntoIterator<Item = (Output, bool)>) -> bool {
-        let mut modes: HashMap<_, _> = modes.into_iter().collect();
+        // A snapshot contains at most the small set of current connectors.
+        // Keep output identity without indexing another map by Output.
+        let mut modes: Vec<_> = modes.into_iter().collect();
         let mut sent = false;
         self.outputs.retain(|output, power| {
-            let Some(on) = modes.remove(output) else {
+            let mut on = None;
+            modes.retain(|(current, mode)| {
+                if current != output {
+                    return true;
+                }
+                // Preserve the original map's last-value-wins semantics.
+                on = Some(*mode);
+                false
+            });
+            let Some(on) = on else {
                 for control in power
                     .controls
                     .iter()
@@ -308,6 +319,19 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn power_snapshot_preserves_output_identity_and_last_mode() {
+        let a = test_output("DP-1");
+        let b = test_output("DP-1");
+        let mut power = OutputPowerState::default();
+        assert!(!power.sync([(a.clone(), false), (a.clone(), true), (b.clone(), false)]));
+        assert!(power.outputs[&a].on);
+        assert!(!power.outputs[&b].on);
+        assert!(!power.sync([(a.clone(), true), (a.clone(), false)]));
+        assert!(!power.outputs[&a].on);
+        assert!(!power.outputs.contains_key(&b));
     }
 
     #[test]

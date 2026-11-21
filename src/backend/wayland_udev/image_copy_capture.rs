@@ -591,6 +591,23 @@ pub struct CaptureFrameData {
 }
 unsafe impl Send for CaptureFrameData {}
 
+impl CaptureFrameData {
+    pub(super) fn window_input_layout(
+        &self,
+    ) -> Option<Arc<super::remote_pointer::WindowInputLayout>> {
+        // A nested backend never renders ready capture frames and therefore
+        // cannot supply the layout proof required for a window gesture.
+        #[cfg(feature = "backend-wayland-udev")]
+        {
+            self.window_input_layout.lock().unwrap().clone()
+        }
+        #[cfg(not(feature = "backend-wayland-udev"))]
+        {
+            None
+        }
+    }
+}
+
 pub struct CursorSessionData {
     /// `None` for a cursor session on an inert source.
     pub source: Option<CaptureSource>,

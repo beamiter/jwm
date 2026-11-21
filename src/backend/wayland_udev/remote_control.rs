@@ -788,7 +788,7 @@ impl Dispatch<JwmRemoteControlLeaseV1, LeaseData> for JwmWaylandState {
                 if lease.mode == LeaseMode::WindowGestures {
                     let layout = frame
                         .data::<CaptureFrameData>()
-                        .and_then(|data| data.window_input_layout.lock().unwrap().clone());
+                        .and_then(CaptureFrameData::window_input_layout);
                     let Some(layout) = layout.filter(|layout| {
                         WindowInputLayout::snapshot(&lease.authority.surface).as_ref()
                             == Some(layout.as_ref())
