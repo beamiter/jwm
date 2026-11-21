@@ -282,6 +282,8 @@ unsubmitted batch drop. A monotonic DRM event timestamp is used for feedback
 without advertising `hw_clock`. The timestamp can come from software in the
 display driver. The managed viewer reports `wayland_presentation_discarded`
 when the compositor discards its current submission.
+It reports `wayland_presentation_timeout` when a current or retired
+submission misses the viewer's completion deadline.
 
 DPMS power replies follow the DRM write and refer to the original output
 object. A fresh control reads the confirmed mode. Powering down retires any
