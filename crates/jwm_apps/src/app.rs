@@ -171,7 +171,7 @@ impl App {
         let mut dirty = self.poll_search();
         match &mut self.document {
             Document::Notes(n) if n.due.is_some_and(|due| Instant::now() >= due) => {
-                if let Err(error) = n.save() {
+                if let Err(error) = n.autosave() {
                     n.status = "保存失败；内容仍在编辑器中，请重试或另存为".into();
                     self.error(error);
                 }
@@ -503,7 +503,8 @@ impl App {
                     let _ = cr.save();
                     cr.rectangle(0., body.y + 60., sidebar, body.h - 60.);
                     cr.clip();
-                    if n.search_pending() {
+                    let keep_painted = n.painted_save_refresh();
+                    if n.search_pending() && !keep_painted {
                         ui::text(
                             cr,
                             "正在搜索…",
@@ -513,7 +514,11 @@ impl App {
                         );
                     }
                     let generation = n.current_rows();
-                    let rows = generation.map(|_| n.rows.as_slice()).unwrap_or_default();
+                    let rows = if generation.is_some() || keep_painted {
+                        n.rows.as_slice()
+                    } else {
+                        &[]
+                    };
                     for (i, (path, title)) in rows.iter().enumerate() {
                         let rect = Rect::new(
                             8.,
@@ -531,7 +536,9 @@ impl App {
                         };
                         if selected {
                             ui::rounded(cr, rect, ui::select());
-                        } else if rect.contains(self.pointer.0, self.pointer.1) {
+                        } else if generation.is_some()
+                            && rect.contains(self.pointer.0, self.pointer.1)
+                        {
                             ui::rounded(cr, rect, ui::hover());
                         }
                         ui::text(
@@ -541,19 +548,18 @@ impl App {
                             14.,
                             ui::text_color(),
                         );
-                        self.hits.push(Hit {
-                            rect: Rect::new(
-                                rect.x,
-                                rect.y.max(body.y + 60.),
-                                rect.w,
-                                rect.h.min((body.y + body.h - rect.y).max(0.)),
-                            ),
-                            action: Action::Note(
-                                path.clone(),
-                                generation.expect("displayed rows are current"),
-                            ),
-                            label: title.clone(),
-                        });
+                        if let Some(generation) = generation {
+                            self.hits.push(Hit {
+                                rect: Rect::new(
+                                    rect.x,
+                                    rect.y.max(body.y + 60.),
+                                    rect.w,
+                                    rect.h.min((body.y + body.h - rect.y).max(0.)),
+                                ),
+                                action: Action::Note(path.clone(), generation),
+                                label: title.clone(),
+                            });
+                        }
                     }
                     let _ = cr.restore();
                 }
@@ -1619,6 +1625,61 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autosave_tick_keeps_existing_sidebar_pixels_until_new_results_arrive() {
+        let dir = std::env::temp_dir().join(format!("jwm-autosave-frame-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("current.txt");
+        std::fs::write(&path, "Current title").unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        if let Document::Notes(notes) = &mut app.document {
+            notes.managed = true;
+            notes.directory = dir.clone();
+            notes.refresh();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.set_search_wake(std::sync::Arc::new(move || {
+            let _ = tx.send(());
+        }));
+        let capture = |app: &mut App| {
+            let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 960, 680).unwrap();
+            {
+                let cr = cairo::Context::new(&surface).unwrap();
+                app.draw(&cr, 960., 680., false);
+            }
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            // Exclude the title and search controls; examine the painted rows.
+            (120..300)
+                .flat_map(|y| data[y * stride..y * stride + 180 * 4].iter().copied())
+                .collect::<Vec<_>>()
+        };
+        let before = capture(&mut app);
+        assert!(
+            app.hits
+                .iter()
+                .any(|hit| matches!(hit.action, Action::Note(..)))
+        );
+        if let Document::Notes(notes) = &mut app.document {
+            notes.editor = crate::editor::Editor::new("Renamed title".into());
+            notes.edited();
+            notes.due = Some(Instant::now());
+        }
+        assert!(app.tick());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Renamed title");
+        assert_eq!(capture(&mut app), before);
+        assert!(
+            !app.hits
+                .iter()
+                .any(|hit| matches!(hit.action, Action::Note(..)))
+        );
+        rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(app.poll_search());
+        assert_ne!(capture(&mut app), before);
+        assert!(app.hits.iter().any(|hit| hit.label == "Renamed title"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn asynchronous_query_coalesces_and_rejects_old_hits_before_a_redraw() {
