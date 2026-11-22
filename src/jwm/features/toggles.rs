@@ -5941,6 +5941,9 @@ impl Jwm {
             // Scratchpad exists — toggle visibility
             let is_visible = self.is_client_visible_by_key(sp_key);
             if is_visible {
+                if name == "term" {
+                    crate::backend::terminal_exit_trace::mark("hide_handler");
+                }
                 // A sticky window is visible on every tag, so parking it on
                 // no tag would leave it on screen: hiding a scratchpad ends
                 // its stickiness.

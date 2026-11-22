@@ -49,6 +49,105 @@ def first_capture_then_focus(grab, read_focus, clock=time.monotonic):
     return (begin, image, end), focus_row, focus_observed
 
 
+def early_capture_burst(grab, deadline, clock=time.monotonic, limit=3):
+    """Bounded synchronous grabs; no IPC/color work/sleep between frames.
+
+    Never start a further grab past the original early deadline. A slow grab
+    may finish late and remains recorded, never backdated as early evidence.
+    """
+    frames = []
+    for _ in range(limit):
+        begin = clock()
+        if frames and begin >= deadline:
+            break
+        image = grab()
+        frames.append((begin, image, clock()))
+    return frames
+
+
+def clock_aware_candidate(report):
+    """Separate proposed verdict. Does NOT replace legacy failures/status."""
+    report['legacy_strict_failures'] = list(report['failures'])
+    failures = []
+    if report.get('clock_trace_status') != 'valid':
+        failures.append('missing valid clock markers')
+    else:
+        for case in report['cases']:
+            markers = dict((event, ns) for ns, event in case['clock_markers'])
+            expected = ['hide_handler', 'input_released_visual_ready', 'render_begin',
+                        'submit_begin', 'submit_return_ok', 'render_return_ok']
+            rows = case['clock_markers']
+            if ([event for _, event in rows] != expected
+                    or any(a[0] >= b[0] for a, b in zip(rows, rows[1:]))):
+                failures.append(case['case'] + ': incomplete or unordered markers')
+                continue
+            hide, ready = markers['hide_handler'], markers['input_released_visual_ready']
+            returned = markers['submit_return_ok']
+            evidence = []
+            for frame in case['frames']:
+                begin, end = frame['capture_begin_monotonic_ns'], frame['capture_end_monotonic_ns']
+                if end < hide:
+                    phase = 'pre-handler-unproven'
+                elif begin <= ready:
+                    phase = 'handler-or-ready-boundary-unproven'
+                elif begin <= returned:
+                    phase = 'post-ready-submit-boundary-unproven'
+                else:
+                    phase = 'post-submit-confirmed-pixels-required'
+                frame['acceptance_phase'] = phase
+                confirmed = begin > ready and frame['checked']
+                positive_eligible = begin > returned and frame['checked']
+                evidence.append({**frame, 'checked': positive_eligible})
+                if confirmed and frame['red_fraction'] <= .9:
+                    failures.append(case['case'] + ': confirmed exit occluded: ' + frame['png'])
+            try:
+                X11.assert_full_coverage(evidence, case['frozen_horizon'], case['case'])
+            except AssertionError as error:
+                failures.append(str(error))
+    report['clock_aware_failures'] = failures
+    report['clock_aware_visual_candidate_status'] = 'failure' if failures else 'success'
+    report['clock_aware_scope'] = 'proposed visual-only evidence; legacy status and input failures remain authoritative; not authorized as replacement acceptance'
+
+
+def annotate_clock_evidence(report, trace_path):
+    """Diagnostics only: never removes a failure or excludes a sampled frame."""
+    try:
+        rows = [(int(ns), event) for ns, event in
+                (line.split() for line in trace_path.read_text().splitlines())]
+        if not rows or any(a[0] >= b[0] for a, b in zip(rows, rows[1:])):
+            raise ValueError('missing or non-monotonic trace')
+        if not report['cases']:
+            raise ValueError('no captured cases')
+        report['clock_trace'] = rows
+        expected = ['hide_handler', 'input_released_visual_ready',
+                    'render_begin', 'submit_begin', 'submit_return_ok', 'render_return_ok']
+        for case in report['cases']:
+            start = round(case['key_start'] * 1e9)
+            end = max(frame['capture_end_monotonic_ns'] for frame in case['frames'])
+            markers = [(ns, event) for ns, event in rows if start <= ns <= end][:6]
+            if [event for _, event in markers] != expected:
+                raise ValueError(case['case'] + ': missing/out-of-order/failed submit markers')
+            case['clock_markers'] = markers
+            hide, ready, render, submit, returned, render_return = (ns for ns, _ in markers)
+            for frame in case['frames']:
+                begin, end = frame['capture_begin_monotonic_ns'], frame['capture_end_monotonic_ns']
+                if end < hide:
+                    phase = 'pre-hide-handler'
+                elif begin <= hide:
+                    phase = 'intersects-hide-handler-uncertain'
+                elif end < submit:
+                    phase = 'post-hide-before-submit'
+                elif begin > returned:
+                    phase = 'post-submit-return-not-presentation-proof'
+                else:
+                    phase = 'intersects-submit-uncertain'
+                frame['clock_phase'] = phase
+        report['clock_trace_status'] = 'valid'
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        report['clock_trace_status'] = 'invalid'
+        report['failures'].append('clock diagnostic invalid: ' + str(error))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--backend', choices=['wayland-winit', 'wayland-x11'], default='wayland-winit')
@@ -57,10 +156,14 @@ def main():
     parser.add_argument('--evidence-dir', type=Path, default=ROOT / 'artifacts/terminal-exit-wayland')
     parser.add_argument('--diagnose', action='store_true', help='Collect later cases after a failed invariant; never converts failure to success')
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--phase-candidate', action='store_true', help='local proposed visual verdict plus bounded burst; legacy verdict remains authoritative')
+    parser.add_argument('--trace-clock', action='store_true', help='opt-in diagnostic only; does not alter gates')
     args = parser.parse_args()
     if args.self_test:
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(Offline)
         return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+    if args.phase_candidate and not args.trace_clock:
+        parser.error('--phase-candidate requires --trace-clock')
     output = args.evidence_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     report = {'status': 'running', 'backend': args.backend, 'transport': 'native wl_shm/xdg-shell',
@@ -81,6 +184,13 @@ def main():
             env[key] = str(work / leaf)
         env.update(LIBGL_ALWAYS_SOFTWARE='1', WINIT_X11_SCALE_FACTOR='1',
                    DBUS_SYSTEM_BUS_ADDRESS='unix:path=' + str(work / 'absent-system-bus'))
+        trace_path = output / 'terminal-clock.trace'
+        if args.trace_clock:
+            if time.get_clock_info('monotonic').implementation != 'clock_gettime(CLOCK_MONOTONIC)':
+                raise RuntimeError('clock trace requires Python CLOCK_MONOTONIC')
+            env['JWM_TERMINAL_EXIT_TRACE'] = str(trace_path)
+            report['limits'].append('CLOCK_MONOTONIC trace adds clock/lock/buffer cost and post-submit file writes; submit return is not presentation feedback. Missing/damaged trace invalidates diagnosis; not every IO failure is observable. Capture float timestamps rounded to nanoseconds, not nanosecond measurement precision.')
+            report['clock_implementation'] = time.get_clock_info('monotonic').implementation
         log = (output / 'session.log').open('w')
         def run(*argv):
             return subprocess.check_output(list(map(str, argv)), env=env, stderr=log, text=True, timeout=15)
@@ -199,10 +309,24 @@ def main():
                     wait(lambda: key_received(events(term_log)[key_offset:], 48), 'native terminal receives b')
                     pending[kind + '-before'] = capture.grab()
                     term_offset, bg_offset = len(events(term_log)), len(events(bg_log))
+                    if args.phase_candidate:
+                        # Compute before key timing; no new work in legacy hot path.
+                        case['frozen_horizon'] = X11.overlap_horizon(term, bg, 0.)
+                        case['early_deadline_seconds'] = case['frozen_horizon'] / 3
                     started, finished = hotkey()
                     case.update(key_start=started, key_finish=finished)
-                    first_frame, focus_row, focus_observed = first_capture_then_focus(
-                        capture.grab, lambda: native_row(msg('get_windows'), term_pid))
+                    if args.phase_candidate:
+                        burst = early_capture_burst(capture.grab, started + case['early_deadline_seconds'])
+                        for index, (_, image, _) in enumerate(burst):
+                            pending[f'{kind}-{index:03}'] = image
+                        focus_row = native_row(msg('get_windows'), term_pid)
+                        focus_observed = time.monotonic()
+                        case['burst_count'] = len(burst)
+                        case['focus_after_burst_seconds'] = focus_observed - burst[-1][2]
+                    else:
+                        first_frame, focus_row, focus_observed = first_capture_then_focus(
+                            capture.grab, lambda: native_row(msg('get_windows'), term_pid))
+                        burst = [first_frame]
                     case['focus_observation_seconds'] = focus_observed-started
                     dispatch_bound = max(finished, focus_observed)-started
                     check(not focus_row['is_focused'], kind+': terminal focus remains after hide')
@@ -210,8 +334,8 @@ def main():
                     # Input probe during exit, without forcibly changing compositor focus.
                     deadline = started + 1.15
                     for index in range(240):
-                        if index == 0:
-                            begin, image, end = first_frame
+                        if index < len(burst):
+                            begin, image, end = burst[index]
                         else:
                             begin = time.monotonic()
                             image = capture.grab()
@@ -220,6 +344,8 @@ def main():
                         pending[name] = image
                         rect = X11.overlap_during_capture(term, bg, begin-started, end-started, dispatch_bound)
                         sample = {'seconds': end-started, 'capture_start': begin-started, 'png': name+'.png',
+                                  'capture_begin_monotonic_ns': round(begin * 1e9),
+                                  'capture_end_monotonic_ns': round(end * 1e9),
                                   'rect': rect, 'checked': False, 'total_term_pixels': X11.color_pixels(image, 'term')}
                         if rect and (rect[2]-rect[0])*(rect[3]-rect[1]) >= 400:
                             area = (rect[2]-rect[0])*(rect[3]-rect[1])
@@ -233,7 +359,8 @@ def main():
                         if end >= deadline:
                             break
                         time.sleep(.008)
-                    horizon = X11.overlap_horizon(term, bg, dispatch_bound)
+                    horizon = (case['frozen_horizon'] if args.phase_candidate else
+                               X11.overlap_horizon(term, bg, dispatch_bound))
                     case['horizon'] = horizon
                     try:
                         X11.assert_full_coverage(case['frames'], horizon, kind)
@@ -326,6 +453,10 @@ def main():
                         os.killpg(child.pid, signal.SIGKILL)
                         child.wait(timeout=4)
             log.close()
+            if args.trace_clock:
+                annotate_clock_evidence(report, trace_path)
+            if args.phase_candidate:
+                clock_aware_candidate(report)
             report['status'] = 'failure' if report['failures'] else 'success'
             (output / 'report.json').write_text(json.dumps(report, indent=2)+'\n')
             print(json.dumps(report, indent=2))
@@ -373,6 +504,102 @@ class Offline(unittest.TestCase):
             lambda: object(), lambda: {'is_focused': False}, lambda: next(ticks))
         # The caller still measures from key start, not from capture completion.
         self.assertGreater(observed_at - 20., .2)
+    def test_clock_diagnostic_never_relaxes_failed_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace'
+            path.write_text('100 hide_handler\n120 input_released_visual_ready\n125 render_begin\n140 submit_begin\n160 submit_return_ok\n165 render_return_ok\n')
+            frames = [{'capture_begin_monotonic_ns': a, 'capture_end_monotonic_ns': b,
+                       'checked': True, 'red_fraction': 0.0}
+                      for a, b in [(50, 90), (90, 110), (110, 130), (130, 150), (170, 180)]]
+            report = {'cases': [{'case': 'pip', 'key_start': 0, 'frames': frames}],
+                      'failures': ['original occlusion failure']}
+            annotate_clock_evidence(report, path)
+            self.assertEqual(report['clock_trace_status'], 'valid')
+            self.assertEqual(report['failures'], ['original occlusion failure'])
+            self.assertTrue(all(frame['checked'] for frame in frames))
+            self.assertEqual([frame['clock_phase'] for frame in frames], [
+                'pre-hide-handler', 'intersects-hide-handler-uncertain',
+                'post-hide-before-submit', 'intersects-submit-uncertain',
+                'post-submit-return-not-presentation-proof'])
+
+    def test_clock_missing_out_of_order_and_submit_error_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace'
+            for text in ['', '100 hide_handler\n90 submit_return_ok\n',
+                         '100 hide_handler\n120 input_released_visual_ready\n125 render_begin\n140 submit_begin\n160 submit_return_error\n165 render_return_ok\n',
+                         '100 hide_handler\n120 input_released_visual_ready\n125 render_begin\n165 render_return_ok\n']:
+                path.write_text(text)
+                report = {'cases': [{'case': 'pip', 'key_start': 0, 'frames': [
+                    {'capture_begin_monotonic_ns': 170, 'capture_end_monotonic_ns': 180}]}], 'failures': []}
+                annotate_clock_evidence(report, path)
+                self.assertEqual(report['clock_trace_status'], 'invalid')
+                self.assertEqual(len(report['failures']), 1)
+
+    def phase_report(self, early_begin, early_end, early_red=1.):
+        frames = []
+        for index, (begin, end, red, checked) in enumerate([
+                (early_begin, early_end, early_red, True),
+                (.11, .12, 1., True), (.19, .20, 1., True), (1.10, 1.15, 0., False)]):
+            frames.append({'capture_begin_monotonic_ns': round(begin*1e9),
+                           'capture_end_monotonic_ns': round(end*1e9), 'seconds': end,
+                           'red_fraction': red, 'checked': checked, 'png': str(index)})
+        return {'failures': ['legacy failure'], 'clock_trace_status': 'valid', 'cases': [
+            {'case': 'pip', 'frozen_horizon': .248, 'frames': frames,
+             'clock_markers': [(40_000_000, 'hide_handler'), (60_000_000, 'input_released_visual_ready'),
+                               (61_000_000, 'render_begin'), (62_000_000, 'submit_begin'),
+                               (64_000_000, 'submit_return_ok'), (64_500_000, 'render_return_ok')]}]}
+
+    def test_phase_prehandler_and_cross_ready_cannot_supply_early_evidence(self):
+        for begin, end in [(.02, .03), (.05, .07), (.07, .09)]:
+            report = self.phase_report(begin, end)
+            clock_aware_candidate(report)
+            self.assertEqual(report['clock_aware_visual_candidate_status'], 'failure')
+            self.assertEqual(report['failures'], ['legacy failure'])
+            self.assertTrue(report['cases'][0]['frames'][0]['checked'])
+            self.assertEqual(report['legacy_strict_failures'], ['legacy failure'])
+
+    def test_phase_confirmed_early_red_required_and_occlusion_still_fails(self):
+        report = self.phase_report(.065, .08, 0.)
+        clock_aware_candidate(report)
+        self.assertIn('confirmed exit occluded', report['clock_aware_failures'][0])
+        report = self.phase_report(.065, .08)
+        clock_aware_candidate(report)
+        self.assertEqual(report['clock_aware_visual_candidate_status'], 'success')
+        self.assertEqual(report['failures'], ['legacy failure'])
+
+    def test_phase_cross_submit_is_not_positive_but_ready_occlusion_is_failure(self):
+        for red in (1., 0.):
+            report = self.phase_report(.061, .08, red)
+            extra = dict(report['cases'][0]['frames'][1])
+            extra.update(capture_begin_monotonic_ns=140_000_000,
+                         capture_end_monotonic_ns=150_000_000, seconds=.15, png='extra')
+            report['cases'][0]['frames'].insert(2, extra)
+            clock_aware_candidate(report)
+            self.assertEqual(report['clock_aware_visual_candidate_status'], 'failure')
+            self.assertTrue(any('missing early' in failure for failure in report['clock_aware_failures']))
+            if red == 0.:
+                self.assertTrue(any('confirmed exit occluded' in failure for failure in report['clock_aware_failures']))
+            self.assertEqual(report['failures'], ['legacy failure'])
+
+    def test_phase_complete_markers_required_even_if_status_claims_valid(self):
+        report = self.phase_report(.065, .08)
+        report['cases'][0]['clock_markers'].pop(3)
+        clock_aware_candidate(report)
+        self.assertEqual(report['clock_aware_visual_candidate_status'], 'failure')
+
+    def test_phase_missing_markers_fails(self):
+        report = self.phase_report(.065, .08)
+        report['clock_trace_status'] = 'invalid'
+        clock_aware_candidate(report)
+        self.assertEqual(report['clock_aware_visual_candidate_status'], 'failure')
+
+    def test_burst_preserves_late_grab_and_never_starts_next_past_deadline(self):
+        ticks = iter([.04, .05, .06, .09, .091])
+        frames = early_capture_burst(lambda: 'image', .082666, lambda: next(ticks))
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(frames[-1][2], .09)
+        self.assertGreater(frames[-1][2], .082666)
+
     def test_event_log(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'events'
