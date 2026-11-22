@@ -282,6 +282,8 @@ jobs:
           for backend in x11rb xcb; do
             python3 scripts/test-terminal-exit-x11.py --jwm target/debug/jwm \
               --backend "$backend" --output "artifacts/terminal-exit-$backend"
+            python3 scripts/test-terminal-exit-x11.py --jwm target/debug/jwm \
+              --backend "$backend" --stacked --output "artifacts/terminal-exit-stacked-$backend"
           done
 
       - name: Retain terminal exit overlap frames

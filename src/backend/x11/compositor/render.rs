@@ -252,6 +252,23 @@ fn intersect_gl_scissors(a: GlScissor, b: GlScissor) -> Option<GlScissor> {
     (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
 }
 
+fn terminal_slide_scissor(rect: crate::core::types::Rect, width: u32, height: u32) -> GlScissor {
+    let max_x = i64::from(width.min(i32::MAX as u32));
+    let max_y = i64::from(height.min(i32::MAX as u32));
+    let x = i64::from(rect.x);
+    let y = i64::from(rect.y);
+    let left = x.clamp(0, max_x);
+    let top = y.clamp(0, max_y);
+    let right = (x + i64::from(rect.w.max(0))).clamp(0, max_x);
+    let bottom = (y + i64::from(rect.h.max(0))).clamp(0, max_y);
+    (
+        left as i32,
+        (max_y - bottom) as i32,
+        (right - left) as i32,
+        (bottom - top) as i32,
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WallpaperBlendPlan {
     old_global_opacity: Option<f32>,
@@ -527,6 +544,42 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.frame_draw_calls
             .set(self.frame_draw_calls.get().saturating_add(1));
+    }
+
+    pub(crate) fn set_terminal_slide_clip(&mut self, clip: Option<(u32, crate::core::types::Rect)>) {
+        if self.terminal_slide_clip != clip {
+            self.terminal_slide_clip = clip;
+            self.needs_render = true;
+        }
+    }
+
+    /// Scope only draws into the scene, not temporary backdrop blur FBO work.
+    fn draw_window_arrays(
+        &self,
+        window_clip: Option<GlScissor>,
+        repair: Option<GlScissor>,
+        mode: u32,
+        count: i32,
+    ) {
+        let Some(clip) = window_clip else {
+            self.draw_arrays(mode, 0, count);
+            return;
+        };
+        let Some((x, y, w, h)) = intersect_gl_scissors(clip, repair.unwrap_or(clip)) else {
+            return;
+        };
+        unsafe {
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(x, y, w, h);
+        }
+        self.draw_arrays(mode, 0, count);
+        unsafe {
+            if let Some((x, y, w, h)) = repair {
+                self.gl.scissor(x, y, w, h);
+            } else {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+        }
     }
 
     /// Arm or disarm the interactive screenshot scene freeze. The actual copy
@@ -5357,6 +5410,14 @@ impl<C: CompositorConnection> Compositor<C> {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        let terminal_slide_clip = self.terminal_slide_clip.map(|(id, rect)| {
+            (id, terminal_slide_scissor(rect, self.screen_w, self.screen_h))
+        });
+        let clip_for = |window| {
+            terminal_slide_clip
+                .filter(|(id, _)| *id == window)
+                .map(|(_, clip)| clip)
+        };
         let completed = self
             .companion_pending_presentation
             .as_ref()
@@ -5430,6 +5491,9 @@ impl<C: CompositorConnection> Compositor<C> {
             scene
                 .iter()
                 .filter_map(|&(win, x, y, w, h)| {
+                    if clip_for(win).is_some() {
+                        return None;
+                    }
                     let wt = self.windows.get(&win)?;
                     // tick_fades/tick_peek run later in this frame. Their
                     // first step may expose wallpaper despite opacity 1 now.
@@ -6339,7 +6403,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 let geometry_deformation_active = (self.wobbly_windows && wt.wobbly.is_some())
                     || (self.window_tilt && is_focused && !is_statusbar);
 
-                if rect_covers_output(x, y, w, h, self.screen_w, self.screen_h)
+                if clip_for(win).is_none()
+                    && rect_covers_output(x, y, w, h, self.screen_w, self.screen_h)
                     && is_opaque_occluder(
                         wt.has_rgba,
                         layer_opacity,
@@ -6964,7 +7029,12 @@ impl<C: CompositorConnection> Compositor<C> {
                         .uniform_4_f32(self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh);
                     self.gl
                         .uniform_2_f32(self.shadow_uniforms.size.as_ref(), win_w, win_h);
-                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_window_arrays(
+                        clip_for(win),
+                        use_scissor.then_some(damage_scissor),
+                        glow::TRIANGLE_STRIP,
+                        4,
+                    );
                 }
 
                 self.gl_state_tracker.bind_vertex_array(&self.gl, None);
@@ -7052,7 +7122,12 @@ impl<C: CompositorConnection> Compositor<C> {
                         draw_w + 2.0 * style.radius,
                         draw_h + 2.0 * style.radius,
                     );
-                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_window_arrays(
+                        clip_for(win),
+                        use_scissor.then_some(damage_scissor),
+                        glow::TRIANGLE_STRIP,
+                        4,
+                    );
                 }
 
                 // Avoid leaking the negative glow-mode sentinel into later
@@ -7557,7 +7632,12 @@ impl<C: CompositorConnection> Compositor<C> {
                                         bw,
                                         bh,
                                     );
-                                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                    self.draw_window_arrays(
+                                        clip_for(win),
+                                        use_scissor.then_some(damage_scissor),
+                                        glow::TRIANGLE_STRIP,
+                                        4,
+                                    );
                                     self.gl.uniform_4_f32(
                                         self.win_uniforms.uv_rect.as_ref(),
                                         0.0,
@@ -7604,7 +7684,12 @@ impl<C: CompositorConnection> Compositor<C> {
                                 ghost.width,
                                 ghost.height,
                             );
-                            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                            self.draw_window_arrays(
+                                clip_for(win),
+                                use_scissor.then_some(damage_scissor),
+                                glow::TRIANGLE_STRIP,
+                                4,
+                            );
                         }
                     }
 
@@ -7673,7 +7758,12 @@ impl<C: CompositorConnection> Compositor<C> {
                             .uniform_1_i32(self.wobbly_uniforms.grid_n.as_ref(), grid_n);
                         // Grid: (grid_n-1)^2 quads, 6 verts each
                         let quads = grid_n - 1;
-                        self.draw_arrays(glow::TRIANGLES, 0, quads * quads * 6);
+                        self.draw_window_arrays(
+                            clip_for(win),
+                            use_scissor.then_some(damage_scissor),
+                            glow::TRIANGLES,
+                            quads * quads * 6,
+                        );
 
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));
@@ -7749,7 +7839,12 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.gl
                             .uniform_2_f32(self.tilt_uniforms.light_dir.as_ref(), 0.0, -1.0);
                         // Grid: grid^2 quads, 6 verts each
-                        self.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
+                        self.draw_window_arrays(
+                            clip_for(win),
+                            use_scissor.then_some(damage_scissor),
+                            glow::TRIANGLES,
+                            grid * grid * 6,
+                        );
 
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));
@@ -7799,7 +7894,12 @@ impl<C: CompositorConnection> Compositor<C> {
                                 .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
                         }
 
-                        self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        self.draw_window_arrays(
+                            clip_for(win),
+                            use_scissor.then_some(damage_scissor),
+                            glow::TRIANGLE_STRIP,
+                            4,
+                        );
 
                         // Reset ripple for next window
                         if ripple_prog.is_some() {
@@ -7944,7 +8044,12 @@ impl<C: CompositorConnection> Compositor<C> {
                                     bdr_h,
                                 );
                             }
-                            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                            self.draw_window_arrays(
+                                clip_for(win),
+                                use_scissor.then_some(damage_scissor),
+                                glow::TRIANGLE_STRIP,
+                                4,
+                            );
 
                             self.gl.use_program(Some(self.program));
                             self.gl.uniform_matrix_4_f32_slice(
@@ -7987,6 +8092,13 @@ impl<C: CompositorConnection> Compositor<C> {
                     let glow_hash = glow_style
                         .map(WindowGlowStyle::hash_words)
                         .unwrap_or([0; 3]);
+                    if let Some((x, y, w, h)) = clip_for(win) {
+                        for edge in [x, y, w, h] {
+                            blur_below_hash = blur_below_hash
+                                .wrapping_mul(6364136223846793005)
+                                .wrapping_add(u64::from(edge as u32));
+                        }
+                    }
                     for value in [
                         win as u64,
                         ((x as u64) << 32) | y as u32 as u64,
@@ -9725,6 +9837,23 @@ mod tests {
         let backoff = frame.find("ifwt.pixmap_refresh.next_refresh_in(pixmap_refresh_now,false).is_some_and(|delay|!delay.is_zero())")
             .expect("intervening scene frames must respect the native import backoff");
         assert!(backoff < refresh);
+    }
+
+    #[test]
+    fn terminal_slide_scissor_clips_output_in_gl_coordinates() {
+        use crate::core::types::Rect;
+        assert_eq!(
+            super::terminal_slide_scissor(Rect::new(0, 400, 1280, 400), 1280, 800),
+            (0, 0, 1280, 400)
+        );
+        assert_eq!(
+            super::terminal_slide_scissor(Rect::new(-40, -20, 100, 200), 1280, 800),
+            (0, 620, 60, 180)
+        );
+        assert_eq!(
+            super::terminal_slide_scissor(Rect::new(0, 900, 1280, 400), 1280, 800),
+            (0, 0, 1280, 0)
+        );
     }
 
     #[test]

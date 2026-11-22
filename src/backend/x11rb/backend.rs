@@ -1177,6 +1177,16 @@ impl Backend for X11rbBackend {
             .is_some_and(|c| c.set_partial_damage(enabled)))
     }
 
+    fn compositor_set_terminal_slide_clip(
+        &mut self,
+        clip: Option<(WindowId, crate::core::types::Rect)>,
+    ) {
+        let clip = clip.and_then(|(window, rect)| self.ids.x11(window).ok().map(|id| (id, rect)));
+        if let Some(compositor) = &mut self.compositor {
+            compositor.set_terminal_slide_clip(clip);
+        }
+    }
+
     fn compositor_render_frame(
         &mut self,
         scene: &[(u64, i32, i32, u32, u32)],
