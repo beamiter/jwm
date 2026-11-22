@@ -98,6 +98,25 @@ fn catalog_identity_matches(class: &str, instance: &str, entry: &LaunchEntry) ->
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorksceneOutcome {
+    LayoutApplied,
+    SessionRevealRequested,
+    ApplicationLaunchRequested,
+}
+
+impl WorksceneOutcome {
+    fn message(self) -> &'static str {
+        match self {
+            Self::LayoutApplied => "Workspace layout applied",
+            Self::SessionRevealRequested => {
+                "Terminal focused; session reveal requested, awaiting provider confirmation"
+            }
+            Self::ApplicationLaunchRequested => "Application launch requested",
+        }
+    }
+}
+
 pub(crate) struct WorkscenePlan {
     config: Arc<Config>,
     outputs: Vec<(MonitorKey, u32, Option<LayoutEnum>)>,
@@ -186,11 +205,14 @@ impl Jwm {
         let registered = super::launcher::AgentEntry::from_snapshot(&snapshot);
         let mut sessions = Vec::new();
         let mut applications = Vec::new();
-        let mut rows = vec![ListRow {
-            key: "layout".into(),
-            text: format!("Apply workspace layout · {}", details.join("; ")),
-            data: RowData::Workscene,
-        }];
+        let mut rows = Vec::new();
+        if !outputs.is_empty() {
+            rows.push(ListRow {
+                key: "layout".into(),
+                text: format!("Apply workspace layout · {}", details.join("; ")),
+                data: RowData::Workscene,
+            });
+        }
         for id in &scene.sessions {
             if let Some(entry) = registered.iter().find(|entry| &entry.session_id == id) {
                 let index = sessions.len();
@@ -231,7 +253,7 @@ impl Jwm {
                 let index = applications.len();
                 rows.push(ListRow {
                     key: format!("application:{index}"),
-                    text: format!("Start missing application: {name} · only when selected"),
+                    text: format!("Start {name} · normal window placement"),
                     data: RowData::Workscene,
                 });
                 applications.push(entry.clone());
@@ -243,6 +265,14 @@ impl Jwm {
                 });
             }
         }
+        let selected = rows
+            .iter()
+            .position(|row| {
+                row.key == "layout"
+                    || row.key.starts_with("session:")
+                    || row.key.starts_with("application:")
+            })
+            .unwrap_or(0);
         self.features.workscene_preview = Some(WorkscenePlan {
             config,
             outputs,
@@ -255,14 +285,14 @@ impl Jwm {
             rows,
             row_icons: Vec::new(),
             source_rows: None,
-            selected: 0,
+            selected,
             message: format!(
                 "{} · preview only · choose each action; Esc cancels",
                 scene.name
             ),
             prompt: None,
             query: String::new(),
-            empty: "Empty scene".into(),
+            empty: "No actions configured for this scene".into(),
         };
         self.sync_system_ui(backend);
         Ok(())
@@ -271,10 +301,7 @@ impl Jwm {
     pub(crate) fn perform_workscene_selection(&mut self, backend: &mut dyn Backend) {
         let result = self.activate_workscene_action(backend);
         let body = match result {
-            Ok(()) => {
-                "Selected action dispatched; provider sessions require their own reveal receipt"
-                    .into()
-            }
+            Ok(outcome) => outcome.message().into(),
             Err(error) => error,
         };
         backend.compositor_push_toast(crate::backend::api::ToastNotification {
@@ -288,7 +315,7 @@ impl Jwm {
     pub(crate) fn activate_workscene_action(
         &mut self,
         backend: &mut dyn Backend,
-    ) -> Result<(), String> {
+    ) -> Result<WorksceneOutcome, String> {
         let action = self
             .features
             .system_ui
@@ -310,6 +337,9 @@ impl Jwm {
                 return Err("Scene changed or an output disconnected; open a new preview".into());
             }
             if action == "layout" {
+                if plan.outputs.is_empty() {
+                    return Err("No workspace layout in this scene".into());
+                }
                 if plan
                     .outputs
                     .iter()
@@ -325,12 +355,14 @@ impl Jwm {
                             .map_err(|e| e.to_string())?;
                     }
                 }
+                Ok(WorksceneOutcome::LayoutApplied)
             } else if let Some(index) = action
                 .strip_prefix("session:")
                 .and_then(|index| index.parse::<usize>().ok())
             {
                 let entry = plan.sessions.get(index).ok_or("Session preview expired")?;
                 self.activate_scene_agent_session(backend, entry)?;
+                Ok(WorksceneOutcome::SessionRevealRequested)
             } else if let Some(index) = action
                 .strip_prefix("application:")
                 .and_then(|index| index.parse::<usize>().ok())
@@ -362,10 +394,10 @@ impl Jwm {
                     .map_err(|e| e.to_string())?;
                 // An accepted spawn is single-use even before the new window appears.
                 entry.command.clear();
+                Ok(WorksceneOutcome::ApplicationLaunchRequested)
             } else {
-                return Err("This object is unavailable; no action was dispatched".into());
+                Err("This object is unavailable; no action was dispatched".into())
             }
-            Ok(())
         })();
         self.features.workscene_preview = Some(plan);
         result
@@ -394,7 +426,10 @@ mod tests {
         jwm.open_workscene_preview(&mut backend, scene.clone())
             .unwrap();
         assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 1);
-        jwm.activate_workscene_action(&mut backend).unwrap();
+        assert_eq!(
+            jwm.activate_workscene_action(&mut backend).unwrap(),
+            WorksceneOutcome::LayoutApplied
+        );
         assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 2);
         jwm.open_workscene_preview(&mut backend, scene).unwrap();
         jwm.state.monitors.remove(monitor);
@@ -402,6 +437,66 @@ mod tests {
             jwm.activate_workscene_action(&mut backend)
                 .unwrap_err()
                 .contains("disconnected")
+        );
+    }
+
+    #[test]
+    fn scene_without_outputs_selects_the_first_action_and_cannot_apply_a_layout() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.sel_mon.unwrap();
+        let notes = LaunchEntry::new(
+            "JWM Notes".into(),
+            vec!["jwm-notes".into()],
+            false,
+            None,
+            "jwm notes".into(),
+        );
+        jwm.features.launcher_catalog = Arc::from([notes]);
+        let mut scene = Workscene {
+            name: "Notes only".into(),
+            outputs: Vec::new(),
+            sessions: Vec::new(),
+            applications: vec!["Missing catalog entry".into(), "JWM Notes".into()],
+        };
+
+        jwm.open_workscene_preview(&mut backend, scene.clone())
+            .unwrap();
+        let SystemUiState::ListPanel { rows, .. } = &jwm.features.system_ui else {
+            panic!("expected workscene preview");
+        };
+        assert!(rows.iter().all(|row| row.key != "layout"));
+        assert_eq!(
+            jwm.features.system_ui.selected_workscene_action(),
+            Some("application:0")
+        );
+
+        scene.applications.clear();
+        jwm.open_workscene_preview(&mut backend, scene).unwrap();
+        assert_eq!(jwm.features.system_ui.selected_workscene_action(), None);
+        assert_eq!(
+            jwm.activate_workscene_action(&mut backend).unwrap_err(),
+            "No scene action"
+        );
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 1);
+    }
+
+    #[test]
+    fn scene_outcomes_distinguish_local_success_from_requested_actions() {
+        assert_eq!(
+            WorksceneOutcome::LayoutApplied.message(),
+            "Workspace layout applied"
+        );
+        assert_eq!(
+            WorksceneOutcome::ApplicationLaunchRequested.message(),
+            "Application launch requested"
+        );
+        assert!(
+            WorksceneOutcome::SessionRevealRequested
+                .message()
+                .contains("awaiting provider confirmation")
         );
     }
 

@@ -194,11 +194,15 @@ omitting it preserves the workspace's layout. Each preview offers workspace
 layout, session reveal and missing-application startup as separate actions.
 Applying the layout keeps your active display; if its new workspace hides the
 focused window, focus moves to a visible window on that display if there is one.
-Only a specifically selected missing application is started, once per preview;
-existing matching applications and registered terminal sessions are reused.
+Omit `workscenes.outputs` for an application- or session-only scene. Such a
+preview has no layout action and starts on its first available action.
+Only a specifically selected missing application is requested, once per preview.
+Its window follows JWM's normal placement rules, not the scene's output list.
+Already-open applications are shown without moving or relaunching them.
+For registered terminal sessions, JWM focuses the terminal and requests a
+reveal; the provider still needs to confirm the pane switch.
 A configuration publication or disconnected output invalidates the preview.
-Scenes restore desktop placement and registered provider references, without
-claiming to recover arbitrary application content or unsupported cloud sessions.
+Scenes do not recover arbitrary application content or unsupported cloud sessions.
 
 On native Wayland sidebars, the explicit `⌨` end-cap enters keyboard mode;
 ordinary hover retains application keyboard focus. Tab/Up/Down navigate the
