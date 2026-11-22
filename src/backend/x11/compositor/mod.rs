@@ -1112,6 +1112,7 @@ where
     last_gpu_load_update: std::time::Instant,
     /// GLES draws issued during the in-progress frame (`&self` helpers count here).
     frame_draw_calls: Cell<u32>,
+    terminal_slide_clip: Option<(u32, crate::core::types::Rect)>,
     /// GLES draws from the last completed `render_frame` (what `get_metrics` reports).
     last_draw_calls: u32,
     /// Redundant GL state changes skipped on the last completed frame.

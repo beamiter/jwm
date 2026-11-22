@@ -354,6 +354,25 @@ impl Jwm {
         true
     }
 
+    fn sync_terminal_slide_clip(&self, backend: &mut dyn Backend) {
+        let clip = (self.state.monitors.len() > 1)
+            .then(|| {
+                let key = *self.scratchpads.get("term")?;
+                let animation = self.animations.active.get(&key)?;
+                if !matches!(animation.kind, AnimationKind::Appear | AnimationKind::Hide) {
+                    return None;
+                }
+                let client = self.state.clients.get(key)?;
+                let output = &self.state.monitors.get(client.mon?)?.geometry;
+                Some((
+                    client.win,
+                    Rect::new(output.m_x, output.m_y, output.m_w, output.m_h),
+                ))
+            })
+            .flatten();
+        backend.compositor_set_terminal_slide_clip(clip);
+    }
+
     pub(super) fn render_pending_frame(&mut self, backend: &mut dyn Backend) {
         if !backend.has_compositor() {
             return;
@@ -367,6 +386,7 @@ impl Jwm {
         // groups change open it: otherwise window add/remove frames rendered
         // from tick_animations leave the compositor painting a stale strip
         // until some unrelated event arms `needs_render` again.
+        self.sync_terminal_slide_clip(backend);
         let groups_changed = self.sync_window_groups(backend);
         // When overview is active the prism rotation runs inside the render
         // pass (tick_overview_prism), but clear_needs_render() after
@@ -446,6 +466,7 @@ impl Jwm {
             .iter()
             .map(|(&key, animation)| (key, animation.sample(now).0))
             .collect();
+        self.sync_terminal_slide_clip(backend);
         self.sync_window_groups(backend);
         let scene = self.build_compositor_scene(backend, &overrides);
         let focused = self
@@ -581,6 +602,9 @@ impl Jwm {
         self.flush_system_ui(backend);
 
         let composited = backend.has_compositor();
+        if composited {
+            self.sync_terminal_slide_clip(backend);
+        }
         // A live reduced-motion change retires the nested copy and its driver.
         if !CONFIG.load().motion_enabled()
             && backend.set_terminal_exit_visual(None)

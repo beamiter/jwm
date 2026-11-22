@@ -4376,6 +4376,14 @@ pub trait Backend:
         false
     }
 
+    /// Restrict a composited terminal slide to its owning output. This is a
+    /// rendering clip in root pixels, not a window resize or input boundary.
+    fn compositor_set_terminal_slide_clip(
+        &mut self,
+        _clip: Option<(WindowId, crate::core::types::Rect)>,
+    ) {
+    }
+
     /// Submit the first nested terminal dismissal frame synchronously, after
     /// input focus and native geometry have been released. Not a per-tick hook.
     fn present_terminal_exit_visual(&mut self) -> Result<(), BackendError> {
