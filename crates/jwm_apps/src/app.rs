@@ -3,7 +3,7 @@ pub(crate) mod accessibility;
 
 use crate::{
     editor::Editor,
-    notes::Notes,
+    notes::{Notes, SaveError},
     ui::{self, Icon, Rect},
     viewer::Viewer,
 };
@@ -26,6 +26,7 @@ enum Action {
     New,
     Open,
     Save,
+    KeepConflictCopy,
     SaveAs(bool),
     Trash,
     Previous,
@@ -63,6 +64,7 @@ enum Action {
 pub(crate) enum Effect {
     OpenNote(PathBuf),
     SaveAs(PathBuf, bool),
+    KeepConflictCopy,
     Notebook,
     Close,
     Minimize,
@@ -92,6 +94,7 @@ struct Picker {
 enum Dialog {
     Picker(Box<Picker>),
     Error(String),
+    SaveConflict,
     Unsaved,
     Trash,
     Overwrite(PathBuf, bool),
@@ -814,6 +817,10 @@ impl App {
             dialog => {
                 let (title, message) = match &dialog {
                     Dialog::Error(e) => ("操作未完成", e.as_str()),
+                    Dialog::SaveConflict => (
+                        "原文件已被修改",
+                        "原文件未覆盖。可将当前修改保存为同目录的恢复副本并继续编辑，或另存到其他位置。",
+                    ),
                     Dialog::Unsaved => (
                         "保存当前修改？",
                         "当前内容尚未保存。可以保存、另存为，或放弃修改。",
@@ -838,6 +845,11 @@ impl App {
                 cr.move_to(r.x + 24., r.y + 72.);
                 pangocairo::functions::show_layout(cr, &layout);
                 let buttons = match &dialog {
+                    Dialog::SaveConflict => vec![
+                        ("取消", Action::Cancel),
+                        ("另存为", Action::SaveAs(false)),
+                        ("保留两份", Action::KeepConflictCopy),
+                    ],
                     Dialog::Unsaved => vec![
                         ("取消", Action::Cancel),
                         ("放弃修改", Action::Discard),
@@ -887,6 +899,13 @@ impl App {
                 vec![Action::Cancel, Action::Overwrite(path.clone(), *close)]
             }
             Some(Dialog::Error(_)) => vec![Action::Cancel],
+            Some(Dialog::SaveConflict) => {
+                vec![
+                    Action::Cancel,
+                    Action::SaveAs(false),
+                    Action::KeepConflictCopy,
+                ]
+            }
             None => vec![],
         }
     }
@@ -973,6 +992,22 @@ impl App {
         self.dialog = None;
         close
     }
+    pub(crate) fn write_conflict_copy(&mut self, reserved: impl Fn(&Path) -> bool) {
+        if !matches!(self.dialog, Some(Dialog::SaveConflict)) {
+            return;
+        }
+        if let Document::Notes(n) = &mut self.document {
+            match n.keep_conflict_copy(reserved) {
+                Ok(_) => {
+                    self.dialog = None;
+                    self.focus = Focus::Editor;
+                    self.dragging = false;
+                }
+                Err(error) => self.error(error),
+            }
+        }
+    }
+
     fn action(&mut self, action: Action) {
         if let Action::Note(path, generation) = &action
             && !matches!(&self.document, Document::Notes(n)
@@ -1000,6 +1035,20 @@ impl App {
             } else {
                 PickerMode::Images
             }),
+            Action::Save => {
+                if let Document::Notes(n) = &mut self.document {
+                    match n.save_explicitly() {
+                        Ok(()) => (),
+                        Err(SaveError::Conflict) => self.dialog = Some(Dialog::SaveConflict),
+                        Err(SaveError::Other(error)) => self.error(error),
+                    }
+                }
+            }
+            Action::KeepConflictCopy => {
+                if matches!(self.dialog, Some(Dialog::SaveConflict)) {
+                    self.effects.push(Effect::KeepConflictCopy);
+                }
+            }
             Action::SaveAs(close) => self.picker(PickerMode::Save(close)),
             Action::Cancel => self.dialog = None,
             Action::Accept => self.accept_picker(),
@@ -1073,7 +1122,6 @@ impl App {
                             n.find.query.preedit.clear();
                             Ok(())
                         }
-                        Action::Save => n.save(),
                         Action::ConfirmTrash => {
                             self.dialog = None;
                             n.trash().map(|()| {
@@ -2563,6 +2611,43 @@ mod tests {
             format!("edited {source}")
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn explicit_save_conflict_offers_a_copy_without_automatic_writes() {
+        let directory =
+            std::env::temp_dir().join(format!("jwm-app-recovery-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("source.md");
+        std::fs::write(&path, "source").unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        app.ime("draft ".into(), true);
+        let external = directory.join("external");
+        std::fs::write(&external, "outside edit").unwrap();
+        std::fs::rename(external, &path).unwrap();
+
+        app.action(Action::Save);
+        assert!(matches!(app.dialog, Some(Dialog::SaveConflict)));
+        assert!(app.dialog_actions().contains(&Action::KeepConflictCopy));
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        app.action(Action::Cancel);
+        assert!(app.dialog.is_none());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+
+        app.action(Action::Save);
+        app.action(Action::KeepConflictCopy);
+        assert!(matches!(app.effects.as_slice(), [Effect::KeepConflictCopy]));
+        app.write_conflict_copy(|_| false);
+        assert!(app.dialog.is_none());
+        assert!(app.focus == Focus::Editor);
+        let Document::Notes(notes) = &app.document else {
+            panic!("expected notes editor");
+        };
+        let copy = notes.document.as_ref().unwrap().file.path().unwrap();
+        assert_ne!(copy, path);
+        assert_eq!(std::fs::read_to_string(copy).unwrap(), "draft source");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "outside edit");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

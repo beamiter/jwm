@@ -90,7 +90,15 @@ def main():
                     shutil.copyfile(work / "apps.log", args.evidence_dir / "apps.log")
                     subprocess.run(["import", "-window", "root", str(args.evidence_dir / "failure.png")], env=env)
                 saved = {str(path.relative_to(work)): path.read_text() for path in work.glob("data/jwm/notes/*.txt")}
+                owned = [(process.pid, process.poll(), Path(process.args[0]).name)
+                         for process in processes[-12:]]
+                try:
+                    tree = command("xwininfo", "-root", "-tree", timeout=2)
+                except (OSError, subprocess.SubprocessError) as error:
+                    tree = repr(error)
                 raise AssertionError(message + "\nLast probe error: " + str(last_probe_error)
+                                     + "\nRecent owned processes: " + repr(owned)
+                                     + "\nPrivate X11 window tree:\n" + tree[-6000:]
                                      + "\nSaved: " + repr(saved) + "\n" + (work / "apps.log").read_text())
 
             def launch(name, *files):
@@ -101,6 +109,13 @@ def main():
 
             def window(name):
                 return wait(lambda: find_window(command, name), f"Window did not appear: {name}")
+
+            def activate_note(path, title, primary):
+                activation = launch("jwm-notes", path)
+                wait(lambda: activation.poll() is not None, "Secondary Notes activation did not exit")
+                assert activation.returncode == 0, f"Secondary Notes activation exited {activation.returncode}"
+                assert primary.poll() is None, "Primary Notes host exited during secondary activation"
+                return window(title)
 
             def focus(identifier):
                 command("xdotool", "windowfocus", "--sync", identifier)
@@ -312,7 +327,7 @@ def main():
                 time.sleep(.2)
                 assert external.read_text() == "Changed by another editor", "Save overwrote an external change"
                 assert editor.poll() is None, "Conflict killed the editor"
-                key("Return")  # Dismiss save error.
+                key("Escape")  # Cancel the recovery choices without writing.
                 close_button(edit_window)
                 time.sleep(.2)
                 assert editor.poll() is None, "Header close discarded unsaved edits"
@@ -358,10 +373,8 @@ def main():
                 b.write_text("Target")
                 primary = launch("jwm-notes", a)
                 a_window = window(r"save-as-source\.txt.*JWM 备忘录")
-                activation = launch("jwm-notes", b)
-                b_window = window(r"save-as-target\.txt.*JWM 备忘录")
+                b_window = activate_note(b, r"save-as-target\.txt.*JWM 备忘录", primary)
                 assert a_window != b_window
-                wait(lambda: activation.poll() == 0, "Target did not join the existing Notes host")
                 focus(b_window)
                 key("ctrl+End")
                 type_text(" dirty-B")
@@ -412,6 +425,62 @@ def main():
                 key("ctrl+w")
                 wait(lambda: primary.poll() is not None, "Save As proof editors did not close")
                 print("Two-window Save As protects both drafts and allows closed or fresh targets: PASS",
+                      flush=True)
+
+                # Recovery cannot claim a filename held by another live editor,
+                # even when that editor was opened through an alias to a leaf
+                # that has since been removed from the filesystem.
+                source = work / "recovery-source.md"
+                reserved = work / "recovery-source (恢复副本).md"
+                sibling = work / "recovery-source (恢复副本 2).md"
+                alias = work / "recovery-other-editor.md"
+                exported_other = work / "other-editor-draft.md"
+                source.write_bytes(b"\xef\xbb\xbfsource\r\n")
+                reserved.write_bytes(b"other")
+                alias.symlink_to(reserved)
+                primary = launch("jwm-notes", source)
+                source_window = window(r"recovery-source\.md.*JWM 备忘录")
+                other_window = activate_note(alias, r"recovery-other-editor\.md.*JWM 备忘录", primary)
+                assert source_window != other_window
+                focus(other_window)
+                key("ctrl+End")
+                type_text(" dirty-B")
+                acknowledge_title("other editor dirty before deletion", alias, other_window, True)
+                reserved.unlink()
+                focus(source_window)
+                key("ctrl+End")
+                type_text("draft-A")
+                replacement.write_bytes(b"outside edit")
+                replacement.replace(source)
+                key("ctrl+s", "Escape")
+                acknowledge_title("cancel keeps source dirty", source, source_window, True)
+                assert not reserved.exists() and not sibling.exists()
+                key("ctrl+s", "shift+Tab", "Return")
+                wait(lambda: sibling.exists() and sibling.read_bytes() == b"\xef\xbb\xbfsource\r\ndraft-A",
+                     "Keep Both did not save the original editor draft under the next suffix")
+                acknowledge_title("recovery copy adopted", sibling, source_window, False)
+                assert not reserved.exists() and alias.is_symlink()
+                assert source.read_bytes() == b"outside edit"
+                key("ctrl+End")
+                type_text(" again")
+                key("ctrl+s")
+                wait(lambda: sibling.read_bytes() == b"\xef\xbb\xbfsource\r\ndraft-A again",
+                     "Immediate save on newly adopted recovery copy failed")
+                acknowledge_title("recovery copy saved again", sibling, source_window, False)
+                key("ctrl+w")
+
+                focus(other_window)
+                acknowledge_title("other editor remained dirty", alias, other_window, True)
+                key("ctrl+shift+s")
+                type_text(str(exported_other))
+                key("Return")
+                wait(lambda: exported_other.exists() and exported_other.read_bytes() == b"other dirty-B",
+                     "Live editor holding the missing name lost its draft")
+                assert not reserved.exists() and alias.is_symlink()
+                assert source.read_bytes() == b"outside edit"
+                key("ctrl+w")
+                wait(lambda: primary.poll() is not None, "Recovery proof editors did not close")
+                print("Keep Both preserves both drafts, skips an open missing name and saves again: PASS",
                       flush=True)
 
                 # Real key/pointer events must not edit the Markdown preview.
