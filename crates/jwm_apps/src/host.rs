@@ -135,7 +135,9 @@ impl Host {
             // A symlink to the current note is not a separate copy. Use the
             // original path so Notes runs its existing stamp/etag-checked save.
             let current = note_path(native).filter(|path| canonical_note_path(path) == canonical);
-            native.app.write_as(current.as_deref().unwrap_or(path), close)
+            native
+                .app
+                .write_as(current.as_deref().unwrap_or(path), close)
         };
         if should_close {
             self.windows.remove(&id);
