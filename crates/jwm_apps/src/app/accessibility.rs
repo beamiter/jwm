@@ -198,9 +198,7 @@ impl Semantics {
     }
 
     pub(crate) fn action(&self, app: &mut App, request: ActionRequest) -> bool {
-        if self.previous.is_none()
-            || request.target_tree != TreeId::ROOT
-            || request.data.is_some()
+        if self.previous.is_none() || request.target_tree != TreeId::ROOT || request.data.is_some()
         {
             return false;
         }
@@ -274,8 +272,10 @@ mod tests {
 
     #[test]
     fn conflict_dialog_exposes_only_live_recovery_actions() {
-        let path =
-            std::env::temp_dir().join(format!("jwm-notes-atspi-conflict-{}.md", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "jwm-notes-atspi-conflict-{}.md",
+            std::process::id()
+        ));
         fs::write(&path, "original").unwrap();
         let mut app = App::new(true, vec![path.clone()]).unwrap();
         app.ime("draft ".into(), true);

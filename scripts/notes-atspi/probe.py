@@ -32,8 +32,14 @@ def wait(get, seconds):
         time.sleep(.1)
 
 
-def children(node):
+class TreeTransition(ProbeError):
+    """An AT-SPI object disappeared while traversing a changing tree."""
+
+
+def children(node, fresh=False):
     count = node.get_child_count()
+    if fresh and count == -1:
+        raise TreeTransition("atspi-node-disappeared")
     if not 0 <= count <= 256:
         raise ProbeError("invalid-node-count")
     for index in range(count):
@@ -42,7 +48,7 @@ def children(node):
             yield child
 
 
-def named(root, label, roles):
+def named(root, label, roles, fresh=False):
     todo = [] if root is None else [root]
     match = None
     seen = 0
@@ -51,11 +57,13 @@ def named(root, label, roles):
         seen += 1
         if seen > 256:
             raise ProbeError("tree-too-large")
+        if fresh:
+            node.clear_cache()
         if node.get_role() in roles and node.get_name() == label:
             if match is not None:
                 raise ProbeError("ambiguous-control")
             match = node
-        todo.extend(children(node))
+        todo.extend(children(node, fresh=fresh))
     return match
 
 
@@ -207,36 +215,42 @@ def conflict_controls(atspi, current, window, send, source):
     send("key", "ctrl+End")
     send("type", "--", " local draft")
 
-    def controls():
-        root = current()
-        dialog = named(root, "原文件已被修改", {roles.DIALOG})
+    def snapshot(check):
+        # When the dialog replaces the editor tree (and vice versa), libatspi
+        # can still return an old object with a -1 child count. Discard that
+        # entire observation; never treat an old tree as proof of absence.
+        try:
+            return check(current())
+        except TreeTransition:
+            return None
+
+    def modal(root):
+        dialog = named(root, "原文件已被修改", {roles.DIALOG}, fresh=True)
         if dialog is None:
             return None
-        if named(root, EDITOR, fields) is not None:
+        if named(root, EDITOR, fields, fresh=True) is not None:
             raise ProbeError("conflict-modal-leaked-underlying-editor")
-        buttons = [named(dialog, label, {roles.PUSH_BUTTON})
+        buttons = [named(dialog, label, {roles.PUSH_BUTTON}, fresh=True)
                    for label in ("取消", "另存为", "保留两份")]
         return buttons if all(buttons) else None
 
+    def editor(root):
+        node = named(root, EDITOR, fields, fresh=True)
+        return node is not None and node.get_state_set().contains(atspi.StateType.FOCUSED)
+
     send("key", "ctrl+s")
-    buttons = wait(controls, 5)
+    buttons = wait(lambda: snapshot(modal), 5)
     if buttons is None or not activate(buttons[0]):
         raise ProbeError("conflict-cancel-not-actionable")
-    if not wait(lambda: named(current(), EDITOR, fields) is not None, 5) or sibling.exists():
+    if not wait(lambda: snapshot(editor), 5) or sibling.exists():
         raise ProbeError("conflict-cancel-did-not-restore-editor-without-writing")
 
     send("key", "ctrl+s")
-    buttons = wait(controls, 5)
+    buttons = wait(lambda: snapshot(modal), 5)
     if buttons is None or not activate(buttons[2]):
         raise ProbeError("conflict-keep-both-not-actionable")
 
-    def adopted():
-        if not window(sibling.name):
-            return False
-        editor = named(current(), EDITOR, fields)
-        return editor is not None and editor.get_state_set().contains(atspi.StateType.FOCUSED)
-
-    if not wait(adopted, 5):
+    if not wait(lambda: window(sibling.name) and snapshot(editor), 5):
         raise ProbeError("conflict-copy-did-not-reopen-focused")
     if source.read_bytes() != b"outside edit" or sibling.read_bytes() != expected:
         raise ProbeError("conflict-keep-both-content-mismatch")
