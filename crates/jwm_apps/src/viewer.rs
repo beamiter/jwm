@@ -15,8 +15,28 @@ pub struct DecodedImage {
 /// a malformed image cannot exhaust the desktop's memory.
 pub fn decode(path: &Path) -> Result<DecodedImage, String> {
     use image::ImageDecoder;
-    let mut reader = image::ImageReader::open(path)
+    use std::{fs::OpenOptions, io::BufReader, os::unix::fs::OpenOptionsExt};
+    // A special file selected from a directory must not hold the sole decode
+    // worker indefinitely. Inspect the opened descriptor, not a racy path stat.
+    const O_NONBLOCK: i32 = 0o4000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NONBLOCK)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    if !file
+        .metadata()
         .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("只能打开普通图片文件。".into());
+    }
+    let mut reader = image::ImageReader::new(BufReader::new(file));
+    // Preserve ImageReader::open's extension hint before content sniffing.
+    if let Ok(format) = image::ImageFormat::from_path(path) {
+        reader.set_format(format);
+    }
+    let mut reader = reader
         .with_guessed_format()
         .map_err(|error| error.to_string())?;
     let mut limits = image::Limits::default();
@@ -214,6 +234,58 @@ fn surface(decoded: DecodedImage) -> Result<ImageSurface, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn special_input_is_rejected_and_pending_regular_image_recovers() {
+        use std::{
+            os::unix::fs::symlink,
+            process::Command,
+            time::{Duration, Instant},
+        };
+        let dir = std::env::temp_dir().join(format!("jwm-viewer-special-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("waiting.png");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let regular = dir.join("regular.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([20, 40, 60, 255]))
+            .save(&regular)
+            .unwrap();
+        let alias = dir.join("alias.png");
+        symlink(&regular, &alias).unwrap();
+        let fifo_alias = dir.join("fifo-alias.png");
+        symlink(&fifo, &fifo_alias).unwrap();
+        let (send, receive) = mpsc::channel();
+        let inputs = [fifo.clone(), fifo_alias, dir.clone()];
+        std::thread::spawn(move || {
+            send.send(inputs.iter().all(|path| decode(path).is_err()))
+                .unwrap();
+        });
+        assert!(
+            receive
+                .recv_timeout(Duration::from_secs(2))
+                .expect("special-file decode blocked")
+        );
+        assert_eq!(decode(&alias).unwrap().width, 3);
+        // Queue a newer regular image while the first request still owns the
+        // worker. This covers the recovery path, not just standalone rejection.
+        let mut viewer = Viewer::new(vec![fifo]);
+        viewer.open(vec![alias]);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while viewer.loading() && Instant::now() < deadline {
+            viewer.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!viewer.loading(), "pending regular image did not finish");
+        assert_eq!(viewer.dimensions(), (3., 2.));
+        assert!(viewer.image.is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn decodes_png_and_rejects_corruption_without_a_display() {
