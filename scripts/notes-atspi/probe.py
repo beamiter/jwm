@@ -204,7 +204,23 @@ def keyboard_results(atspi, current, window, send):
     return "notes-keyboard-down-up-escape-reveal-and-enter-observed"
 
 
+def conflict_tree_snapshot(current, check, transport_error):
+    try:
+        return check(current())
+    except TreeTransition:
+        return None
+    except transport_error as error:
+        # libatspi can report the retired object's path instead of returning
+        # a -1 child count after the dialog is replaced. Discard that sample
+        # only; the outer deadline still requires a fresh, focused editor.
+        if (error.domain == "atspi_error" and error.code == 1
+                and re.fullmatch(r"/org/a11y/atspi/accessible/[0-9]+/[0-9]+", error.message)):
+            return None
+        raise
+
+
 def conflict_controls(atspi, current, window, send, source):
+    from gi.repository import GLib
     roles = atspi.Role
     fields = {roles.ENTRY, roles.TEXT, roles.DOCUMENT_TEXT}
     sibling = source.with_name(source.stem + " (恢复副本)" + source.suffix)
@@ -219,10 +235,7 @@ def conflict_controls(atspi, current, window, send, source):
         # When the dialog replaces the editor tree (and vice versa), libatspi
         # can still return an old object with a -1 child count. Discard that
         # entire observation; never treat an old tree as proof of absence.
-        try:
-            return check(current())
-        except TreeTransition:
-            return None
+        return conflict_tree_snapshot(current, check, GLib.Error)
 
     def modal(root):
         dialog = named(root, "原文件已被修改", {roles.DIALOG}, fresh=True)
@@ -395,7 +408,13 @@ def main():
     except (ProbeError, GLib.Error, OSError, AttributeError, TypeError,
             subprocess.SubprocessError) as exc:
         outcome = str(exc) if isinstance(exc, ProbeError) else "probe-transport-or-fixture-error"
-        print(json.dumps({"outcome": outcome}))
+        import traceback
+        trace = [{"file": Path(frame.filename).name, "line": frame.lineno, "call": frame.name}
+                 for frame in traceback.extract_tb(exc.__traceback__)[-12:]]
+        typed = {"exception": type(exc).__name__, "trace": trace}
+        if isinstance(exc, GLib.Error):
+            typed.update(domain=exc.domain, code=exc.code, detail=exc.message[:300])
+        print(json.dumps({"outcome": outcome, "fixture_diagnostic": typed}))
         return 2
     print(json.dumps({"backend": "x11", "outcome": outcome,
                       "gtk_positive_control": "action-observed", "screen_reader_enabled": True,
