@@ -4,8 +4,9 @@
 //! tags: wherever the pointer happens to be. That is right for a window the
 //! user just asked for with a keybinding or the launcher, and wrong for most
 //! of the rest: a browser reopened from a shell, a viewer an agent spawns
-//! inside a terminal, an application's own second top-level. Those belong
-//! where the same application was last closed.
+//! inside a terminal, an application's own second top-level. Global opt-in
+//! controls inherited history; per-application Current and Remember rules
+//! independently suppress or opt into history without changing that default.
 //!
 //! Two bounded registries implement that:
 //!
@@ -40,6 +41,7 @@ use crate::core::models::ClientKey;
 use crate::jwm::rules::RuleMatcher;
 use crate::jwm::scratchpad_pending::linux_process_start_time;
 use crate::jwm::session::{ensure_private_directory, session_file_path};
+use crate::jwm::types::{PlacementPolicy, WMRule};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -774,9 +776,20 @@ impl JwmLaunchRegistry {
         probe: &ProcessProbe<'_>,
         now: Instant,
     ) -> LaunchOrigin {
+        self.classify_with_fallback(pid, managed_pids, probe, now, true)
+    }
+
+    fn classify_with_fallback(
+        &mut self,
+        pid: Option<u32>,
+        managed_pids: &HashSet<u32>,
+        probe: &ProcessProbe<'_>,
+        now: Instant,
+        allow_recent_fallback: bool,
+    ) -> LaunchOrigin {
         self.expire(now);
         let Some(pid) = pid else {
-            return if self.claim_recent_unresolved(now).is_some() {
+            return if allow_recent_fallback && self.claim_recent_unresolved(now).is_some() {
                 LaunchOrigin::Jwm
             } else {
                 LaunchOrigin::Unknown
@@ -794,7 +807,7 @@ impl JwmLaunchRegistry {
                 return LaunchOrigin::Jwm;
             }
         }
-        if self.claim_recent_unresolved(now).is_some() {
+        if allow_recent_fallback && self.claim_recent_unresolved(now).is_some() {
             LaunchOrigin::Jwm
         } else {
             LaunchOrigin::External
@@ -914,6 +927,15 @@ impl Jwm {
     }
 
     fn launch_origin_of(&mut self, client_key: ClientKey, now: Instant) -> LaunchOrigin {
+        self.launch_origin_with_fallback(client_key, now, true)
+    }
+
+    fn launch_origin_with_fallback(
+        &mut self,
+        client_key: ClientKey,
+        now: Instant,
+        allow_recent_fallback: bool,
+    ) -> LaunchOrigin {
         let pid = self
             .state
             .clients
@@ -930,12 +952,17 @@ impl Jwm {
             ancestors: &linux_ancestors,
             start_time: &linux_process_start_time,
         };
-        self.jwm_launches.classify(pid, &managed_pids, &probe, now)
+        if allow_recent_fallback {
+            self.jwm_launches.classify(pid, &managed_pids, &probe, now)
+        } else {
+            self.jwm_launches
+                .classify_with_fallback(pid, &managed_pids, &probe, now, false)
+        }
     }
 
     /// After rules ran for a freshly managed top-level: mark it as one whose
     /// closing is worth remembering, and, when the memory has an entry for
-    /// its identity and JWM did not launch it, move it there. Explicit spawn
+    /// its identity and effective policy permits history, move it there. Explicit spawn
     /// pins take precedence; automatic close history leaves rule-pinned tags
     /// and monitors alone. Returns whether placement moved the window away
     /// from its default, so the caller can preserve the user's focused view.
@@ -944,12 +971,26 @@ impl Jwm {
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) -> bool {
-        let Some((win, name, class, instance)) = self.state.clients.get(client_key).map(|client| {
+        let Some(client) = self.state.clients.get(client_key) else {
+            return false;
+        };
+        let rule = RuleMatcher::find_matching_rule(&client.name, &client.class, &client.instance);
+        self.adopt_remembered_placement_with_rule(backend, client_key, rule.as_ref())
+    }
+
+    /// Shared production path with an explicitly selected first rule for tests.
+    pub(crate) fn adopt_remembered_placement_with_rule(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        rule: Option<&WMRule>,
+    ) -> bool {
+        let Some((win, class, instance, pid)) = self.state.clients.get(client_key).map(|client| {
             (
                 client.win,
-                client.name.clone(),
                 client.class.clone(),
                 client.instance.clone(),
+                client.pid,
             )
         }) else {
             return false;
@@ -974,28 +1015,43 @@ impl Jwm {
         }
 
         let cfg = CONFIG.load();
-        if !self
-            .closed_placements
-            .is_enabled(cfg.behavior().remember_closed_placement)
+        let policy = rule.map_or(PlacementPolicy::Inherit, |rule| rule.placement);
+        let now = Instant::now();
+        if policy == PlacementPolicy::Current {
+            // Claim only proven PID/ancestry attribution, without reading history
+            // or guessing that an unrelated pending launch belongs to this app.
+            self.launch_origin_with_fallback(client_key, now, false);
+            return false;
+        }
+        if !policy.records_history(
+            self.closed_placements
+                .is_enabled(cfg.behavior().remember_closed_placement),
+        ) {
+            return false;
+        }
+        // Explicit Remember must not override a dropdown's pending ownership.
+        // Inspect only; successful manage retains responsibility for consuming it.
+        if policy == PlacementPolicy::Remember
+            && (self.scratchpads.values().any(|&key| key == client_key)
+                || pid.is_some_and(|pid| {
+                    self.scratchpad_pending
+                        .matches_pending(pid, linux_process_start_time(pid), now)
+                }))
         {
             return false;
         }
         let Some(remembered) = self.closed_placements.lookup(&identity) else {
             return false;
         };
-        let origin = self.launch_origin_of(client_key, Instant::now());
-        if !origin.uses_memory() {
-            info!(
-                "[closed-placement] {win:?} ({identity}) was launched by JWM; keeping the default placement"
-            );
+        let origin = self.launch_origin_of(client_key, now);
+        if policy == PlacementPolicy::Inherit && !origin.uses_memory() {
             return false;
         }
 
         let mut remembered = remembered;
         remembered.monitor_num = self.resolve_remembered_monitor_num(backend, &remembered);
 
-        let rule = RuleMatcher::find_matching_rule(&name, &class, &instance);
-        let placement = resolve_memory_against_rule(&remembered, rule.as_ref(), cfg.tagmask());
+        let placement = resolve_memory_against_rule(&remembered, rule, cfg.tagmask());
         // A monitor that has gone away keeps the client on the selected one;
         // the remembered tags still apply there, because tags are the
         // user's workspaces and travel with them across outputs.
@@ -1346,11 +1402,25 @@ impl Jwm {
         backend: &dyn Backend,
         client_key: ClientKey,
     ) {
+        let Some(client) = self.state.clients.get(client_key) else {
+            return;
+        };
+        let rule = RuleMatcher::find_matching_rule(&client.name, &client.class, &client.instance);
+        self.remember_closed_placement_with_rule(backend, client_key, rule.as_ref());
+    }
+
+    pub(crate) fn remember_closed_placement_with_rule(
+        &mut self,
+        backend: &dyn Backend,
+        client_key: ClientKey,
+        rule: Option<&WMRule>,
+    ) {
         let cfg = CONFIG.load();
-        if !self
-            .closed_placements
-            .is_enabled(cfg.behavior().remember_closed_placement)
-        {
+        let policy = rule.map_or(PlacementPolicy::Inherit, |rule| rule.placement);
+        if !policy.records_history(
+            self.closed_placements
+                .is_enabled(cfg.behavior().remember_closed_placement),
+        ) {
             return;
         }
         let Some(client) = self.state.clients.get(client_key) else {
@@ -1398,8 +1468,8 @@ impl Jwm {
         }
     }
 
-    /// Config reload: a feature switched off forgets what it learned, including
-    /// the on-disk snapshot, so a later re-enable starts empty.
+    /// Config reload: when neither global inheritance nor any Remember rule
+    /// needs history, clear the map and snapshot. A later opt-in starts empty.
     pub(crate) fn reconcile_closed_placement_config(&mut self, enabled: bool) {
         if enabled {
             return;
@@ -1452,6 +1522,37 @@ mod tests {
                 .map(|(_, start)| *start)
         };
         (ancestors, start_time)
+    }
+
+    #[test]
+    fn placement_policy_current_claims_proven_origin_without_consuming_other_apps() {
+        let now = Instant::now();
+        let probe = ProcessProbe {
+            ancestors: &|_| Vec::new(),
+            start_time: &|_| Some(42),
+        };
+        let managed = HashSet::new();
+        for pid in [None, Some(999)] {
+            let mut registry = JwmLaunchRegistry::default();
+            registry.record(123, Some(42), now);
+            let result = registry.classify_with_fallback(pid, &managed, &probe, now, false);
+            assert_ne!(result, LaunchOrigin::Jwm);
+            assert_eq!(
+                registry.classify(None, &managed, &probe, now),
+                LaunchOrigin::Jwm,
+                "unrelated Current app must leave B's pending attribution alone"
+            );
+        }
+        let mut registry = JwmLaunchRegistry::default();
+        registry.record(123, Some(42), now);
+        assert_eq!(
+            registry.classify_with_fallback(Some(123), &managed, &probe, now, false),
+            LaunchOrigin::Jwm
+        );
+        assert_eq!(
+            registry.classify(None, &managed, &probe, now),
+            LaunchOrigin::Unknown
+        );
     }
 
     #[test]
@@ -1757,6 +1858,7 @@ mod tests {
             tags,
             is_floating: false,
             monitor,
+            placement: PlacementPolicy::Inherit,
         }
     }
 

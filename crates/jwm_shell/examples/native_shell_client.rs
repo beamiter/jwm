@@ -80,7 +80,16 @@ fn main() -> Result<()> {
     if let Some(title) = option("--title") {
         window.set_title(title);
     }
-    window.set_app_id("jwm.shared-shell.native-test");
+    let app_id = option("--app-id").unwrap_or_else(|| "jwm.shared-shell.native-test".to_owned());
+    anyhow::ensure!(
+        !app_id.is_empty()
+            && app_id.len() <= 255
+            && app_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')),
+        "app id must be a nonempty ASCII identifier"
+    );
+    window.set_app_id(&app_id);
     window.set_min_size(Some((200, 120)));
     if fullscreen {
         window.set_fullscreen(None);

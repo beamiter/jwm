@@ -10,10 +10,10 @@ this order:
 3. A matching `[[rules]]` entry can pin the tags, the monitor, or both.
 4. A spawn pin saved with `Alt+Ctrl+P` fixes both the output and tags for that
    application, overriding placement from `[[rules]]`.
-5. If explicitly enabled, the closed-placement memory described below moves
+5. When enabled by the inherited global policy or an explicit per-app rule,
+   the closed-placement memory described below moves
    the window to where the same application was last closed, unless a rule
-   already pinned that part, an explicit spawn pin applies, or JWM launched
-   the window itself.
+   already pinned that part, an explicit spawn pin applies, or (for `inherit`) JWM launched the window itself.
 
 By default, new windows open on the currently focused tag, including windows
 reopened from a terminal, by an agent (`claude`, `codex`), or by a running
@@ -26,16 +26,71 @@ transient-parent placement still take precedence.
 remember_closed_placement = false  # default
 ```
 
-Omitting this key also disables the memory. Set it to `true` to opt into
+Omitting this key disables inherited memory. Set it to `true` to opt into
 returning applications to their last closed monitor and tags. Existing
 configurations that explicitly set `true` keep that setting after an upgrade;
 change it to `false` to use the current tag.
 
-The key is hot-reloadable and accepts `set_config`. Switching it off also
-forgets everything remembered so far — both the in-memory map and the on-disk
-snapshot — so a later re-enable starts from what the user does next rather
-than from stale history. While the feature is disabled the snapshot file is
-deleted (or ignored); it is only loaded at startup when the feature is on.
+The key is hot-reloadable and accepts `set_config`. It is the default for
+`inherit` rules, not a master kill switch: an explicit `remember` rule works even
+when it is false. Snapshot loading/retention is enabled if the global default is
+true **or any rule says remember**. When both are absent, the in-memory map and
+snapshot are cleared as before; a later re-enable starts from future closes.
+Adding a remember rule after disabled startup does not resurrect deleted history.
+
+## Per-application new-window placement
+
+Add `placement` to the **first matching existing rule**, keeping its other fields.
+Do not append a rule behind one that already matches. Values are case-sensitive;
+unknown values fail configuration parsing. Omitted values mean `inherit`.
+
+```toml
+[[rules]]
+class = "anvil"
+instance = ""
+name = ""
+tags = 0
+is_floating = false
+monitor = -1
+placement = "current"
+
+[[rules]]
+class = "firefox"
+instance = ""
+name = ""
+tags = 0
+is_floating = false
+monitor = -1
+placement = "remember"
+```
+
+| Policy | New top-level window | Eligible close |
+| --- | --- | --- |
+| `inherit` (default) | Existing global default and launch-origin logic | Record only when global memory is on |
+| `current` | Do not consult close history | Do not write close history |
+| `remember` | Use history if present, including JWM launches, even when global default is false | Record independently of global default |
+
+`current` leaves any existing record untouched. Switching back to `remember`
+may therefore use the last record from before `current`; no history is fabricated
+while current is selected. `remember` without a record keeps ordinary placement.
+Only matching applications opt in when the global default is false. Rules still
+use case-sensitive substring matching; stored history uses exact class/instance
+identity. On native Wayland, this follows the existing app-ID mapping.
+
+Transient-parent and scratchpad ownership remain authoritative. Explicit spawn
+pins still win; rule-pinned tag and monitor components are never overwritten by
+history. `current` is not an instruction to ignore a pin or relocate a dialog.
+A remembered window landing on a background tag does not change the user's view
+or steal focus. Existing managed windows are not moved on configuration reload;
+subsequent new windows and eligible closes use the then-current policy. Current
+means the focused view when the window is managed, not when its launch began.
+Reusing an application's existing window is not a new-window placement event.
+Actual restart restoration of surviving windows remains separate and unchanged.
+
+Acceptance must use two app identities and two tags, swap current/remember,
+exercise global false/true and inherit, then verify pins, dialogs, pending
+scratchpads and restart persistence independently on X11 and native Wayland.
+Shared mock-backend tests are not physical desktop acceptance.
 
 ## Pin an application's spawn location
 
@@ -117,8 +172,8 @@ the transfer and pulls the window back onto its own unlocked output.
 
 ## What is remembered
 
-With the feature enabled, when a regular top-level window is unmanaged,
-closed by the user or by its process, JWM records its output identity and tag
+When its effective policy permits recording and a regular top-level window is
+unmanaged (closed by the user or its process), JWM records its output identity and tag
 mask under its `WM_CLASS` (class and instance, matched exactly). The output is
 remembered by
 `OutputIdentity.stable_key` (the connector name when EDID is absent), with
@@ -138,8 +193,9 @@ launcher windows is process-only and is not written to disk.
 
 ## Who gets the memory
 
-When the feature is enabled, the exclusion is about who launched the window,
-not what it is. JWM records the PID of every child it spawns itself: keybinding
+For `inherit` with global memory enabled, the exclusion is about who launched
+the window, not what it is. Explicit `current`/`remember` override this origin
+decision (but not scratchpad ownership). JWM records the PID of every child it spawns itself: keybinding
 `spawn` commands, the
 application launcher, scratchpads, the session menu and other shell panels.
 When a new window maps, JWM walks its process ancestry and stops at the
@@ -510,3 +566,26 @@ reserve space. Padding extends the overlap test only perpendicular to the
 chosen edge. If all four observed dock reservations are zero, the configured
 bar offset is used only for the part not already reserved above the work
 area by a strut. Observed stacked docks retain their reservation.
+
+### Real desktop acceptance fixture
+
+`scripts/test-app-placement-native.py` runs two distinct application identities
+against a private JWM process and owned Xvfb display. It seeds both histories,
+checks `current` versus `remember` with global memory disabled, swaps the rules
+without relocating an existing window, and checks omitted/default and inherited
+launch-origin behavior. Assertions cover exact tag masks, visibility, focus, and
+saved history. Each backend writes `result.json`, generated configs, and logs;
+a missing dependency or failed invariant exits nonzero, not a green skip.
+
+```sh
+python3 scripts/test-app-placement-native.py --self-test
+python3 scripts/test-app-placement-native.py --backend x11rb --jwm target/release/jwm
+python3 scripts/test-app-placement-native.py --backend wayland-winit --jwm target/release/jwm \
+  --client-bin crates/jwm_shell/target/debug/examples/native_shell_client
+```
+
+The native Wayland acceptance workflow reuses its compositor/client build and
+runs both backends. The self-test verifies harness contracts only; enabling the
+workflow is not evidence of desktop success. Consult the exact commit's run
+and `app-placement-native` artifacts. This fixture does not certify physical
+multi-monitor/DRM behavior, pixel output, or compositor restart restoration.

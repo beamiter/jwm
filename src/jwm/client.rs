@@ -6743,6 +6743,169 @@ mod unmanage_minimized_tests {
     }
 
     #[test]
+    fn placement_policy_spawn_pin_wins_over_current_and_remember() {
+        use crate::jwm::types::PlacementPolicy;
+        for policy in [PlacementPolicy::Current, PlacementPolicy::Remember] {
+            let mut backend = ClientSpyBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            jwm.closed_placements.set_enabled_for_test(false);
+            set_class(&backend, "PinnedFixture", "pin");
+            let key = manage_window(&mut jwm, &mut backend, 0x91fc);
+            jwm.state.clients[key].state.tags = 0b10;
+            jwm.toggle_spawn_placement(&mut backend, &crate::jwm::types::WMArgEnum::Int(0))
+                .unwrap();
+            assert_eq!(jwm.client_spawn_placement_pinned(key), Some(true));
+            jwm.state.clients[key].state.tags = 1;
+            let rule = WMRule::new(
+                "PinnedFixture".into(),
+                String::new(),
+                String::new(),
+                0,
+                false,
+                -1,
+            )
+            .with_placement(policy);
+            jwm.adopt_remembered_placement_with_rule(&mut backend, key, Some(&rule));
+            assert_eq!(jwm.state.clients[key].state.tags, 2);
+        }
+    }
+
+    #[test]
+    fn placement_policy_snapshot_retained_until_last_opt_in_is_removed() {
+        let mut backend = ClientSpyBackend::new();
+        let (mut jwm, _, _) = jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+        assert!(!jwm.closed_placements.is_empty());
+        jwm.reconcile_closed_placement_config(true); // global false + a Remember rule
+        assert!(!jwm.closed_placements.is_empty());
+        jwm.reconcile_closed_placement_config(false); // no global default or Remember rule
+        assert!(jwm.closed_placements.is_empty());
+        jwm.reconcile_closed_placement_config(true);
+        assert!(
+            jwm.closed_placements.is_empty(),
+            "enabling later cannot resurrect deleted records"
+        );
+    }
+
+    #[test]
+    fn placement_policy_two_apps_two_tags_and_close_writes() {
+        use crate::jwm::closed_placement::PlacementIdentity;
+        use crate::jwm::types::PlacementPolicy;
+        for global in [false, true] {
+            let mut backend = ClientSpyBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            jwm.closed_placements.set_enabled_for_test(global);
+            let mon = jwm.state.sel_mon.unwrap();
+            let num = jwm.state.monitors[mon].num;
+            set_class(&backend, "FocusAnchor", "anchor");
+            let anchor = manage_window(&mut jwm, &mut backend, 0x91ef);
+            let mut keys = Vec::new();
+            for (index, class, policy) in [
+                (0, "AppA", PlacementPolicy::Current),
+                (1, "AppB", PlacementPolicy::Remember),
+            ] {
+                set_class(&backend, "UnmatchedFixture", "fixture");
+                let key = manage_window(&mut jwm, &mut backend, 0x91f0 + index);
+                jwm.state.clients[key].class = class.into();
+                jwm.state.clients[key].instance = class.into();
+                let identity = PlacementIdentity::new(class, class).unwrap();
+                jwm.closed_placements
+                    .remember(identity.clone(), num, None, 0b10);
+                let before = jwm.closed_placements.lookup(&identity).unwrap();
+                let rule = WMRule::new(class.into(), String::new(), String::new(), 0, false, -1)
+                    .with_placement(policy);
+                jwm.focus(&mut backend, Some(anchor)).unwrap();
+                let selection = jwm.get_selected_client_key();
+                let moved =
+                    jwm.adopt_remembered_placement_with_rule(&mut backend, key, Some(&rule));
+                if moved {
+                    jwm.settle_remembered_placement_elsewhere(&mut backend, key)
+                        .unwrap();
+                }
+                assert_eq!(
+                    jwm.state.clients[key].state.tags,
+                    if index == 0 { 1 } else { 2 }
+                );
+                assert_eq!(
+                    active_tags(&jwm, mon),
+                    1,
+                    "history must not change the active view"
+                );
+                assert_eq!(
+                    jwm.get_selected_client_key(),
+                    selection,
+                    "placement stage must not steal focus"
+                );
+                // Simulate a later explicit move, then the same production close stage.
+                jwm.state.clients[key].state.tags = 0b100;
+                jwm.remember_closed_placement_with_rule(&backend, key, Some(&rule));
+                let after = jwm.closed_placements.lookup(&identity).unwrap();
+                assert_eq!(after.tags, if index == 0 { before.tags } else { 0b100 });
+                keys.push(key);
+            }
+            // Selecting policy for B never retroactively relocates A.
+            assert_eq!(jwm.state.clients[keys[0]].state.tags, 0b100);
+        }
+    }
+
+    #[test]
+    fn placement_policy_remember_respects_each_rule_pin_and_pending_scratchpad() {
+        use crate::jwm::types::PlacementPolicy;
+        for (tags, monitor) in [(0, -1), (0b10, -1), (0, 0), (0b10, 0)] {
+            let mut backend = ClientSpyBackend::new();
+            let (mut jwm, first, second) =
+                jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+            jwm.closed_placements.set_enabled_for_test(false);
+            set_class(&backend, "UnmatchedFixture", "fixture");
+            let key = manage_window(&mut jwm, &mut backend, 0x91fa);
+            jwm.state.clients[key].class = "firefox".into();
+            jwm.state.clients[key].instance = "Navigator".into();
+            let rule = WMRule::new(
+                "firefox".into(),
+                String::new(),
+                String::new(),
+                tags,
+                false,
+                monitor,
+            )
+            .with_placement(PlacementPolicy::Remember);
+            jwm.state.clients[key].state.tags = 0;
+            jwm.apply_single_rule(key, &rule);
+            jwm.set_default_tags(key);
+            jwm.note_jwm_launch(external_pid(), std::time::Instant::now());
+            jwm.adopt_remembered_placement_with_rule(&mut backend, key, Some(&rule));
+            assert_eq!(
+                jwm.state.clients[key].mon,
+                Some(if monitor < 0 { second } else { first })
+            );
+            assert_eq!(
+                jwm.state.clients[key].state.tags,
+                if tags == 0 { 4 } else { tags as u32 }
+            );
+            assert_eq!(active_tags(&jwm, first), 1);
+            assert_eq!(active_tags(&jwm, second), 1);
+        }
+        let mut backend = ClientSpyBackend::new();
+        let (mut jwm, first, _) = jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+        jwm.closed_placements.set_enabled_for_test(false);
+        set_class(&backend, "UnmatchedFixture", "fixture");
+        let key = manage_window(&mut jwm, &mut backend, 0x91fb);
+        jwm.state.clients[key].class = "firefox".into();
+        jwm.state.clients[key].instance = "Navigator".into();
+        let now = std::time::Instant::now();
+        jwm.scratchpad_pending
+            .register_spawned(external_pid(), "term".into(), None, now)
+            .unwrap();
+        let rule = WMRule::new("firefox".into(), String::new(), String::new(), 0, false, -1)
+            .with_placement(PlacementPolicy::Remember);
+        assert!(!jwm.adopt_remembered_placement_with_rule(&mut backend, key, Some(&rule)));
+        assert_eq!(jwm.state.clients[key].mon, Some(first));
+        assert_eq!(
+            jwm.claim_pending_scratchpad(external_pid(), std::time::Instant::now()),
+            Some("term".into())
+        );
+    }
+
+    #[test]
     fn disabled_memory_reopens_on_the_focused_tag_and_monitor() {
         // None exercises the actual built-in default; Some(false) the explicit opt-out.
         for enabled in [None, Some(false)] {
