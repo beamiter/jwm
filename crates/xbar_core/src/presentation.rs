@@ -1292,8 +1292,75 @@ struct LayoutPass<'a, M> {
     config: &'a PresentationConfig,
     measurer: &'a M,
     network_metrics: std::cell::OnceCell<NetworkTextMetrics>,
-    widest_clock_digits: std::cell::OnceCell<[char; 10]>,
+    clock_metrics: std::cell::OnceCell<NumericClockMetrics>,
     percent_metrics: [std::cell::OnceCell<PercentTextMetrics>; 5],
+}
+
+/// Stable width samples for the conventional numeric clock formats across bar toolkits.
+pub struct NumericClockMetrics {
+    widest: [char; 10],
+}
+
+impl NumericClockMetrics {
+    fn measure(mut measure: impl FnMut(&str) -> f32) -> Self {
+        let mut widest = ('0', 0.0_f32);
+        Self {
+            widest: std::array::from_fn(|index| {
+                let digit = char::from(b'0' + index as u8);
+                let width = finite_non_negative(measure(digit.encode_utf8(&mut [0; 4])));
+                if width > widest.1 {
+                    widest = (digit, width);
+                }
+                widest.0
+            }),
+        }
+    }
+
+    /// Measure a shaped, position-aware exemplar, leaving other clock formats
+    /// on the caller's normal sizing path.
+    #[must_use]
+    pub fn width(
+        cache: &std::cell::OnceCell<Self>,
+        value: &str,
+        icon: &str,
+        mut measure: impl FnMut(&str) -> f32,
+    ) -> Option<f32> {
+        // In these four ASCII clock shapes a digit sets the upper bound for
+        // that position. E.g. minutes and seconds cannot begin with 6–9.
+        // Other formats keep the ordinary measured text.
+        const SHAPES: [&str; 4] = [
+            "29:59",
+            "29:59:59",
+            "9999-19-39 29:59",
+            "9999-19-39 29:59:59",
+        ];
+        let shape = SHAPES.into_iter().find(|shape| {
+            shape.len() == value.len()
+                && shape.bytes().zip(value.bytes()).all(|(slot, byte)| {
+                    if slot.is_ascii_digit() {
+                        byte.is_ascii_digit() && byte <= slot
+                    } else {
+                        slot == byte
+                    }
+                })
+        })?;
+        let metrics = cache.get_or_init(|| Self::measure(&mut measure));
+        // Shape the whole exemplar so rounding/ink overhang is not added
+        // separately for each glyph. Do not pad the displayed string itself.
+        let mut sample = String::with_capacity(icon.len() + 2 + shape.len());
+        if !icon.is_empty() {
+            sample.push_str(icon);
+            sample.push_str("  ");
+        }
+        sample.extend(shape.bytes().map(|byte| {
+            if byte.is_ascii_digit() {
+                metrics.widest[usize::from(byte - b'0')]
+            } else {
+                char::from(byte)
+            }
+        }));
+        Some(finite_non_negative(measure(&sample)))
+    }
 }
 
 /// Stable icon and right-aligned value slots for the 0..=100% controls.
@@ -1676,7 +1743,7 @@ pub(crate) fn build_scene<M: TextMeasurer>(
         config,
         measurer,
         network_metrics: std::cell::OnceCell::new(),
-        widest_clock_digits: std::cell::OnceCell::new(),
+        clock_metrics: std::cell::OnceCell::new(),
         percent_metrics: std::array::from_fn(|_| std::cell::OnceCell::new()),
     }
     .build(view, viewport, interaction)
@@ -1965,53 +2032,8 @@ impl<M: TextMeasurer> LayoutPass<'_, M> {
     }
 
     fn numeric_clock_width(&self, value: &str, icon: &str) -> Option<f32> {
-        // In these four ASCII clock shapes a digit sets the upper bound for
-        // that position. E.g. minutes and seconds cannot begin with 6–9.
-        // Other formats keep the ordinary measured text.
-        const SHAPES: [&str; 4] = [
-            "29:59",
-            "29:59:59",
-            "9999-19-39 29:59",
-            "9999-19-39 29:59:59",
-        ];
-        let shape = SHAPES.into_iter().find(|shape| {
-            shape.len() == value.len()
-                && shape.bytes().zip(value.bytes()).all(|(slot, byte)| {
-                    if slot.is_ascii_digit() {
-                        byte.is_ascii_digit() && byte <= slot
-                    } else {
-                        slot == byte
-                    }
-                })
-        })?;
-        let measure =
-            |text: &str| finite_non_negative(self.measurer.measure(text, self.font_size()).width);
-        let widest = self.widest_clock_digits.get_or_init(|| {
-            let mut widest = ('0', 0.0_f32);
-            std::array::from_fn(|index| {
-                let digit = char::from(b'0' + index as u8);
-                let width = measure(digit.encode_utf8(&mut [0; 4]));
-                if width > widest.1 {
-                    widest = (digit, width);
-                }
-                widest.0
-            })
-        });
-        // Shape the whole exemplar so rounding/ink overhang is not added
-        // separately for each glyph. Do not pad the displayed string itself.
-        let mut sample = String::with_capacity(icon.len() + 2 + shape.len());
-        if !icon.is_empty() {
-            sample.push_str(icon);
-            sample.push_str("  ");
-        }
-        sample.extend(shape.bytes().map(|byte| {
-            if byte.is_ascii_digit() {
-                widest[usize::from(byte - b'0')]
-            } else {
-                char::from(byte)
-            }
-        }));
-        Some(measure(&sample))
+        let measure = |text: &str| self.measurer.measure(text, self.font_size()).width;
+        NumericClockMetrics::width(&self.clock_metrics, value, icon, measure)
     }
 
     fn control_extent(&self, control: &ControlSpec, compact: bool) -> f32 {
