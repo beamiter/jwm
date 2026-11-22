@@ -365,7 +365,8 @@ def main():
                 type_text(str(target_path))
                 key("Return")
                 assert target_path.read_text() == "Target", "Overwrite ran without confirmation"
-                key("Return")
+                # The confirmation dialog deliberately has no default action.
+                key("shift+Tab", "Return")  # Select and activate its last button, Replace.
                 wait(lambda: target_path.read_text() == "Source dirty-A",
                      "Baseline did not replace already-open destination")
                 acknowledge_title("baseline source adopted live target", target_path, source_window, False)
