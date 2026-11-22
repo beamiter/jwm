@@ -41,8 +41,11 @@ pub fn decode(path: &Path) -> Result<DecodedImage, String> {
     })
 }
 
+// Only worker-prepared native-endian pixels may cross into the Cairo path.
+struct PreparedImage(DecodedImage);
+
 type LoadResult = (
-    Result<DecodedImage, String>,
+    Result<PreparedImage, String>,
     Option<Vec<PathBuf>>,
     PathBuf,
     u64,
@@ -124,7 +127,8 @@ impl Viewer {
         self.worker = Some(rx);
         std::thread::spawn(move || {
             let entries = scan.then(|| neighbors(&path));
-            let _ = tx.send((decode(&path), entries, path, generation));
+            let image = decode(&path).map(prepare_surface_pixels);
+            let _ = tx.send((image, entries, path, generation));
         });
     }
     pub fn loading(&self) -> bool {
@@ -191,9 +195,8 @@ impl Viewer {
         self.fit = false;
     }
 }
-fn surface(decoded: DecodedImage) -> Result<ImageSurface, String> {
-    let mut pixels = decoded.pixels;
-    for p in pixels.as_chunks_mut::<4>().0 {
+fn prepare_surface_pixels(mut decoded: DecodedImage) -> PreparedImage {
+    for p in decoded.pixels.as_chunks_mut::<4>().0 {
         let a = u32::from(p[3]);
         let value = (a << 24)
             | ((u32::from(p[0]) * a / 255) << 16)
@@ -201,8 +204,12 @@ fn surface(decoded: DecodedImage) -> Result<ImageSurface, String> {
             | (u32::from(p[2]) * a / 255);
         p.copy_from_slice(&value.to_ne_bytes());
     }
+    PreparedImage(decoded)
+}
+
+fn surface(PreparedImage(decoded): PreparedImage) -> Result<ImageSurface, String> {
     ImageSurface::create_for_data(
-        pixels,
+        decoded.pixels,
         Format::ARgb32,
         decoded.width as i32,
         decoded.height as i32,
@@ -214,6 +221,37 @@ fn surface(decoded: DecodedImage) -> Result<ImageSurface, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_prepares_native_cairo_pixels_before_surface_creation() {
+        let path =
+            std::env::temp_dir().join(format!("jwm-viewer-cairo-{}.png", std::process::id()));
+        let pixels = vec![10, 20, 30, 0, 100, 200, 255, 128, 20, 40, 60, 255];
+        image::RgbaImage::from_raw(3, 1, pixels)
+            .unwrap()
+            .save(&path)
+            .unwrap();
+        let mut viewer = Viewer::new(Vec::new());
+        viewer.paths.push(path.clone());
+        viewer.load(false);
+        let (prepared, entries, returned_path, generation) = viewer
+            .worker
+            .take()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(returned_path, path);
+        assert_eq!(generation, viewer.generation);
+        assert!(entries.is_none());
+        let mut cairo = surface(prepared.unwrap()).unwrap();
+        assert_eq!((cairo.width(), cairo.height(), cairo.stride()), (3, 1, 12));
+        let expected = [0x0000_0000u32, 0x8032_6480, 0xff14_283c]
+            .into_iter()
+            .flat_map(u32::to_ne_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(&*cairo.data().unwrap(), expected.as_slice());
+    }
 
     #[test]
     fn decodes_png_and_rejects_corruption_without_a_display() {
