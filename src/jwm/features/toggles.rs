@@ -1425,6 +1425,7 @@ impl Jwm {
             .features
             .system_ui
             .set_launcher_entries(std::sync::Arc::clone(&self.features.launcher_catalog))
+            || self.resolve_pending_workscene_applications()
         {
             self.mark_system_ui_dirty();
         }

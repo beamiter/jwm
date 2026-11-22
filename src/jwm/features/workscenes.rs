@@ -121,7 +121,8 @@ pub(crate) struct WorkscenePlan {
     config: Arc<Config>,
     outputs: Vec<(MonitorKey, u32, Option<LayoutEnum>)>,
     sessions: Vec<super::launcher::AgentEntry>,
-    applications: Vec<super::system_ui::LaunchEntry>,
+    applications: Vec<LaunchEntry>,
+    pending_applications: Vec<(usize, String)>,
 }
 impl std::fmt::Debug for WorkscenePlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -205,6 +206,9 @@ impl Jwm {
         let registered = super::launcher::AgentEntry::from_snapshot(&snapshot);
         let mut sessions = Vec::new();
         let mut applications = Vec::new();
+        let mut pending_applications = Vec::new();
+        let indexing = self.features.launcher_catalog_refreshed_at.is_none()
+            && super::connectivity::job_in_flight(self.features.launcher_catalog_job.as_ref());
         let mut rows = Vec::new();
         if !outputs.is_empty() {
             rows.push(ListRow {
@@ -243,38 +247,16 @@ impl Jwm {
             if !seen_applications.insert(name.as_str()) {
                 continue;
             }
-            let entry = self
-                .features
-                .launcher_catalog
-                .iter()
-                .find(|entry| &entry.name == name);
-            if self.state.clients.values().any(|client| {
-                entry.map_or_else(
-                    || app_identity_matches(&client.class, &client.instance, name, ""),
-                    |entry| catalog_identity_matches(&client.class, &client.instance, entry),
-                )
-            }) {
+            if indexing {
+                let index = rows.len();
                 rows.push(ListRow {
-                    key: "present".into(),
-                    text: format!("Already open: {name} · process preserved"),
+                    key: "indexing".into(),
+                    text: format!("Looking up {name} · indexing applications"),
                     data: RowData::Workscene,
                 });
-                continue;
-            }
-            if let Some(entry) = entry {
-                let index = applications.len();
-                rows.push(ListRow {
-                    key: format!("application:{index}"),
-                    text: format!("Start {name} · normal window placement"),
-                    data: RowData::Workscene,
-                });
-                applications.push(entry.clone());
+                pending_applications.push((index, name.clone()));
             } else {
-                rows.push(ListRow {
-                    key: "missing".into(),
-                    text: format!("Missing catalog entry: {name} · refresh applications first"),
-                    data: RowData::Workscene,
-                });
+                rows.push(self.workscene_application_row(name, &mut applications));
             }
         }
         let selected = rows
@@ -290,6 +272,7 @@ impl Jwm {
             outputs,
             sessions,
             applications,
+            pending_applications,
         });
         self.features.system_ui = SystemUiState::ListPanel {
             list_scroll: None,
@@ -308,6 +291,81 @@ impl Jwm {
         };
         self.sync_system_ui(backend);
         Ok(())
+    }
+
+    fn workscene_application_row(
+        &self,
+        name: &str,
+        applications: &mut Vec<LaunchEntry>,
+    ) -> ListRow {
+        let entry = self
+            .features
+            .launcher_catalog
+            .iter()
+            .find(|entry| entry.name == name);
+        if self.state.clients.values().any(|client| {
+            entry.map_or_else(
+                || app_identity_matches(&client.class, &client.instance, name, ""),
+                |entry| catalog_identity_matches(&client.class, &client.instance, entry),
+            )
+        }) {
+            return ListRow {
+                key: "present".into(),
+                text: format!("Already open: {name} · process preserved"),
+                data: RowData::Workscene,
+            };
+        }
+        if let Some(entry) = entry {
+            let index = applications.len();
+            applications.push(entry.clone());
+            ListRow {
+                key: format!("application:{index}"),
+                text: format!("Start {name} · normal window placement"),
+                data: RowData::Workscene,
+            }
+        } else {
+            ListRow {
+                key: "missing".into(),
+                text: format!("Missing catalog entry: {name} · refresh applications first"),
+                data: RowData::Workscene,
+            }
+        }
+    }
+
+    pub(crate) fn resolve_pending_workscene_applications(&mut self) -> bool {
+        if !self.features.system_ui.is_workscene_preview() {
+            return false;
+        }
+        let Some(mut plan) = self.features.workscene_preview.take() else {
+            return false;
+        };
+        if !Arc::ptr_eq(&plan.config, &CONFIG.load_full()) || plan.pending_applications.is_empty() {
+            self.features.workscene_preview = Some(plan);
+            return false;
+        }
+        // Resolve just the rows that could not be classified before the
+        // initial scan. Keep the panel, existing actions and selection intact.
+        let replacements: Vec<_> = std::mem::take(&mut plan.pending_applications)
+            .into_iter()
+            .map(|(index, name)| {
+                let row = self.workscene_application_row(&name, &mut plan.applications);
+                (index, row)
+            })
+            .collect();
+        self.features.workscene_preview = Some(plan);
+        let SystemUiState::ListPanel { rows, .. } = &mut self.features.system_ui else {
+            return false;
+        };
+        let mut changed = false;
+        for (index, row) in replacements {
+            if let Some(pending) = rows.get_mut(index)
+                && pending.key == "indexing"
+            {
+                *pending = row;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub(crate) fn perform_workscene_selection(&mut self, backend: &mut dyn Backend) {
@@ -407,6 +465,8 @@ impl Jwm {
                 // An accepted spawn is single-use even before the new window appears.
                 entry.command.clear();
                 Ok(WorksceneOutcome::ApplicationLaunchRequested)
+            } else if action == "indexing" {
+                Err("Still indexing applications; wait for the catalog to load".into())
             } else {
                 Err("This object is unavailable; no action was dispatched".into())
             }
@@ -533,6 +593,59 @@ mod tests {
         assert_eq!(plan.applications.len(), 2);
         assert_eq!(plan.applications[0].name, "Terminal");
         assert_eq!(plan.applications[1].name, "JWM Notes");
+    }
+
+    #[test]
+    fn cold_scene_catalog_updates_pending_rows_after_worker_publication() {
+        use crate::jwm::features::connectivity::BackgroundJob;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let (job, publish) = BackgroundJob::controlled_for_test();
+        jwm.features.launcher_catalog_job = Some(job);
+        let scene = Workscene {
+            name: "Cold catalog".into(),
+            outputs: Vec::new(),
+            sessions: Vec::new(),
+            applications: vec!["JWM Notes".into(), "Not installed".into()],
+        };
+        jwm.open_workscene_preview(&mut backend, scene).unwrap();
+        jwm.poll_launcher_catalog_job();
+        let SystemUiState::ListPanel { rows, selected, .. } = &jwm.features.system_ui else {
+            panic!("expected workscene preview");
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.key == "indexing"));
+        assert_eq!(*selected, 0);
+        assert_eq!(
+            jwm.activate_workscene_action(&mut backend).unwrap_err(),
+            "Still indexing applications; wait for the catalog to load"
+        );
+
+        publish(Arc::from([LaunchEntry::new(
+            "JWM Notes".into(),
+            vec!["jwm-notes".into()],
+            false,
+            None,
+            "jwm notes".into(),
+        )]));
+        jwm.poll_launcher_catalog_job();
+        assert!(jwm.features.launcher_catalog_refreshed_at.is_some());
+        assert_eq!(
+            jwm.features.system_ui.selected_workscene_action(),
+            Some("application:0")
+        );
+        let SystemUiState::ListPanel { rows, .. } = &jwm.features.system_ui else {
+            panic!("expected workscene preview");
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].text.starts_with("Start JWM Notes"));
+        assert_eq!(rows[1].key, "missing");
+        assert!(rows[1].text.starts_with("Missing catalog entry: Not installed"));
+        let plan = jwm.features.workscene_preview.as_ref().unwrap();
+        assert!(plan.pending_applications.is_empty());
+        assert_eq!(plan.applications.len(), 1);
     }
 
     #[test]
