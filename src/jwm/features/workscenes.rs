@@ -51,6 +51,10 @@ pub fn defaults() -> Vec<Workscene> {
         .collect()
 }
 
+fn actionable_row(row: &ListRow) -> bool {
+    row.key == "layout" || row.key.starts_with("session:") || row.key.starts_with("application:")
+}
+
 fn app_identity_matches(class: &str, instance: &str, name: &str, program: &str) -> bool {
     [class, instance].iter().any(|identity| {
         identity.eq_ignore_ascii_case(name)
@@ -259,14 +263,7 @@ impl Jwm {
                 rows.push(self.workscene_application_row(name, &mut applications));
             }
         }
-        let selected = rows
-            .iter()
-            .position(|row| {
-                row.key == "layout"
-                    || row.key.starts_with("session:")
-                    || row.key.starts_with("application:")
-            })
-            .unwrap_or(0);
+        let selected = rows.iter().position(actionable_row).unwrap_or(0);
         self.features.workscene_preview = Some(WorkscenePlan {
             config,
             outputs,
@@ -343,8 +340,8 @@ impl Jwm {
             self.features.workscene_preview = Some(plan);
             return false;
         }
-        // Resolve just the rows that could not be classified before the
-        // initial scan. Keep the panel, existing actions and selection intact.
+        // Resolve only the rows that could not be classified before the
+        // initial scan. Keep the panel and existing actions intact.
         let replacements: Vec<_> = std::mem::take(&mut plan.pending_applications)
             .into_iter()
             .map(|(index, name)| {
@@ -353,9 +350,12 @@ impl Jwm {
             })
             .collect();
         self.features.workscene_preview = Some(plan);
-        let SystemUiState::ListPanel { rows, .. } = &mut self.features.system_ui else {
+        let SystemUiState::ListPanel { rows, selected, .. } = &mut self.features.system_ui else {
             return false;
         };
+        // Row zero is the placeholder only when no action existed at all.
+        // Do not override a working layout/session or a move to another row.
+        let default_placeholder = *selected == 0 && !rows.iter().any(actionable_row);
         let mut changed = false;
         for (index, row) in replacements {
             if let Some(pending) = rows.get_mut(index)
@@ -364,6 +364,9 @@ impl Jwm {
                 *pending = row;
                 changed = true;
             }
+        }
+        if changed && default_placeholder {
+            *selected = rows.iter().position(actionable_row).unwrap_or(*selected);
         }
         changed
     }
@@ -608,7 +611,7 @@ mod tests {
             name: "Cold catalog".into(),
             outputs: Vec::new(),
             sessions: Vec::new(),
-            applications: vec!["JWM Notes".into(), "Not installed".into()],
+            applications: vec!["Not installed".into(), "JWM Notes".into()],
         };
         jwm.open_workscene_preview(&mut backend, scene).unwrap();
         jwm.poll_launcher_catalog_job();
@@ -640,16 +643,17 @@ mod tests {
             panic!("expected workscene preview");
         };
         assert_eq!(rows.len(), 2);
-        assert!(rows[0].text.starts_with("Start JWM Notes"));
-        assert_eq!(rows[1].key, "missing");
+        assert!(rows[1].text.starts_with("Start JWM Notes"));
+        assert_eq!(rows[0].key, "missing");
         assert!(
-            rows[1]
+            rows[0]
                 .text
                 .starts_with("Missing catalog entry: Not installed")
         );
         let plan = jwm.features.workscene_preview.as_ref().unwrap();
         assert!(plan.pending_applications.is_empty());
         assert_eq!(plan.applications.len(), 1);
+        assert_eq!(plan.applications[0].command, ["jwm-notes"]);
     }
 
     #[test]
