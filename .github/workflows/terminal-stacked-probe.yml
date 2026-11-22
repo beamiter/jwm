@@ -21,14 +21,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify baseline with fixture changes only
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = dcd076af8c5a74f6e018225e9c3c68e78bdbebaa
-          diff -u <(printf '%s\n' .github/workflows/terminal-stacked-probe.yml scripts/test-terminal-exit-x11.py) <(git diff --name-only HEAD^ HEAD)
-          git diff --check HEAD^ HEAD
+          base=dcd076af8c5a74f6e018225e9c3c68e78bdbebaa
+          git merge-base --is-ancestor "$base" HEAD
+          diff -u <(printf '%s\n' .github/workflows/terminal-stacked-probe.yml scripts/test-terminal-exit-x11.py) <(git diff --name-only "$base" HEAD)
+          git diff --check "$base" HEAD
       - name: Install native build and display dependencies
         timeout-minutes: 10
         run: |
