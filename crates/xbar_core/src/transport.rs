@@ -329,9 +329,22 @@ mod tests {
             monitor: crate::MonitorId(3),
         };
         assert_eq!(transport.execute(command).unwrap(), SendOutcome::Sent);
+        let received = owner
+            .try_receive_command()
+            .unwrap()
+            .expect("queued command");
+        // The producer stamps the command when it is queued, not when this
+        // assertion runs. Verify the stamp exists and check the exact wire payload.
+        assert_ne!(received.timestamp, 0);
         assert_eq!(
-            owner.try_receive_command().unwrap(),
-            Some(command_to_shared(command))
+            received,
+            SharedCommand {
+                cmd_type: shared_structures::CommandType::SetLayout.into(),
+                parameter: 2,
+                monitor_id: 3,
+                timestamp: received.timestamp,
+                ..SharedCommand::default()
+            }
         );
         owner.destroy().unwrap();
     }
