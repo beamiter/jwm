@@ -91,6 +91,15 @@ struct Picker {
     entries: Vec<PathBuf>,
     offset: usize,
 }
+const CONFLICT_TITLE: &str = "原文件已被修改";
+const CONFLICT_DESCRIPTION: &str =
+    "原文件未覆盖。可将当前修改保存为同目录的恢复副本并继续编辑，或另存到其他位置。";
+const CONFLICT_ACTIONS: [(&str, Action); 3] = [
+    ("取消", Action::Cancel),
+    ("另存为", Action::SaveAs(false)),
+    ("保留两份", Action::KeepConflictCopy),
+];
+
 enum Dialog {
     Picker(Box<Picker>),
     Error(String),
@@ -109,6 +118,7 @@ pub(crate) struct App {
     pub effects: Vec<Effect>,
     dialog: Option<Dialog>,
     dialog_focus: Option<usize>,
+    conflict_revision: u64,
     focus: Focus,
     result_path: Option<PathBuf>,
     result_index: Option<usize>,
@@ -133,6 +143,7 @@ impl App {
             effects: vec![],
             dialog: None,
             dialog_focus: None,
+            conflict_revision: 0,
             focus: Focus::Editor,
             result_path: None,
             result_index: None,
@@ -817,10 +828,7 @@ impl App {
             dialog => {
                 let (title, message) = match &dialog {
                     Dialog::Error(e) => ("操作未完成", e.as_str()),
-                    Dialog::SaveConflict => (
-                        "原文件已被修改",
-                        "原文件未覆盖。可将当前修改保存为同目录的恢复副本并继续编辑，或另存到其他位置。",
-                    ),
+                    Dialog::SaveConflict => (CONFLICT_TITLE, CONFLICT_DESCRIPTION),
                     Dialog::Unsaved => (
                         "保存当前修改？",
                         "当前内容尚未保存。可以保存、另存为，或放弃修改。",
@@ -845,11 +853,7 @@ impl App {
                 cr.move_to(r.x + 24., r.y + 72.);
                 pangocairo::functions::show_layout(cr, &layout);
                 let buttons = match &dialog {
-                    Dialog::SaveConflict => vec![
-                        ("取消", Action::Cancel),
-                        ("另存为", Action::SaveAs(false)),
-                        ("保留两份", Action::KeepConflictCopy),
-                    ],
+                    Dialog::SaveConflict => CONFLICT_ACTIONS.to_vec(),
                     Dialog::Unsaved => vec![
                         ("取消", Action::Cancel),
                         ("放弃修改", Action::Discard),
@@ -899,13 +903,10 @@ impl App {
                 vec![Action::Cancel, Action::Overwrite(path.clone(), *close)]
             }
             Some(Dialog::Error(_)) => vec![Action::Cancel],
-            Some(Dialog::SaveConflict) => {
-                vec![
-                    Action::Cancel,
-                    Action::SaveAs(false),
-                    Action::KeepConflictCopy,
-                ]
-            }
+            Some(Dialog::SaveConflict) => CONFLICT_ACTIONS
+                .iter()
+                .map(|(_, action)| action.clone())
+                .collect(),
             None => vec![],
         }
     }
@@ -1039,7 +1040,10 @@ impl App {
                 if let Document::Notes(n) = &mut self.document {
                     match n.save_explicitly() {
                         Ok(()) => (),
-                        Err(SaveError::Conflict) => self.dialog = Some(Dialog::SaveConflict),
+                        Err(SaveError::Conflict) => {
+                            self.conflict_revision = self.conflict_revision.wrapping_add(1);
+                            self.dialog = Some(Dialog::SaveConflict);
+                        }
                         Err(SaveError::Other(error)) => self.error(error),
                     }
                 }

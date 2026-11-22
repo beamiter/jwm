@@ -38,3 +38,10 @@ success. The probe invokes the row only through AT-SPI, then checks the same
 X window's new exact title, X focus, and semantic editor focus. A failed GTK
 control makes the run fail, not count as a negative baseline. The gate does
 not attest to search entry, editor text ranges, speech, or Wayland.
+
+The conflict arm opens a synthetic external file and independently replaces it.
+It discovers the named modal and its three buttons, invokes Cancel and then
+Keep Both through AT-SPI, verifies that the underlying editor was not exposed
+while the modal was active, and checks the recovered sibling's exact bytes and
+editor focus without altering the external file. No synthesized speech or
+real personal documents are involved.

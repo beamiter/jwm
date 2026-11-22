@@ -1,4 +1,4 @@
-"""Read-only AT-SPI probe for Notes, with generated test notes only."""
+"""Isolated AT-SPI probe for Notes, with generated test notes only."""
 import argparse
 import json
 import os
@@ -72,7 +72,7 @@ def activate(node):
 
 
 def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds, enable_reader=None,
-             keyboard=None):
+             keyboard=None, initial_title=INITIAL):
     def application(pid):
         desktop = atspi.get_desktop(0)
         if desktop is None:
@@ -96,11 +96,11 @@ def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds, enable_reader=
         raise ProbeError("gtk-positive-control-action-not-observed")
     if enable_reader is not None:
         enable_reader()
-    if not window(INITIAL):
+    if not window(initial_title):
         raise ProbeError("initial-notes-window-not-ready")
 
     def current():
-        if not window(INITIAL):
+        if not window(initial_title):
             raise ProbeError("initial-notes-window-lost")
         return application(notes_pid)
 
@@ -196,7 +196,54 @@ def keyboard_results(atspi, current, window, send):
     return "notes-keyboard-down-up-escape-reveal-and-enter-observed"
 
 
-def run_isolated(notes_path, atspi, set_reader, keyboard=False):
+def conflict_controls(atspi, current, window, send, source):
+    roles = atspi.Role
+    fields = {roles.ENTRY, roles.TEXT, roles.DOCUMENT_TEXT}
+    sibling = source.with_name(source.stem + " (恢复副本)" + source.suffix)
+    expected = b"original local draft"
+    replacement = source.with_name("outside")
+    replacement.write_bytes(b"outside edit")
+    replacement.replace(source)
+    send("key", "ctrl+End")
+    send("type", "--", " local draft")
+
+    def controls():
+        root = current()
+        dialog = named(root, "原文件已被修改", {roles.DIALOG})
+        if dialog is None:
+            return None
+        if named(root, EDITOR, fields) is not None:
+            raise ProbeError("conflict-modal-leaked-underlying-editor")
+        buttons = [named(dialog, label, {roles.PUSH_BUTTON})
+                   for label in ("取消", "另存为", "保留两份")]
+        return buttons if all(buttons) else None
+
+    send("key", "ctrl+s")
+    buttons = wait(controls, 5)
+    if buttons is None or not activate(buttons[0]):
+        raise ProbeError("conflict-cancel-not-actionable")
+    if not wait(lambda: named(current(), EDITOR, fields) is not None, 5) or sibling.exists():
+        raise ProbeError("conflict-cancel-did-not-restore-editor-without-writing")
+
+    send("key", "ctrl+s")
+    buttons = wait(controls, 5)
+    if buttons is None or not activate(buttons[2]):
+        raise ProbeError("conflict-keep-both-not-actionable")
+
+    def adopted():
+        if not window(sibling.name):
+            return False
+        editor = named(current(), EDITOR, fields)
+        return editor is not None and editor.get_state_set().contains(atspi.StateType.FOCUSED)
+
+    if not wait(adopted, 5):
+        raise ProbeError("conflict-copy-did-not-reopen-focused")
+    if source.read_bytes() != b"outside edit" or sibling.read_bytes() != expected:
+        raise ProbeError("conflict-keep-both-content-mismatch")
+    return "notes-conflict-actions-and-recovered-copy-observed"
+
+
+def run_isolated(notes_path, atspi, set_reader, keyboard=False, conflict=False):
     env = dict(os.environ)
     launched = []
     with tempfile.TemporaryDirectory(prefix="jwm-notes-atspi-") as t:
@@ -226,20 +273,25 @@ def run_isolated(notes_path, atspi, set_reader, keyboard=False):
                      "AT_SPI_BUS_ADDRESS", "GTK_MODULES", "GTK_A11Y"):
             env.pop(name, None)
         receipt = temp / "gtk-action"
+        source = temp / f"{INITIAL}.md"
+        initial_title = source.name if conflict else INITIAL
+        if conflict:
+            source.write_bytes(b"original")
         # AccessKit listens for the actual ScreenReaderEnabled property.
         # Exercise both transitions only in this owned, disposable bus.
         set_reader(False)
         try:
             control = subprocess.Popen([sys.executable, __file__, "--gtk", str(receipt)], env=env)
             launched.append(control)
-            notes = subprocess.Popen([str(notes_path)], env=env)
+            files = ["--", str(source)] if conflict else []
+            notes = subprocess.Popen([str(notes_path), *files], env=env)
             launched.append(notes)
 
             def ready():
                 if notes.poll() is not None:
                     raise ProbeError("notes-process-exited")
                 listing = xdo("search", "--all", "--onlyvisible", "--pid", str(notes.pid),
-                              "--name", "^" + re.escape(INITIAL) + " ", env=env)
+                              "--name", "^" + re.escape(initial_title) + " ", env=env)
                 ids = listing.stdout.splitlines()
                 return ids[0] if listing.returncode == 0 and len(ids) == 1 else None
 
@@ -255,7 +307,7 @@ def run_isolated(notes_path, atspi, set_reader, keyboard=False):
                 actual = xdo("getwindowname", wid, env=env)
                 if actual.returncode or actual.stdout.rstrip("\n") != title + " — JWM 备忘录":
                     return False
-                if not refocused and title == INITIAL:
+                if not refocused and title == initial_title:
                     if xdo("windowfocus", "--sync", wid, env=env).returncode:
                         raise ProbeError("x11-focus-request-failed")
                     refocused = True
@@ -271,9 +323,14 @@ def run_isolated(notes_path, atspi, set_reader, keyboard=False):
                 if xdo(*argv, env=env).returncode:
                     raise ProbeError("x11-key-injection-failed")
 
+            check = None
+            if keyboard:
+                check = lambda *a: keyboard_results(*a, send)
+            elif conflict:
+                check = lambda *a: conflict_controls(*a, send, source)
             outcome = evaluate(atspi, control.pid, notes.pid, receipt, window, 7,
-                               enable_reader=lambda: set_reader(True),
-                               keyboard=(lambda *a: keyboard_results(*a, send)) if keyboard else None)
+                               enable_reader=lambda: set_reader(True), keyboard=check,
+                               initial_title=initial_title)
             if keyboard and {path.name: path.read_bytes() for path in n.glob("*.txt")} != original:
                 raise ProbeError("keyboard-navigation-modified-notebook")
             return outcome
@@ -288,7 +345,7 @@ def main():
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument("--gtk", type=Path, help=argparse.SUPPRESS)
     args.add_argument("--notes", type=Path)
-    args.add_argument("--expect", choices=("baseline", "working", "keyboard"))
+    args.add_argument("--expect", choices=("baseline", "working", "keyboard", "conflict"))
     opt = args.parse_args()
     if (os.getenv("JWM_ATSPI_ISOLATED") != "1" or not os.getenv("DISPLAY")
             or not os.getenv("DBUS_SESSION_BUS_ADDRESS") or os.getenv("AT_SPI_BUS_ADDRESS")):
@@ -319,7 +376,8 @@ def main():
         if Atspi.init() != 0:
             raise ProbeError("atspi-init-failed")
         Atspi.set_timeout(1500, 3000)
-        outcome = run_isolated(opt.notes.resolve(), Atspi, set_reader, keyboard=opt.expect == "keyboard")
+        outcome = run_isolated(opt.notes.resolve(), Atspi, set_reader,
+                               keyboard=opt.expect == "keyboard", conflict=opt.expect == "conflict")
     except (ProbeError, GLib.Error, OSError, AttributeError, TypeError,
             subprocess.SubprocessError) as exc:
         outcome = str(exc) if isinstance(exc, ProbeError) else "probe-transport-or-fixture-error"
@@ -332,6 +390,7 @@ def main():
         "baseline": "notes-no-atspi-application-for-pid",
         "working": "notes-named-controls-action-and-focus-observed",
         "keyboard": "notes-keyboard-down-up-escape-reveal-and-enter-observed",
+        "conflict": "notes-conflict-actions-and-recovered-copy-observed",
     }[opt.expect]
     return 0 if outcome == expected else 1
 
