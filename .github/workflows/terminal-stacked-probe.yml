@@ -1,0 +1,56 @@
+name: Terminal exit stacked-output baseline
+on:
+  pull_request:
+    branches: ['dot/terminal-stacked-probe-base']
+    types: [opened, synchronize, reopened, converted_to_draft]
+    paths: ['.github/workflows/terminal-stacked-probe.yml', 'scripts/test-terminal-exit-x11.py']
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    if: >-
+      github.repository == 'beamiter/jwm' &&
+      github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'dot/terminal-stacked-probe'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify baseline with fixture changes only
+        run: |
+          set -euo pipefail
+          base=dcd076af8c5a74f6e018225e9c3c68e78bdbebaa
+          git merge-base --is-ancestor "$base" HEAD
+          diff -u <(printf '%s\n' .github/workflows/terminal-stacked-probe.yml scripts/test-terminal-exit-x11.py) <(git diff --name-only "$base" HEAD)
+          git diff --check "$base" HEAD
+      - name: Install native build and display dependencies
+        timeout-minutes: 10
+        run: |
+          bash scripts/ci-install-deps.sh build-essential pkg-config libglib2.0-dev \
+            libcairo2-dev libpango1.0-dev libasound2-dev libdbus-1-dev libudev-dev libinput-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libx11-xcb-dev libxext-dev libxxf86vm-dev libxcb1-dev libxcb-composite0-dev \
+            libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcursor-dev libxfixes-dev libxi-dev libxrandr-dev libxrender-dev \
+            dbus-daemon xvfb xdotool x11-xserver-utils python3-pil
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - name: Build the pinned production WM
+        run: cargo build --locked --no-default-features --features backend-x11rb --bin jwm
+      - name: Classify native pixels on the owning and upper virtual outputs
+        timeout-minutes: 3
+        run: |
+          /usr/bin/python3 scripts/test-terminal-exit-x11.py --jwm target/debug/jwm --backend x11rb \
+            --stacked-probe --output artifacts/terminal-stacked
+      - name: Retain baseline frames, config, reports and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: terminal-stacked-baseline
+          path: artifacts/terminal-stacked
