@@ -79,6 +79,13 @@ pub(crate) fn run(id: &str, notes: bool, paths: Vec<PathBuf>) -> Result<(), Erro
                 "",
             );
         }
+        // GApplication queues secondary activation asynchronously. Its normal
+        // run loop flushes before returning, but this host drives Winit instead.
+        // Do not let this short-lived launcher exit with the request unsent.
+        application
+            .dbus_connection()
+            .ok_or_else(|| std::io::Error::other("secondary activation has no D-Bus connection"))?
+            .flush_sync(gio::Cancellable::NONE)?;
         return Ok(());
     }
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
