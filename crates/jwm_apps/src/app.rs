@@ -949,11 +949,16 @@ impl App {
             }
         }
     }
-    pub(crate) fn write_as(&mut self, path: &Path, close: bool) -> bool {
+    pub(crate) fn write_as(&mut self, path: &Path, close: bool, same_document: bool) -> bool {
         let Document::Notes(n) = &mut self.document else {
             return false;
         };
-        if let Err(error) = n.save_as(path) {
+        let result = if same_document {
+            n.save()
+        } else {
+            n.save_as(path)
+        };
+        if let Err(error) = result {
             self.error(error);
             return false;
         }

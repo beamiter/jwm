@@ -132,12 +132,11 @@ impl Host {
             );
             false
         } else {
-            // A symlink to the current note is not a separate copy. Use the
-            // original path so Notes runs its existing stamp/etag-checked save.
-            let current = note_path(native).filter(|path| canonical_note_path(path) == canonical);
-            native
-                .app
-                .write_as(current.as_deref().unwrap_or(path), close)
+            // A symlink to the current note is not a separate copy. Select
+            // the stamp/etag-checked save explicitly, not a new GIO handle.
+            let same_document =
+                note_path(native).is_some_and(|path| canonical_note_path(&path) == canonical);
+            native.app.write_as(path, close, same_document)
         };
         if should_close {
             self.windows.remove(&id);
