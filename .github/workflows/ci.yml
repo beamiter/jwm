@@ -220,6 +220,7 @@ jobs:
             xwayland \
             xserver-xephyr \
             xdotool \
+            x11-xserver-utils \
             x11-apps \
             x11-utils \
             python3-pil imagemagick \
@@ -263,6 +264,11 @@ jobs:
         run: |
           cargo build --locked -p jwm --bin jwm --bin jwm-tool
           python3 scripts/test-restart-x11.py --jwm target/debug/jwm --compositor both --triggers hotkey,ipc --stale-published-owner foreign
+
+      - name: Restart keeps tag 3 and 7 on their original X11 outputs
+        run: |
+          python3 scripts/test-restart-x11.py --jwm target/debug/jwm --compositor off \
+            --triggers hotkey --two-outputs --windows 2
 
       - name: Terminal exit full-animation overlap pixels
         timeout-minutes: 5
