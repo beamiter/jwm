@@ -395,7 +395,11 @@ def main():
     except (ProbeError, GLib.Error, OSError, AttributeError, TypeError,
             subprocess.SubprocessError) as exc:
         outcome = str(exc) if isinstance(exc, ProbeError) else "probe-transport-or-fixture-error"
-        print(json.dumps({"outcome": outcome}))
+        import traceback
+        trace = [{"file": Path(frame.filename).name, "line": frame.lineno, "call": frame.name}
+                 for frame in traceback.extract_tb(exc.__traceback__)[-8:]]
+        print(json.dumps({"outcome": outcome, "diagnostic_exception": type(exc).__name__,
+                          "diagnostic": str(exc)[:500], "trace": trace}))
         return 2
     print(json.dumps({"backend": "x11", "outcome": outcome,
                       "gtk_positive_control": "action-observed", "screen_reader_enabled": True,
