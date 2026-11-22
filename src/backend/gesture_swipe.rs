@@ -42,6 +42,22 @@ pub enum SwipeAxis {
     Vertical,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SwipeVelocitySample {
+    previous: (f64, f64),
+    delta: (f64, f64),
+    scale: f64,
+}
+
+impl SwipeVelocitySample {
+    fn velocity(self) -> (f64, f64) {
+        (
+            0.4 * self.previous.0 + 0.6 * self.delta.0 * self.scale,
+            0.4 * self.previous.1 + 0.6 * self.delta.1 * self.scale,
+        )
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct GestureSwipeTracker {
     pub fingers: u32,
@@ -51,7 +67,7 @@ pub struct GestureSwipeTracker {
     pub dy: f64,
     pub axis: Option<SwipeAxis>,
     last_time: Option<u32>,
-    velocity: (f64, f64),
+    velocity_sample: Option<SwipeVelocitySample>,
 }
 
 impl GestureSwipeTracker {
@@ -59,12 +75,7 @@ impl GestureSwipeTracker {
         *self = Self {
             fingers,
             intercept,
-            config_signature: String::new(),
-            dx: 0.0,
-            dy: 0.0,
-            axis: None,
-            last_time: None,
-            velocity: (0.0, 0.0),
+            ..Self::default()
         };
     }
 
@@ -87,20 +98,31 @@ impl GestureSwipeTracker {
 
     /// Device timestamps wrap at 2^32 ms. A long pause invalidates flick speed.
     pub fn update_timed(&mut self, dx: f64, dy: f64, time: u32) {
-        if let Some(previous) = self.last_time {
-            let dt = time.wrapping_sub(previous);
-            if (1..=80).contains(&dt) {
-                let scale = 1000.0 / f64::from(dt);
-                self.velocity = (
-                    0.4 * self.velocity.0 + 0.6 * dx * scale,
-                    0.4 * self.velocity.1 + 0.6 * dy * scale,
-                );
-            } else if dt > 80 {
-                self.velocity = (0.0, 0.0);
+        match self.last_time.map(|previous| time.wrapping_sub(previous)) {
+            Some(0) => {
+                // Millisecond timestamps can be shared by several updates.
+                // Use all their motion, without smoothing the same interval twice.
+                if let Some(sample) = &mut self.velocity_sample {
+                    sample.delta.0 += dx;
+                    sample.delta.1 += dy;
+                }
             }
+            Some(dt @ 1..=80) => {
+                self.velocity_sample = Some(SwipeVelocitySample {
+                    previous: self.velocity(),
+                    delta: (dx, dy),
+                    scale: 1000.0 / f64::from(dt),
+                });
+            }
+            _ => self.velocity_sample = None,
         }
         self.last_time = Some(time);
         self.update(dx, dy);
+    }
+
+    fn velocity(&self) -> (f64, f64) {
+        self.velocity_sample
+            .map_or((0.0, 0.0), SwipeVelocitySample::velocity)
     }
 
     pub fn direction(&self) -> Option<&'static str> {
@@ -127,9 +149,10 @@ impl GestureSwipeTracker {
         time: u32,
     ) -> Option<(u32, &'static str)> {
         let direction = self.direction();
+        let (vx, vy) = self.velocity();
         let (distance, velocity) = match self.axis {
-            Some(SwipeAxis::Horizontal) => (self.dx, self.velocity.0),
-            Some(SwipeAxis::Vertical) => (self.dy, self.velocity.1),
+            Some(SwipeAxis::Horizontal) => (self.dx, vx),
+            Some(SwipeAxis::Vertical) => (self.dy, vy),
             None => (0.0, 0.0),
         };
         let fresh = self
@@ -272,6 +295,52 @@ mod tests {
         tracker.update_timed(-15.0, 0.0, u32::MAX - 5);
         tracker.update_timed(-20.0, 0.0, 2);
         assert_eq!(tracker.finish_timed(false, 80.0, 4), Some((3, "left")));
+    }
+
+    #[test]
+    fn same_timestamp_updates_preserve_short_flick_and_reversal_speed() {
+        let mut tracker = GestureSwipeTracker::default();
+        tracker.begin(3, true);
+        tracker.update_timed(-16.0, 0.0, u32::MAX - 9);
+        let mut combined = tracker.clone();
+        tracker.update_timed(-20.0, 0.0, 10);
+        tracker.update_timed(-20.0, 0.0, 10);
+        combined.update_timed(-40.0, 0.0, 10);
+        assert_eq!(tracker.dx, combined.dx);
+        assert_eq!(tracker.velocity(), combined.velocity());
+        assert_eq!(tracker.finish_timed(false, 80.0, 10), Some((3, "left")));
+        assert_eq!(combined.finish_timed(false, 80.0, 10), Some((3, "left")));
+
+        tracker.begin(3, true);
+        tracker.update_timed(-160.0, 0.0, 100);
+        let mut combined = tracker.clone();
+        tracker.update_timed(-60.0, 0.0, 120);
+        tracker.update_timed(100.0, 0.0, 120);
+        combined.update_timed(40.0, 0.0, 120);
+        assert_eq!(tracker.dx, -120.0);
+        assert_eq!(tracker.dx, combined.dx);
+        assert_eq!(tracker.velocity(), combined.velocity());
+        assert_eq!(tracker.finish_timed(false, 80.0, 120), None);
+        assert_eq!(combined.finish_timed(false, 80.0, 120), None);
+    }
+
+    #[test]
+    fn same_timestamp_updates_cannot_invent_speed_after_missing_or_stale_interval() {
+        let mut tracker = GestureSwipeTracker::default();
+        tracker.begin(3, true);
+        tracker.update_timed(-20.0, 0.0, 10);
+        tracker.update_timed(-20.0, 0.0, 10);
+        assert_eq!(tracker.velocity(), (0.0, 0.0));
+        assert_eq!(tracker.finish_timed(false, 80.0, 10), None);
+
+        tracker.begin(3, true);
+        tracker.update_timed(-12.0, 0.0, 10);
+        tracker.update_timed(-8.0, 0.0, 12);
+        assert!(tracker.velocity().0 < -900.0);
+        tracker.update_timed(-12.0, 0.0, 100);
+        tracker.update_timed(-24.0, 0.0, 100);
+        assert_eq!(tracker.velocity(), (0.0, 0.0));
+        assert_eq!(tracker.finish_timed(false, 80.0, 100), None);
     }
 
     #[test]
