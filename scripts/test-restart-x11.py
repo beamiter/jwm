@@ -119,7 +119,8 @@ def publish_foreign_owner(display, resource):
     finally:
         xlib.XCloseDisplay(connection)
 
-def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout, stale_owner, two_outputs):
+def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout, stale_owner, two_outputs,
+             inactive_tag_focus):
     work = Path(tempfile.mkdtemp(prefix=f"jwm-restart-{backend}-"))
     work.chmod(0o700)
     children = FIXTURE.Children()
@@ -263,26 +264,63 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
         else:
             FIXTURE.command(socket, "view", {"value": 4})
             FIXTURE.command(socket, "setlayout", {"layout": "scrolling"})
+        def spawn_app(index, output, tags):
+            name = f"JwmRestartFixture{index}"
+            child = children.spawn(["xmessage", "-name", name, "-title", name, "isolated restart fixture"],
+                                   env, work / f"application-{index}.log")
+            row = wait(lambda: next((item for item in FIXTURE.query(socket, "get_windows")
+                                     if item["name"] == name), None), "managed fixture application")
+            xids = run("xdotool", "search", "--name", "^" + re.escape(name) + "$").splitlines()
+            assert len(xids) == 1, xids
+            if output:
+                assert row["monitor"] == named_output_state()[output]["num"]
+                assert row["tags"] == tags
+            return {"name": name, "identity": identity(child.pid), "xid": int(xids[0]),
+                    "window": row["id"], "output": output, "tags": tags}
+
+        def native_focus():
+            return int(run("xdotool", "getwindowfocus").strip())
+
+        prior_tags = {"JWM-left": 2, "JWM-right": 16}
         for index in range(windows):
             output = ("JWM-left", "JWM-right")[index] if two_outputs else None
             if output:
                 if not named_output_state()[output]["focused"]:
                     FIXTURE.command(socket, "focusmon", {"value": 1})
                 assert named_output_state()[output]["focused"]
+                if inactive_tag_focus and output == "JWM-left":
+                    FIXTURE.command(socket, "view", {"value": prior_tags[output]})
                 FIXTURE.command(socket, "view", {"value": tags_by_side[output]})
                 FIXTURE.command(socket, "setlayout", {"layout": layout_by_side[output]})
-            name = f"JwmRestartFixture{index}"
-            child = children.spawn(["xmessage", "-name", name, "-title", name, "isolated restart fixture"],
-                                   env, work / f"application-{index}.log")
-            row = wait(lambda: next((item for item in FIXTURE.query(socket, "get_windows")
-                                     if item["name"] == name), None), "managed fixture application")
-            xid = int(run("xdotool", "search", "--name", "^" + re.escape(name) + "$").splitlines()[0])
-            if output:
-                assert row["monitor"] == named_output_state()[output]["num"]
-                assert row["tags"] == tags_by_side[output]
-            applications.append({"name": name, "identity": identity(child.pid), "xid": xid,
-                                 "window": row["id"], "output": output})
-        report["applications"] = applications
+            applications.append(spawn_app(index, output, tags_by_side.get(output)))
+        history_app = None
+        if inactive_tag_focus:
+            right = applications[-1]
+            right_tag, history_tag = tags_by_side["JWM-right"], prior_tags["JWM-right"]
+            # The competing window is eligible on both tag 5 and 7. Focus
+            # it on tag 7 immediately before exec so global recency cannot
+            # substitute for tag 5's remembered selection.
+            FIXTURE.command(socket, "focus_window", right["window"])
+            FIXTURE.command(socket, "toggletag", {"value": history_tag})
+            right["tags"] |= history_tag
+            tagged = next(row for row in FIXTURE.query(socket, "get_windows") if row["id"] == right["window"])
+            assert tagged["tags"] == right["tags"], tagged
+            FIXTURE.command(socket, "view", {"value": history_tag})
+            history_app = spawn_app(windows, "JWM-right", history_tag)
+            FIXTURE.command(socket, "focus_window", right["window"])
+            wait(lambda: native_focus() == right["xid"], "eligible alternate on tag 5")
+            FIXTURE.command(socket, "focus_window", history_app["window"])
+            wait(lambda: native_focus() == history_app["xid"], "store tag 5 native focus")
+            FIXTURE.command(socket, "view", {"value": right_tag})
+            wait(lambda: native_focus() == right["xid"], "tag 7 native focus")
+            FIXTURE.command(socket, "view", {"value": history_tag})
+            wait(lambda: native_focus() == history_app["xid"], "tag 5 native focus before restart")
+            FIXTURE.command(socket, "view", {"value": right_tag})
+            wait(lambda: native_focus() == right["xid"], "return to tag 7 before restart")
+            report["inactive_focus"] = {"tag_mask": history_tag, "expected_xid": history_app["xid"],
+                                        "alternate_xid": right["xid"], "before_restart": "passed"}
+        tracked_apps = applications + ([history_app] if history_app else [])
+        report["applications"] = tracked_apps
         # Xlib lazily initializes Xephyr's XKB map when the first client opens;
         # reinstall against that final map, as the native shortcut fixture does.
         FIXTURE.command(socket, "reload_config", {})
@@ -298,11 +336,14 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                 active_app = applications[-1]
                 FIXTURE.command(socket, "focus_window", active_app["window"])
                 prior_focused_xid = active_app["xid"]
-                wait(lambda: int(run("xdotool", "getwindowfocus").strip()) == prior_focused_xid,
+                wait(lambda: native_focus() == prior_focused_xid,
                      "native X11 focus on right fixture")
                 prior_outputs = named_output_state()
                 assert prior_outputs["JWM-right"]["focused"] and not prior_outputs["JWM-left"]["focused"]
                 assert all(prior_outputs[name]["active_tags"] == tag for name, tag in tags_by_side.items())
+                if inactive_tag_focus:
+                    assert all(prior_outputs[name]["previous_tags"] == tag
+                               for name, tag in prior_tags.items()), prior_outputs
                 assert prior_outputs["JWM-left"]["layout"] != prior_outputs["JWM-right"]["layout"]
                 assert all(prior_outputs[app["output"]]["selected_window"] == app["name"]
                            for app in applications), prior_outputs
@@ -341,7 +382,7 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                     raise RuntimeError("restart changed the JWM PID/start time")
                 if two_outputs:
                     observed_outputs = named_output_state()
-                    observed_focus = int(run("xdotool", "getwindowfocus").strip())
+                    observed_focus = native_focus()
                     report["last_restart_observation"] = {
                         "expected_outputs": prior_outputs, "outputs": observed_outputs,
                         "expected_focus": prior_focused_xid, "focus": observed_focus,
@@ -354,7 +395,7 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                 if FIXTURE.query(socket, "get_layout") != prior_layout:
                     return None
                 rows = {item["name"]: item for item in FIXTURE.query(socket, "get_windows")}
-                for application in applications:
+                for application in tracked_apps:
                     if identity(application["identity"]["pid"]) != application["identity"]:
                         raise AssertionError("foreign application process did not survive restart")
                     if application["name"] not in rows:
@@ -362,7 +403,7 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                     if two_outputs:
                         row = rows[application["name"]]
                         side = application["output"]
-                        if row["monitor"] != prior_outputs[side]["num"] or row["tags"] != tags_by_side[side]:
+                        if row["monitor"] != prior_outputs[side]["num"] or row["tags"] != application["tags"]:
                             return None
                     xids = [int(item) for item in run("xdotool", "search", "--name", "^" + re.escape(application["name"]) + "$").splitlines()]
                     if application["xid"] not in xids:
@@ -382,6 +423,24 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
             alive()
             assert identity(wm_pid) == wm_identity
             assert context()["wm_instance_id"] == report["steps"][-1]["new_instance"]
+            if history_app:
+                # Change only the view. Do not use focus_window after exec.
+                FIXTURE.command(socket, "view", {"value": prior_tags["JWM-right"]})
+
+                def recalled():
+                    output = named_output_state()
+                    if output is None:
+                        return None
+                    left, right = output["JWM-left"], output["JWM-right"]
+                    xid = native_focus()
+                    report["inactive_focus"]["observed"] = {"outputs": output, "xid": xid}
+                    return (left["active_tags"] == tags_by_side["JWM-left"]
+                            and right["active_tags"] == prior_tags["JWM-right"]
+                            and right["focused"] and right["selected_window"] == history_app["name"]
+                            and xid == history_app["xid"])
+
+                wait(recalled, "restart recalls tag 5 native focus without an explicit focus command")
+                report["inactive_focus"]["after_restart"] = "passed"
         report["status"] = "passed"
     except BaseException as error:
         report["error"] = f"{type(error).__name__}: {error}"
@@ -410,6 +469,8 @@ def main():
                         help="publish a live fixture application's XID as stale typed PIXMAP hints before restart")
     parser.add_argument("--windows", type=int, choices=range(1, 6), default=1)
     parser.add_argument("--two-outputs", action="store_true", help="use two named RandR regions on private Xvfb")
+    parser.add_argument("--inactive-tag-focus", action="store_true",
+                        help="also check native focus recall on a previously hidden tag")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--timeout", type=float, default=90, help="per-stage deadline; cold software GL compiles shaders")
     parser.add_argument("--preflight", action="store_true")
@@ -424,6 +485,8 @@ def main():
         parser.error("triggers must be hotkey and/or ipc")
     if args.two_outputs and args.windows != 2:
         parser.error("--two-outputs requires exactly two fixtures (--windows 2)")
+    if args.inactive_tag_focus and not (args.two_outputs and triggers == ["hotkey"]):
+        parser.error("--inactive-tag-focus needs --two-outputs and --triggers hotkey")
     needed = REQUIRED + (("xrandr",) if args.two_outputs else ())
     dependencies = {name: shutil.which(name) for name in needed}
     ready = all(dependencies.values()) and args.jwm.is_file() and bool(ctypes.util.find_library("X11"))
@@ -443,7 +506,7 @@ def main():
     report = {"schema_version": 1, "binary": str(binary), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "uses_user_desktop": False, "runs_cargo": False,
               "runs": [run_case(binary, backend, state, triggers, args.windows, args.keep, args.timeout,
-                                args.stale_published_owner, args.two_outputs)
+                                args.stale_published_owner, args.two_outputs, args.inactive_tag_focus)
                        for backend in backends for state in states]}
     text = json.dumps(report, indent=2) + "\n"
     if args.report:

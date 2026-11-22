@@ -270,6 +270,11 @@ jobs:
           python3 scripts/test-restart-x11.py --jwm target/debug/jwm --compositor off \
             --triggers hotkey --two-outputs --windows 2
 
+      - name: Restart remembers native focus on an inactive X11 tag
+        run: |
+          python3 scripts/test-restart-x11.py --jwm target/debug/jwm --compositor off \
+            --triggers hotkey --two-outputs --windows 2 --inactive-tag-focus
+
       - name: Terminal exit full-animation overlap pixels
         timeout-minutes: 5
         run: |
