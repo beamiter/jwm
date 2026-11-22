@@ -1003,11 +1003,8 @@ mod tests {
             assert_eq!(loaded, body);
             file.save(&loaded).unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
-            assert!(
-                file.save(&format!("{loaded}x"))
-                    .unwrap_err()
-                    .contains("8 MiB")
-            );
+            let error = file.save(&format!("{loaded}x")).unwrap_err();
+            assert!(matches!(error, SaveError::Other(message) if message.contains("8 MiB")));
             assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
             std::fs::write(&path, format!("{original}x")).unwrap();
             assert!(TextFile::load(gio::File::for_path(&path)).is_err());
