@@ -546,7 +546,10 @@ impl<C: CompositorConnection> Compositor<C> {
             .set(self.frame_draw_calls.get().saturating_add(1));
     }
 
-    pub(crate) fn set_terminal_slide_clip(&mut self, clip: Option<(u32, crate::core::types::Rect)>) {
+    pub(crate) fn set_terminal_slide_clip(
+        &mut self,
+        clip: Option<(u32, crate::core::types::Rect)>,
+    ) {
         if self.terminal_slide_clip != clip {
             self.terminal_slide_clip = clip;
             self.needs_render = true;
@@ -5411,7 +5414,10 @@ impl<C: CompositorConnection> Compositor<C> {
         focused: Option<u32>,
     ) -> bool {
         let terminal_slide_clip = self.terminal_slide_clip.map(|(id, rect)| {
-            (id, terminal_slide_scissor(rect, self.screen_w, self.screen_h))
+            (
+                id,
+                terminal_slide_scissor(rect, self.screen_w, self.screen_h),
+            )
         });
         let clip_for = |window| {
             terminal_slide_clip
