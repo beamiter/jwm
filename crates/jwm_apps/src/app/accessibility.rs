@@ -1,6 +1,8 @@
 //! A small semantic tree for Notes. Document values and destructive actions are
 //! intentionally not exposed by this adapter.
-use super::{Action, App, Document, Focus};
+use super::{
+    Action, App, CONFLICT_ACTIONS, CONFLICT_DESCRIPTION, CONFLICT_TITLE, Dialog, Document, Focus,
+};
 use accesskit::{Action as Request, ActionRequest, Node, NodeId, Role, Tree, TreeId, TreeUpdate};
 use std::{collections::HashMap, path::PathBuf};
 
@@ -15,6 +17,7 @@ const RELOAD: NodeId = NodeId(6);
 pub(crate) struct Semantics {
     rows: HashMap<PathBuf, NodeId>,
     row_generation: Option<u64>,
+    conflict_controls: Option<(u64, [NodeId; CONFLICT_ACTIONS.len()])>,
     next_id: u64,
     previous: Option<Vec<(NodeId, Node)>>,
 }
@@ -24,6 +27,7 @@ impl Default for Semantics {
         Self {
             rows: HashMap::new(),
             row_generation: None,
+            conflict_controls: None,
             next_id: 7,
             previous: None,
         }
@@ -41,6 +45,7 @@ impl Semantics {
         self.previous = None;
         self.rows.clear();
         self.row_generation = None;
+        self.conflict_controls = None;
     }
 
     pub(crate) fn update(&mut self, app: &App, scale: f64) -> TreeUpdate {
@@ -48,12 +53,46 @@ impl Semantics {
         let mut children = Vec::new();
         let mut nodes = Vec::new();
         let mut focus = ROOT;
+        let conflict =
+            matches!(app.dialog, Some(Dialog::SaveConflict)).then_some(app.conflict_revision);
+        if self
+            .conflict_controls
+            .is_some_and(|(revision, _)| Some(revision) != conflict)
+        {
+            self.conflict_controls = None;
+        }
         if app.dialog.is_some() {
             // Do not keep underlying nodes actionable in a modal scope.
             self.rows.clear();
             let mut modal = named(Role::Dialog, "备忘录对话框");
             modal.set_modal();
             focus = MODAL;
+            if let Some(revision) = conflict {
+                let (_, ids) = self.conflict_controls.get_or_insert_with(|| {
+                    let ids = std::array::from_fn(|_| {
+                        let id = NodeId(self.next_id);
+                        self.next_id += 1;
+                        id
+                    });
+                    (revision, ids)
+                });
+                modal.set_label(CONFLICT_TITLE);
+                modal.set_description(CONFLICT_DESCRIPTION);
+                modal.set_children(ids.to_vec());
+                for (id, (label, action)) in ids.iter().zip(&CONFLICT_ACTIONS) {
+                    let mut node = named(Role::Button, label);
+                    node.add_action(Request::Click);
+                    if let Some(hit) = app.hits.iter().find(|hit| &hit.action == action) {
+                        node.set_bounds(bounds(hit.rect, scale));
+                    }
+                    nodes.push((*id, node));
+                }
+                if let Some(index) = app.dialog_focus
+                    && let Some(id) = ids.get(index)
+                {
+                    focus = *id;
+                }
+            }
             children.push(MODAL);
             nodes.push((MODAL, modal));
         } else if let Document::Notes(notes) = &app.document {
@@ -159,12 +198,25 @@ impl Semantics {
     }
 
     pub(crate) fn action(&self, app: &mut App, request: ActionRequest) -> bool {
-        if self.previous.is_none()
-            || request.target_tree != TreeId::ROOT
-            || app.dialog.is_some()
-            || request.data.is_some()
+        if self.previous.is_none() || request.target_tree != TreeId::ROOT || request.data.is_some()
         {
             return false;
+        }
+        if let Some(dialog) = &app.dialog {
+            if !matches!(dialog, Dialog::SaveConflict) {
+                return false;
+            }
+            let Some((published_revision, ids)) = &self.conflict_controls else {
+                return false;
+            };
+            if *published_revision != app.conflict_revision || request.action != Request::Click {
+                return false;
+            }
+            let Some(index) = ids.iter().position(|id| *id == request.target_node) else {
+                return false;
+            };
+            app.action(CONFLICT_ACTIONS[index].1.clone());
+            return true;
         }
         let Document::Notes(notes) = &app.document else {
             return false;
@@ -217,6 +269,43 @@ mod tests {
     use super::*;
     use gio::prelude::FileExt;
     use std::fs;
+
+    #[test]
+    fn conflict_dialog_exposes_only_live_recovery_actions() {
+        let path = std::env::temp_dir().join(format!(
+            "jwm-notes-atspi-conflict-{}.md",
+            std::process::id()
+        ));
+        fs::write(&path, "original").unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        app.ime("draft ".into(), true);
+        fs::write(&path, "outside change").unwrap();
+        app.action(Action::Save);
+        let mut semantics = Semantics::default();
+        let tree = semantics.update(&app, 1.);
+        let (_, ids) = semantics.conflict_controls.unwrap();
+        assert_eq!(tree.focus, MODAL);
+        assert_eq!(tree.nodes.len(), 5);
+        for (id, (label, _)) in ids.iter().zip(&CONFLICT_ACTIONS) {
+            let (_, button) = tree.nodes.iter().find(|(node, _)| node == id).unwrap();
+            assert_eq!(button.label(), Some(*label));
+            assert!(button.supports_action(Request::Click));
+        }
+        assert!(!semantics.action(&mut app, request(EDITOR, Request::Focus)));
+        assert!(semantics.action(&mut app, request(ids[0], Request::Click)));
+        app.action(Action::Save);
+        assert!(!semantics.action(&mut app, request(ids[2], Request::Click)));
+        semantics.update(&app, 1.);
+        let (_, new_ids) = semantics.conflict_controls.unwrap();
+        assert_ne!(new_ids, ids);
+        assert!(!semantics.action(&mut app, request(ids[2], Request::Click)));
+        assert!(semantics.action(&mut app, request(new_ids[2], Request::Click)));
+        assert!(matches!(
+            app.effects.as_slice(),
+            [super::super::Effect::KeepConflictCopy]
+        ));
+        fs::remove_file(path).unwrap();
+    }
 
     fn request(node: NodeId, action: Request) -> ActionRequest {
         ActionRequest {

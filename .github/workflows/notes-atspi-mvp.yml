@@ -58,7 +58,8 @@ jobs:
           install -m 700 "$target/debug/jwm-notes" "$RUNNER_TEMP/notes-feature-off"
           cargo build --locked --manifest-path crates/jwm_apps/Cargo.toml --target-dir "$target" --bin jwm-notes --no-default-features --features accessibility
           install -m 700 "$target/debug/jwm-notes" "$RUNNER_TEMP/notes-feature-on"
-      - name: Assert independent GTK receipt and all three Notes outcomes
+          cargo test --locked --manifest-path crates/jwm_apps/Cargo.toml --target-dir "$target" --no-default-features --features accessibility --lib app::accessibility::tests::conflict_dialog_exposes_only_live_recovery_actions -- --exact
+      - name: Assert independent GTK receipt and Notes accessibility outcomes
         run: |
           unset DBUS_SESSION_BUS_ADDRESS AT_SPI_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET
           probe() (
@@ -75,3 +76,4 @@ jobs:
           probe feature-off baseline
           probe feature-on working
           probe feature-on keyboard
+          probe feature-on conflict
