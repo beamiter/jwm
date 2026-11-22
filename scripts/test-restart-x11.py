@@ -234,8 +234,10 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                 if len(rows) != 1:
                     return None
                 fields = ("num", "active_tags", "previous_tags", "layout", "prev_layout",
-                          "focused", "selected_id", "n_master", "m_fact", "gap")
+                          "focused", "n_master", "m_fact", "gap")
                 state[name] = {field: rows[0][field] for field in fields}
+                # IPC omits selected_id on a monitor without a selected client.
+                state[name]["selected_id"] = rows[0].get("selected_id")
             return state
 
         before = wait(context, "initial IPC")
