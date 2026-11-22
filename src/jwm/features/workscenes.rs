@@ -213,7 +213,13 @@ impl Jwm {
                 data: RowData::Workscene,
             });
         }
+        // Preserve the first occurrence. A repeated entry in configuration is
+        // not a second explicit request to reveal the same session.
+        let mut seen_sessions = std::collections::HashSet::new();
         for id in &scene.sessions {
+            if !seen_sessions.insert(id.as_str()) {
+                continue;
+            }
             if let Some(entry) = registered.iter().find(|entry| &entry.session_id == id) {
                 let index = sessions.len();
                 rows.push(ListRow {
@@ -230,7 +236,13 @@ impl Jwm {
                 });
             }
         }
+        // In particular, duplicates must share the same single-use launch row
+        // even before the application's first window becomes visible.
+        let mut seen_applications = std::collections::HashSet::new();
         for name in &scene.applications {
+            if !seen_applications.insert(name.as_str()) {
+                continue;
+            }
             let entry = self
                 .features
                 .launcher_catalog
@@ -481,6 +493,46 @@ mod tests {
             "No scene action"
         );
         assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 1);
+    }
+
+    #[test]
+    fn scene_lists_each_exact_reference_once_in_first_occurrence_order() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let entry = |name: &str, program: &str| {
+            LaunchEntry::new(name.into(), vec![program.into()], false, None, name.into())
+        };
+        jwm.features.launcher_catalog = Arc::from([
+            entry("JWM Notes", "jwm-notes"),
+            entry("Terminal", "jwm-test-terminal"),
+        ]);
+        let scene = Workscene {
+            name: "Repeated references".into(),
+            outputs: Vec::new(),
+            sessions: vec!["first".into(), "second".into(), "first".into()],
+            applications: vec![
+                "Terminal".into(),
+                "JWM Notes".into(),
+                "Terminal".into(),
+                "JWM Notes".into(),
+            ],
+        };
+        jwm.open_workscene_preview(&mut backend, scene).unwrap();
+        let SystemUiState::ListPanel { rows, selected, .. } = &jwm.features.system_ui else {
+            panic!("expected workscene preview");
+        };
+        assert_eq!(rows.len(), 4);
+        assert!(rows[0].text.starts_with("Unavailable session first ·"));
+        assert!(rows[1].text.starts_with("Unavailable session second ·"));
+        assert_eq!(rows[2].key, "application:0");
+        assert_eq!(rows[3].key, "application:1");
+        assert_eq!(*selected, 2);
+        let plan = jwm.features.workscene_preview.as_ref().unwrap();
+        assert_eq!(plan.applications.len(), 2);
+        assert_eq!(plan.applications[0].name, "Terminal");
+        assert_eq!(plan.applications[1].name, "JWM Notes");
     }
 
     #[test]
