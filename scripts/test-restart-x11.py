@@ -228,6 +228,10 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
             monitors = FIXTURE.query(socket, "get_monitors")
             if len(monitors) != 2:
                 return None
+            # JWM's IPC IDs are allocated by each instance, not X11 XIDs.
+            # Resolve them within the same instance to fixture names; the
+            # restart check below independently verifies each name's PID/XID.
+            windows_by_id = {row["id"]: row["name"] for row in FIXTURE.query(socket, "get_windows")}
             state = {}
             for name, rect in geometry.items():
                 rows = [m for m in monitors if (m["x"], m["y"], m["w"], m["h"]) == rect]
@@ -237,7 +241,10 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                           "focused", "n_master", "m_fact", "gap")
                 state[name] = {field: rows[0][field] for field in fields}
                 # IPC omits selected_id on a monitor without a selected client.
-                state[name]["selected_id"] = rows[0].get("selected_id")
+                selected_id = rows[0].get("selected_id")
+                if selected_id is not None and selected_id not in windows_by_id:
+                    return None
+                state[name]["selected_window"] = windows_by_id.get(selected_id)
             return state
 
         before = wait(context, "initial IPC")
@@ -297,6 +304,8 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                 assert prior_outputs["JWM-right"]["focused"] and not prior_outputs["JWM-left"]["focused"]
                 assert all(prior_outputs[name]["active_tags"] == tag for name, tag in tags_by_side.items())
                 assert prior_outputs["JWM-left"]["layout"] != prior_outputs["JWM-right"]["layout"]
+                assert all(prior_outputs[app["output"]]["selected_window"] == app["name"]
+                           for app in applications), prior_outputs
             started = time.monotonic()
             if stale_owner == "foreign":
                 publish_foreign_owner(private_display, applications[0]["xid"])
@@ -336,6 +345,7 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                     report["last_restart_observation"] = {
                         "expected_outputs": prior_outputs, "outputs": observed_outputs,
                         "expected_focus": prior_focused_xid, "focus": observed_focus,
+                        "new_instance": current["wm_instance_id"],
                     }
                     if observed_outputs != prior_outputs or observed_focus != prior_focused_xid:
                         return None
