@@ -5,7 +5,7 @@ use gio::prelude::*;
 use std::{
     collections::HashMap,
     num::NonZeroU32,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -98,7 +98,55 @@ pub(crate) fn run(id: &str, notes: bool, paths: Vec<PathBuf>) -> Result<(), Erro
     }
     Ok(())
 }
+fn canonical_note_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn note_path(native: &NativeWindow) -> Option<PathBuf> {
+    match &native.app.document {
+        crate::app::Document::Notes(notes) => notes.document.as_ref()?.file.path(),
+        crate::app::Document::Image(_) => None,
+    }
+}
+
 impl Host {
+    fn open_note_owner(&self, canonical: &Path, except: Option<WindowId>) -> Option<&NativeWindow> {
+        self.windows.iter().find_map(|(&id, native)| {
+            (Some(id) != except
+                && note_path(native)
+                    .is_some_and(|path| canonical_note_path(&path).as_path() == canonical))
+            .then_some(native)
+        })
+    }
+
+    fn save_as(&mut self, id: WindowId, path: &Path, close: bool) {
+        let canonical = canonical_note_path(path);
+        let destination_open = self.open_note_owner(&canonical, Some(id)).is_some();
+        let Some(native) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let ime_target = native.app.ime_target();
+        let should_close = if destination_open {
+            native.app.show_error(
+                "目标文件已在另一个备忘录窗口中打开。请选择其他文件名，或先关闭该文件。".into(),
+            );
+            false
+        } else {
+            // A symlink to the current note is not a separate copy. Select
+            // the stamp/etag-checked save explicitly, not a new GIO handle.
+            let same_document =
+                note_path(native).is_some_and(|path| canonical_note_path(&path) == canonical);
+            native.app.write_as(path, close, same_document)
+        };
+        if should_close {
+            self.windows.remove(&id);
+        } else {
+            native.sync_ime_target(ime_target);
+            native.window.set_title(&native.app.title());
+            native.window.request_redraw();
+        }
+    }
+
     fn open(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -106,19 +154,12 @@ impl Host {
         paths: Vec<PathBuf>,
     ) -> Result<(), Error> {
         // Focus files already opened in this process rather than split their edits.
-        if notes && let Some(path) = paths.first() {
-            let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-            for existing in self.windows.values() {
-                if let crate::app::Document::Notes(n) = &existing.app.document
-                    && n.document
-                        .as_ref()
-                        .and_then(|d| d.file.path())
-                        .is_some_and(|p| std::fs::canonicalize(&p).unwrap_or(p) == canonical)
-                {
-                    existing.window.focus_window();
-                    return Ok(());
-                }
-            }
+        if notes
+            && let Some(path) = paths.first()
+            && let Some(existing) = self.open_note_owner(&canonical_note_path(path), None)
+        {
+            existing.window.focus_window();
+            return Ok(());
         }
         let mut app = App::new(notes, paths)?;
         let identity = if notes {
@@ -185,6 +226,7 @@ impl Host {
                         native.app.show_error(error.to_string());
                     }
                 }
+                Effect::SaveAs(path, close) => self.save_as(id, &path, close),
                 Effect::Notebook => {
                     if let Err(error) = self.open(event_loop, true, vec![]) {
                         eprintln!("new notebook: {error}");
