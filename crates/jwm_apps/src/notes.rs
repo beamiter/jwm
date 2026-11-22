@@ -205,7 +205,11 @@ fn recovery_name(path: &Path, index: usize) -> Result<std::ffi::OsString, String
     Ok(std::ffi::OsString::from_vec(name))
 }
 
-fn publish_recovery(source: &Path, encoded: &[u8]) -> Result<PathBuf, String> {
+fn publish_recovery(
+    source: &Path,
+    encoded: &[u8],
+    reserved: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, String> {
     use std::{
         fs::{self, DirBuilder, OpenOptions},
         io::{ErrorKind, Write},
@@ -252,6 +256,9 @@ fn publish_recovery(source: &Path, encoded: &[u8]) -> Result<PathBuf, String> {
 
     for index in 1..=64 {
         let path = parent.join(recovery_name(source, index)?);
+        if reserved(&path) {
+            continue;
+        }
         // Publish only complete bytes. Never replace a file or follow a
         // symlink occupying a candidate name, even if it appeared mid-save.
         match fs::hard_link(&draft, &path) {
@@ -544,7 +551,10 @@ impl Notes {
         }
         opened
     }
-    pub(crate) fn keep_conflict_copy(&mut self) -> Result<PathBuf, String> {
+    pub(crate) fn keep_conflict_copy(
+        &mut self,
+        reserved: impl Fn(&Path) -> bool,
+    ) -> Result<PathBuf, String> {
         if !self.dirty {
             return Err("没有需要保留的未保存修改。".into());
         }
@@ -552,18 +562,17 @@ impl Notes {
         let original = source.file.path().ok_or("请选择本地文件。")?;
         let (bom, crlf) = (source.bom, source.crlf);
         let bytes = encode_text(&self.editor.text, bom, crlf)?;
-        let path = publish_recovery(&original, bytes.as_bytes())?;
+        let path = publish_recovery(&original, bytes.as_bytes(), reserved)?;
         // Verify the bytes and stamp the new inode after removing its staging
         // hard link. Keep the editor's encoding rules and in-memory content.
-        let (mut document, _) =
-            TextFile::load_with_reader(gio::File::for_path(&path), |stream| {
-                let read = read_limited(stream.into_read())?;
-                if read != bytes.as_bytes() {
-                    return Err("副本已发生变化，当前编辑内容仍保留。".into());
-                }
-                Ok(read)
-            })
-            .map_err(|error| format!("副本已写入 {}，但无法切换：{error}", path.display()))?;
+        let (mut document, _) = TextFile::load_with_reader(gio::File::for_path(&path), |stream| {
+            let read = read_limited(stream.into_read())?;
+            if read != bytes.as_bytes() {
+                return Err("副本已发生变化，当前编辑内容仍保留。".into());
+            }
+            Ok(read)
+        })
+        .map_err(|error| format!("副本已写入 {}，但无法切换：{error}", path.display()))?;
         document.bom = bom;
         document.crlf = crlf;
         self.document = Some(document);
@@ -1153,8 +1162,15 @@ mod tests {
         let missing = directory.join("not-created");
         symlink(&missing, &symlink_path).unwrap();
 
-        let recovered = notes.keep_conflict_copy().unwrap();
-        assert_eq!(recovered, directory.join(recovery_name(&source, 3).unwrap()));
+        let open_but_missing = directory.join(recovery_name(&source, 3).unwrap());
+        let recovered = notes
+            .keep_conflict_copy(|path| path == open_but_missing.as_path())
+            .unwrap();
+        assert!(!open_but_missing.exists());
+        assert_eq!(
+            recovered,
+            directory.join(recovery_name(&source, 4).unwrap())
+        );
         assert_eq!(recovered.extension().unwrap(), "md");
         assert!(recovered.file_name().unwrap().to_str().unwrap().len() <= 255);
         assert_eq!(
@@ -1182,17 +1198,13 @@ mod tests {
         assert_eq!(std::fs::read_to_string(occupied).unwrap(), "keep existing");
         assert_eq!(std::fs::read_link(symlink_path).unwrap(), missing);
         assert!(!missing.exists());
-        assert!(
-            std::fs::read_dir(&directory)
+        assert!(std::fs::read_dir(&directory).unwrap().all(|entry| {
+            !entry
                 .unwrap()
-                .all(|entry| {
-                    !entry
-                        .unwrap()
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".jwm-notes-")
-                })
-        );
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".jwm-notes-")
+        }));
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1212,7 +1224,7 @@ mod tests {
             std::fs::write(path, "already occupied").unwrap();
         }
 
-        assert!(notes.keep_conflict_copy().is_err());
+        assert!(notes.keep_conflict_copy(|_| false).is_err());
         assert!(notes.dirty);
         assert_eq!(notes.editor.text, "unsaved edit");
         assert_eq!(

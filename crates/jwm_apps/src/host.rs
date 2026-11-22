@@ -102,6 +102,31 @@ fn canonical_note_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+// A live editor can still own a missing leaf. Resolve its existing parent
+// and, for a dangling final symlink, the link target before comparing it.
+fn recovery_owner_path(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for _ in 0..16 {
+        if let Ok(canonical) = std::fs::canonicalize(&current) {
+            return canonical;
+        }
+        let Some(parent) = current.parent().filter(|p| !p.as_os_str().is_empty()) else {
+            break;
+        };
+        if let Ok(target) = std::fs::read_link(&current) {
+            current = parent.join(target);
+            continue;
+        }
+        if let Some(name) = current.file_name()
+            && let Ok(parent) = std::fs::canonicalize(parent)
+        {
+            return parent.join(name);
+        }
+        break;
+    }
+    current
+}
+
 fn note_path(native: &NativeWindow) -> Option<PathBuf> {
     match &native.app.document {
         crate::app::Document::Notes(notes) => notes.document.as_ref()?.file.path(),
@@ -145,6 +170,26 @@ impl Host {
             native.window.set_title(&native.app.title());
             native.window.request_redraw();
         }
+    }
+
+    fn keep_conflict_copy(&mut self, id: WindowId) {
+        let reserved: std::collections::HashSet<_> = self
+            .windows
+            .iter()
+            .filter(|(other, _)| **other != id)
+            .filter_map(|(_, window)| note_path(window))
+            .map(|path| recovery_owner_path(&path))
+            .collect();
+        let Some(native) = self.windows.get_mut(&id) else {
+            return;
+        };
+        let ime_target = native.app.ime_target();
+        native
+            .app
+            .write_conflict_copy(|path| reserved.contains(&recovery_owner_path(path)));
+        native.sync_ime_target(ime_target);
+        native.window.set_title(&native.app.title());
+        native.window.request_redraw();
     }
 
     fn open(
@@ -227,6 +272,7 @@ impl Host {
                     }
                 }
                 Effect::SaveAs(path, close) => self.save_as(id, &path, close),
+                Effect::KeepConflictCopy => self.keep_conflict_copy(id),
                 Effect::Notebook => {
                     if let Err(error) = self.open(event_loop, true, vec![]) {
                         eprintln!("new notebook: {error}");

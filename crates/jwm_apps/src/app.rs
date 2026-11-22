@@ -64,6 +64,7 @@ enum Action {
 pub(crate) enum Effect {
     OpenNote(PathBuf),
     SaveAs(PathBuf, bool),
+    KeepConflictCopy,
     Notebook,
     Close,
     Minimize,
@@ -899,7 +900,11 @@ impl App {
             }
             Some(Dialog::Error(_)) => vec![Action::Cancel],
             Some(Dialog::SaveConflict) => {
-                vec![Action::Cancel, Action::SaveAs(false), Action::KeepConflictCopy]
+                vec![
+                    Action::Cancel,
+                    Action::SaveAs(false),
+                    Action::KeepConflictCopy,
+                ]
             }
             None => vec![],
         }
@@ -987,6 +992,22 @@ impl App {
         self.dialog = None;
         close
     }
+    pub(crate) fn write_conflict_copy(&mut self, reserved: impl Fn(&Path) -> bool) {
+        if !matches!(self.dialog, Some(Dialog::SaveConflict)) {
+            return;
+        }
+        if let Document::Notes(n) = &mut self.document {
+            match n.keep_conflict_copy(reserved) {
+                Ok(_) => {
+                    self.dialog = None;
+                    self.focus = Focus::Editor;
+                    self.dragging = false;
+                }
+                Err(error) => self.error(error),
+            }
+        }
+    }
+
     fn action(&mut self, action: Action) {
         if let Action::Note(path, generation) = &action
             && !matches!(&self.document, Document::Notes(n)
@@ -1024,18 +1045,8 @@ impl App {
                 }
             }
             Action::KeepConflictCopy => {
-                if !matches!(self.dialog, Some(Dialog::SaveConflict)) {
-                    return;
-                }
-                if let Document::Notes(n) = &mut self.document {
-                    match n.keep_conflict_copy() {
-                        Ok(_) => {
-                            self.dialog = None;
-                            self.focus = Focus::Editor;
-                            self.dragging = false;
-                        }
-                        Err(error) => self.error(error),
-                    }
+                if matches!(self.dialog, Some(Dialog::SaveConflict)) {
+                    self.effects.push(Effect::KeepConflictCopy);
                 }
             }
             Action::SaveAs(close) => self.picker(PickerMode::Save(close)),
@@ -2625,6 +2636,8 @@ mod tests {
 
         app.action(Action::Save);
         app.action(Action::KeepConflictCopy);
+        assert!(matches!(app.effects.as_slice(), [Effect::KeepConflictCopy]));
+        app.write_conflict_copy(|_| false);
         assert!(app.dialog.is_none());
         assert!(app.focus == Focus::Editor);
         let Document::Notes(notes) = &app.document else {
