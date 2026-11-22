@@ -83,9 +83,44 @@ reading are rejected. If edits exceed the save limit, saving reports an error
 without modifying the original/destination file or discarding the unsaved buffer.
 Shorten the content before retrying; oversized input is never silently truncated.
 
-This is Markdown rendering, **not TSX execution**. React/TSX live preview needs a
-separate isolated runtime and remains planned; the editor does not run project
-scripts, install npm dependencies or execute embedded JavaScript.
+This is Markdown rendering, **not TSX execution**. The editor does not run
+project scripts, install npm dependencies or execute embedded JavaScript.
+
+### TSX preview in an external browser
+
+A separate [TSX preview launcher](tsx-preview.md) is available for existing,
+trusted React/Vite projects. It is **not embedded in Notes and not a sandbox**.
+The Markdown button and Ctrl+Shift+P do not start it; Notes has no browser-preview
+button yet. Install it separately with `bash scripts/install-tsx-preview.sh` from
+the repository root (the native-apps installer does not install this launcher).
+
+For a saved default-export component that can render without props:
+
+1. Save the file in Notes with Ctrl+S. Resolve any save error or external-change
+   conflict first; the browser reads disk, never the unsaved editor buffer.
+2. In your terminal, check the explicitly chosen project and component without
+   executing project code:
+
+   ```sh
+   ~/.local/bin/jwm-tsx-preview --project /path/to/project --component src/App.tsx --check
+   ```
+
+3. Only if you trust that project and its installed dependencies, explicitly start:
+
+   ```sh
+   ~/.local/bin/jwm-tsx-preview --project /path/to/project --component src/App.tsx --trust-project --open
+   ```
+
+Local dependencies execute with your user permissions; previewed browser code
+can access the network. A successful check is **not** a security audit or trust
+grant. The launcher installs nothing. It requires Node and project-local
+Vite/React dependencies already installed by you. Omit `--component` in both
+commands to preview the project's `index.html` instead.
+
+Keep the terminal open while previewing, save subsequent edits in Notes, and
+press Ctrl+C in that terminal to stop the server and remove its temporary cache.
+Closing Notes or the browser tab does not stop this separately launched server.
+See [TSX preview](tsx-preview.md) for compatibility and security boundaries.
 
 ## Image viewer
 
