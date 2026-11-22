@@ -642,7 +642,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].text.starts_with("Start JWM Notes"));
         assert_eq!(rows[1].key, "missing");
-        assert!(rows[1].text.starts_with("Missing catalog entry: Not installed"));
+        assert!(
+            rows[1]
+                .text
+                .starts_with("Missing catalog entry: Not installed")
+        );
         let plan = jwm.features.workscene_preview.as_ref().unwrap();
         assert!(plan.pending_applications.is_empty());
         assert_eq!(plan.applications.len(), 1);
