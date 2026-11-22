@@ -119,7 +119,7 @@ def publish_foreign_owner(display, resource):
     finally:
         xlib.XCloseDisplay(connection)
 
-def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout, stale_owner):
+def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout, stale_owner, two_outputs):
     work = Path(tempfile.mkdtemp(prefix=f"jwm-restart-{backend}-"))
     work.chmod(0o700)
     children = FIXTURE.Children()
@@ -160,14 +160,23 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
             config.write_text(text)
         run(binary, "--backend", backend, "--check-config", timeout=30)
         env["DISPLAY"] = children.display("Xvfb", env, work)
-        host_env = env.copy()
-        env["DISPLAY"] = children.display("Xephyr", env, work)
-        # Xephyr only delivers its nested keyboard while its own host window
-        # has focus. The host here is our hidden Xvfb, never the user display.
-        host_window = subprocess.check_output(["xdotool", "search", "--class", "Xephyr"],
-                                              env=host_env, text=True, timeout=5).splitlines()[0]
-        subprocess.run(["xdotool", "windowfocus", "--sync", host_window], env=host_env,
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
+        host_env = None
+        host_window = None
+        if two_outputs:
+            # Xvfb is itself the only owned X server in this case. Verify
+            # named RandR regions before asking JWM to manage either one.
+            connected, = re.findall(r"^(\S+) connected", run("xrandr", "--query"), re.MULTILINE)
+            run("xrandr", "--setmonitor", "JWM-left", "640/170x800/212+0+0", connected)
+            run("xrandr", "--setmonitor", "JWM-right", "640/170x800/212+640+0", "none")
+        else:
+            host_env = env.copy()
+            env["DISPLAY"] = children.display("Xephyr", env, work)
+            # Xephyr only delivers its nested keyboard while its own host window
+            # has focus. The host here is our hidden Xvfb, never the user display.
+            host_window = subprocess.check_output(["xdotool", "search", "--class", "Xephyr"],
+                                                  env=host_env, text=True, timeout=5).splitlines()[0]
+            subprocess.run(["xdotool", "windowfocus", "--sync", host_window], env=host_env,
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
         private_display = env["DISPLAY"]
         pid_file = work / "wm.pid"
         wrapper = "import os,sys;open(sys.argv[1],'x').write(str(os.getpid()));os.execv(sys.argv[2],sys.argv[2:])"
@@ -210,6 +219,34 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
             geometry = native_pixmap_geometry(private_display, int(ids[0], 16))
             return geometry if geometry["width"] == 1280 and geometry["height"] == 800 else None
 
+        def named_output_state():
+            listing = run("xrandr", "--listmonitors")
+            geometry = {"JWM-left": (0, 0, 640, 800), "JWM-right": (640, 0, 640, 800)}
+            for name, (x, y, width, height) in geometry.items():
+                expected = rf"^\s*\d+: [*+]*{name} {width}/\d+x{height}/\d+\+{x}\+{y}(?:\s|$)"
+                assert re.search(expected, listing, re.MULTILINE), listing
+            monitors = FIXTURE.query(socket, "get_monitors")
+            if len(monitors) != 2:
+                return None
+            # JWM's IPC IDs are allocated by each instance, not X11 XIDs.
+            # Resolve them within the same instance to fixture names; the
+            # restart check below independently verifies each name's PID/XID.
+            windows_by_id = {row["id"]: row["name"] for row in FIXTURE.query(socket, "get_windows")}
+            state = {}
+            for name, rect in geometry.items():
+                rows = [m for m in monitors if (m["x"], m["y"], m["w"], m["h"]) == rect]
+                if len(rows) != 1:
+                    return None
+                fields = ("num", "active_tags", "previous_tags", "layout", "prev_layout",
+                          "focused", "n_master", "m_fact", "gap")
+                state[name] = {field: rows[0][field] for field in fields}
+                # IPC omits selected_id on a monitor without a selected client.
+                selected_id = rows[0].get("selected_id")
+                if selected_id is not None and selected_id not in windows_by_id:
+                    return None
+                state[name]["selected_window"] = windows_by_id.get(selected_id)
+            return state
+
         before = wait(context, "initial IPC")
         wm_pid = int(pid_file.read_text())
         wm_identity = identity(wm_pid)
@@ -218,17 +255,33 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
         assert version["backend"] == backend, version
         report.update(wm_identity=wm_identity, display=private_display,
                       initial_instance=before["wm_instance_id"], initial_wallpaper=wait(wallpaper_ready, "initial native wallpaper"))
-        FIXTURE.command(socket, "view", {"value": 4})
-        FIXTURE.command(socket, "setlayout", {"layout": "scrolling"})
         applications = []
+        layout_by_side = {"JWM-left": "tile", "JWM-right": "monocle"}
+        tags_by_side = {"JWM-left": 4, "JWM-right": 64}
+        if two_outputs:
+            wait(named_output_state, "two independently named native regions")
+        else:
+            FIXTURE.command(socket, "view", {"value": 4})
+            FIXTURE.command(socket, "setlayout", {"layout": "scrolling"})
         for index in range(windows):
+            output = ("JWM-left", "JWM-right")[index] if two_outputs else None
+            if output:
+                if not named_output_state()[output]["focused"]:
+                    FIXTURE.command(socket, "focusmon", {"value": 1})
+                assert named_output_state()[output]["focused"]
+                FIXTURE.command(socket, "view", {"value": tags_by_side[output]})
+                FIXTURE.command(socket, "setlayout", {"layout": layout_by_side[output]})
             name = f"JwmRestartFixture{index}"
             child = children.spawn(["xmessage", "-name", name, "-title", name, "isolated restart fixture"],
                                    env, work / f"application-{index}.log")
             row = wait(lambda: next((item for item in FIXTURE.query(socket, "get_windows")
                                      if item["name"] == name), None), "managed fixture application")
             xid = int(run("xdotool", "search", "--name", "^" + re.escape(name) + "$").splitlines()[0])
-            applications.append({"name": name, "identity": identity(child.pid), "xid": xid, "window": row["id"]})
+            if output:
+                assert row["monitor"] == named_output_state()[output]["num"]
+                assert row["tags"] == tags_by_side[output]
+            applications.append({"name": name, "identity": identity(child.pid), "xid": xid,
+                                 "window": row["id"], "output": output})
         report["applications"] = applications
         # Xlib lazily initializes Xephyr's XKB map when the first client opens;
         # reinstall against that final map, as the native shortcut fixture does.
@@ -239,6 +292,20 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
             prior_wallpaper = wallpaper_ready()
             assert prior_wallpaper is not None
             prior_layout = FIXTURE.query(socket, "get_layout")
+            prior_outputs = None
+            prior_focused_xid = None
+            if two_outputs:
+                active_app = applications[-1]
+                FIXTURE.command(socket, "focus_window", active_app["window"])
+                prior_focused_xid = active_app["xid"]
+                wait(lambda: int(run("xdotool", "getwindowfocus").strip()) == prior_focused_xid,
+                     "native X11 focus on right fixture")
+                prior_outputs = named_output_state()
+                assert prior_outputs["JWM-right"]["focused"] and not prior_outputs["JWM-left"]["focused"]
+                assert all(prior_outputs[name]["active_tags"] == tag for name, tag in tags_by_side.items())
+                assert prior_outputs["JWM-left"]["layout"] != prior_outputs["JWM-right"]["layout"]
+                assert all(prior_outputs[app["output"]]["selected_window"] == app["name"]
+                           for app in applications), prior_outputs
             started = time.monotonic()
             if stale_owner == "foreign":
                 publish_foreign_owner(private_display, applications[0]["xid"])
@@ -250,12 +317,15 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                 # Inject at Xephyr's host window, exactly where physical keys
                 # enter it. Both displays belong to this fixture. --window
                 # would use SendEvent and bypass the native keyboard path.
-                run("xdotool", "windowfocus", "--sync", applications[0]["xid"])
-                subprocess.run(["xdotool", "windowfocus", "--sync", host_window], env=host_env,
-                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
-                subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "120", "Alt_L+Shift_L+r"],
-                               env=host_env, check=True, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.PIPE, timeout=5)
+                if two_outputs:
+                    run("xdotool", "key", "--clearmodifiers", "--delay", "120", "Alt_L+Shift_L+r")
+                else:
+                    run("xdotool", "windowfocus", "--sync", applications[0]["xid"])
+                    subprocess.run(["xdotool", "windowfocus", "--sync", host_window], env=host_env,
+                                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
+                    subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "120", "Alt_L+Shift_L+r"],
+                                   env=host_env, check=True, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, timeout=5)
             else:
                 try:
                     FIXTURE.command(socket, "restart", {})
@@ -269,7 +339,17 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                     return None
                 if identity(wm_pid) != wm_identity:
                     raise RuntimeError("restart changed the JWM PID/start time")
-                if current["monitors"][0]["visible_tag_mask"] != 4:
+                if two_outputs:
+                    observed_outputs = named_output_state()
+                    observed_focus = int(run("xdotool", "getwindowfocus").strip())
+                    report["last_restart_observation"] = {
+                        "expected_outputs": prior_outputs, "outputs": observed_outputs,
+                        "expected_focus": prior_focused_xid, "focus": observed_focus,
+                        "new_instance": current["wm_instance_id"],
+                    }
+                    if observed_outputs != prior_outputs or observed_focus != prior_focused_xid:
+                        return None
+                elif current["monitors"][0]["visible_tag_mask"] != 4:
                     return None
                 if FIXTURE.query(socket, "get_layout") != prior_layout:
                     return None
@@ -279,6 +359,11 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                         raise AssertionError("foreign application process did not survive restart")
                     if application["name"] not in rows:
                         return None
+                    if two_outputs:
+                        row = rows[application["name"]]
+                        side = application["output"]
+                        if row["monitor"] != prior_outputs[side]["num"] or row["tags"] != tags_by_side[side]:
+                            return None
                     xids = [int(item) for item in run("xdotool", "search", "--name", "^" + re.escape(application["name"]) + "$").splitlines()]
                     if application["xid"] not in xids:
                         raise AssertionError("application XID did not survive restart")
@@ -288,7 +373,7 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                 run("xdpyinfo")
                 return {"trigger": trigger, "status": "passed", "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
                         "old_instance": previous["wm_instance_id"], "new_instance": current["wm_instance_id"],
-                        "wallpaper": geometry}
+                        "wallpaper": geometry, "outputs": prior_outputs, "native_focus": prior_focused_xid}
 
             report["steps"].append(wait(restored, f"{trigger} restart with native wallpaper"))
             # A response immediately before a delayed BadPixmap/connection
@@ -324,6 +409,7 @@ def main():
     parser.add_argument("--stale-published-owner", choices=("none", "foreign"), default="none",
                         help="publish a live fixture application's XID as stale typed PIXMAP hints before restart")
     parser.add_argument("--windows", type=int, choices=range(1, 6), default=1)
+    parser.add_argument("--two-outputs", action="store_true", help="use two named RandR regions on private Xvfb")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--timeout", type=float, default=90, help="per-stage deadline; cold software GL compiles shaders")
     parser.add_argument("--preflight", action="store_true")
@@ -336,7 +422,10 @@ def main():
         parser.error("timeout must be within (0, 300] seconds")
     if not triggers or any(name not in ("hotkey", "ipc") for name in triggers):
         parser.error("triggers must be hotkey and/or ipc")
-    dependencies = {name: shutil.which(name) for name in REQUIRED}
+    if args.two_outputs and args.windows != 2:
+        parser.error("--two-outputs requires exactly two fixtures (--windows 2)")
+    needed = REQUIRED + (("xrandr",) if args.two_outputs else ())
+    dependencies = {name: shutil.which(name) for name in needed}
     ready = all(dependencies.values()) and args.jwm.is_file() and bool(ctypes.util.find_library("X11"))
     if args.preflight:
         print(json.dumps({"dependencies": dependencies, "binary": str(args.jwm), "ready": ready,
@@ -353,7 +442,8 @@ def main():
     states = (True, False) if args.compositor == "both" else (args.compositor == "on",)
     report = {"schema_version": 1, "binary": str(binary), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "uses_user_desktop": False, "runs_cargo": False,
-              "runs": [run_case(binary, backend, state, triggers, args.windows, args.keep, args.timeout, args.stale_published_owner)
+              "runs": [run_case(binary, backend, state, triggers, args.windows, args.keep, args.timeout,
+                                args.stale_published_owner, args.two_outputs)
                        for backend in backends for state in states]}
     text = json.dumps(report, indent=2) + "\n"
     if args.report:
