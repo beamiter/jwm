@@ -204,7 +204,23 @@ def keyboard_results(atspi, current, window, send):
     return "notes-keyboard-down-up-escape-reveal-and-enter-observed"
 
 
+def conflict_tree_snapshot(current, check, transport_error):
+    try:
+        return check(current())
+    except TreeTransition:
+        return None
+    except transport_error as error:
+        # libatspi can report the retired object's path instead of returning
+        # a -1 child count after the dialog is replaced. Discard that sample
+        # only; the outer deadline still requires a fresh, focused editor.
+        if (error.domain == "atspi_error" and error.code == 1
+                and re.fullmatch(r"/org/a11y/atspi/accessible/[0-9]+/[0-9]+", error.message)):
+            return None
+        raise
+
+
 def conflict_controls(atspi, current, window, send, source):
+    from gi.repository import GLib
     roles = atspi.Role
     fields = {roles.ENTRY, roles.TEXT, roles.DOCUMENT_TEXT}
     sibling = source.with_name(source.stem + " (恢复副本)" + source.suffix)
@@ -219,10 +235,7 @@ def conflict_controls(atspi, current, window, send, source):
         # When the dialog replaces the editor tree (and vice versa), libatspi
         # can still return an old object with a -1 child count. Discard that
         # entire observation; never treat an old tree as proof of absence.
-        try:
-            return check(current())
-        except TreeTransition:
-            return None
+        return conflict_tree_snapshot(current, check, GLib.Error)
 
     def modal(root):
         dialog = named(root, "原文件已被修改", {roles.DIALOG}, fresh=True)
