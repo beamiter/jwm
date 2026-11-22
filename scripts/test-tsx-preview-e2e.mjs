@@ -92,6 +92,23 @@ try {
   await page.locator('vite-error-overlay').waitFor();
   await writeFile(path.join(root, 'src/App.tsx'), component('Recovered'));
   await page.getByRole('button', { name: 'Recovered 0' }).waitFor();
+  await writeFile(path.join(root, 'src/App.tsx'),
+    'export default function Broken(){throw new Error("<mark>render failure</mark>");}');
+  const failure = page.getByRole('alert');
+  await failure.getByRole('heading', { name: 'Component preview failed' }).waitFor();
+  await failure.getByText('<mark>render failure</mark>', { exact: true }).waitFor();
+  assert.equal(await failure.locator('mark').count(), 0, 'error details must be rendered as plain text');
+  await failure.getByText('Fix the component and save to try again.').waitFor();
+  await writeFile(path.join(root, 'src/App.tsx'), component('Runtime recovered'));
+  await page.getByRole('button', { name: 'Runtime recovered 0' }).waitFor();
+  assert.equal(await failure.count(), 0);
+
+  await writeFile(path.join(root, 'src/App.tsx'), 'export function NamedOnly(){return <p>Named only</p>;}');
+  await failure.getByText('Export the preview component as default.').waitFor();
+  await writeFile(path.join(root, 'src/App.tsx'), component('Default restored'));
+  await page.getByRole('button', { name: 'Default restored 0' }).waitFor();
+  assert.equal(await failure.count(), 0);
+  console.log('PASS: component render error and missing default export are visible and recover on save');
   await stop(run);
   assert.equal(await readFile(path.join(root, '.env'), 'utf8'), 'VITE_ENV_SECRET=env-secret-marker');
   await assert.rejects(readFile(path.join(root, 'MUST_NOT_RUN')));
