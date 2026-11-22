@@ -78,23 +78,33 @@ pub(crate) fn markup(source: &str) -> String {
     output
 }
 
+struct ParsedMarkup {
+    text: gio::glib::GString,
+    attributes: pango::AttrList,
+}
+
 #[derive(Default)]
 pub(crate) struct Preview {
     pub enabled: bool,
     pub scroll: f64,
     revision: Option<u64>,
-    markup: String,
+    parsed: Option<ParsedMarkup>,
 }
 impl Preview {
     pub fn draw(&mut self, cr: &cairo::Context, area: Rect, source: &str, revision: u64) {
         if self.revision != Some(revision) {
-            self.markup = markup(source);
+            self.parsed = pango::parse_markup(&markup(source), '\0')
+                .ok()
+                .map(|(attributes, text, _)| ParsedMarkup { text, attributes });
             self.revision = Some(revision);
         }
-        // Layout inherits current font/scale on every draw; Markdown parsing is
-        // cached across caret redraws and invalidated only by source revisions.
+        // Refresh the layout for the current width, font and Cairo target, but
+        // do not parse the same Pango markup again when scrolling or redrawing.
         let layout = ui::layout(cr, "", 15., area.w, true);
-        layout.set_markup(&self.markup);
+        if let Some(parsed) = &self.parsed {
+            layout.set_text(parsed.text.as_str());
+            layout.set_attributes(Some(&parsed.attributes));
+        }
         self.scroll = self
             .scroll
             .clamp(0., (f64::from(layout.pixel_size().1) - area.h).max(0.));
@@ -157,7 +167,8 @@ mod tests {
         notes
             .preview
             .draw(&cr, area, &notes.editor.text, notes.editor.revision);
-        assert!(notes.preview.markup.contains("first"));
+        let text = &notes.preview.parsed.as_ref().unwrap().text;
+        assert!(text.contains("first"));
         notes.preview.enabled = true;
         notes.preview.scroll = 20.;
         std::fs::write(&path, "# second").unwrap();
@@ -167,9 +178,59 @@ mod tests {
         notes
             .preview
             .draw(&cr, area, &notes.editor.text, notes.editor.revision);
-        assert!(notes.preview.markup.contains("second"));
-        assert!(!notes.preview.markup.contains("first"));
+        let text = &notes.preview.parsed.as_ref().unwrap().text;
+        assert!(text.contains("second"));
+        assert!(!text.contains("first"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cached_markup_keeps_pixels_and_reflows_at_current_width_and_scale() {
+        let source = "# Heading\n\n**Bold** and *italic* text that wraps.";
+        let next_source = "second revision";
+        let mut preview = Preview::default();
+        for (width, scale) in [(180., 1.), (92., 1.), (92., 2.)] {
+            let height = 140.;
+            let area = Rect::new(0., 0., width, height);
+            let render = |draw: &mut dyn FnMut(&cairo::Context)| {
+                let mut surface = cairo::ImageSurface::create(
+                    cairo::Format::ARgb32,
+                    (width * scale) as i32,
+                    (height * scale) as i32,
+                )
+                .unwrap();
+                surface.set_device_scale(scale, scale);
+                let cr = cairo::Context::new(&surface).unwrap();
+                draw(&cr);
+                drop(cr);
+                surface.data().unwrap().to_vec()
+            };
+            let expected = render(&mut |cr| {
+                let layout = ui::layout(cr, "", 15., width, true);
+                layout.set_markup(&markup(source));
+                cr.move_to(0., 0.);
+                ui::color(cr, ui::text_color());
+                pangocairo::functions::show_layout(cr, &layout);
+            });
+            let actual = render(&mut |cr| {
+                // The revision, not a redraw, drives replacement of the parse.
+                let text = if preview.revision.is_some() {
+                    next_source
+                } else {
+                    source
+                };
+                preview.draw(cr, area, text, 1);
+            });
+            assert!(expected.iter().any(|&byte| byte != 0));
+            assert_eq!(actual, expected, "width {width}, scale {scale}");
+        }
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 180, 140).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        preview.draw(&cr, Rect::new(0., 0., 180., 140.), next_source, 2);
+        assert_eq!(
+            preview.parsed.as_ref().unwrap().text.as_str(),
+            "second revision\n\n"
+        );
     }
 
     #[test]
