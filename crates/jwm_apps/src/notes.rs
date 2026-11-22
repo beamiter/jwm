@@ -50,6 +50,21 @@ impl FileStamp {
             .map_err(|e| e.to_string())
     }
 }
+#[derive(Debug)]
+pub(crate) enum SaveError {
+    Conflict,
+    Other(String),
+}
+
+impl SaveError {
+    fn message(self) -> String {
+        match self {
+            Self::Conflict => "文件已被其他程序修改，请另存为以保留当前内容。".into(),
+            Self::Other(message) => message,
+        }
+    }
+}
+
 /// Etags and local file identity protect against conflicting external edits.
 pub struct TextFile {
     pub file: gio::File,
@@ -111,11 +126,11 @@ impl TextFile {
         ))
     }
 
-    pub fn save(&mut self, text: &str) -> Result<(), String> {
-        if FileStamp::read(&self.file)? != self.stamp {
-            return Err("文件已被其他程序修改，请另存为以保留当前内容。".into());
+    fn save(&mut self, text: &str) -> Result<(), SaveError> {
+        if FileStamp::read(&self.file).map_err(SaveError::Other)? != self.stamp {
+            return Err(SaveError::Conflict);
         }
-        let text = encode_text(text, self.bom, self.crlf)?;
+        let text = encode_text(text, self.bom, self.crlf).map_err(SaveError::Other)?;
         self.etag = self
             .file
             .replace_contents(
@@ -126,9 +141,13 @@ impl TextFile {
                 gio::Cancellable::NONE,
             )
             .map_err(|error| {
-                format!("保存失败：{error}\n如果文件已被其他程序修改，请另存为以保留当前内容。")
+                if error.matches(gio::IOErrorEnum::WrongEtag) {
+                    SaveError::Conflict
+                } else {
+                    SaveError::Other(format!("保存失败：{error}"))
+                }
             })?;
-        self.stamp = FileStamp::read(&self.file)?;
+        self.stamp = FileStamp::read(&self.file).map_err(SaveError::Other)?;
         Ok(())
     }
 }
@@ -153,6 +172,99 @@ fn encode_text(text: &str, bom: bool, crlf: bool) -> Result<String, String> {
         text.to_owned()
     };
     Ok(if bom { format!("\u{feff}{text}") } else { text })
+}
+
+fn recovery_name(path: &Path, index: usize) -> Result<std::ffi::OsString, String> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let suffix = if index == 1 {
+        " (恢复副本)".into()
+    } else {
+        format!(" (恢复副本 {index})")
+    };
+    let extension = path.extension().map(OsStrExt::as_bytes);
+    let extra = extension.map_or(0, |ext| 1 + ext.len());
+    let limit = 255usize
+        .checked_sub(suffix.len() + extra)
+        .filter(|limit| *limit >= 4)
+        .ok_or("原文件扩展名过长，请改用另存为。")?;
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Notes");
+    let mut end = stem.len().min(limit);
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut name = stem.as_bytes()[..end].to_vec();
+    name.extend_from_slice(suffix.as_bytes());
+    if let Some(extension) = extension {
+        name.push(b'.');
+        name.extend_from_slice(extension);
+    }
+    Ok(std::ffi::OsString::from_vec(name))
+}
+
+fn publish_recovery(source: &Path, encoded: &[u8]) -> Result<PathBuf, String> {
+    use std::{
+        fs::{self, DirBuilder, OpenOptions},
+        io::{ErrorKind, Write},
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    let parent = source.parent().ok_or("无法找到原文件的目录。")?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    struct Staging(PathBuf);
+    impl Drop for Staging {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.join("draft"));
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+    let mut staging = None;
+    for i in 0..16 {
+        let path = parent.join(format!(".jwm-notes-{}-{stamp}-{i}", std::process::id()));
+        match DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => {
+                staging = Some(Staging(path));
+                break;
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let staging = staging.ok_or("无法创建临时恢复文件，请改用另存为。")?;
+    let draft = staging.0.join("draft");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&draft)
+        .map_err(|error| error.to_string())?;
+    file.write_all(encoded)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| error.to_string())?;
+    drop(file);
+
+    for index in 1..=64 {
+        let path = parent.join(recovery_name(source, index)?);
+        // Publish only complete bytes. Never replace a file or follow a
+        // symlink occupying a candidate name, even if it appeared mid-save.
+        match fs::hard_link(&draft, &path) {
+            Ok(()) => {
+                // Remove the staging name before the caller records ctime.
+                drop(staging);
+                return Ok(path);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("恢复副本名称已用完，请改用另存为。".into())
 }
 
 pub fn create_note(directory: &Path) -> Result<PathBuf, String> {
@@ -381,20 +493,23 @@ impl Notes {
             .managed
             .then(|| Instant::now() + std::time::Duration::from_millis(700));
     }
-    fn persist(&mut self) -> Result<bool, String> {
+    fn persist(&mut self) -> Result<bool, SaveError> {
         self.due = None;
         if !self.dirty {
             return Ok(false);
         }
         self.document
             .as_mut()
-            .ok_or("没有可保存的文件。")?
+            .ok_or_else(|| SaveError::Other("没有可保存的文件。".into()))?
             .save(&self.editor.text)?;
         self.dirty = false;
         self.status = "已保存".into();
         Ok(true)
     }
     pub fn save(&mut self) -> Result<(), String> {
+        self.save_explicitly().map_err(SaveError::message)
+    }
+    pub(crate) fn save_explicitly(&mut self) -> Result<(), SaveError> {
         if self.persist()? && self.managed {
             self.refresh();
         }
@@ -403,7 +518,7 @@ impl Notes {
     /// Complete the write before acknowledging it, but rebuild the notebook
     /// results off the input loop. The existing worker cancels older scans.
     pub fn autosave(&mut self) -> Result<(), String> {
-        if self.persist()? && self.managed {
+        if self.persist().map_err(SaveError::message)? && self.managed {
             self.refresh_notebook();
         }
         Ok(())
@@ -422,12 +537,43 @@ impl Notes {
         // Save before loading another note, but scan the result list only
         // once. If the save succeeded and the load failed, still refresh to
         // reflect the saved file's new title, contents and modification time.
-        let saved = self.persist()?;
+        let saved = self.persist().map_err(SaveError::message)?;
         let opened = self.load(path);
         if opened.is_ok() || (saved && self.managed) {
             self.refresh();
         }
         opened
+    }
+    pub(crate) fn keep_conflict_copy(&mut self) -> Result<PathBuf, String> {
+        if !self.dirty {
+            return Err("没有需要保留的未保存修改。".into());
+        }
+        let source = self.document.as_ref().ok_or("没有可保存的文件。")?;
+        let original = source.file.path().ok_or("请选择本地文件。")?;
+        let (bom, crlf) = (source.bom, source.crlf);
+        let bytes = encode_text(&self.editor.text, bom, crlf)?;
+        let path = publish_recovery(&original, bytes.as_bytes())?;
+        // Verify the bytes and stamp the new inode after removing its staging
+        // hard link. Keep the editor's encoding rules and in-memory content.
+        let (mut document, _) =
+            TextFile::load_with_reader(gio::File::for_path(&path), |stream| {
+                let read = read_limited(stream.into_read())?;
+                if read != bytes.as_bytes() {
+                    return Err("副本已发生变化，当前编辑内容仍保留。".into());
+                }
+                Ok(read)
+            })
+            .map_err(|error| format!("副本已写入 {}，但无法切换：{error}", path.display()))?;
+        document.bom = bom;
+        document.crlf = crlf;
+        self.document = Some(document);
+        self.dirty = false;
+        self.due = None;
+        if self.managed {
+            self.refresh_notebook();
+        }
+        self.status = format!("已保留副本：{}", path.display());
+        Ok(path)
     }
     pub fn save_as(&mut self, path: &Path) -> Result<(), String> {
         let file = gio::File::for_path(path);
@@ -981,6 +1127,101 @@ mod tests {
             encode_text("备忘\n第二行\n", true, true).unwrap(),
             "\u{feff}备忘\r\n第二行\r\n"
         );
+    }
+
+    #[test]
+    fn conflict_copy_keeps_bytes_and_skips_long_name_and_symlink_collisions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory =
+            std::env::temp_dir().join(format!("jwm-notes-keep-conflict-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.join(format!("{}.md", "备".repeat(83)));
+        std::fs::write(&source, "\u{feff}first\r\nsecond\r\n").unwrap();
+        let mut notes = Notes::new(Some(source.clone())).unwrap();
+        notes.editor.text = "我的草稿\n第二行\n".into();
+        notes.edited();
+
+        let replacement = directory.join("replacement");
+        std::fs::write(&replacement, "outside edit").unwrap();
+        std::fs::rename(replacement, &source).unwrap();
+        assert!(matches!(notes.save_explicitly(), Err(SaveError::Conflict)));
+
+        let occupied = directory.join(recovery_name(&source, 1).unwrap());
+        std::fs::write(&occupied, "keep existing").unwrap();
+        let symlink_path = directory.join(recovery_name(&source, 2).unwrap());
+        let missing = directory.join("not-created");
+        symlink(&missing, &symlink_path).unwrap();
+
+        let recovered = notes.keep_conflict_copy().unwrap();
+        assert_eq!(recovered, directory.join(recovery_name(&source, 3).unwrap()));
+        assert_eq!(recovered.extension().unwrap(), "md");
+        assert!(recovered.file_name().unwrap().to_str().unwrap().len() <= 255);
+        assert_eq!(
+            std::fs::read_to_string(&recovered).unwrap(),
+            "\u{feff}我的草稿\r\n第二行\r\n"
+        );
+        assert_eq!(
+            recovered.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!notes.dirty);
+        assert_eq!(
+            notes.document.as_ref().unwrap().file.path().as_deref(),
+            Some(recovered.as_path())
+        );
+        assert!(notes.status.contains(&*recovered.to_string_lossy()));
+        notes.editor.text.push_str("再次保存\n");
+        notes.edited();
+        notes.save_explicitly().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(recovered).unwrap(),
+            "\u{feff}我的草稿\r\n第二行\r\n再次保存\r\n"
+        );
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "outside edit");
+        assert_eq!(std::fs::read_to_string(occupied).unwrap(), "keep existing");
+        assert_eq!(std::fs::read_link(symlink_path).unwrap(), missing);
+        assert!(!missing.exists());
+        assert!(
+            std::fs::read_dir(&directory)
+                .unwrap()
+                .all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".jwm-notes-")
+                })
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn exhausted_recovery_names_leave_the_original_editor_dirty() {
+        let directory =
+            std::env::temp_dir().join(format!("jwm-notes-recovery-full-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.join("active.txt");
+        std::fs::write(&source, "old contents").unwrap();
+        let mut notes = Notes::new(Some(source.clone())).unwrap();
+        notes.editor.text = "unsaved edit".into();
+        notes.edited();
+        std::fs::write(&source, "other contents").unwrap();
+        for index in 1..=64 {
+            let path = directory.join(recovery_name(&source, index).unwrap());
+            std::fs::write(path, "already occupied").unwrap();
+        }
+
+        assert!(notes.keep_conflict_copy().is_err());
+        assert!(notes.dirty);
+        assert_eq!(notes.editor.text, "unsaved edit");
+        assert_eq!(
+            notes.document.as_ref().unwrap().file.path().as_deref(),
+            Some(source.as_path())
+        );
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "other contents");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 65);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
