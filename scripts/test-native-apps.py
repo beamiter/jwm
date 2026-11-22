@@ -339,6 +339,59 @@ def main():
                 wait(lambda: editor.poll() is not None, "Saved editor did not close")
                 print("Clipboard, undo, desktop activation, file picker and overwrite confirmation: PASS", flush=True)
 
+                # Validation only: reproduce Save As into another live editor.
+                source_path = work / "save-as-source.txt"
+                target_path = work / "save-as-target.txt"
+                recovered_path = work / "save-as-target-recovered.txt"
+                source_path.write_text("Source")
+                target_path.write_text("Target")
+                owning_process = launch("jwm-notes", source_path)
+                source_window = window(r"save-as-source\.txt.*JWM 备忘录")
+                activation = launch("jwm-notes", target_path)
+                target_window = window(r"save-as-target\.txt.*JWM 备忘录")
+                assert source_window != target_window
+                wait(lambda: activation.poll() is not None, "Second Notes launch did not exit")
+                assert activation.returncode == 0 and owning_process.poll() is None
+                focus(target_window)
+                key("ctrl+End")
+                type_text(" dirty-B")
+                acknowledge_title("target dirty before Save As", target_path, target_window, True)
+                focus(source_window)
+                key("ctrl+End")
+                type_text(" dirty-A")
+                acknowledge_title("source dirty before Save As", source_path, source_window, True)
+
+                key("ctrl+shift+s")
+                type_text(str(target_path))
+                key("Return")
+                assert target_path.read_text() == "Target", "Overwrite ran without confirmation"
+                key("Return")
+                wait(lambda: target_path.read_text() == "Source dirty-A",
+                     "Baseline did not replace already-open destination")
+                acknowledge_title("baseline source adopted live target", target_path, source_window, False)
+                acknowledge_title("baseline original target remains live and dirty", target_path,
+                                  target_window, True)
+                assert source_path.read_text() == "Source", "Source file changed during Save As"
+
+                focus(target_window)
+                key("ctrl+s")
+                assert target_path.read_text() == "Source dirty-A", "Normal stale save replaced B"
+                acknowledge_title("baseline stale save kept B dirty", target_path, target_window, True)
+                key("Return")  # Dismiss the external-change warning.
+                key("ctrl+shift+s")
+                type_text(str(recovered_path))
+                key("Return")
+                wait(lambda: recovered_path.exists() and recovered_path.read_text() == "Target dirty-B",
+                     "Original target's dirty buffer could not export to a fresh path")
+                acknowledge_title("baseline original window recovered to new file", recovered_path,
+                                  target_window, False)
+                key("ctrl+w")
+                focus(source_window)
+                key("ctrl+w")
+                wait(lambda: owning_process.poll() is not None, "Both proof editors did not close")
+                print("Two-window Save As baseline witness (duplicate titles, recoverable edits): PASS",
+                      flush=True)
+
                 # Real key/pointer events must not edit the Markdown preview.
                 markdown = work / "preview.md"
                 source = "# Preview heading\n\n**Bold content** and `code`\n\n- one\n- two\n"
