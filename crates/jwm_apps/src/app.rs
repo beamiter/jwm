@@ -62,6 +62,7 @@ enum Action {
 }
 pub(crate) enum Effect {
     OpenNote(PathBuf),
+    SaveAs(PathBuf, bool),
     Notebook,
     Close,
     Minimize,
@@ -943,31 +944,29 @@ impl App {
                 if path.exists() && !same {
                     self.dialog = Some(Dialog::Overwrite(path, close));
                 } else {
-                    self.write_as(&path, close);
+                    self.effects.push(Effect::SaveAs(path, close));
                 }
             }
         }
     }
-    fn write_as(&mut self, path: &Path, close: bool) {
-        if let Document::Notes(n) = &mut self.document {
-            match n.save_as(path) {
-                Ok(()) => {
-                    // A notebook export does not discard an unsaved source note.
-                    if close
-                        && n.managed
-                        && let Err(e) = n.save()
-                    {
-                        self.error(e);
-                        return;
-                    }
-                    self.dialog = None;
-                    if close {
-                        self.effects.push(Effect::Close);
-                    }
-                }
-                Err(e) => self.error(e),
-            }
+    pub(crate) fn write_as(&mut self, path: &Path, close: bool) -> bool {
+        let Document::Notes(n) = &mut self.document else {
+            return false;
+        };
+        if let Err(error) = n.save_as(path) {
+            self.error(error);
+            return false;
         }
+        // A notebook export does not discard an unsaved source note.
+        if close
+            && n.managed
+            && let Err(error) = n.save()
+        {
+            self.error(error);
+            return false;
+        }
+        self.dialog = None;
+        close
     }
     fn action(&mut self, action: Action) {
         if let Action::Note(path, generation) = &action
@@ -1009,7 +1008,7 @@ impl App {
                 }
             }
             Action::Trash => self.dialog = Some(Dialog::Trash),
-            Action::Overwrite(path, close) => self.write_as(&path, close),
+            Action::Overwrite(path, close) => self.effects.push(Effect::SaveAs(path, close)),
             Action::Parent => {
                 if let Some(Dialog::Picker(p)) = &mut self.dialog {
                     let path = p.resolve();

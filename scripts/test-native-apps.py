@@ -319,6 +319,17 @@ def main():
                 key("Escape")  # Cancel the unsaved-changes prompt.
                 assert external.read_text() == "Changed by another editor", "Header close overwrote the conflict"
                 print("Explicit text save, encoding preservation and external conflict: PASS", flush=True)
+                alias = work / "conflicted file alias.txt"
+                alias.symlink_to(external)
+                key("ctrl+shift+s")
+                type_text(str(alias))
+                key("Return")
+                key("shift+Tab", "Return")
+                assert alias.is_symlink(), "Save As replaced the symbolic link"
+                assert external.read_text() == "Changed by another editor", "Alias bypassed stamped Save"
+                acknowledge_title("alias refusal retained dirty original", external, edit_window, True)
+                key("Return")  # Dismiss the normal outside-change warning.
+                print("Save As through an alias preserves external edits and source draft: PASS", flush=True)
                 # Export through the actual self-drawn path picker. A target
                 # that exists must remain untouched until explicit confirmation.
                 existing = work / "existing copy.txt"
@@ -338,6 +349,70 @@ def main():
                 key("ctrl+w")
                 wait(lambda: editor.poll() is not None, "Saved editor did not close")
                 print("Clipboard, undo, desktop activation, file picker and overwrite confirmation: PASS", flush=True)
+
+                # Confirming an overwrite must not replace a live document.
+                a = work / "save-as-source.txt"
+                b = work / "save-as-target.txt"
+                copy = work / "save-as-fresh.txt"
+                a.write_text("Source")
+                b.write_text("Target")
+                primary = launch("jwm-notes", a)
+                a_window = window(r"save-as-source\.txt.*JWM 备忘录")
+                activation = launch("jwm-notes", b)
+                b_window = window(r"save-as-target\.txt.*JWM 备忘录")
+                assert a_window != b_window
+                wait(lambda: activation.poll() == 0, "Target did not join the existing Notes host")
+                focus(b_window)
+                key("ctrl+End")
+                type_text(" dirty-B")
+                acknowledge_title("target dirty before Save As", b, b_window, True)
+                focus(a_window)
+                key("ctrl+End")
+                type_text(" dirty-A")
+                acknowledge_title("source dirty before Save As", a, a_window, True)
+                key("ctrl+shift+s")
+                type_text(str(b))
+                key("Return")
+                assert b.read_text() == "Target", "Overwrite ran before confirmation"
+                key("shift+Tab", "Return")  # Explicitly choose Replace.
+                assert a.read_text() == "Source" and b.read_text() == "Target"
+                acknowledge_title("rejected Save As retained dirty source", a, a_window, True)
+                acknowledge_title("rejected Save As retained dirty target", b, b_window, True)
+                key("Return")  # Dismiss the rejection.
+
+                # Reopen B by desktop activation; it must not create a third window.
+                existing_windows = set(command("xdotool", "search", "--onlyvisible",
+                                               "--class", "org.jwm").splitlines())
+                reopened = launch("jwm-notes", b)
+                wait(lambda: reopened.poll() == 0, "Target activation did not return")
+                time.sleep(.35)  # Allow the primary host to process the open request.
+                assert set(command("xdotool", "search", "--onlyvisible",
+                                   "--class", "org.jwm").splitlines()) == existing_windows
+                focus(b_window)
+                key("ctrl+s")
+                wait(lambda: b.read_text() == "Target dirty-B", "Target's dirty text was not retained")
+                acknowledge_title("target saved normally after refusal", b, b_window, False)
+                key("ctrl+w")
+
+                focus(a_window)
+                key("ctrl+shift+s")
+                type_text(str(copy))
+                key("Return")
+                wait(lambda: copy.exists() and copy.read_text() == "Source dirty-A",
+                     "Source's dirty text was not retained for a fresh destination")
+                acknowledge_title("new copy adopted normally", copy, a_window, False)
+                # B is now closed. Explicit overwrite must still work.
+                key("ctrl+shift+s")
+                type_text(str(b))
+                key("Return")
+                assert b.read_text() == "Target dirty-B", "Closed target was overwritten without confirmation"
+                key("shift+Tab", "Return")
+                wait(lambda: b.read_text() == "Source dirty-A", "Closed target no longer accepts overwrite")
+                acknowledge_title("closed target adopted after confirmation", b, a_window, False)
+                key("ctrl+w")
+                wait(lambda: primary.poll() is not None, "Save As proof editors did not close")
+                print("Two-window Save As protects both drafts and allows closed or fresh targets: PASS",
+                      flush=True)
 
                 # Real key/pointer events must not edit the Markdown preview.
                 markdown = work / "preview.md"

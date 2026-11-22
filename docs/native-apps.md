@@ -169,7 +169,9 @@ refresh the current filter without reloading or saving the document you are edit
 In an external document, F5 or the circular-arrow toolbar button reloads the
 current path, including external atomic replacements. It never writes to disk
 or discards unsaved edits. If saving conflicts, save a separate copy and reopen
-the original; copying does not overwrite the original. When the disk text changes,
+the original; use a genuinely different filename. Saving to the original through
+a symbolic link still checks for outside edits, and Save As refuses a destination
+already open in another Notes window. When the disk text changes,
 reloading resets the selection, undo history and find state but keeps the code-font
 and Markdown-preview toggles. A failed reload leaves the existing buffer unchanged.
 
