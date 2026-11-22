@@ -112,6 +112,34 @@ class TestProbe(unittest.TestCase):
             self.run_probe()
         self.assertEqual(self.title, probe.INITIAL)
 
+    def test_conflict_snapshot_retries_only_retired_atspi_object(self):
+        class TransportError(Exception):
+            def __init__(self, message, code=1, domain="atspi_error"):
+                self.message, self.code, self.domain = message, code, domain
+
+        path = "/org/a11y/atspi/accessible/0/202914184810805067776"
+        stale = TransportError(path)
+        calls = iter((stale, "fresh focused editor"))
+
+        def check(_):
+            value = next(calls)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        self.assertIsNone(probe.conflict_tree_snapshot(lambda: self.notes, check, TransportError))
+        self.assertEqual(probe.conflict_tree_snapshot(lambda: self.notes, check, TransportError),
+                         "fresh focused editor")
+
+        for error in (TransportError("bus disconnected"), TransportError(path, 2),
+                      TransportError(path, domain="other_error")):
+            def report():
+                raise error
+
+            with self.assertRaises(TransportError) as raised:
+                probe.conflict_tree_snapshot(report, check, TransportError)
+            self.assertIs(raised.exception, error)
+
     def test_bounded_tree(self):
         self.desk.children.extend([self.gtk] * 256)
         with self.assertRaisesRegex(probe.ProbeError, "invalid-node-count"):
