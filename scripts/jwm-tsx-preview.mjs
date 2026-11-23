@@ -85,7 +85,31 @@ function componentPlugin(entryUrl) {
     resolveId(source) { if (source === id) return `\0${id}`; },
     load(source) {
       if (source !== `\0${id}`) return;
-      return `import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport Component from ${JSON.stringify(entryUrl)};\ncreateRoot(document.getElementById('root')).render(React.createElement(Component));\n`;
+      return `import React from 'react';
+import { createRoot } from 'react-dom/client';
+import * as PreviewModule from ${JSON.stringify(entryUrl)};
+const h = React.createElement;
+function failure(message) {
+  return h('main', { role: 'alert' },
+    h('h1', null, 'Component preview failed'),
+    h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, message),
+    h('p', null, 'Fix the component and save to try again.'));
+}
+class PreviewBoundary extends React.Component {
+  state = { message: null };
+  static getDerivedStateFromError(error) {
+    const message = error instanceof Error ? error.message : '';
+    return { message: message.slice(0, 1000) || 'The component failed while rendering.' };
+  }
+  render() {
+    return this.state.message === null ? this.props.children : failure(this.state.message);
+  }
+}
+const Component = PreviewModule.default;
+createRoot(document.getElementById('root')).render(Component == null
+  ? failure('Export the preview component as default.')
+  : h(PreviewBoundary, null, h(Component)));
+`;
     },
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
