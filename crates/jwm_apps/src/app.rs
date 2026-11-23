@@ -674,9 +674,8 @@ impl App {
                     let _ = cr.paint();
                     let _ = cr.restore();
                     v.status = format!(
-                        "{} / {}  ·  {} × {}  ·  {}  ·  {}",
-                        v.index + 1,
-                        v.paths.len(),
+                        "{}  ·  {} × {}  ·  {}  ·  {}",
+                        v.collection_status(),
                         w as u32,
                         h as u32,
                         if v.fit {
