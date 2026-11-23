@@ -80,11 +80,7 @@ impl<'a> WindowGlowSettings<'a> {
         target: WindowGlowTarget<'_>,
         status_bar_name: &str,
     ) -> Option<WindowGlowStyle> {
-        if !counts_for_smart_borders(
-            target.class_name,
-            status_bar_name,
-            target.override_redirect,
-        ) {
+        if !counts_for_smart_borders(target.class_name, status_bar_name, target.override_redirect) {
             return None;
         }
         self.style_for(target)
