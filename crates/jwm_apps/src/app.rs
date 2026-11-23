@@ -44,6 +44,7 @@ enum Action {
     RefreshNotebook,
     ReloadExternal,
     Find,
+    FindSelection,
     FindField,
     FindNext(bool),
     FindClose,
@@ -1144,6 +1145,17 @@ impl App {
                             self.dragging = false;
                             Ok(())
                         }
+                        Action::FindSelection => {
+                            if !n.managed
+                                && self.focus == Focus::Editor
+                                && n.find.use_selection(&n.editor)
+                            {
+                                self.focus = Focus::Find;
+                                n.editor.preedit.clear();
+                                self.dragging = false;
+                            }
+                            Ok(())
+                        }
                         Action::FindNext(backwards) => {
                             n.find.navigate(&mut n.editor, backwards);
                             Ok(())
@@ -1430,6 +1442,21 @@ impl App {
         }
     }
 
+    fn find_selection_key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> bool {
+        if self.dialog.is_some()
+            || self.focus != Focus::Editor
+            || mods != ModifiersState::CONTROL
+            || !matches!(key, Key::Character(key) if key.eq_ignore_ascii_case("e"))
+            || !matches!(&self.document, Document::Notes(n) if !n.managed)
+        {
+            return false;
+        }
+        if !repeat {
+            self.action(Action::FindSelection);
+        }
+        true
+    }
+
     pub fn key(
         &mut self,
         event: &KeyEvent,
@@ -1440,6 +1467,7 @@ impl App {
         self.next_blink = Instant::now() + Duration::from_millis(500);
         if self.refresh_key(&event.logical_key, mods, event.repeat)
             || self.notebook_results_key(&event.logical_key, mods, event.repeat)
+            || self.find_selection_key(&event.logical_key, mods, event.repeat)
         {
             return;
         }
@@ -2470,6 +2498,49 @@ mod tests {
             assert!(!n.editor.monospace);
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn document_find_selection_shortcut_keeps_the_source_clean() {
+        let term = "编译🙂Error";
+        let source = format!("{term}\n编译🙂error\n{term}");
+        let filename = format!("jwm-find-selection-{}.txt", std::process::id());
+        let path = std::env::temp_dir().join(filename);
+        std::fs::write(&path, &source).unwrap();
+        let mut app = App::new(true, vec![path.clone()]).unwrap();
+        let start = source.rfind(term).unwrap();
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        n.editor.anchor = source.len();
+        n.editor.cursor = start;
+        let key = Key::Character("e".into());
+        let ctrl = ModifiersState::CONTROL;
+        assert!(!app.find_selection_key(&key, ctrl | ModifiersState::SHIFT, false));
+        assert!(app.find_selection_key(&key, ctrl, true));
+        assert!(app.focus == Focus::Editor);
+        assert!(app.find_selection_key(&key, ctrl, false));
+        assert_eq!(app.ime_target(), 4);
+        let Document::Notes(n) = &app.document else {
+            unreachable!()
+        };
+        assert_eq!(n.find.query.text, term);
+        assert_eq!((n.find.current, n.find.total), (1, 2));
+        assert_eq!((n.editor.cursor, n.editor.anchor), (start, source.len()));
+
+        app.action(Action::FindNext(false));
+        app.action(Action::FindClose);
+        assert_eq!(app.ime_target(), 1);
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        assert_eq!(n.editor.selection(), 0..term.len());
+        assert_eq!(n.editor.revision, 0);
+        assert!(!n.dirty);
+        n.managed = true;
+        assert!(!app.find_selection_key(&key, ctrl, false));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

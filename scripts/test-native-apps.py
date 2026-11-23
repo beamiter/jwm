@@ -547,6 +547,24 @@ def main():
                 wait(lambda: find_app.poll() is not None, "Find editor did not close")
                 print("Native document find input, next/previous wrap and source focus: PASS", flush=True)
 
+                # Ctrl+E starts at the chosen occurrence without using the clipboard.
+                selection_path = work / "find-selection.txt"
+                selection_source = "clipboard-sentinel\nneedle first\nneedle second\nNeedle case\n"
+                selection_path.write_text(selection_source)
+                selection_app = launch("jwm-notes", selection_path)
+                focus(window("find-selection.txt.*JWM 备忘录"))
+                key("ctrl+Home", "shift+End", "ctrl+c")
+                key("ctrl+Home", "Down", "Down", "Home", *(["Right"] * 6))
+                key(*(["shift+Left"] * 6), "ctrl+e", "ctrl+s")
+                assert selection_path.read_text() == selection_source, "Find selection modified source"
+                key("Return", "Escape", "ctrl+v", "ctrl+s")
+                expected = "clipboard-sentinel\nclipboard-sentinel first\nneedle second\nNeedle case\n"
+                wait(lambda: selection_path.read_text() == expected,
+                     "Selection find did not wrap from the second occurrence or preserve clipboard")
+                key("ctrl+w")
+                wait(lambda: selection_app.poll() is not None, "Selection-find editor did not close")
+                print("Native Ctrl+E selection, case-sensitive wrap and unchanged clipboard: PASS", flush=True)
+
                 # Code view changes presentation, not source bytes or keyboard routing.
                 code_path = work / "component.tsx"
                 code_source = b"\xef\xbb\xbfconst view = <div>iiii WWWW</div>;\r\n"
