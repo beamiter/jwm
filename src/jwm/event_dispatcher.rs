@@ -16906,7 +16906,7 @@ impl Jwm {
             next = min_optional_duration(next, Some(std::time::Duration::from_millis(100)));
         }
         if let Some(capture) = &self.features.scroll_capture {
-            next = min_optional_duration(next, Some(capture.next_wakeup(now)));
+            next = min_optional_duration(next, capture.next_wakeup(now));
         }
         if self.wallpaper_drag.is_some() {
             next = min_optional_duration(next, Some(FRAME_INTERVAL));
