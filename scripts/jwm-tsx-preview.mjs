@@ -87,7 +87,6 @@ function componentPlugin(entryUrl) {
       if (source !== `\0${id}`) return;
       return `import React from 'react';
 import { createRoot } from 'react-dom/client';
-import * as PreviewModule from ${JSON.stringify(entryUrl)};
 const h = React.createElement;
 function failure(message) {
   return h('main', { role: 'alert' },
@@ -95,20 +94,27 @@ function failure(message) {
     h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, message),
     h('p', null, 'Fix the component and save to try again.'));
 }
+function errorMessage(error, fallback) {
+  const message = error instanceof Error ? error.message : '';
+  return message.slice(0, 1000) || fallback;
+}
 class PreviewBoundary extends React.Component {
   state = { message: null };
   static getDerivedStateFromError(error) {
-    const message = error instanceof Error ? error.message : '';
-    return { message: message.slice(0, 1000) || 'The component failed while rendering.' };
+    return { message: errorMessage(error, 'The component failed while rendering.') };
   }
   render() {
     return this.state.message === null ? this.props.children : failure(this.state.message);
   }
 }
-const Component = PreviewModule.default;
-createRoot(document.getElementById('root')).render(Component == null
-  ? failure('Export the preview component as default.')
-  : h(PreviewBoundary, null, h(Component)));
+const root = createRoot(document.getElementById('root'));
+// Start the preview wrapper first so a failing module can still show a diagnostic.
+import(${JSON.stringify(entryUrl)}).then(
+  ({ default: Component }) => root.render(Component == null
+    ? failure('Export the preview component as default.')
+    : h(PreviewBoundary, null, h(Component))),
+  error => root.render(failure(errorMessage(error, 'The component module could not be loaded.'))),
+);
 `;
     },
     configureServer(server) {
