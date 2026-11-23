@@ -444,7 +444,9 @@ mod tests {
         let held = Mods::SUPER;
         let never = || -> Option<Mods> { panic!("an unrelated release must not query the mask") };
         // A known gesture modifier uses the post-release mask when available.
-        assert!(release_commits(held, keys::KEY_Super_L, || Some(Mods::empty())));
+        assert!(release_commits(held, keys::KEY_Super_L, || Some(
+            Mods::empty()
+        )));
         assert!(release_commits(held, keys::KEY_Super_L, || None));
         assert!(!release_commits(held, keys::KEY_Alt_L, never));
         // A non-modifier key never commits and never costs a query.
@@ -476,7 +478,11 @@ mod tests {
     fn releasing_one_of_two_physical_modifier_keys_keeps_the_switcher_open() {
         let alt = Mods::ALT;
         assert!(!release_commits(alt, keys::KEY_Alt_L, || Some(alt)));
-        assert!(release_commits(alt, keys::KEY_Alt_R, || Some(Mods::empty())));
+        assert!(release_commits(
+            alt,
+            keys::KEY_Alt_R,
+            || Some(Mods::empty())
+        ));
 
         // Distinct gesture modifiers are not interchangeable. Releasing
         // Control still commits when Alt remains held.

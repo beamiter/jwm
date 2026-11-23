@@ -2890,6 +2890,7 @@ mod tests {
 
     #[derive(Default)]
     struct GrabSpyKeyOps {
+        release_keysym: Option<KeySym>,
         solar_modifiers: AtomicU32,
         keyboard_grabs: AtomicUsize,
         keyboard_ungrabs: AtomicUsize,
@@ -2918,12 +2919,16 @@ mod tests {
             Ok(())
         }
 
-        fn clean_mods(&self, _raw_state: u16) -> Mods {
-            Mods::from_bits_truncate(self.solar_modifiers.load(AtomicOrdering::Relaxed) as _)
+        fn clean_mods(&self, raw_state: u16) -> Mods {
+            if self.release_keysym.is_some() {
+                Mods::from_bits_truncate(raw_state)
+            } else {
+                Mods::from_bits_truncate(self.solar_modifiers.load(AtomicOrdering::Relaxed) as _)
+            }
         }
 
         fn keysym_from_keycode(&mut self, keycode: u8) -> Result<KeySym, BackendError> {
-            Ok(u32::from(keycode))
+            Ok(self.release_keysym.unwrap_or(u32::from(keycode)))
         }
 
         fn clear_cache(&mut self) {}
@@ -12955,6 +12960,53 @@ mod tests {
 
         assert!(error.to_string().contains("window switcher"));
         assert!(!jwm.features.system_ui.is_window_switcher());
+    }
+
+    #[test]
+    fn switcher_release_prefers_the_event_mask_or_queries_live_state_on_x11() {
+        use crate::jwm::features::system_ui::{ListRow, RowData, SystemUiState};
+
+        for event_has_mask in [true, false] {
+            let mut jwm = empty_jwm();
+            let mut backend = RenderSpyBackend::new();
+            backend.key_ops.release_keysym = Some(keys::KEY_Alt_L);
+            backend
+                .input_ops
+                .solar_query_enabled
+                .store(true, AtomicOrdering::Relaxed);
+            jwm.features.window_switcher_mods = Mods::ALT;
+            jwm.features.system_ui = SystemUiState::window_switcher(
+                vec![ListRow {
+                    key: "only-row".into(),
+                    text: "Window".into(),
+                    data: RowData::WindowSwitcher { window: 0x900 },
+                }],
+                0,
+            );
+            // Wayland's live mask is deliberately different from the mask
+            // captured with the release. For X11 only the live mask exists.
+            for (post, stays_open) in [(Mods::ALT, true), (Mods::empty(), false)] {
+                let live = if event_has_mask {
+                    Mods::ALT ^ post
+                } else {
+                    post
+                };
+                backend
+                    .input_ops
+                    .solar_button_mask
+                    .store(u32::from(live.bits()), AtomicOrdering::Relaxed);
+                jwm.handle_event(
+                    &mut backend,
+                    BackendEvent::KeyRelease {
+                        keycode: 64,
+                        state_after: event_has_mask.then_some(post.bits()),
+                        time: 1,
+                    },
+                )
+                .unwrap();
+                assert_eq!(jwm.features.system_ui.is_window_switcher(), stays_open);
+            }
+        }
     }
 
     #[test]
