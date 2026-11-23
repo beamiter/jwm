@@ -836,6 +836,38 @@ mod tests {
     }
 
     #[test]
+    fn overview_drop_baseline_publishes_active_tag_then_requested_tag() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = jwm.state.monitor_order[0];
+        let target = add_right_monitor(&mut jwm, source);
+        assert_eq!(jwm.state.monitors[target].get_active_tags(), 1);
+        let target_num = jwm.state.monitors[target].num as u32;
+        let window = WindowId::from_raw(0x4f1);
+        let key = visible_client(&mut jwm, source, window.raw(), Rect::new(60, 80, 400, 300));
+        jwm.state.clients[key].state.is_floating = true;
+        backend.property_ops.client_info.lock().unwrap().clear();
+
+        // Mirror the production Tags Overview drop route on this exact master.
+        jwm.sendmon(&mut backend, Some(key), Some(target));
+        jwm.move_client_to_tag(&mut backend, key, 2).unwrap();
+
+        let writes: Vec<_> = backend
+            .property_ops
+            .client_info
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|(win, _, _)| *win == window)
+            .collect();
+        assert_eq!(writes, [(window, 1, target_num), (window, 2, target_num)]);
+        assert_eq!(jwm.state.clients[key].mon, Some(target));
+        assert_eq!(jwm.state.clients[key].state.tags, 2);
+        eprintln!("BASELINE: overview drop published target active tag before requested tag");
+    }
+
+    #[test]
     fn visible_floating_sendmon_keeps_its_place_on_the_target_work_area() {
         let mut backend = DockSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
