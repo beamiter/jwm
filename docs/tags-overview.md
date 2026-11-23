@@ -1,8 +1,8 @@
 # Tags overview
 
-`Alt+O` (`toggle_tags_overview`) opens a GNOME-style grid of every tag on the
-current monitor at once, so you can see which workspace holds what instead of
-walking tags blind. Each cell carries the tag's number and a line-drawn
+`Alt+O` (`toggle_tags_overview`) opens a grid of workspaces on the selected
+monitor. With multiple displays, each display gets a labeled row, so you can
+see and act on workspaces across the desktop from one panel. Each cell carries the tag's number and a line-drawn
 wireframe of its windows; the tags currently on screen keep a persistent
 accent frame. The key is a toggle — pressing it again closes the grid without
 changing the view. The dim behind the panel fades in on the same `opened²`
@@ -28,7 +28,7 @@ like the other shell cards.
 | `Home` / `End` | jump to the first / last cell (no commit) |
 | `Page Up` / `Page Down` | jump by one grid row (no commit) |
 | `Return` / keypad `Enter` | jump to the highlighted tag and close |
-| `1`–`9` | jump straight to that tag and close |
+| `1`–`9` | jump to that tag on the highlighted display and close |
 | `Esc` | close without switching |
 | `Alt+O` | close without switching (the key is a toggle) |
 
@@ -60,10 +60,9 @@ Left/Right. Middle-click confirms the highlighted tag like `Return`.
   highlighted tag and closes, the Enter twin shared with the layout picker.
 - Dragging a window's wireframe from its cell onto another cell moves the
   window to that tag and keeps the grid open, so several windows can be
-  dealt out in one visit. The move replaces the window's whole tag mask with
-  the target tag — the dwm `tag()` semantics of `Mod1+Shift+N`, shared with
-  the same code path — so a window that sat on several tags ends up on only
-  the drop target. Dropping on the dimmed desktop or the panel's dead space
+  dealt out in one visit. The window goes straight to the selected display
+  and workspace, without switching the current view. The target tag replaces
+  the window's previous tags, just like `Mod1+Shift+N`. Dropping on the dimmed desktop or the panel's dead space
   commits nothing and simply lets the press go. A sticky window's wireframe
   is the one that cannot be dragged: it draws in every cell, but tagging it
   would rewrite a mask stickiness ignores and the next `view` would put back,
@@ -78,7 +77,7 @@ Left/Right. Middle-click confirms the highlighted tag like `Return`.
 
 ## What the cells show
 
-- The tag currently on screen draws live: its cell swaps the wireframes for
+- Each display's primary on-screen tag draws live: its cell swaps the wireframes for
   the windows' own textures, scaled into the same rectangles (the expose
   thumbnails' shader path), so a ticking clock or a moving video reads
   directly in the grid. A window whose texture is unavailable keeps its
@@ -115,23 +114,8 @@ describing a screen you are not looking at.
 
 ## Limitations
 
-- Only the current monitor's tags are shown; there is no cross-monitor grid.
-  This was re-evaluated and stays a deliberate boundary. Keeping one panel on
-  the selected monitor's `SystemUiViewport` is fine, but everything past the
-  viewport is structural: the flat `TagsGrid` schema (one `cols`, a single
-  `live` cell, one selection), the uniform `grid_geometry`, the rectangular
-  clamping keyboard walk, and a commit that targets `sel_mon` — a
-  cross-screen commit would need `focusmon`+`view`, the digit keys become
-  ambiguous across groups, and a wireframe drag is only defined within the
-  window's own monitor. A minimal design, if it ever lands: `TagsGrid` gains
-  per-monitor sections (label, cell range, per-section `cols`) plus one live
-  cell per monitor; a sectioned geometry variant stacks each monitor's
-  sub-grid with a header band inside the same panel; the selection walk
-  learns section boundaries; commit resolves a cell to (monitor, tag) and
-  runs `focusmon` then `view` when they differ; drags stay same-monitor.
-- Only the on-screen tag's cell is live; a multi-tag view live-draws its
-  primary (lowest) tag, and every other cell identifies windows by position
-  and shape, not by content.
+- Only one cell per display is live. In a multi-tag view, that cell is the
+  lowest active tag; other cells show position and shape, not live content.
 
 Confirming a tag runs the ordinary `view` path, which emits `monitor/bar`
 so occupancy subscribers see the new tag, layout knobs, and counts.
