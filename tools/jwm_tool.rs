@@ -9703,8 +9703,28 @@ mod daemon_diagnostics_tests {
     fn production_launcher_preserves_stderr_across_selfexec_and_multiple_children() {
         let dir = PrivateDir::new("selfexec");
         let script = dir.0.join("jwm");
-        fs::write(&script, "#!/bin/sh\nprintf 'before=%s\\n' \"$$\" >&2\nexec /bin/sh -c 'printf \"after=%s\\n\" \"$$\" >&2; exit 23'\n").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let source = concat!(
+            "#!/bin/sh\n",
+            "printf 'before=%s\\n' \"$$\" >&2\n",
+            "exec /bin/sh -c 'printf \"after=%s\\n\" \"$$\" >&2; exit 23'\n",
+        );
+        // Create the executable outside the parallel test process. A writer
+        // opened here could survive in another thread's forked child until
+        // that child execs, causing ETXTBSY even after fs::write returned.
+        assert!(
+            Command::new("/bin/sh")
+                .args([
+                    "-eu",
+                    "-c",
+                    r#"printf '%s' "$2" > "$1"; /bin/chmod 0755 -- "$1""#,
+                    "write-private-fixture",
+                ])
+                .arg(&script)
+                .arg(source)
+                .status()
+                .unwrap()
+                .success()
+        );
         let mut manager = JwmManager::new(script, Some("x11rb".into()));
         manager.child_stderr = Some(Capture::start(&dir.log()).unwrap());
         let mut pids = Vec::new();
