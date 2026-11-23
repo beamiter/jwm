@@ -45,7 +45,10 @@ pub fn decode(path: &Path) -> Result<DecodedImage, String> {
 struct PreparedImage(DecodedImage);
 
 type LoadResult = (Result<PreparedImage, String>, Option<PathBuf>, u64);
-type ScanResult = (Vec<PathBuf>, PathBuf, u64);
+struct ScanWorker {
+    generation: u64,
+    receiver: Receiver<(Vec<PathBuf>, PathBuf)>,
+}
 pub(crate) struct Viewer {
     pub paths: Vec<PathBuf>,
     pub index: usize,
@@ -59,7 +62,7 @@ pub(crate) struct Viewer {
     generation: u64,
     worker: Option<Receiver<LoadResult>>,
     pending: Option<(PathBuf, bool, u64)>,
-    scanner: Option<Receiver<ScanResult>>,
+    scanner: Option<ScanWorker>,
     pending_scan: Option<(PathBuf, u64)>,
 }
 impl Viewer {
@@ -139,11 +142,29 @@ impl Viewer {
             return;
         };
         let (tx, rx) = mpsc::channel();
-        self.scanner = Some(rx);
+        self.scanner = Some(ScanWorker {
+            generation,
+            receiver: rx,
+        });
         std::thread::spawn(move || {
             let entries = neighbors(&path);
-            let _ = tx.send((entries, path, generation));
+            let _ = tx.send((entries, path));
         });
+    }
+    pub fn collection_status(&self) -> String {
+        let discovering = self
+            .scanner
+            .as_ref()
+            .is_some_and(|scanner| scanner.generation == self.generation)
+            || self
+                .pending_scan
+                .as_ref()
+                .is_some_and(|(_, generation)| *generation == self.generation);
+        if discovering {
+            "正在查找同目录图片…".into()
+        } else {
+            format!("{} / {}", self.index + 1, self.paths.len())
+        }
     }
     pub fn loading(&self) -> bool {
         self.worker.is_some() || self.scanner.is_some()
@@ -194,22 +215,23 @@ impl Viewer {
         let Some(scanner) = &self.scanner else {
             return false;
         };
-        let result = match scanner.try_recv() {
+        let generation = scanner.generation;
+        let result = match scanner.receiver.try_recv() {
             Err(mpsc::TryRecvError::Empty) => return false,
             result => result,
         };
         self.scanner = None;
-        let mut changed = false;
-        if let Ok((paths, path, generation)) = result
-            && generation == self.generation
+        let current = generation == self.generation;
+        if current
+            && let Ok((paths, path)) = result
             && let Some(index) = paths.iter().position(|candidate| candidate == &path)
         {
             self.paths = paths;
             self.index = index;
-            changed = true;
         }
         self.start_scan();
-        changed
+        // Even a disconnected current scanner changes the collection status.
+        current
     }
     pub fn dimensions(&self) -> (f64, f64) {
         let Some(image) = &self.image else {
@@ -285,25 +307,26 @@ mod tests {
         let sibling = PathBuf::from("earlier.png");
         viewer.paths = vec![selected.clone()];
         let (scan_tx, scan_rx) = mpsc::channel();
-        viewer.scanner = Some(scan_rx);
+        viewer.scanner = Some(ScanWorker {
+            generation: viewer.generation,
+            receiver: scan_rx,
+        });
         deliver_decoded(&mut viewer, 3, None);
 
         assert!(viewer.poll());
         assert_eq!(viewer.dimensions(), (3., 1.));
         assert_eq!(viewer.paths.as_slice(), std::slice::from_ref(&selected));
+        assert_eq!(viewer.collection_status(), "正在查找同目录图片…");
         assert!(viewer.loading());
 
         viewer.rotation = 1;
         scan_tx
-            .send((
-                vec![sibling.clone(), selected.clone()],
-                selected.clone(),
-                viewer.generation,
-            ))
+            .send((vec![sibling.clone(), selected.clone()], selected.clone()))
             .unwrap();
         assert!(viewer.poll());
         assert_eq!(viewer.paths, [sibling, selected]);
         assert_eq!(viewer.index, 1);
+        assert_eq!(viewer.collection_status(), "2 / 2");
         assert_eq!(viewer.dimensions(), (1., 3.));
         assert!(!viewer.loading());
     }
@@ -315,7 +338,10 @@ mod tests {
         let first = PathBuf::from("new-1.png");
         let second = PathBuf::from("new-2.png");
         let (scan_tx, scan_rx) = mpsc::channel();
-        viewer.scanner = Some(scan_rx);
+        viewer.scanner = Some(ScanWorker {
+            generation: viewer.generation,
+            receiver: scan_rx,
+        });
 
         // Hold the decoder lane so open queues work without touching disk.
         let (old_tx, old_rx) = mpsc::channel();
@@ -330,15 +356,39 @@ mod tests {
         deliver_decoded(&mut viewer, 4, None);
         assert!(viewer.poll());
         assert_eq!(viewer.dimensions(), (4., 1.));
+        assert_eq!(viewer.collection_status(), "1 / 2");
 
-        scan_tx
-            .send((vec![old.clone()], old, old_generation))
-            .unwrap();
+        scan_tx.send((vec![old.clone()], old)).unwrap();
         assert!(!viewer.poll());
         assert_eq!(viewer.paths, [first, second]);
         assert_eq!(viewer.index, 0);
+        assert_eq!(viewer.collection_status(), "1 / 2");
         assert_eq!(viewer.dimensions(), (4., 1.));
         assert!(!viewer.loading());
+    }
+
+    #[test]
+    fn viewer_discovery_settles_to_one_image_on_completion_or_disconnect() {
+        let mut viewer = Viewer::new(Vec::new());
+        let selected = PathBuf::from("only.png");
+        viewer.paths = vec![selected.clone()];
+        for succeeds in [true, false] {
+            let (scan_tx, scan_rx) = mpsc::channel();
+            viewer.scanner = Some(ScanWorker {
+                generation: viewer.generation,
+                receiver: scan_rx,
+            });
+            assert_eq!(viewer.collection_status(), "正在查找同目录图片…");
+            if succeeds {
+                scan_tx
+                    .send((vec![selected.clone()], selected.clone()))
+                    .unwrap();
+            }
+            drop(scan_tx);
+            assert!(viewer.poll());
+            assert_eq!(viewer.collection_status(), "1 / 1");
+            assert!(!viewer.loading());
+        }
     }
 
     #[test]
