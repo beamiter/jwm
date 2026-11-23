@@ -224,7 +224,7 @@ glow = "0.18"
 winit = { version = "0.30.13", optional = true }
 png = "0.18"
 image = "0.25"
-ffmpeg-next = { version = "8.1.0", default-features = false, features = ["format", "software-scaling"], optional = true }
+ffmpeg-next = { version = "9.1.0", default-features = false, features = ["format", "software-scaling"], optional = true }
 jpeg-encoder = { version = "0.7.1", features = ["simd"], optional = true }
 rayon = { version = "1.12", optional = true }
 xcursor = "0.3.10"
