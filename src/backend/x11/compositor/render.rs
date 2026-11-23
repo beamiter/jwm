@@ -7069,24 +7069,21 @@ impl<C: CompositorConnection> Compositor<C> {
                     let Some(wt) = self.windows.get(&win) else {
                         continue;
                     };
-                    let is_statusbar = wt.class_name == frame_status_bar_name
-                        || wt.class_name.contains(frame_status_bar_name);
-                    if is_statusbar {
-                        continue;
-                    }
-
                     let fade = wt.fade_opacity * self.peek_opacity_for(&wt.class_name);
-                    let Some(style) = glow_settings.style_for(WindowGlowTarget {
-                        focused: focused == Some(win),
-                        fullscreen: window_prefers_direct_presentation(
-                            wt.is_fullscreen,
-                            wt.bypass_compositor,
-                        ),
-                        override_redirect: wt.is_override_redirect,
-                        shaped: wt.is_shaped,
-                        class_name: &wt.class_name,
-                        fade,
-                    }) else {
+                    let Some(style) = glow_settings.style_for_client(
+                        WindowGlowTarget {
+                            focused: focused == Some(win),
+                            fullscreen: window_prefers_direct_presentation(
+                                wt.is_fullscreen,
+                                wt.bypass_compositor,
+                            ),
+                            override_redirect: wt.is_override_redirect,
+                            shaped: wt.is_shaped,
+                            class_name: &wt.class_name,
+                            fade,
+                        },
+                        frame_status_bar_name,
+                    ) else {
                         continue;
                     };
 
@@ -8080,10 +8077,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     // this window. Besides stacking/geometry, include visual
                     // state that can change without texture damage (focus,
                     // opacity, dimming, fades, scale, rounded clipping and glow).
-                    let glow_style = if is_statusbar {
-                        None
-                    } else {
-                        glow_settings.style_for(WindowGlowTarget {
+                    let glow_style = glow_settings.style_for_client(
+                        WindowGlowTarget {
                             focused: is_focused,
                             fullscreen: window_prefers_direct_presentation(
                                 wt.is_fullscreen,
@@ -8093,8 +8088,9 @@ impl<C: CompositorConnection> Compositor<C> {
                             shaped: wt.is_shaped,
                             class_name: &wt.class_name,
                             fade: fade * peek_mul,
-                        })
-                    };
+                        },
+                        frame_status_bar_name,
+                    );
                     let glow_hash = glow_style
                         .map(WindowGlowStyle::hash_words)
                         .unwrap_or([0; 3]);
