@@ -10,6 +10,37 @@ pub(crate) struct Find {
     revisions: Option<(u64, u64)>,
 }
 impl Find {
+    /// Seed a literal query without editing or moving the source selection.
+    pub fn use_selection(&mut self, editor: &Editor) -> bool {
+        let range = editor.selection();
+        let Some(query) = editor.text.get(range.clone()) else {
+            return false;
+        };
+        if query.is_empty() || query.len() > 4096 || query.contains(['\r', '\n']) {
+            return false;
+        }
+        let mut total = 0;
+        let mut current = None;
+        for (index, (offset, _)) in editor.text.match_indices(query).enumerate() {
+            if offset == range.start {
+                current = Some(index);
+            }
+            total = index + 1;
+        }
+        // Do not move to a different result if existing non-overlap semantics
+        // would skip the chosen occurrence.
+        let Some(current) = current else {
+            return false;
+        };
+        self.query = Editor::new(query.to_owned());
+        self.query.select_all();
+        self.total = total;
+        self.current = current;
+        self.revisions = Some((editor.revision, self.query.revision));
+        self.enabled = true;
+        true
+    }
+
     pub fn sync(&mut self, editor: &mut Editor) {
         let revisions = (editor.revision, self.query.revision);
         if self.revisions == Some(revisions) {
@@ -95,6 +126,41 @@ impl Find {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn find_selection_keeps_the_selected_unicode_occurrence() {
+        let term = "编译🙂Error";
+        let text = format!("{term} 编译🙂error {term}");
+        let mut editor = Editor::new(text);
+        let second = editor.text.rfind(term).unwrap();
+        editor.anchor = second + term.len();
+        editor.cursor = second;
+        let mut find = Find::default();
+        find.query.insert("previous");
+        find.sync(&mut editor);
+        assert!(find.use_selection(&editor));
+        assert_eq!((find.current, find.total), (1, 2));
+        assert_eq!(find.query.text, term);
+        assert_eq!(editor.cursor, second);
+        assert_eq!(editor.anchor, second + term.len());
+        find.navigate(&mut editor, false);
+        assert_eq!(editor.selection(), 0..term.len());
+        assert_eq!(editor.revision, 0);
+    }
+
+    #[test]
+    fn find_selection_ignores_empty_multiline_and_overlapping_ranges() {
+        let mut editor = Editor::new("ababa\r\nend".into());
+        let mut find = Find::default();
+        find.query.insert("end");
+        for range in [0..0, 4..8, 2..5] {
+            editor.select(range.clone());
+            assert!(!find.use_selection(&editor));
+            assert_eq!(editor.selection(), range);
+            assert_eq!(find.query.text, "end");
+            assert!(!find.enabled);
+        }
+    }
+
     #[test]
     fn unicode_wrap_empty_missing_and_edits() {
         let mut editor = Editor::new("前🙂猫 后🙂猫".into());
