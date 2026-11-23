@@ -4,6 +4,7 @@
 //! ranges, fade modulation, and damage reach stay identical across X11 and
 //! Wayland.
 
+use crate::backend::compositor_common::border_style::counts_for_smart_borders;
 use crate::backend::compositor_common::rules::contains_ignore_case;
 use crate::config::BehaviorConfig;
 
@@ -71,6 +72,22 @@ impl<'a> WindowGlowSettings<'a> {
             return 0;
         }
         (radius.ceil() as i32).saturating_add(WINDOW_GLOW_DAMAGE_PAD)
+    }
+
+    /// Share the client/chrome boundary between drawing and blur dependencies.
+    pub(crate) fn style_for_client(
+        self,
+        target: WindowGlowTarget<'_>,
+        status_bar_name: &str,
+    ) -> Option<WindowGlowStyle> {
+        if !counts_for_smart_borders(
+            target.class_name,
+            status_bar_name,
+            target.override_redirect,
+        ) {
+            return None;
+        }
+        self.style_for(target)
     }
 
     /// Resolve one window's effective style, or suppress the pass entirely.
@@ -191,6 +208,25 @@ mod tests {
         let mut shaped = target("Frost");
         shaped.shaped = true;
         assert!(settings.style_for(shaped).is_none());
+    }
+
+    #[test]
+    fn client_glow_excludes_panel_chrome_and_unmanaged_overlays() {
+        let mut settings = make_settings(&[], &[]);
+        settings.focused_only = false;
+        let mut panel = target("jwm-xilem_bar");
+        panel.focused = false;
+        assert!(settings.style_for_client(panel, "xilem_bar").is_none());
+
+        let mut popup = target("app-with-popup");
+        popup.focused = false;
+        popup.override_redirect = true;
+        assert!(settings.style_for_client(popup, "xilem_bar").is_none());
+
+        let mut normal = target("Frost");
+        normal.focused = false;
+        assert!(settings.style_for_client(normal, "xilem_bar").is_some());
+        assert!(settings.style_for_client(normal, "").is_some());
     }
 
     #[test]

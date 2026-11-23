@@ -3811,14 +3811,17 @@ impl WaylandCompositor {
                     if wt.gl_texture.is_none() {
                         continue;
                     }
-                    let Some(style) = glow_settings.style_for(WindowGlowTarget {
-                        focused: focused == Some(win_id),
-                        fullscreen: wt.is_fullscreen,
-                        override_redirect: false,
-                        shaped: wt.is_shaped,
-                        class_name: &wt.class_name,
-                        fade: wt.fade_opacity,
-                    }) else {
+                    let Some(style) = glow_settings.style_for_client(
+                        WindowGlowTarget {
+                            focused: focused == Some(win_id),
+                            fullscreen: wt.is_fullscreen,
+                            override_redirect: self.is_unmanaged_overlay(win_id),
+                            shaped: wt.is_shaped,
+                            class_name: &wt.class_name,
+                            fade: wt.fade_opacity,
+                        },
+                        frame_status_bar_name,
+                    ) else {
                         continue;
                     };
 
@@ -3900,14 +3903,17 @@ impl WaylandCompositor {
                     if wt.gl_texture.is_none() {
                         continue;
                     }
-                    let Some(style) = glow_settings.style_for(WindowGlowTarget {
-                        focused: focused == Some(win_id),
-                        fullscreen: wt.is_fullscreen,
-                        override_redirect: false,
-                        shaped: wt.is_shaped,
-                        class_name: &wt.class_name,
-                        fade: wt.fade_opacity,
-                    }) else {
+                    let Some(style) = glow_settings.style_for_client(
+                        WindowGlowTarget {
+                            focused: focused == Some(win_id),
+                            fullscreen: wt.is_fullscreen,
+                            override_redirect: self.is_unmanaged_overlay(win_id),
+                            shaped: wt.is_shaped,
+                            class_name: &wt.class_name,
+                            fade: wt.fade_opacity,
+                        },
+                        frame_status_bar_name,
+                    ) else {
                         continue;
                     };
                     any_visible = true;

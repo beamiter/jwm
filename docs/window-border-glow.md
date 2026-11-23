@@ -28,7 +28,8 @@ The built-in luminance profile intentionally makes the top/right edge and the
 upper-right hotspot brighter, with a weaker lower-left hotspot. Focused-only is
 the default so a single active client reads as the light source.
 
-Fullscreen, shaped, and X11 override-redirect surfaces are skipped. In
-particular, suppressing the effect for fullscreen clients preserves direct
+Fullscreen and shaped windows, the status bar, and unmanaged overlays
+(such as popup menus and input-method candidates) are skipped. Suppressing
+the effect for fullscreen clients preserves direct
 scanout/unredirect eligibility. Partial-damage regions are expanded by the glow
 radius, and backdrop-blur cache keys include the effective glow style.
