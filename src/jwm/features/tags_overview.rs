@@ -1034,9 +1034,8 @@ mod tests {
         }
         let (_, frame) = tags_grid::presented_cell(&grid.cells[source], false);
         let outline = overview.cells[source].windows[0];
-        let start = center(crate::backend::compositor_common::layout_strip::window_rect(
-            frame, outline,
-        ));
+        let start =
+            center(crate::backend::compositor_common::layout_strip::window_rect(frame, outline));
         let away = center(grid.cells[0].cell);
         let back = center(grid.cells[source].cell);
 
