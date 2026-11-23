@@ -109,6 +109,24 @@ try {
   await page.getByRole('button', { name: 'Default restored 0' }).waitFor();
   assert.equal(await failure.count(), 0);
   console.log('PASS: component render error and missing default export are visible and recover on save');
+  const initMessage = 'component initialization failed';
+  const appPath = path.join(root, 'src/App.tsx');
+  await writeFile(appPath,
+    'throw new Error("component initialization failed"); export default function App(){return <div>not mounted</div>;}');
+  // Start from a fresh document, with no state or overlay from the preceding mode.
+  const initPage = await browser.newPage();
+  const observedError = initPage.waitForEvent('pageerror', {
+    predicate: error => error.message === initMessage, timeout: 10000,
+  });
+  await initPage.goto(run.url);
+  await observedError;
+  assert.equal(await initPage.locator('#root').textContent(), '');
+  assert.equal(await initPage.locator('vite-error-overlay').count(), 0);
+  assert.equal(await initPage.getByRole('alert').count(), 0);
+  console.log('PASS (baseline defect): module initialization exception visible to pageerror but preview surface is blank');
+  await writeFile(appPath, component('Initialization fixed'));
+  await initPage.getByRole('button', { name: 'Initialization fixed 0' }).waitFor();
+  await initPage.close();
   await stop(run);
   assert.equal(await readFile(path.join(root, '.env'), 'utf8'), 'VITE_ENV_SECRET=env-secret-marker');
   await assert.rejects(readFile(path.join(root, 'MUST_NOT_RUN')));
