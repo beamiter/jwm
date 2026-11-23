@@ -544,7 +544,13 @@ impl WMController for Jwm {
         }
     }
 
-    fn on_key_release(&mut self, backend: &mut dyn Backend, keycode: u8, state_after: Option<u16>) {
+    fn on_key_release(
+        &mut self,
+        backend: &mut dyn Backend,
+        keycode: u8,
+        state_after: Option<u16>,
+        _time: u32,
+    ) {
         // Only the window switcher listens to releases: letting go of the
         // modifier the gesture started with commits the highlighted row.
         if !self.features.system_ui.is_window_switcher() {
@@ -17094,8 +17100,8 @@ impl EventHandler for Jwm {
             BackendEvent::KeyRelease {
                 keycode,
                 state_after,
-                ..
-            } => self.on_key_release(backend, keycode, state_after),
+                time,
+            } => self.on_key_release(backend, keycode, state_after, time),
             BackendEvent::EnterNotify {
                 window,
                 subwindow: _,
