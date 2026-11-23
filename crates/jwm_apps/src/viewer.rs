@@ -290,7 +290,7 @@ mod tests {
 
         assert!(viewer.poll());
         assert_eq!(viewer.dimensions(), (3., 1.));
-        assert_eq!(viewer.paths, [selected.clone()]);
+        assert_eq!(viewer.paths.as_slice(), std::slice::from_ref(&selected));
         assert!(viewer.loading());
 
         viewer.rotation = 1;

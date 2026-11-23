@@ -19,7 +19,7 @@ use winit::{
 
 pub(crate) enum Document {
     Notes(Box<Notes>),
-    Image(Viewer),
+    Image(Box<Viewer>),
 }
 #[derive(Clone, PartialEq)]
 enum Action {
@@ -137,7 +137,7 @@ impl App {
         let document = if notes {
             Document::Notes(Box::new(Notes::new(paths.into_iter().next())?))
         } else {
-            Document::Image(Viewer::new(paths))
+            Document::Image(Box::new(Viewer::new(paths)))
         };
         Ok(Self {
             document,
