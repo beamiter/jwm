@@ -168,6 +168,7 @@ pub(crate) fn switcher_press(button: u8) -> SwitcherPress {
 /// restores, a "screen N" marker on the other heads.
 pub(crate) fn switcher_row(entry: &SwitcherEntry) -> String {
     crate::jwm::features::launcher::window_row(&crate::jwm::features::launcher::WindowEntry {
+        client_key: None,
         id: entry.window,
         title: entry.title.clone(),
         class: entry.class.clone(),

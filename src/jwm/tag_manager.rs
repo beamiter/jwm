@@ -56,6 +56,7 @@ impl Jwm {
             client.state.tags = target_tag;
         }
         self.retarget_client_spawn_pin(backend, client_key);
+        self.refresh_launcher_window_location(client_key);
         let _ = self.setclienttagprop(backend, client_key);
 
         self.focus(backend, None)?;
@@ -274,6 +275,7 @@ impl Jwm {
         if explicit_tags.is_some_and(|tags| tags != active_tags) {
             self.retarget_client_spawn_pin(backend, client_key);
         }
+        self.refresh_launcher_window_location(client_key);
         let _ = self.setclienttagprop(backend, client_key);
 
         if is_hidden {
@@ -379,6 +381,66 @@ mod tests {
                 .is_some(),
             "retagging must hide the actual source window even if selection moved"
         );
+    }
+
+    #[test]
+    fn an_open_launcher_tracks_window_moves_without_losing_its_selection() {
+        use crate::jwm::features::SystemUiState;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let left = jwm.state.monitor_order[0];
+        let right = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(left);
+        let mut add = |id, mon| {
+            let mut client = WMClient::new(WindowId::from_raw(id));
+            client.mon = Some(mon);
+            client.name = "Quarterly notes".into();
+            client.state.tags = 1;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, mon);
+            key
+        };
+        add(0x1616, left);
+        let target = add(0x1717, right);
+
+        let windows = jwm.launcher_window_snapshot();
+        jwm.features.system_ui = SystemUiState::open_launcher(Default::default(), windows, false);
+        for ch in "/quarterly".chars() {
+            jwm.features.system_ui.push_char(ch);
+        }
+        jwm.features.system_ui.move_selection(1);
+        let initial = jwm.features.system_ui.overlay_parts();
+        assert_eq!(jwm.features.system_ui.selected_window(), Some(0x1717));
+        assert_eq!(initial.items.len(), 2);
+        let right_num = jwm.state.monitors[right].num;
+        assert!(initial.items[1].ends_with(&format!("[screen {right_num}]")));
+
+        jwm.system_ui_dirty = false;
+        jwm.move_client_to_tag(&mut backend, target, 2).unwrap();
+        assert!(jwm.system_ui_dirty);
+        let retagged = jwm.features.system_ui.overlay_parts();
+        assert!(retagged.items[1].ends_with(&format!("[tag 2, screen {right_num}]")));
+
+        jwm.system_ui_dirty = false;
+        jwm.move_client_to_monitor_tag(&mut backend, target, left, 4)
+            .unwrap();
+        assert!(jwm.system_ui_dirty);
+        let moved = jwm.features.system_ui.overlay_parts();
+        assert!(moved.items[1].ends_with("[tag 3]"));
+        assert_eq!(moved.items[0], initial.items[0]);
+        assert_eq!(moved.selected, initial.selected);
+        assert_eq!(moved.query, initial.query);
+        assert_eq!(jwm.features.system_ui.selected_window(), Some(0x1717));
+
+        assert!(jwm.activate_launcher_selection(&mut backend).unwrap());
+        assert_eq!(jwm.state.sel_mon, Some(left));
+        assert_eq!(jwm.state.monitors[left].get_active_tags(), 4);
+        assert_eq!(jwm.get_selected_client_key(), Some(target));
     }
 
     #[derive(Default)]
