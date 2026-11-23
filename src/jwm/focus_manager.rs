@@ -575,7 +575,10 @@ impl Jwm {
 
     /// The screen a parked or minimized scratchpad will open on, independent
     /// of its current Dock or saved placement.
-    pub(crate) fn scratchpad_reveal_monitor(&self, source: Option<MonitorKey>) -> Option<MonitorKey> {
+    pub(crate) fn scratchpad_reveal_monitor(
+        &self,
+        source: Option<MonitorKey>,
+    ) -> Option<MonitorKey> {
         self.state
             .sel_mon
             .filter(|&monitor| self.state.monitors.contains_key(monitor))
