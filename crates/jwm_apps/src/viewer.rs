@@ -1,6 +1,9 @@
 use crate::neighbors;
 use cairo::{Format, ImageSurface};
 use std::{
+    fs::{self, File, OpenOptions},
+    io::BufReader,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
 };
@@ -11,12 +14,36 @@ pub struct DecodedImage {
     pub height: u32,
 }
 
+fn open_image_file(path: &Path) -> Result<File, String> {
+    let ordinary_file = |metadata: fs::Metadata| {
+        if metadata.is_file() {
+            Ok(())
+        } else {
+            Err("请选择普通图片文件。".to_string())
+        }
+    };
+    ordinary_file(fs::metadata(path).map_err(|error| error.to_string())?)?;
+    // A replacement between metadata and open may no longer be a file.
+    // In particular, opening a FIFO without a writer must not stall this
+    // window's single decoder. Validate the already opened descriptor.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    ordinary_file(file.metadata().map_err(|error| error.to_string())?)?;
+    Ok(file)
+}
+
 /// Decoding and directory scanning run off the UI thread. Cap allocations so
 /// a malformed image cannot exhaust the desktop's memory.
 pub fn decode(path: &Path) -> Result<DecodedImage, String> {
     use image::ImageDecoder;
-    let mut reader = image::ImageReader::open(path)
-        .map_err(|error| error.to_string())?
+    let mut reader = image::ImageReader::new(BufReader::new(open_image_file(path)?));
+    if let Ok(format) = image::ImageFormat::from_path(path) {
+        reader.set_format(format);
+    }
+    let mut reader = reader
         .with_guessed_format()
         .map_err(|error| error.to_string())?;
     let mut limits = image::Limits::default();
@@ -419,6 +446,55 @@ mod tests {
             .flat_map(u32::to_ne_bytes)
             .collect::<Vec<_>>();
         assert_eq!(&*cairo.data().unwrap(), expected.as_slice());
+    }
+
+    #[test]
+    fn a_non_image_path_does_not_block_the_next_valid_image() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let folder =
+            std::env::temp_dir().join(format!("jwm-viewer-file-types-{}", std::process::id()));
+        fs::create_dir(&folder).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(folder.clone());
+        let pipe = folder.join("not-a-picture.png");
+        assert!(
+            Command::new("/usr/bin/mkfifo")
+                .arg(&pipe)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let picture = folder.join("known-good.png");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([20, 40, 60, 255]))
+            .save(&picture)
+            .unwrap();
+        let link = folder.join("extensionless");
+        symlink(&picture, &link).unwrap();
+
+        let mut viewer = Viewer::new(vec![pipe, link]);
+        let settle = |viewer: &mut Viewer| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while viewer.loading() && Instant::now() < deadline {
+                viewer.poll();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(!viewer.loading(), "viewer worker did not settle");
+        };
+        settle(&mut viewer);
+        assert!(viewer.image.is_none());
+        assert!(viewer.message.contains("请选择普通图片文件。"));
+
+        viewer.navigate(1);
+        settle(&mut viewer);
+        assert_eq!(viewer.dimensions(), (3., 2.));
     }
 
     #[test]
