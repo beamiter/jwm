@@ -529,7 +529,9 @@ mod tests {
             cancellation: None,
             next_sample: now,
             pointer_released: true,
-            finish: final_sample.then_some(ScrollFinish::Complete { to_clipboard: false }),
+            finish: final_sample.then_some(ScrollFinish::Complete {
+                to_clipboard: false,
+            }),
             final_sample,
             match_failed: false,
         }
