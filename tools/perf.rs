@@ -1353,7 +1353,17 @@ pub fn run_compare(baseline: &Path, candidate: &Path, json: bool) -> io::Result<
     let result = (|| -> Result<perf_contract::CompareReport, String> {
         let baseline = load_baseline(baseline)?;
         let candidate = load_baseline(candidate)?;
-        perf_contract::compare(&baseline, &candidate, &default_budgets())
+        let report = perf_contract::compare(&baseline, &candidate, &default_budgets())?;
+        // The contract reports whether any evaluated budget was violated. The
+        // CLI gate also needs at least one evaluated budget to claim success.
+        if report
+            .verdicts
+            .iter()
+            .all(|verdict| verdict.outcome == VerdictOutcome::NotComparable)
+        {
+            return Err("no budgeted metrics could be evaluated".into());
+        }
+        Ok(report)
     })();
 
     match result {

@@ -155,3 +155,101 @@ fn daemon_retains_private_child_stderr_and_actual_exit_code() {
     let daemon_log = fs::read_to_string(home.join(".local/share/jwm/jwm_daemon.log")).unwrap();
     assert!(daemon_log.contains("exit_code=37"), "{daemon_log}");
 }
+
+fn perf_compare(
+    runtime: &Path,
+    baseline_scenarios: serde_json::Value,
+    candidate_scenarios: serde_json::Value,
+    json: bool,
+) -> Output {
+    let snapshot = |scenarios| {
+        serde_json::json!({
+            "schema_version": 1,
+            "recorded_at": "2026-07-25T00:00:00Z",
+            "jwm_version": "0.2.0",
+            "label": {
+                "cpu": "Test CPU",
+                "gpu": "Test GPU",
+                "driver": "555.0",
+                "kernel": "6.17.0",
+                "backend": "xcb",
+                "renderer_api": "glx/opengl",
+                "resolution": "2560x1440",
+                "config_fingerprint": "abcd1234"
+            },
+            "scenarios": scenarios
+        })
+    };
+    let baseline = runtime.join("baseline.json");
+    let candidate = runtime.join("candidate.json");
+    fs::write(&baseline, snapshot(baseline_scenarios).to_string()).unwrap();
+    fs::write(&candidate, snapshot(candidate_scenarios).to_string()).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_jwm-tool"));
+    command
+        .args(["perf", "compare"])
+        .arg(baseline)
+        .arg(candidate);
+    if json {
+        command.arg("--json");
+    }
+    command.output().expect("run jwm-tool perf compare")
+}
+
+#[test]
+fn perf_compare_refuses_when_no_budget_was_evaluated() {
+    use serde_json::json;
+    let runtime = RuntimeDir::new("perf-no-evidence");
+    let skipped = json!({
+        "allocation_steady": {"status": "skipped", "reason": "counter disabled"}
+    });
+    let output = perf_compare(runtime.path(), skipped.clone(), skipped, false);
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("within budgets"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("comparison refused: no budgeted metrics could be evaluated")
+    );
+
+    let unbudgeted = json!({
+        "steady_frame": {"status": "recorded", "metrics": {"sample_seconds": 1.0}}
+    });
+    for scenarios in [json!({}), unbudgeted] {
+        let output = perf_compare(runtime.path(), scenarios.clone(), scenarios, true);
+        assert!(!output.status.success());
+        let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            verdict,
+            json!({"comparable": false, "refusal": "no budgeted metrics could be evaluated"})
+        );
+    }
+}
+
+#[test]
+fn perf_compare_preserves_partial_pass_and_missing_required_metric_failure() {
+    use serde_json::json;
+    let runtime = RuntimeDir::new("perf-partial-evidence");
+    let recorded = json!({
+        "steady_frame": {"status": "recorded", "metrics": {"frame_time_p95_ms": 2.0}},
+        "allocation_steady": {"status": "skipped", "reason": "counter disabled"}
+    });
+    let output = perf_compare(runtime.path(), recorded.clone(), recorded.clone(), true);
+    assert!(output.status.success(), "{output:?}");
+    let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["comparable"], true);
+    assert_eq!(verdict["report"]["passed"], true);
+
+    // Loss of a required measurement is still a violation, even when no
+    // paired measurement remains. Optional allocation metrics stay n/a.
+    let output = perf_compare(runtime.path(), recorded, json!({}), true);
+    assert!(!output.status.success());
+    let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["comparable"], true);
+    assert_eq!(verdict["report"]["passed"], false);
+    assert!(
+        verdict["report"]["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["metric"] == "frame_time_p95_ms" && row["outcome"] == "violation")
+    );
+}
