@@ -165,9 +165,9 @@ dependencies = [
 
 [[package]]
 name = "cairo-rs"
-version = "0.22.9"
+version = "0.22.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df683f1d30b457964673a5541a4603208ef95ab6873d2a55871895cf310f3b56"
+checksum = "62bf7f026ae17fe688938438ec1da2b69f69832f1428a17258f6ee9a7f6e1815"
 dependencies = [
  "bitflags 2.13.2",
  "cairo-sys-rs 0.22.9",
@@ -1353,7 +1353,7 @@ name = "jwm_shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cairo-rs 0.22.9",
+ "cairo-rs 0.22.11",
  "jwm_ipc_transport",
  "libc",
  "log",
@@ -1844,7 +1844,7 @@ version = "0.22.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd199a0fef965b3ebda91a929a1ab5e7729538882c68e8de38e1904d2e094757"
 dependencies = [
- "cairo-rs 0.22.9",
+ "cairo-rs 0.22.11",
  "glib 0.22.9",
  "pango 0.22.9",
  "pangocairo-sys",
@@ -2453,9 +2453,9 @@ dependencies = [
 
 [[package]]
 name = "tao"
-version = "0.37.2"
+version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5777b06fe6435126ae8d816eba269e050e1e10d302cf5461e9c49eccabc3548"
+checksum = "02ca9c0ce2a2fd70dc4ef4449ca5e8d30e6fa0db111cd8008594602a06a68371"
 dependencies = [
  "bitflags 2.13.2",
  "block2",
@@ -2508,7 +2508,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
- "cairo-rs 0.22.9",
+ "cairo-rs 0.22.11",
  "glow",
  "glutin",
  "gtk",
@@ -3378,7 +3378,7 @@ version = "0.9.1"
 dependencies = [
  "alsa",
  "anyhow",
- "cairo-rs 0.22.9",
+ "cairo-rs 0.22.11",
  "chrono",
  "flexi_logger",
  "image",
