@@ -205,12 +205,14 @@ With an **empty query the list is applications only**. The promise that the
 top row is one `Enter` from the application you use most is worth more than a
 window list you did not ask for; one keystroke brings the windows in.
 
-A row says where its window is only when that is somewhere else — `[tag 3]`,
-`[minimised]`, `[screen 1]` for one that is on the other monitor and plainly
-visible there — so it answers "will `Enter` move me somewhere" before you
-press it. A window matches on its title, its class **or** its instance, but
-never across two of them: `foxgithub` finds nothing, because a match spanning
-`GitHub` and `firefox` is a match in neither.
+A row says what will change when you press `Enter`: `[tag 3]` for a
+different workspace, `[minimised]` for a window that needs restoring, and
+`[screen 1]` for a different monitor. These combine when needed, for example
+`[tag 3, screen 1]` or `[minimised, screen 1]`.
+
+A window matches on its title, its class **or** its instance, but never across
+two of them: `foxgithub` finds nothing, because a match spanning `GitHub` and
+`firefox` is a match in neither.
 
 Two kinds of window are deliberately absent: one hidden by the scratchpad
 (it sits on no tag at all, and revealing it means duplicating the

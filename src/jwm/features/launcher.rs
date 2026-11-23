@@ -910,9 +910,10 @@ pub fn window_row(entry: &WindowEntry) -> String {
             Some(tag) => where_it_is.push(format!("tag {}", tag + 1)),
             None => where_it_is.push("hidden".to_string()),
         }
-    } else if !entry.on_selected_monitor {
-        // Visible, but on the other head. Naming its tag would name the one
-        // the user is already looking at.
+    }
+    // The destination screen matters even when its window first needs to be
+    // unminimised or its workspace switched.
+    if !entry.on_selected_monitor {
         where_it_is.push(format!("screen {}", entry.monitor));
     }
     let elsewhere = if where_it_is.is_empty() {
@@ -1933,13 +1934,18 @@ mod tests {
         assert!(row.contains("screen 1"), "{row}");
         assert!(!row.contains("tag") && !row.contains("hidden"));
 
-        // Off-tag on its own monitor still names the tag.
         let off_tag = WindowEntry {
             visible: false,
             tag: Some(2),
             ..elsewhere.clone()
         };
-        assert!(window_row(&off_tag).contains("tag 3"));
+        assert!(window_row(&off_tag).ends_with("[tag 3, screen 1]"));
+
+        let minimised = WindowEntry {
+            minimized: true,
+            ..off_tag
+        };
+        assert!(window_row(&minimised).ends_with("[minimised, screen 1]"));
     }
 
     #[test]
