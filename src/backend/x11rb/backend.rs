@@ -3295,7 +3295,7 @@ mod event_source {
                 }),
                 XEvent::KeyRelease(e) => Some(BackendEvent::KeyRelease {
                     keycode: e.detail,
-                    state: e.state.bits(),
+                    state_after: None,
                     time: e.time,
                 }),
                 XEvent::MapRequest(e) => {

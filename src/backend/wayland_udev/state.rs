@@ -8878,7 +8878,7 @@ mod protocol_hardening_tests {
         });
         server.state.push_event(BackendEvent::KeyRelease {
             keycode: 38,
-            state: 0,
+            state_after: Some(0),
             time: 2,
         });
         server.state.push_event(BackendEvent::WmKeyboardShortcut {

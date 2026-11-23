@@ -2247,7 +2247,9 @@ pub enum BackendEvent {
     },
     KeyRelease {
         keycode: u8,
-        state: u16,
+        /// Native Wayland reports modifiers after the key event. Core X11's
+        /// mask is from before the release and is not usable for this.
+        state_after: Option<u16>,
         time: u32,
     },
 

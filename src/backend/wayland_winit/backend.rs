@@ -2392,7 +2392,7 @@ fn process_input_event_windowed<B: InputBackend>(
                         .lock_safe()
                         .push_back(BackendEvent::KeyRelease {
                             keycode: keycode_u8,
-                            state: mods_state,
+                            state_after: Some(mods_state),
                             time: time.millis(),
                         });
                 }

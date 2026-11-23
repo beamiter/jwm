@@ -100,13 +100,11 @@ pub(crate) fn initial_selection(
 }
 
 /// Whether a key release ends the gesture, given the modifiers `held` when
-/// the panel opened. A gesture modifier the keysym table knows commits when
-/// it was held. Any *other* modifier keysym — `Meta_L` for a Win key under
-/// `altwin:meta_win`, `Hyper_L`, the macintosh layouts' Meta on Mod1 — is
-/// decided by the live modifier mask through `live_mods`, which no layout
-/// can disguise: a modifier held at open that is no longer down commits.
-/// Non-modifier keys never change the mask and never commit, so the mask is
-/// only queried for a modifier keysym; a failed query commits nothing.
+/// the panel opened. A named gesture modifier commits only when its
+/// logical mask is no longer down: another physical key may still hold it.
+/// Without a post-release mask, retain the named keysym fallback.
+/// For alternate modifier keysyms, only the mask can decide. Unrelated
+/// named modifiers and ordinary keys never ask for a mask.
 pub(crate) fn release_commits(
     held: Mods,
     keysym: u32,
@@ -116,7 +114,7 @@ pub(crate) fn release_commits(
         return false;
     }
     if let Some(modifier) = modifier_of_keysym(keysym) {
-        return held.contains(modifier);
+        return held.contains(modifier) && live_mods().is_none_or(|down| !down.contains(modifier));
     }
     if !(keys::KEY_Shift_L..=keys::KEY_Hyper_R).contains(&keysym) {
         return false;
@@ -444,9 +442,12 @@ mod tests {
     #[test]
     fn a_release_commits_by_keysym_or_failing_that_by_the_live_mask() {
         let held = Mods::SUPER;
-        let never = || -> Option<Mods> { panic!("the mask is not queried for a known keysym") };
-        // A known gesture modifier decides on its own.
-        assert!(release_commits(held, keys::KEY_Super_L, never));
+        let never = || -> Option<Mods> { panic!("an unrelated release must not query the mask") };
+        // A known gesture modifier uses the post-release mask when available.
+        assert!(release_commits(held, keys::KEY_Super_L, || Some(
+            Mods::empty()
+        )));
+        assert!(release_commits(held, keys::KEY_Super_L, || None));
         assert!(!release_commits(held, keys::KEY_Alt_L, never));
         // A non-modifier key never commits and never costs a query.
         assert!(!release_commits(held, keys::KEY_Tab, never));
@@ -471,6 +472,22 @@ mod tests {
         // No answer from the server is no commit; nothing held is no commit.
         assert!(!release_commits(held, keys::KEY_Meta_L, || None));
         assert!(!release_commits(Mods::empty(), keys::KEY_Super_L, never));
+    }
+
+    #[test]
+    fn releasing_one_of_two_physical_modifier_keys_keeps_the_switcher_open() {
+        let alt = Mods::ALT;
+        assert!(!release_commits(alt, keys::KEY_Alt_L, || Some(alt)));
+        assert!(release_commits(
+            alt,
+            keys::KEY_Alt_R,
+            || Some(Mods::empty())
+        ));
+
+        // Distinct gesture modifiers are not interchangeable. Releasing
+        // Control still commits when Alt remains held.
+        let chord = Mods::ALT | Mods::CONTROL;
+        assert!(release_commits(chord, keys::KEY_Control_L, || Some(alt)));
     }
 
     #[test]
