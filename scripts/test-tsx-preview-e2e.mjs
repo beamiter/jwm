@@ -19,7 +19,7 @@ const component = label => `import {useState} from 'react'; export default funct
 
 async function start(extra = []) {
   const child = spawn(process.execPath, [tool, '--project', root, '--trust-project', ...extra], {
-    env: { ...process.env, VITE_SHOULD_NOT_LEAK: 'parent-secret-marker' }, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, VITE_SHOULD_NOT_LEAK: 'parent-secret-marker', DEBUG: 'vite:hmr' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   children.add(child);
   let output = '';
@@ -63,6 +63,24 @@ try {
   const cachesBefore = new Set((await readdir(tmpdir())).filter(name => name.startsWith('jwm-tsx-preview-')));
   browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}) });
   const page = await browser.newPage();
+  const events = [];
+  const record = (name, detail = '') => {
+    events.push([Date.now(), name, detail]);
+    if (events.length > 140) events.shift();
+  };
+  page.on('console', msg => { if (msg.text().startsWith('[vite]')) record('vite console', msg.text()); });
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) record('navigation'); });
+  page.on('websocket', ws => {
+    record('websocket opening');
+    ws.on('framereceived', ({ payload }) => {
+      try { const data = JSON.parse(payload); record('HMR payload', data.type); } catch {}
+    });
+    ws.on('close', () => record('websocket close'));
+  });
+  page.on('response', response => {
+    const url = new URL(response.url());
+    if (url.pathname === '/src/App.tsx') record('component response', response.status());
+  });
   const errors = [];
   page.on('pageerror', error => errors.push(String(error)));
   let run = await start();
@@ -88,20 +106,32 @@ try {
   await page.getByRole('button', { name: 'Updated 0' }).waitFor();
   await page.getByRole('button').click();
   await page.getByRole('button', { name: 'Updated 1' }).waitFor();
-  await writeFile(path.join(root, 'src/App.tsx'), 'export default function Broken(){return <div>');
-  await page.locator('vite-error-overlay').waitFor();
-  await writeFile(path.join(root, 'src/App.tsx'), component('Recovered'));
-  await page.getByRole('button', { name: 'Recovered 0' }).waitFor();
-  await writeFile(path.join(root, 'src/App.tsx'),
-    'export default function Broken(){throw new Error("<mark>render failure</mark>");}');
   const failure = page.getByRole('alert');
-  await failure.getByRole('heading', { name: 'Component preview failed' }).waitFor();
-  await failure.getByText('<mark>render failure</mark>', { exact: true }).waitFor();
-  assert.equal(await failure.locator('mark').count(), 0, 'error details must be rendered as plain text');
-  await failure.getByText('Fix the component and save to try again.').waitFor();
-  await writeFile(path.join(root, 'src/App.tsx'), component('Runtime recovered'));
-  await page.getByRole('button', { name: 'Runtime recovered 0' }).waitFor();
-  assert.equal(await failure.count(), 0);
+  for (let iteration = 1; iteration <= 12; iteration++) {
+    try {
+      await writeFile(path.join(root, 'src/App.tsx'), 'export default function Broken(){return <div>');
+      await page.locator('vite-error-overlay').waitFor();
+      await writeFile(path.join(root, 'src/App.tsx'), component('Recovered'));
+      await page.getByRole('button', { name: 'Recovered 0' }).waitFor();
+      await writeFile(path.join(root, 'src/App.tsx'),
+        'export default function Broken(){throw new Error("<mark>render failure</mark>");}');
+      await failure.getByRole('heading', { name: 'Component preview failed' }).waitFor();
+      await failure.getByText('<mark>render failure</mark>', { exact: true }).waitFor();
+      assert.equal(await failure.locator('mark').count(), 0, 'error details must be rendered as plain text');
+      await failure.getByText('Fix the component and save to try again.').waitFor();
+      await writeFile(path.join(root, 'src/App.tsx'), component('Runtime recovered'));
+      await page.getByRole('button', { name: 'Runtime recovered 0' }).waitFor();
+      assert.equal(await failure.count(), 0);
+      console.log('PASS: syntax → recovery → render error → recovery iteration', iteration);
+    } catch (error) {
+      console.log('DIAGNOSTIC iteration', iteration);
+      console.log('DIAGNOSTIC recent events', JSON.stringify(events));
+      console.log('DIAGNOSTIC page errors', JSON.stringify(errors.slice(-8)));
+      console.log('DIAGNOSTIC root', await page.locator('#root').textContent({ timeout: 2000 }).catch(() => '(unavailable)'));
+      console.log('DIAGNOSTIC server logs', run.logs().split('\n').slice(-60).join('\n'));
+      throw error;
+    }
+  }
 
   await writeFile(path.join(root, 'src/App.tsx'), 'export function NamedOnly(){return <p>Named only</p>;}');
   await failure.getByText('Export the preview component as default.').waitFor();
