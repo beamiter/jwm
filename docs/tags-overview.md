@@ -54,16 +54,17 @@ Left/Right. Middle-click confirms the highlighted tag like `Return`.
   the sliver of gap the lift now covers. Where the lift overhangs a
   neighbour, the card painted last owns the pixel, which is again what is
   drawn on top.
-- Clicking a cell — press and release on the same cell — jumps to that tag
-  and closes, exactly like `Return`.
+- Clicking a cell without dragging jumps to that tag and closes, exactly
+  like `Return`.
 - Middle-click anywhere on the grab (with a highlight) jumps to the
   highlighted tag and closes, the Enter twin shared with the layout picker.
 - Dragging a window's wireframe from its cell onto another cell moves the
   window to that tag and keeps the grid open, so several windows can be
   dealt out in one visit. The window goes straight to the selected display
   and workspace, without switching the current view. The target tag replaces
-  the window's previous tags, just like `Mod1+Shift+N`. Dropping on the dimmed desktop or the panel's dead space
-  commits nothing and simply lets the press go. A sticky window's wireframe
+  the window's previous tags, just like `Mod1+Shift+N`. Releasing a drag
+  back on its source cell, on the dimmed desktop, or in the panel's dead
+  space cancels the drag and keeps the grid open. A sticky window's wireframe
   is the one that cannot be dragged: it draws in every cell, but tagging it
   would rewrite a mask stickiness ignores and the next `view` would put back,
   so a press on it settles as the cell's click instead of arming a drag that

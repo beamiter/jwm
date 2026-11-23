@@ -10,14 +10,12 @@
 //! panel never changes while the grid is up, so cancelling is simply closing
 //! and confirming is an ordinary tag jump (`Jwm::view`).
 //!
-//! The pointer gesture is a press/release pair. A press on a cell only arms
-//! a [`PendingCellPress`]; the release settles it: released on the same cell
-//! it is the click's tag jump, released on another cell with a wireframe in
-//! hand it drops that window onto the new tag (`Jwm::move_client_to_tag`,
-//! the dwm `tag()` semantics — the mask is replaced, not merged), released
-//! anywhere else it simply disarms. The compositor-facing [`TagsGridCell`]
-//! carries no window identity, so the snapshot keeps a parallel id per
-//! outline in [`TagsOverviewState::window_ids`] for the drag to resolve.
+//! A cell press only arms a [`PendingCellPress`]. An undragged release on
+//! that cell jumps to its tag. A window dragged to a different cell moves
+//! there with a replaced tag mask; returning to the source or releasing
+//! outside the cells cancels. The compositor-facing [`TagsGridCell`] carries
+//! no window identity, so the snapshot keeps a parallel id per outline in
+//! [`TagsOverviewState::window_ids`] for the drag to resolve.
 
 use crate::backend::api::{Backend, ExposeNavDirection, LiveTagsCell, TagsGridCell};
 use crate::backend::common_define::WindowId;
@@ -273,13 +271,12 @@ pub enum TagsOverviewRelease {
 }
 
 /// Settle a release from the press it answers and the cell it lands on.
-/// Same cell is always the click, whatever the press held; another cell is
-/// a window drop only once the gesture actually became a drag (a window in
-/// hand that crossed the cell boundary).
+/// A release on the source is a click only if there was no drag. A drag
+/// released on the source cell cancels without changing the view.
 pub fn plan_release(pending: PendingCellPress, release_cell: Option<usize>) -> TagsOverviewRelease {
-    match release_cell {
-        Some(cell) if cell == pending.cell => TagsOverviewRelease::View(cell),
-        Some(target) if pending.dragging => match pending.window {
+    match (release_cell, pending.dragging) {
+        (Some(cell), false) if cell == pending.cell => TagsOverviewRelease::View(cell),
+        (Some(target), true) if target != pending.cell => match pending.window {
             Some(window) => TagsOverviewRelease::MoveToTag { window, target },
             // A drag by definition holds a window; the arm stays total.
             None => TagsOverviewRelease::Disarm,
@@ -631,14 +628,11 @@ impl Jwm {
         }
     }
 
-    /// The release answering a pending press: on the press's own cell it is
-    /// the click (select that tag, commit, close); on another cell with a
-    /// drag in flight it drops the window on that tag through
-    /// [`Jwm::move_client_to_tag`] — the same path `Mod1+Shift+数字` takes —
-    /// and keeps the panel open with refreshed cells; anywhere else it just
-    /// disarms. The pointer grab delivers releases without the button
-    /// number, so the first release after the button-1 press settles the
-    /// gesture.
+    /// An undragged release on the press's cell is a click: view the tag
+    /// and close. An active drag drops only on a different cell. Returning
+    /// to the source or releasing outside the cells simply disarms and
+    /// leaves the panel open. The pointer grab delivers releases without
+    /// the button number, so the first release settles the gesture.
     pub(crate) fn release_tags_overview(
         &mut self,
         backend: &mut dyn Backend,
@@ -987,6 +981,90 @@ mod tests {
         jwm.confirm_tags_overview(&mut backend).unwrap();
         assert_eq!(jwm.state.sel_mon, Some(right));
         assert_eq!(jwm.state.monitors[right].get_active_tags(), 2);
+    }
+
+    #[test]
+    fn returning_a_drag_to_an_inactive_source_keeps_the_overview_open() {
+        use crate::core::models::WMClient;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let left = jwm.state.monitor_order[0];
+        let right = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(left);
+
+        let mut active = WMClient::new(WindowId::from_raw(0x5a1));
+        active.mon = Some(left);
+        active.state.tags = 1;
+        let focused = jwm.insert_client(active);
+        jwm.attach_to_monitor(focused, left);
+        jwm.focus(&mut backend, Some(focused)).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(focused));
+
+        let win = WindowId::from_raw(0x5a2);
+        let mut inactive = WMClient::new(win);
+        inactive.mon = Some(right);
+        inactive.state.tags = 2;
+        inactive.state.is_floating = true;
+        inactive.geometry.x = 2200;
+        inactive.geometry.y = 250;
+        inactive.geometry.w = 720;
+        inactive.geometry.h = 480;
+        let window = jwm.insert_client(inactive);
+        jwm.attach_to_monitor(window, right);
+
+        let source = CONFIG.load().tags_length() + 1;
+        let overview = jwm.tags_overview_state(left);
+        assert_eq!(overview.targets[source], (right, 1));
+        let before = [left, right].map(|mon| jwm.state.monitors[mon].get_active_tags());
+        assert_eq!(before, [1, 1]);
+        jwm.features.system_ui = SystemUiState::TagsOverview(overview);
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        let grid = tags_grid::grid_geometry(
+            jwm.system_ui_viewport().rect(),
+            overview.cells.len(),
+            overview.cols,
+        );
+        fn center([x, y, w, h]: [f32; 4]) -> (f64, f64) {
+            (f64::from(x + w * 0.5), f64::from(y + h * 0.5))
+        }
+        let (_, frame) = tags_grid::presented_cell(&grid.cells[source], false);
+        let outline = overview.cells[source].windows[0];
+        let start =
+            center(crate::backend::compositor_common::layout_strip::window_rect(frame, outline));
+        let away = center(grid.cells[0].cell);
+        let back = center(grid.cells[source].cell);
+
+        jwm.press_tags_overview(&mut backend, start.0, start.1);
+        let pending = jwm.features.system_ui.tags_overview().unwrap().pending;
+        assert_eq!(pending.map(|press| press.window), Some(Some(win.raw())));
+        jwm.hover_tags_overview(&mut backend, away.0, away.1);
+        assert!(
+            jwm.features
+                .system_ui
+                .tags_overview()
+                .unwrap()
+                .pending
+                .is_some_and(|press| press.dragging)
+        );
+        jwm.hover_tags_overview(&mut backend, back.0, back.1);
+        jwm.release_tags_overview(&mut backend, back.0, back.1)
+            .unwrap();
+
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert!(overview.pending.is_none());
+        assert_eq!(jwm.state.sel_mon, Some(left));
+        assert_eq!(jwm.get_selected_client_key(), Some(focused));
+        assert_eq!(
+            [left, right].map(|mon| jwm.state.monitors[mon].get_active_tags()),
+            before
+        );
+        assert_eq!(jwm.state.clients[window].mon, Some(right));
+        assert_eq!(jwm.state.clients[window].state.tags, 2);
     }
 
     #[test]
@@ -1450,9 +1528,8 @@ mod tests {
     }
 
     #[test]
-    fn a_release_on_the_presss_own_cell_is_the_click() {
-        // Same cell is the view jump whether or not the press held a
-        // wireframe, and even if the gesture dragged away and came back.
+    fn a_release_on_the_source_cell_is_a_click_without_a_drag() {
+        // A plain press can click a workspace or one of its window outlines.
         for pending in [
             PendingCellPress {
                 cell: 2,
@@ -1463,11 +1540,6 @@ mod tests {
                 cell: 2,
                 window: Some(9),
                 dragging: false,
-            },
-            PendingCellPress {
-                cell: 2,
-                window: Some(9),
-                dragging: true,
             },
         ] {
             assert_eq!(
