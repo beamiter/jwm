@@ -188,6 +188,9 @@ export function serverConfig(info, options, cache) {
     plugins: [requestGuard(info.root, cache), ...(options.component ? [componentPlugin(`/${relative}`)] : [])],
     server: {
       host: '127.0.0.1', port: options.port, strictPort: true, open: false,
+      // In component mode a mid-write event can reload the entire document.
+      // Wait briefly for the editor's completed save before invalidating modules.
+      ...(options.component ? { watch: { awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 20 } } } : {}),
       cors: false, allowedHosts: [],
       fs: { strict: true, allow: [info.root, cache], deny: ['**/.git/**', '**/.env', '**/.env.*', '**/*.{pem,key,p12,pfx}'] },
     },
