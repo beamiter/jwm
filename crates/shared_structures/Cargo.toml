@@ -18,7 +18,7 @@ serde = { version = "1.0.228", features = ["derive"], optional = true }
 rkyv = { version = "0.8", optional = true }
 serde-big-array = { version = "0.5.1", optional = true }
 shared_memory = "0.12.4"
-nix = { version = "0.31.3", features = ["fs", "poll", "socket", "uio"], optional = true }
+nix = { version = "0.32.0", features = ["fs", "poll", "socket", "uio"], optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
