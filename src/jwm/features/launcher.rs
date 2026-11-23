@@ -1266,7 +1266,11 @@ impl crate::jwm::Jwm {
         entries
     }
 
-    fn launcher_window_entry(&self, client_key: ClientKey, tag_count: usize) -> Option<WindowEntry> {
+    fn launcher_window_entry(
+        &self,
+        client_key: ClientKey,
+        tag_count: usize,
+    ) -> Option<WindowEntry> {
         let client = self.state.clients.get(client_key)?;
         let monitor_key = client.mon?;
         let monitor = self.state.monitors.get(monitor_key)?;
