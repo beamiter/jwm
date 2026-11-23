@@ -433,13 +433,14 @@ pub struct WindowEntry {
     /// Zero-based tag index; `None` for a sticky window, which is on all of
     /// them.
     pub tag: Option<usize>,
+    /// The monitor that revealing this window would land on.
     pub monitor: i32,
     /// Showing on its own monitor: on one of that monitor's active tags, and
     /// not minimised. Deliberately not "on the screen the user is looking
     /// at" — a window can be plainly visible on the other head, and calling
     /// that hidden is what made rows claim a tag the user was already on.
     pub visible: bool,
-    /// On the monitor the user is looking at.
+    /// Revealing the window stays on the selected monitor.
     pub on_selected_monitor: bool,
     pub minimized: bool,
 }
@@ -1287,16 +1288,29 @@ impl crate::jwm::Jwm {
                 } else {
                     (0..tag_count).find(|index| client.state.tags & (1 << index) != 0)
                 };
+                // A minimized scratchpad opens on the current monitor, not
+                // necessarily the one that owns its saved Dock placement.
+                // Keep the source stack order and lock filter above intact.
+                let reveal_destination = if client.state.is_hidden
+                    && self.scratchpads.values().any(|&key| key == client_key)
+                {
+                    self.scratchpad_reveal_monitor(client.mon)
+                        .and_then(|key| self.state.monitors.get(key).map(|m| (key, m.num)))
+                } else {
+                    None
+                };
+                let (reveal_monitor, reveal_monitor_num) =
+                    reveal_destination.unwrap_or((monitor_key, monitor.num));
                 entries.push(WindowEntry {
                     id: client.win.raw(),
                     title: client.name.clone(),
                     class: client.class.clone(),
                     instance: client.instance.clone(),
                     tag,
-                    monitor: monitor.num,
+                    monitor: reveal_monitor_num,
                     visible: !client.state.is_hidden
                         && (client.state.is_sticky || client.state.tags & active != 0),
-                    on_selected_monitor: Some(monitor_key) == self.state.sel_mon,
+                    on_selected_monitor: Some(reveal_monitor) == self.state.sel_mon,
                     minimized: client.state.is_hidden,
                 });
             }

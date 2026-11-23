@@ -573,6 +573,15 @@ impl Jwm {
         Ok(true)
     }
 
+    /// The screen a parked or minimized scratchpad will open on, independent
+    /// of its current Dock or saved placement.
+    pub(crate) fn scratchpad_reveal_monitor(&self, source: Option<MonitorKey>) -> Option<MonitorKey> {
+        self.state
+            .sel_mon
+            .filter(|&monitor| self.state.monitors.contains_key(monitor))
+            .or_else(|| source.filter(|&monitor| self.state.monitors.contains_key(monitor)))
+    }
+
     /// Put a parked or minimized scratchpad on the selected monitor/tag before
     /// it is revealed. Returns whether a scratchpad placement was applied.
     ///
@@ -637,12 +646,7 @@ impl Jwm {
         }
 
         let target_monitor = self
-            .state
-            .sel_mon
-            .filter(|&monitor| self.state.monitors.get(monitor).is_some())
-            .or_else(|| {
-                source_monitor.filter(|&monitor| self.state.monitors.get(monitor).is_some())
-            })
+            .scratchpad_reveal_monitor(source_monitor)
             .ok_or("scratchpad has no monitor available for reveal")?;
         if source_monitor.is_some() && source_monitor != Some(target_monitor) {
             // This is only the placement phase of a reveal transaction. Do
@@ -1861,6 +1865,57 @@ mod scratchpad_reveal_tests {
         let client = &jwm.state.clients[scratchpad];
         assert_eq!(client.mon, Some(target));
         assert!(!client.state.is_hidden);
+        assert_eq!(jwm.get_selected_client_key(), Some(scratchpad));
+    }
+
+    #[test]
+    fn launcher_describes_where_a_minimized_scratchpad_actually_opens() {
+        use crate::jwm::features::SystemUiState;
+
+        let (mut jwm, scratchpad, window, target) = jwm_with_cross_monitor_scratchpad(true);
+        let source = jwm.state.clients[scratchpad].mon.unwrap();
+        assert_ne!(source, target);
+        assert!(
+            !jwm.launcher_window_snapshot()
+                .iter()
+                .any(|entry| entry.id == window.raw()),
+            "parked scratchpads are not launcher targets"
+        );
+        jwm.state.clients[scratchpad].name = "Scratchpad term".into();
+        jwm.state.clients[scratchpad].state.tags = 1;
+
+        // An ordinary minimized window with the same source placement still
+        // sends the user to the other monitor.
+        let ordinary = WindowId::from_raw(0x703);
+        let mut client = WMClient::new(ordinary);
+        client.mon = Some(source);
+        client.name = "Ordinary term".into();
+        client.state.tags = 1;
+        client.state.is_hidden = true;
+        let ordinary_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(ordinary_key, source);
+        let entries = jwm.launcher_window_snapshot();
+        let ordinary_row = entries
+            .iter()
+            .find(|entry| entry.id == ordinary.raw())
+            .unwrap();
+        assert_eq!(ordinary_row.monitor, jwm.state.monitors[source].num);
+        assert!(!ordinary_row.on_selected_monitor);
+
+        let mut launcher = SystemUiState::open_launcher(std::sync::Arc::from([]), entries, false);
+        for ch in "/Scratchpad".chars() {
+            launcher.push_char(ch);
+        }
+        assert_eq!(launcher.selected_window(), Some(window.raw()));
+        let panel = launcher.overlay_text();
+        assert!(panel.contains("Scratchpad term  [minimised]"), "{panel}");
+        assert!(!panel.contains("screen "), "{panel}");
+
+        jwm.features.system_ui = launcher;
+        let mut backend = ScratchpadBackend::new();
+        assert!(jwm.activate_launcher_selection(&mut backend).unwrap());
+        assert_eq!(jwm.state.sel_mon, Some(target));
+        assert_eq!(jwm.state.clients[scratchpad].mon, Some(target));
         assert_eq!(jwm.get_selected_client_key(), Some(scratchpad));
     }
 
