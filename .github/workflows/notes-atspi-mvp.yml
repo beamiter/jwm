@@ -69,8 +69,20 @@ jobs:
             chmod 700 "$xdg_dir"
             export XDG_RUNTIME_DIR="$xdg_dir"
             printf 'AT-SPI Notes variant=%s expected=%s\n' "$1" "$2"
-            env JWM_ATSPI_ISOLATED=1 GSETTINGS_BACKEND=memory timeout -k 5s 80s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
-              /usr/bin/python3 scripts/notes-atspi/probe.py --notes "$RUNNER_TEMP/notes-$1" --expect "$2"
+            # Prevent a last-client reset between the readiness check and the
+            # two probe clients attaching. Keep Xauthority and a private X socket.
+            env JWM_ATSPI_ISOLATED=1 GSETTINGS_BACKEND=memory timeout -k 5s 80s dbus-run-session -- \
+              xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp -noreset' \
+              bash -ec '
+                for attempt in 1 2 3 4 5; do
+                  if xdotool getdisplaygeometry; then
+                    exec /usr/bin/python3 scripts/notes-atspi/probe.py --notes "$1" --expect "$2"
+                  fi
+                  sleep 0.2
+                done
+                echo "Private Xvfb never accepted a client" >&2
+                exit 2
+              ' notes-atspi "$RUNNER_TEMP/notes-$1" "$2"
           )
           probe baseline baseline
           probe feature-off baseline
