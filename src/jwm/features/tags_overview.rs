@@ -94,6 +94,8 @@ pub struct TagsOverviewState {
     pub cols: u32,
     /// Highlighted cell: a tag index, stable across rebuilds.
     pub selected: usize,
+    /// Unlike the opening highlight, this selection can switch the view.
+    selection_explicit: bool,
     /// The pointer press waiting for its release, if one is down.
     pub pending: Option<PendingCellPress>,
     /// The monitor the cells describe and the viewport was pushed for.
@@ -135,6 +137,7 @@ impl TagsOverviewState {
             sticky_windows,
             cols,
             selected,
+            selection_explicit: false,
             pending: None,
             monitor: None,
             targets: Vec::new(),
@@ -160,6 +163,7 @@ impl TagsOverviewState {
         match move_expose_selection(Some(self.selected), direction, self.cells.len(), self.cols) {
             Some(next) if next != self.selected => {
                 self.selected = next;
+                self.selection_explicit = true;
                 true
             }
             _ => false,
@@ -178,6 +182,7 @@ impl TagsOverviewState {
             return false;
         }
         self.selected = next;
+        self.selection_explicit = true;
         true
     }
 
@@ -198,6 +203,7 @@ impl TagsOverviewState {
             return false;
         }
         self.selected = next;
+        self.selection_explicit = true;
         true
     }
 }
@@ -466,9 +472,7 @@ impl Jwm {
         }
     }
 
-    /// Commit the highlighted tag: an ordinary `view` jump, then the panel
-    /// goes away. The view itself early-outs on the current tag, so opening
-    /// and confirming is a safe no-op round trip.
+    /// Close an untouched peek, or commit the explicitly selected tag.
     pub(crate) fn confirm_tags_overview(
         &mut self,
         backend: &mut dyn Backend,
@@ -476,6 +480,10 @@ impl Jwm {
         let Some(overview) = self.features.system_ui.tags_overview() else {
             return Ok(());
         };
+        if !overview.selection_explicit {
+            self.close_system_ui(backend);
+            return Ok(());
+        }
         let target = overview
             .targets
             .get(overview.selected)
@@ -547,6 +555,7 @@ impl Jwm {
             return Ok(());
         }
         overview.selected = index;
+        overview.selection_explicit = true;
         self.confirm_tags_overview(backend)
     }
 
@@ -599,6 +608,7 @@ impl Jwm {
             }
             if overview.selected != index {
                 overview.selected = index;
+                overview.selection_explicit = true;
                 moved = true;
             }
         }
@@ -783,6 +793,7 @@ impl Jwm {
         let rebuilt = self.tags_overview_state(sel_mon_key);
         if let Some(overview) = self.features.system_ui.tags_overview_mut() {
             let selected = overview.selected;
+            let selection_explicit = overview.selection_explicit;
             let identity = overview.targets.get(selected).copied();
             let pending = overview.pending.filter(|pending| {
                 overview.monitor == rebuilt.monitor
@@ -803,6 +814,8 @@ impl Jwm {
                         selected.min(overview.cells.len().saturating_sub(1))
                     }
                 });
+            let selection_valid = overview.selected < overview.cells.len();
+            overview.selection_explicit = selection_explicit && selection_valid;
             overview.pending = pending;
         }
         self.mark_system_ui_dirty();
@@ -966,7 +979,7 @@ mod tests {
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
         let left = jwm.state.monitor_order[0];
         let right = jwm.state.monitor_order[1];
-        let mut overview = jwm.tags_overview_state(left);
+        let overview = jwm.tags_overview_state(left);
         let tags = CONFIG.load().tags_length();
         assert_eq!(overview.cells.len(), tags * 2);
         assert_eq!(overview.targets[0], (left, 0));
@@ -976,9 +989,8 @@ mod tests {
             overview.cells[tags].display_label()
         );
         assert_eq!(live_cells(&overview).len(), 2);
-        overview.selected = tags + 1;
         jwm.features.system_ui = SystemUiState::TagsOverview(overview);
-        jwm.confirm_tags_overview(&mut backend).unwrap();
+        jwm.jump_tags_overview(&mut backend, tags + 1).unwrap();
         assert_eq!(jwm.state.sel_mon, Some(right));
         assert_eq!(jwm.state.monitors[right].get_active_tags(), 2);
     }

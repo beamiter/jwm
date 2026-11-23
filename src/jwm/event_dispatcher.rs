@@ -1007,9 +1007,10 @@ impl WMController for Jwm {
             if self.features.system_ui.is_layout_picker() {
                 self.hover_layout_picker(backend, root_x, root_y);
             } else if self.features.system_ui.is_tags_overview() {
-                // Same contract for the grid: the pointer moves the shared
-                // highlight, and a click takes the cell under it.
-                self.hover_tags_overview(backend, root_x, root_y);
+                // A stationary notification on open is not a tag choice.
+                if pointer_moved {
+                    self.hover_tags_overview(backend, root_x, root_y);
+                }
             } else {
                 let hit = backend.compositor_system_ui_hit_test(root_x, root_y);
                 // An armed slider drag owns the pointer until the release:
@@ -1774,7 +1775,7 @@ impl Jwm {
                         .unwrap_or(self.last_mouse_root);
                     self.press_tags_overview(backend, x, y);
                 }
-                // Middle: Enter twin — jump to the highlighted tag.
+                // Middle confirms the overview just like Enter.
                 2 => {
                     if let Err(error) = self.confirm_tags_overview(backend) {
                         error!("Error confirming tags overview: {error}");
@@ -12129,6 +12130,44 @@ mod tests {
             1,
             "closing must release the pointer grab"
         );
+    }
+
+    #[test]
+    fn tags_overview_peek_preserves_combined_tags_after_stationary_motion() {
+        use crate::backend::compositor_common::{layout_strip, tags_grid};
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.view(&mut backend, &WMArgEnum::UInt(0b110)).unwrap();
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert_eq!(overview.selected, 1);
+        let grid =
+            tags_grid::grid_geometry([0., 0., 1920., 1080.], overview.cells.len(), overview.cols);
+        let [x, y] = layout_strip::center(grid.cells[3].cell);
+        let (x, y) = (f64::from(x), f64::from(y));
+        jwm.last_mouse_root = (x, y);
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            x,
+            y,
+            0,
+        );
+        assert_eq!(jwm.features.system_ui.tags_overview().unwrap().selected, 1);
+        jwm.refresh_tags_overview();
+        jwm.confirm_tags_overview(&mut backend).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 0b110);
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.digit_tags_overview(&mut backend, 1).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 0b010);
     }
 
     #[test]
