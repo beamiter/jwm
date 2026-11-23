@@ -95,10 +95,13 @@ pub fn neighbors(path: &Path) -> Vec<PathBuf> {
         paths.push(path.to_path_buf());
     }
     paths.sort_by_cached_key(|path| {
-        path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_lowercase()
+        let name = path.file_name().unwrap_or_default();
+        // Keep case-insensitive browsing and compare embedded numbers
+        // naturally. The raw name breaks ties without changing any path.
+        (
+            gio::glib::FilenameCollationKey::from(name.to_string_lossy().to_lowercase()),
+            name.to_owned(),
+        )
     });
     paths
 }
@@ -120,5 +123,53 @@ mod tests {
         assert!(image_path(Path::new("photo.webp")));
         assert!(!image_path(Path::new("script.svg")));
         assert!(!image_path(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn discovered_images_use_numeric_order_and_keep_original_paths() {
+        use std::{fs, os::unix::ffi::OsStrExt};
+
+        let folder = std::env::temp_dir().join(format!("jwm-image-order-{}", std::process::id()));
+        fs::create_dir(&folder).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(folder.clone());
+        let opened = folder.join("extensionless");
+        for name in [
+            "Shot10.png",
+            "shot2.png",
+            "Shot2.png",
+            "shot1.png",
+            "shot02.png",
+            "截图10.png",
+            "截图2.png",
+            "截图1.png",
+            "ignored.txt",
+            "extensionless",
+        ] {
+            fs::write(folder.join(name), b"").unwrap();
+        }
+        let invalid_a = folder.join(std::ffi::OsStr::from_bytes(b"raw-\xfe.png"));
+        let invalid_b = folder.join(std::ffi::OsStr::from_bytes(b"raw-\xff.png"));
+        fs::write(&invalid_b, b"").unwrap();
+        fs::write(&invalid_a, b"").unwrap();
+
+        let ordered = neighbors(&opened);
+        let pos = |name: &Path| ordered.iter().position(|path| path == name).unwrap();
+        let index = |name: &str| pos(&folder.join(name));
+        assert!(index("shot1.png") < index("shot2.png"));
+        assert!(index("shot2.png") < index("Shot10.png"));
+        assert!(index("Shot2.png") < index("shot2.png"));
+        assert!(index("shot1.png") < index("shot02.png"));
+        assert!(index("shot02.png") < index("Shot10.png"));
+        assert!(index("截图1.png") < index("截图2.png"));
+        assert!(index("截图2.png") < index("截图10.png"));
+        assert!(pos(&invalid_a) < pos(&invalid_b));
+        assert_eq!(ordered.iter().filter(|path| *path == &opened).count(), 1);
+        assert!(!ordered.contains(&folder.join("ignored.txt")));
     }
 }

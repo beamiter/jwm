@@ -617,11 +617,15 @@ def main():
                 print("Native code indentation, outdent, grouped undo and Enter prefix: PASS", flush=True)
 
                 # Solid asymmetric images make fit, zoom and rotation measurable.
-                first, second = work / "01 red.png", work / "02 green.webp"
+                images = work / "numbered-images"
+                images.mkdir()
+                first, second, tenth = (images / "shot1.png", images / "shot2.webp",
+                                         images / "shot10.png")
                 Image.new("RGB", (400, 200), (240, 20, 20)).save(first)
                 Image.new("RGB", (200, 400), (20, 240, 20)).save(second)
+                Image.new("RGB", (100, 100), (20, 20, 240)).save(tenth)
                 viewer = launch("jwm-image-viewer", first)
-                image_window = window("01 red.png.*JWM 图片查看器")
+                image_window = window("shot1.png.*JWM 图片查看器")
                 focus(image_window)
                 wait(lambda: color_bounds(image_window)[0] > 400, "Fit-to-window did not render")
                 key("1")
@@ -631,18 +635,37 @@ def main():
                 key("plus")
                 wait(lambda: color_bounds(image_window) == (250, 500), "Zoom did not resize the image")
                 key("Right")
-                window("02 green.webp.*JWM 图片查看器")
+                window("shot2.webp.*JWM 图片查看器")
                 key("1")
                 wait(lambda: color_bounds(image_window) == (200, 400), "WebP or directory navigation failed")
                 key("Right")
-                window("01 red.png.*JWM 图片查看器")
+                window("shot10.png.*JWM 图片查看器")
+                key("Right")
+                window("shot1.png.*JWM 图片查看器")
+                key("Left")
+                window("shot10.png.*JWM 图片查看器")
+                key("Right")
+                window("shot1.png.*JWM 图片查看器")
                 key("f")
                 if args.evidence_dir:
                     time.sleep(.2)
                     screenshot(image_window).save(args.evidence_dir / "image-viewer.png")
                 close_button(image_window)
                 wait(lambda: viewer.poll() is not None, "Viewer did not exit after closing")
-                print("Image rendering, actual size, rotation, zoom, WebP and directory wrap: PASS", flush=True)
+                print("Image rendering, actual size, rotation, zoom, WebP, numeric order and directory wrap: PASS",
+                      flush=True)
+
+                explicit = launch("jwm-image-viewer", first, tenth, second)
+                explicit_window = window("shot1.png.*JWM 图片查看器")
+                focus(explicit_window)
+                key("Right")
+                window("shot10.png.*JWM 图片查看器")
+                key("Right")
+                window("shot2.webp.*JWM 图片查看器")
+                close_button(explicit_window)
+                wait(lambda: explicit.poll() is not None, "Explicit file list viewer did not close")
+                print("Image viewer preserves explicitly opened file order: PASS", flush=True)
+
                 log.flush()
                 contents = (work / "apps.log").read_text()
                 assert all(error not in contents for error in
