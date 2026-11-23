@@ -98,7 +98,9 @@ def evaluate(atspi, gtk_pid, notes_pid, receipt, window, seconds, enable_reader=
     if receipt.exists():
         raise ProbeError("stale-positive-control-receipt")
     gtk = wait(lambda: named(application(gtk_pid), CONTROL, {roles.PUSH_BUTTON}), seconds)
-    if gtk is None or not activate(gtk):
+    if gtk is None:
+        raise ProbeError("gtk-positive-control-not-found")
+    if not activate(gtk):
         raise ProbeError("gtk-positive-control-not-actionable")
     if not wait(lambda: receipt.exists() and receipt.read_text() == "activated\n", seconds):
         raise ProbeError("gtk-positive-control-action-not-observed")
@@ -368,6 +370,32 @@ def run_isolated(notes_path, atspi, set_reader, keyboard=False, conflict=False):
                 child.wait(timeout=3)
 
 
+def failure_payload(exc):
+    if isinstance(exc, ProbeError):
+        return {"outcome": str(exc)}
+    # Keep the stable failure classification. A traceback location and code
+    # help distinguish fixture, bus and toolkit failures without logging
+    # exception messages, environment values or temporary absolute paths.
+    frames = []
+    trace = exc.__traceback__
+    while trace is not None:
+        frame = trace.tb_frame
+        if frame.f_globals.get("__name__") == __name__:
+            frames.append(f"{frame.f_code.co_name}:{trace.tb_lineno}")
+        trace = trace.tb_next
+    payload = {
+        "outcome": "probe-transport-or-fixture-error",
+        "error_type": type(exc).__name__,
+        "probe_stack": frames[-4:],
+    }
+    code = getattr(exc, "code", None)
+    if not isinstance(code, int):
+        code = getattr(exc, "errno", None)
+    if isinstance(code, int):
+        payload["error_code"] = code
+    return payload
+
+
 def main():
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument("--gtk", type=Path, help=argparse.SUPPRESS)
@@ -407,8 +435,7 @@ def main():
                                keyboard=opt.expect == "keyboard", conflict=opt.expect == "conflict")
     except (ProbeError, GLib.Error, OSError, AttributeError, TypeError,
             subprocess.SubprocessError) as exc:
-        outcome = str(exc) if isinstance(exc, ProbeError) else "probe-transport-or-fixture-error"
-        print(json.dumps({"outcome": outcome}))
+        print(json.dumps(failure_payload(exc)))
         return 2
     print(json.dumps({"backend": "x11", "outcome": outcome,
                       "gtk_positive_control": "action-observed", "screen_reader_enabled": True,
