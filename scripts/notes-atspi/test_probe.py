@@ -88,8 +88,29 @@ class TestProbe(unittest.TestCase):
 
     def test_wrong_pid_does_not_satisfy_control(self):
         self.gtk.pid += 900
+        with self.assertRaisesRegex(probe.ProbeError, "gtk-positive-control-not-found"):
+            self.run_probe()
+
+    def test_gtk_control_can_be_present_but_not_actionable(self):
+        self.button.action = None
         with self.assertRaisesRegex(probe.ProbeError, "gtk-positive-control-not-actionable"):
             self.run_probe()
+
+    def test_transport_failure_diagnostics_omit_exception_text(self):
+        try:
+            next(probe.children(SimpleNamespace()))
+        except AttributeError as exc:
+            payload = probe.failure_payload(exc)
+        else:
+            self.fail("expected the incomplete transport object to fail")
+        self.assertEqual(payload["outcome"], "probe-transport-or-fixture-error")
+        self.assertEqual(payload["error_type"], "AttributeError")
+        self.assertEqual(len(payload["probe_stack"]), 1)
+        self.assertRegex(payload["probe_stack"][0], r"^children:[0-9]+$")
+        self.assertNotIn("SimpleNamespace", repr(payload))
+        os_failure = probe.failure_payload(OSError(5, "private-path"))
+        self.assertEqual(os_failure["error_code"], 5)
+        self.assertNotIn("private-path", repr(os_failure))
 
     def test_stale_receipt(self):
         self.receipt.write_text("activated\n")
