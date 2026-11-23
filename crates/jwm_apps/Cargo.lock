@@ -1196,6 +1196,7 @@ dependencies = [
  "gio",
  "image",
  "jwm_ipc_client",
+ "libc",
  "pango",
  "pangocairo",
  "pulldown-cmark",
