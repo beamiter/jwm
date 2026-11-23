@@ -27,7 +27,7 @@ like the other shell cards.
 | `Left` / `Right` / `Up` / `Down` | move the highlight through the grid |
 | `Home` / `End` | jump to the first / last cell (no commit) |
 | `Page Up` / `Page Down` | jump by one grid row (no commit) |
-| `Return` / keypad `Enter` | jump to the highlighted tag and close |
+| `Return` / keypad `Enter` | open the chosen tag, or close an untouched overview without switching |
 | `1`–`9` | jump to that tag on the highlighted display and close |
 | `Esc` | close without switching |
 | `Alt+O` | close without switching (the key is a toggle) |
@@ -44,7 +44,7 @@ The panel grabs the pointer while it is open, so no click can fall through
 to the windows underneath. A press on a cell commits nothing by itself —
 the release settles what the gesture meant. The vertical wheel browses the
 highlight Up/Down like the arrows (no commit); the horizontal wheel browses
-Left/Right. Middle-click confirms the highlighted tag like `Return`.
+Left/Right. Middle-click confirms the selection like `Return`.
 
 - Moving the pointer over a cell highlights it. Mouse and keyboard share the
   one highlight, so you can mix them freely; the dead space between cells
@@ -54,10 +54,9 @@ Left/Right. Middle-click confirms the highlighted tag like `Return`.
   the sliver of gap the lift now covers. Where the lift overhangs a
   neighbour, the card painted last owns the pixel, which is again what is
   drawn on top.
-- Clicking a cell without dragging jumps to that tag and closes, exactly
-  like `Return`.
-- Middle-click anywhere on the grab (with a highlight) jumps to the
-  highlighted tag and closes, the Enter twin shared with the layout picker.
+- Clicking a cell without dragging opens that tag and closes the overview.
+- Middle-click anywhere on the grab works like Enter: it opens the chosen
+  tag or closes an untouched overview without switching.
 - Dragging a window's wireframe from its cell onto another cell moves the
   window to that tag and keeps the grid open, so several windows can be
   dealt out in one visit. The window goes straight to the selected display
