@@ -225,6 +225,11 @@ Violating any budget makes `perf compare` exit non-zero, so it can gate a CI
 job or a release checklist. Recorded metric values must be finite and
 nonnegative; invalid measurements on either side cause comparison to be refused
 before budgets run. Zero remains valid and is evaluated under the usual rules.
+If every budget is `n/a`, no budget was evaluated: `perf compare` refuses
+the comparison and exits non-zero rather than reporting "within budgets".
+With `--json`, it returns `"comparable": false` and a refusal reason.
+Partial results still pass when at least one budget is evaluated and none
+is violated.
 
 Effective budgets are validated before comparison: lower-is-better ratios must
 be finite and at least 1; higher-is-better ratios must be finite in `[0, 1]`;
