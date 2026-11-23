@@ -150,6 +150,12 @@ fn decode_frame(png: Vec<u8>) -> Result<RgbaImage, String> {
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ScrollFinish {
+    Complete { to_clipboard: bool },
+    Partial { to_clipboard: bool },
+}
+
 #[derive(Debug)]
 pub(crate) struct ScrollCapture {
     region: Rect,
@@ -158,8 +164,9 @@ pub(crate) struct ScrollCapture {
     cancellation: Option<ScreenshotCancellation>,
     next_sample: Instant,
     pointer_released: bool,
-    finish: Option<bool>,
+    finish: Option<ScrollFinish>,
     final_sample: bool,
+    match_failed: bool,
 }
 
 impl ScrollCapture {
@@ -228,6 +235,7 @@ impl Jwm {
             pointer_released: false,
             finish: None,
             final_sample: false,
+            match_failed: false,
         });
     }
 
@@ -239,9 +247,27 @@ impl Jwm {
         if let Some(capture) = &mut self.features.scroll_capture {
             // Unless the image is full, take one more sample to include
             // a scroll just before Enter. Repeated keys cannot enqueue exports.
-            capture.finish.get_or_insert(to_clipboard);
-            capture.next_sample = Instant::now();
-            backend.compositor_set_capture_hint(Some("Long screenshot · finishing…".into()));
+            if capture.finish.is_none() {
+                capture.finish = Some(ScrollFinish::Complete { to_clipboard });
+                capture.next_sample = Instant::now();
+                backend.compositor_set_capture_hint(Some("Long screenshot · finishing…".into()));
+            }
+        }
+    }
+
+    pub(crate) fn finish_partial_scroll_screenshot(
+        &mut self,
+        backend: &mut dyn Backend,
+        to_clipboard: bool,
+    ) {
+        if let Some(capture) = &mut self.features.scroll_capture
+            && capture.match_failed
+            && capture.finish.is_none()
+        {
+            capture.finish = Some(ScrollFinish::Partial { to_clipboard });
+            backend.compositor_set_capture_hint(Some(
+                "Long screenshot · exporting captured portion…".into(),
+            ));
         }
     }
 
@@ -263,26 +289,26 @@ impl Jwm {
                         }
                         capture.pointer_released = true;
                     }
-                    if capture.final_sample && matched {
+                    if capture.final_sample
+                        && matched
+                        && let Some(ScrollFinish::Complete { to_clipboard }) = capture.finish
+                    {
                         let image = capture.image.take().expect("completed sample owns image");
-                        self.export_scroll_screenshot(
-                            backend,
-                            image,
-                            capture.finish.unwrap_or(false),
-                        );
+                        self.export_scroll_screenshot(backend, image, to_clipboard);
                         return;
                     }
                     if capture.final_sample {
                         capture.finish = None;
                         capture.final_sample = false;
                     }
+                    capture.match_failed = !matched;
                     let full = capture.image.as_ref().is_some_and(|image| image.full);
                     backend.compositor_set_capture_hint(Some(if full {
                         format!("Long screenshot {width}×{height} · reached the size limit · Enter save · Ctrl+C copy · Esc cancel")
                     } else if matched {
                         format!("Long screenshot {width}×{height} · scroll down slowly · Enter save · Ctrl+C copy · Esc cancel")
                     } else {
-                        format!("Long screenshot {width}×{height} · cannot match: scroll back up, keep overlap; exclude fixed headers · Esc cancel")
+                        "No overlap · Shift+Enter save partial · Ctrl+Shift+C copy · Scroll back / Esc".into()
                     }));
                     capture.next_sample = now + SAMPLE_INTERVAL;
                 }
@@ -303,10 +329,17 @@ impl Jwm {
                 }
             }
         }
+        // A partial finish is explicit. Use the last accepted pixels, after
+        // collecting any already-running sample, but never start a new one.
+        if let Some(ScrollFinish::Partial { to_clipboard }) = capture.finish {
+            let image = capture.image.take().expect("failed match retains an image");
+            self.export_scroll_screenshot(backend, image, to_clipboard);
+            return;
+        }
         // A full image cannot accept another viewport. Wait without polling
         // the capture backend, then export the retained pixels on confirmation.
         if capture.image.as_ref().is_some_and(|image| image.full) {
-            if let Some(to_clipboard) = capture.finish {
+            if let Some(ScrollFinish::Complete { to_clipboard }) = capture.finish {
                 let image = capture.image.take().expect("full capture owns its image");
                 self.export_scroll_screenshot(backend, image, to_clipboard);
             } else {
@@ -478,6 +511,163 @@ mod tests {
         assert_eq!(&image.pixels[..kept.len()], &kept[..]);
     }
 
+    fn capture_with_sample(
+        image: ScrollImage,
+        matched: bool,
+        now: Instant,
+        final_sample: bool,
+    ) -> ScrollCapture {
+        ScrollCapture {
+            region: Rect {
+                x: 0,
+                y: 0,
+                w: 120,
+                h: 240,
+            },
+            image: None,
+            job: Some(BackgroundJob::completed_for_test(Ok((image, matched)))),
+            cancellation: None,
+            next_sample: now,
+            pointer_released: true,
+            finish: final_sample.then_some(ScrollFinish::Complete { to_clipboard: false }),
+            final_sample,
+            match_failed: false,
+        }
+    }
+
+    fn take_scroll_completion(jwm: &Jwm) -> ScreenshotCompletion {
+        assert_eq!(jwm.features.screenshot_completions.len(), 1);
+        let job = &jwm.features.screenshot_completions[0];
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            if let Some(completion) = job.take() {
+                return completion;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "long screenshot export did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn an_unmatched_final_frame_can_export_the_accepted_prefix_explicitly() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let page = page();
+        let expected = image::imageops::crop_imm(&page, 0, 0, 120, 313).to_image();
+        // Isolate the file destination from both the user's files and parallel tests.
+        let dir = std::env::temp_dir().join(format!(
+            "jwm-partial-scroll-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("partial.png");
+
+        for to_clipboard in [true, false] {
+            let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 800, 600)]);
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let mut image = ScrollImage::new(viewport(&page, 0)).unwrap();
+            assert!(image.append(viewport(&page, 73)).unwrap());
+            let matched = image.append(viewport(&page, 500)).unwrap();
+            assert!(!matched);
+            let now = Instant::now();
+            jwm.features.screenshot.scrolling = true;
+            jwm.features.screenshot.output_path = Some(path.to_string_lossy().into_owned());
+            jwm.features.scroll_capture = Some(capture_with_sample(image, matched, now, true));
+
+            jwm.tick_scroll_screenshot(&mut backend, now);
+            assert!(jwm.features.screenshot_completions.is_empty());
+            let capture = jwm.features.scroll_capture.as_ref().unwrap();
+            assert!(capture.match_failed);
+            assert!(capture.finish.is_none());
+            assert_eq!(
+                capture.image.as_ref().unwrap().pixels.as_slice(),
+                expected.as_raw().as_slice()
+            );
+
+            // This backend cannot read the screen. No extra sample is needed,
+            // and a second key cannot change the chosen destination.
+            jwm.finish_partial_scroll_screenshot(&mut backend, to_clipboard);
+            jwm.finish_partial_scroll_screenshot(&mut backend, !to_clipboard);
+            jwm.tick_scroll_screenshot(&mut backend, now);
+            assert!(jwm.features.scroll_capture.is_none());
+            let png = match take_scroll_completion(&jwm) {
+                ScreenshotCompletion::CopiedToClipboard { png, .. } if to_clipboard => {
+                    assert!(!path.exists());
+                    png
+                }
+                ScreenshotCompletion::Saved(saved) if !to_clipboard => {
+                    assert_eq!(std::path::Path::new(&saved), path.as_path());
+                    std::fs::read(&path).unwrap()
+                }
+                _ => panic!("expected partial export to the first chosen destination"),
+            };
+            assert_eq!(decode_frame(png).unwrap(), expected);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn partial_export_is_unavailable_before_a_miss_after_recovery_and_after_cancel() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 800, 600)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let now = Instant::now();
+        let page = page();
+        let image = ScrollImage::new(viewport(&page, 0)).unwrap();
+        jwm.features.screenshot.scrolling = true;
+        jwm.features.scroll_capture = Some(capture_with_sample(image, true, now, false));
+        jwm.finish_partial_scroll_screenshot(&mut backend, true);
+        assert!(
+            jwm.features
+                .scroll_capture
+                .as_ref()
+                .unwrap()
+                .finish
+                .is_none()
+        );
+        jwm.tick_scroll_screenshot(&mut backend, now);
+
+        let mut capture = jwm.features.scroll_capture.take().unwrap();
+        let mut image = capture.image.take().unwrap();
+        let matched = image.append(viewport(&page, 500)).unwrap();
+        assert!(!matched);
+        jwm.features.scroll_capture = Some(capture_with_sample(image, matched, now, false));
+        jwm.tick_scroll_screenshot(&mut backend, now);
+        assert!(jwm.features.scroll_capture.as_ref().unwrap().match_failed);
+
+        let mut capture = jwm.features.scroll_capture.take().unwrap();
+        let mut image = capture.image.take().unwrap();
+        let matched = image.append(viewport(&page, 73)).unwrap();
+        assert!(matched);
+        capture.job = Some(BackgroundJob::completed_for_test(Ok((image, matched))));
+        jwm.features.scroll_capture = Some(capture);
+        jwm.tick_scroll_screenshot(&mut backend, now);
+        assert!(!jwm.features.scroll_capture.as_ref().unwrap().match_failed);
+        jwm.finish_partial_scroll_screenshot(&mut backend, true);
+        assert!(
+            jwm.features
+                .scroll_capture
+                .as_ref()
+                .unwrap()
+                .finish
+                .is_none()
+        );
+
+        jwm.cancel_screenshot_select(&mut backend);
+        jwm.finish_partial_scroll_screenshot(&mut backend, true);
+        jwm.tick_scroll_screenshot(&mut backend, now);
+        assert!(jwm.features.scroll_capture.is_none());
+        assert!(jwm.features.screenshot_completions.is_empty());
+    }
+
     #[test]
     fn a_full_scroll_capture_waits_without_sampling_then_exports_the_retained_pixels() {
         use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
@@ -501,6 +691,7 @@ mod tests {
             pointer_released: true,
             finish: None,
             final_sample: false,
+            match_failed: false,
         };
         assert_eq!(capture.next_wakeup(now), Some(SAMPLE_INTERVAL));
         capture.image.as_mut().unwrap().full = true;
