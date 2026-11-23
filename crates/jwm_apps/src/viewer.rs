@@ -44,12 +44,8 @@ pub fn decode(path: &Path) -> Result<DecodedImage, String> {
 // Only worker-prepared native-endian pixels may cross into the Cairo path.
 struct PreparedImage(DecodedImage);
 
-type LoadResult = (
-    Result<PreparedImage, String>,
-    Option<Vec<PathBuf>>,
-    PathBuf,
-    u64,
-);
+type LoadResult = (Result<PreparedImage, String>, Option<PathBuf>, u64);
+type ScanResult = (Vec<PathBuf>, PathBuf, u64);
 pub(crate) struct Viewer {
     pub paths: Vec<PathBuf>,
     pub index: usize,
@@ -63,6 +59,8 @@ pub(crate) struct Viewer {
     generation: u64,
     worker: Option<Receiver<LoadResult>>,
     pending: Option<(PathBuf, bool, u64)>,
+    scanner: Option<Receiver<ScanResult>>,
+    pending_scan: Option<(PathBuf, u64)>,
 }
 impl Viewer {
     pub fn new(paths: Vec<PathBuf>) -> Self {
@@ -79,6 +77,8 @@ impl Viewer {
             generation: 0,
             worker: None,
             pending: None,
+            scanner: None,
+            pending_scan: None,
         };
         this.open(paths);
         this
@@ -111,6 +111,7 @@ impl Viewer {
         };
         self.generation = self.generation.wrapping_add(1);
         self.pending = Some((path.clone(), scan && self.paths.len() == 1, self.generation));
+        self.pending_scan = None;
         self.image = None;
         self.message = "正在载入图片…".into();
         self.status = path.to_string_lossy().into_owned();
@@ -126,15 +127,32 @@ impl Viewer {
         let (tx, rx) = mpsc::channel();
         self.worker = Some(rx);
         std::thread::spawn(move || {
-            let entries = scan.then(|| neighbors(&path));
             let image = decode(&path).map(prepare_surface_pixels);
-            let _ = tx.send((image, entries, path, generation));
+            let _ = tx.send((image, scan.then_some(path), generation));
+        });
+    }
+    fn start_scan(&mut self) {
+        if self.scanner.is_some() {
+            return;
+        }
+        let Some((path, generation)) = self.pending_scan.take() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.scanner = Some(rx);
+        std::thread::spawn(move || {
+            let entries = neighbors(&path);
+            let _ = tx.send((entries, path, generation));
         });
     }
     pub fn loading(&self) -> bool {
-        self.worker.is_some()
+        self.worker.is_some() || self.scanner.is_some()
     }
     pub fn poll(&mut self) -> bool {
+        let decoded = self.poll_decode();
+        self.poll_scan() || decoded
+    }
+    fn poll_decode(&mut self) -> bool {
         let Some(worker) = &self.worker else {
             return false;
         };
@@ -149,14 +167,10 @@ impl Viewer {
             }
         };
         self.worker = None;
-        let (decoded, entries, path, generation) = result;
+        let (decoded, scan, generation) = result;
         if generation != self.generation {
             self.start();
             return true;
-        }
-        if let Some(paths) = entries {
-            self.index = paths.iter().position(|p| p == &path).unwrap_or(0);
-            self.paths = paths;
         }
         match decoded.and_then(surface) {
             Ok(image) => {
@@ -170,7 +184,32 @@ impl Viewer {
                 self.status = "载入失败".into();
             }
         }
+        // Publish the requested image (or its error) before discovering
+        // neighbors. An older directory scan cannot block the decoder.
+        self.pending_scan = scan.map(|path| (path, generation));
+        self.start_scan();
         true
+    }
+    fn poll_scan(&mut self) -> bool {
+        let Some(scanner) = &self.scanner else {
+            return false;
+        };
+        let result = match scanner.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => return false,
+            result => result,
+        };
+        self.scanner = None;
+        let mut changed = false;
+        if let Ok((paths, path, generation)) = result
+            && generation == self.generation
+            && let Some(index) = paths.iter().position(|candidate| candidate == &path)
+        {
+            self.paths = paths;
+            self.index = index;
+            changed = true;
+        }
+        self.start_scan();
+        changed
     }
     pub fn dimensions(&self) -> (f64, f64) {
         let Some(image) = &self.image else {
@@ -222,6 +261,86 @@ fn surface(PreparedImage(decoded): PreparedImage) -> Result<ImageSurface, String
 mod tests {
     use super::*;
 
+    fn deliver_decoded(viewer: &mut Viewer, width: u32, scan: Option<PathBuf>) {
+        let (tx, rx) = mpsc::channel();
+        assert!(
+            tx.send((
+                Ok(prepare_surface_pixels(DecodedImage {
+                    pixels: vec![255; width as usize * 4],
+                    width,
+                    height: 1,
+                })),
+                scan,
+                viewer.generation,
+            ))
+            .is_ok()
+        );
+        viewer.worker = Some(rx);
+    }
+
+    #[test]
+    fn viewer_publishes_decoded_image_while_directory_scan_is_pending() {
+        let mut viewer = Viewer::new(Vec::new());
+        let selected = PathBuf::from("selected.png");
+        let sibling = PathBuf::from("earlier.png");
+        viewer.paths = vec![selected.clone()];
+        let (scan_tx, scan_rx) = mpsc::channel();
+        viewer.scanner = Some(scan_rx);
+        deliver_decoded(&mut viewer, 3, None);
+
+        assert!(viewer.poll());
+        assert_eq!(viewer.dimensions(), (3., 1.));
+        assert_eq!(viewer.paths, [selected.clone()]);
+        assert!(viewer.loading());
+
+        viewer.rotation = 1;
+        scan_tx
+            .send((
+                vec![sibling.clone(), selected.clone()],
+                selected.clone(),
+                viewer.generation,
+            ))
+            .unwrap();
+        assert!(viewer.poll());
+        assert_eq!(viewer.paths, [sibling, selected]);
+        assert_eq!(viewer.index, 1);
+        assert_eq!(viewer.dimensions(), (1., 3.));
+        assert!(!viewer.loading());
+    }
+
+    #[test]
+    fn viewer_ignores_older_scan_after_opening_an_explicit_file_list() {
+        let mut viewer = Viewer::new(Vec::new());
+        let old = PathBuf::from("old.png");
+        let first = PathBuf::from("new-1.png");
+        let second = PathBuf::from("new-2.png");
+        let (scan_tx, scan_rx) = mpsc::channel();
+        viewer.scanner = Some(scan_rx);
+
+        // Hold the decoder lane so open queues work without touching disk.
+        let (old_tx, old_rx) = mpsc::channel();
+        viewer.worker = Some(old_rx);
+        let old_generation = viewer.generation;
+        viewer.open(vec![first.clone(), second.clone()]);
+        let (path, scan, generation) = viewer.pending.take().unwrap();
+        assert_eq!(path, first);
+        assert!(!scan);
+        assert_ne!(generation, old_generation);
+        drop(old_tx);
+        deliver_decoded(&mut viewer, 4, None);
+        assert!(viewer.poll());
+        assert_eq!(viewer.dimensions(), (4., 1.));
+
+        scan_tx
+            .send((vec![old.clone()], old, old_generation))
+            .unwrap();
+        assert!(!viewer.poll());
+        assert_eq!(viewer.paths, [first, second]);
+        assert_eq!(viewer.index, 0);
+        assert_eq!(viewer.dimensions(), (4., 1.));
+        assert!(!viewer.loading());
+    }
+
     #[test]
     fn worker_prepares_native_cairo_pixels_before_surface_creation() {
         let path =
@@ -233,17 +352,16 @@ mod tests {
             .unwrap();
         let mut viewer = Viewer::new(Vec::new());
         viewer.paths.push(path.clone());
-        viewer.load(false);
-        let (prepared, entries, returned_path, generation) = viewer
+        viewer.load(true);
+        let (prepared, scan, generation) = viewer
             .worker
             .take()
             .unwrap()
             .recv_timeout(std::time::Duration::from_secs(3))
             .unwrap();
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(returned_path, path);
         assert_eq!(generation, viewer.generation);
-        assert!(entries.is_none());
+        assert_eq!(scan, Some(path));
         let mut cairo = surface(prepared.unwrap()).unwrap();
         assert_eq!((cairo.width(), cairo.height(), cairo.stride()), (3, 1, 12));
         let expected = [0x0000_0000u32, 0x8032_6480, 0xff14_283c]
