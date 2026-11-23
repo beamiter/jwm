@@ -3433,8 +3433,15 @@ impl Jwm {
             self.features.capture.clear_confirm_double_click();
             if self.features.screenshot.scrolling {
                 let ctrl = clean_state.contains(Mods::CONTROL);
+                let shift = clean_state.contains(Mods::SHIFT);
                 match keysym {
                     keys::KEY_Escape => self.cancel_screenshot_select(backend),
+                    keys::KEY_Return | keys::KEY_KP_Enter if shift => {
+                        self.finish_partial_scroll_screenshot(backend, false);
+                    }
+                    keys::KEY_c if ctrl && shift => {
+                        self.finish_partial_scroll_screenshot(backend, true);
+                    }
                     keys::KEY_Return | keys::KEY_KP_Enter | keys::KEY_space => {
                         self.finish_scroll_screenshot(backend, false);
                     }
