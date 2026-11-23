@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Uses only this repository's explicitly installed verification dependencies.
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, mkdir, writeFile, readFile, readdir, symlink, rm } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, open, writeFile, readFile, readdir, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -110,6 +110,26 @@ try {
   assert.equal(await failure.count(), 0);
   console.log('PASS: component render error and missing default export are visible and recover on save');
   const appPath = path.join(root, 'src/App.tsx');
+  // Some editors truncate and rewrite a file in place. Do not transform
+  // the incomplete source or leave the page on it after the final write.
+  const componentFailures = [];
+  const recordComponentFailure = response => {
+    if (new URL(response.url()).pathname === '/src/App.tsx' && response.status() >= 500) {
+      componentFailures.push(response.status());
+    }
+  };
+  page.on('response', recordComponentFailure);
+  const saving = await open(appPath, 'w');
+  try {
+    await saving.writeFile('export default function App(){return <div>');
+    await sleep(35);
+    await saving.truncate(0);
+    await saving.write(component('Finished save'), 0, 'utf8');
+  } finally { await saving.close(); }
+  await page.getByRole('button', { name: 'Finished save 0' }).waitFor();
+  page.off('response', recordComponentFailure);
+  assert.deepEqual(componentFailures, [], 'An in-place save must not reload the partial source');
+  console.log('PASS: an in-place component save loads the final source without a partial transform error');
   const initPage = await browser.newPage();
   const initFailure = initPage.getByRole('alert');
   await writeFile(appPath,
