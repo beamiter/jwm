@@ -104,7 +104,7 @@ impl Jwm {
         client_key_opt: Option<ClientKey>,
         target_mon_opt: Option<MonitorKey>,
     ) {
-        self.sendmon_impl(backend, client_key_opt, target_mon_opt, false);
+        self.sendmon_impl(backend, client_key_opt, target_mon_opt, false, None);
     }
 
     /// A pointer drop has already placed the window in desktop coordinates.
@@ -116,7 +116,37 @@ impl Jwm {
         client_key: ClientKey,
         target_mon: MonitorKey,
     ) {
-        self.sendmon_impl(backend, Some(client_key), Some(target_mon), true);
+        self.sendmon_impl(backend, Some(client_key), Some(target_mon), true, None);
+    }
+
+    /// Move an overview drop straight to its destination tag. Transferring
+    /// to the active tag first would publish and arrange an intermediate
+    /// workspace that was never selected by the user.
+    pub(crate) fn move_client_to_monitor_tag(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        target_mon: MonitorKey,
+        target_tag: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let target_tag = target_tag & CONFIG.load().tagmask();
+        let Some(client) = self.state.clients.get(client_key) else {
+            return Ok(());
+        };
+        if target_tag == 0 || !self.state.monitors.contains_key(target_mon) {
+            return Ok(());
+        }
+        if client.mon == Some(target_mon) {
+            return self.move_client_to_tag(backend, client_key, target_tag);
+        }
+        self.sendmon_impl(
+            backend,
+            Some(client_key),
+            Some(target_mon),
+            false,
+            Some(target_tag),
+        );
+        Ok(())
     }
 
     fn sendmon_impl(
@@ -125,6 +155,7 @@ impl Jwm {
         client_key_opt: Option<ClientKey>,
         target_mon_opt: Option<MonitorKey>,
         preserve_drop_geometry: bool,
+        explicit_tags: Option<u32>,
     ) {
         // info!("[sendmon]");
 
@@ -199,16 +230,10 @@ impl Jwm {
             }
         }
 
+        let active_tags = self.state.monitors[target_mon_key].get_active_tags();
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.mon = Some(target_mon_key);
-        }
-
-        if let Some(target_monitor) = self.state.monitors.get(target_mon_key) {
-            let target_tags = target_monitor.get_active_tags();
-
-            if let Some(client) = self.state.clients.get_mut(client_key) {
-                client.state.tags = target_tags;
-            }
+            client.state.tags = explicit_tags.unwrap_or(active_tags);
         }
 
         if preserve_drop_geometry {
@@ -246,6 +271,9 @@ impl Jwm {
         self.attach_back(client_key);
         self.attachstack(client_key);
 
+        if explicit_tags.is_some_and(|tags| tags != active_tags) {
+            self.retarget_client_spawn_pin(backend, client_key);
+        }
         let _ = self.setclienttagprop(backend, client_key);
 
         if is_hidden {
@@ -833,6 +861,38 @@ mod tests {
         let key = jwm.insert_client(client);
         jwm.attach_to_monitor(key, mon);
         key
+    }
+
+    #[test]
+    fn overview_move_publishes_only_the_requested_tag_on_the_target_monitor() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = jwm.state.monitor_order[0];
+        let target = add_right_monitor(&mut jwm, source);
+        assert_eq!(jwm.state.monitors[target].get_active_tags(), 1);
+        let target_num = jwm.state.monitors[target].num as u32;
+        let window = WindowId::from_raw(0x4f1);
+        let key = visible_client(&mut jwm, source, window.raw(), Rect::new(60, 80, 400, 300));
+        jwm.state.clients[key].state.is_floating = true;
+        backend.property_ops.client_info.lock().unwrap().clear();
+
+        jwm.move_client_to_monitor_tag(&mut backend, key, target, 2)
+            .unwrap();
+
+        let writes: Vec<_> = backend
+            .property_ops
+            .client_info
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|(win, _, _)| *win == window)
+            .collect();
+        assert_eq!(writes, [(window, 2, target_num)]);
+        assert_eq!(jwm.state.clients[key].mon, Some(target));
+        assert_eq!(jwm.state.clients[key].state.tags, 2);
+        assert_eq!(jwm.state.sel_mon, Some(source));
+        assert_eq!(jwm.state.monitors[target].get_active_tags(), 1);
     }
 
     #[test]

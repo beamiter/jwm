@@ -699,8 +699,7 @@ impl Jwm {
                     );
                     // The arrange inside rebuilds the open panel's cells, so
                     // the drop is visible without the panel closing.
-                    self.sendmon(backend, Some(client_key), Some(monitor));
-                    self.move_client_to_tag(backend, client_key, mask)?;
+                    self.move_client_to_monitor_tag(backend, client_key, monitor, mask)?;
                 }
             }
             TagsOverviewRelease::Disarm => {
