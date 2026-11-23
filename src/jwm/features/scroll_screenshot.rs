@@ -163,11 +163,15 @@ pub(crate) struct ScrollCapture {
 }
 
 impl ScrollCapture {
-    pub(crate) fn next_wakeup(&self, now: Instant) -> Duration {
+    pub(crate) fn next_wakeup(&self, now: Instant) -> Option<Duration> {
         if self.job.is_some() {
-            Duration::from_millis(20)
+            Some(Duration::from_millis(20))
+        } else if self.finish.is_some() {
+            Some(Duration::ZERO)
+        } else if self.image.as_ref().is_some_and(|image| image.full) {
+            None
         } else {
-            self.next_sample.saturating_duration_since(now)
+            Some(self.next_sample.saturating_duration_since(now))
         }
     }
 }
@@ -233,8 +237,8 @@ impl Jwm {
         to_clipboard: bool,
     ) {
         if let Some(capture) = &mut self.features.scroll_capture {
-            // One more capture after confirmation includes a scroll that
-            // arrived just before Enter. Repeated keys cannot enqueue exports.
+            // Unless the image is full, take one more sample to include
+            // a scroll just before Enter. Repeated keys cannot enqueue exports.
             capture.finish.get_or_insert(to_clipboard);
             capture.next_sample = Instant::now();
             backend.compositor_set_capture_hint(Some("Long screenshot · finishing…".into()));
@@ -298,6 +302,17 @@ impl Jwm {
                     return;
                 }
             }
+        }
+        // A full image cannot accept another viewport. Wait without polling
+        // the capture backend, then export the retained pixels on confirmation.
+        if capture.image.as_ref().is_some_and(|image| image.full) {
+            if let Some(to_clipboard) = capture.finish {
+                let image = capture.image.take().expect("full capture owns its image");
+                self.export_scroll_screenshot(backend, image, to_clipboard);
+            } else {
+                self.features.scroll_capture = Some(capture);
+            }
+            return;
         }
         if capture.job.is_none() && (capture.finish.is_some() || now >= capture.next_sample) {
             let (sender, receiver, cancellation) = screenshot_memory_channel();
@@ -461,6 +476,65 @@ mod tests {
         assert!(image.append(viewport(&page, 375)).unwrap());
         assert_eq!(image.pixels.len(), near_limit.len());
         assert_eq!(&image.pixels[..kept.len()], &kept[..]);
+    }
+
+    #[test]
+    fn a_full_scroll_capture_waits_without_sampling_then_exports_the_retained_pixels() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 800, 600)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let frame = viewport(&page(), 0);
+        let image = ScrollImage::new(frame.clone()).unwrap();
+        let now = Instant::now();
+        let mut capture = ScrollCapture {
+            region: Rect {
+                x: 0,
+                y: 0,
+                w: 120,
+                h: 240,
+            },
+            image: Some(image),
+            job: None,
+            cancellation: None,
+            next_sample: now + SAMPLE_INTERVAL,
+            pointer_released: true,
+            finish: None,
+            final_sample: false,
+        };
+        assert_eq!(capture.next_wakeup(now), Some(SAMPLE_INTERVAL));
+        capture.image.as_mut().unwrap().full = true;
+        assert_eq!(capture.next_wakeup(now), None);
+        jwm.features.scroll_capture = Some(capture);
+        jwm.features.screenshot.scrolling = true;
+
+        // This backend has no region-capture support. Attempting a new
+        // capture once the deadline passed would abort instead of waiting.
+        jwm.tick_scroll_screenshot(&mut backend, now + SAMPLE_INTERVAL);
+        let capture = jwm.features.scroll_capture.as_ref().unwrap();
+        assert!(capture.job.is_none());
+        assert!(capture.image.as_ref().unwrap().full);
+
+        jwm.finish_scroll_screenshot(&mut backend, true);
+        jwm.finish_scroll_screenshot(&mut backend, false);
+        let capture = jwm.features.scroll_capture.as_ref().unwrap();
+        assert_eq!(capture.next_wakeup(now), Some(Duration::ZERO));
+        jwm.tick_scroll_screenshot(&mut backend, now + SAMPLE_INTERVAL);
+        assert!(jwm.features.scroll_capture.is_none());
+        assert_eq!(jwm.features.screenshot_completions.len(), 1);
+        let job = &jwm.features.screenshot_completions[0];
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let completion = loop {
+            if let Some(completion) = job.take() {
+                break completion;
+            }
+            assert!(Instant::now() < deadline, "clipboard export did not finish");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let ScreenshotCompletion::CopiedToClipboard { png, .. } = completion else {
+            panic!("expected the first finish request to keep the clipboard destination");
+        };
+        assert_eq!(decode_frame(png).unwrap(), frame);
     }
 
     #[test]
