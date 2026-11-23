@@ -4060,7 +4060,7 @@ impl UdevBackend {
                                     pending_events.lock_safe().push_back(
                                         BackendEvent::KeyRelease {
                                             keycode: keycode_u8,
-                                            state: mods_state,
+                                            state_after: Some(mods_state),
                                             time: time.millis(),
                                         },
                                     );

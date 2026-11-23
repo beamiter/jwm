@@ -544,7 +544,7 @@ impl WMController for Jwm {
         }
     }
 
-    fn on_key_release(&mut self, backend: &mut dyn Backend, keycode: u8, _mods: u16, _time: u32) {
+    fn on_key_release(&mut self, backend: &mut dyn Backend, keycode: u8, state_after: Option<u16>) {
         // Only the window switcher listens to releases: letting go of the
         // modifier the gesture started with commits the highlighted row.
         if !self.features.system_ui.is_window_switcher() {
@@ -553,14 +553,15 @@ impl WMController for Jwm {
         let Ok(keysym) = backend.key_ops_mut().keysym_from_keycode(keycode) else {
             return;
         };
-        // A gesture modifier the keysym table knows decides on its own; a
-        // modifier keysym it does not (Meta_L for a Win key under
-        // altwin:meta_win, Hyper_L, ...) is decided by the live mask, read
-        // back from the server now that the release has been processed —
-        // the event's own state field is the mask *before* the release.
+        // Use the mask captured with the release when available; a later
+        // Wayland event may already have changed the seat state. For X11,
+        // query the live mask only when this release could end the gesture.
         let held = self.features.window_switcher_mods;
         let commits = crate::jwm::features::switcher::release_commits(held, keysym, || {
-            let (_, _, mask, _) = backend.input_ops().query_pointer_root().ok()?;
+            let mask = state_after.or_else(|| {
+                let (_, _, mask, _) = backend.input_ops().query_pointer_root().ok()?;
+                Some(mask)
+            })?;
             Some(
                 backend.key_ops().clean_mods(mask)
                     & crate::jwm::features::switcher::release_commit_mods(),
@@ -17092,9 +17093,9 @@ impl EventHandler for Jwm {
             }
             BackendEvent::KeyRelease {
                 keycode,
-                state,
-                time,
-            } => self.on_key_release(backend, keycode, state, time),
+                state_after,
+                ..
+            } => self.on_key_release(backend, keycode, state_after),
             BackendEvent::EnterNotify {
                 window,
                 subwindow: _,

@@ -2155,7 +2155,7 @@ impl XcbBackend {
             }),
             xcb::Event::X(x::Event::KeyRelease(ev)) => Some(BackendEvent::KeyRelease {
                 keycode: ev.detail(),
-                state: ev.state().bits() as u16,
+                state_after: None,
                 time: ev.time(),
             }),
             xcb::Event::RandR(xcb::randr::Event::ScreenChangeNotify(_))

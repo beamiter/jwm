@@ -5,6 +5,8 @@
 highlighted window. One tap is the classic "go back": the highlight opens
 on the *previous* window, and a quick tap that is already over by the time
 the panel is up commits it immediately.
+Releasing one of two keys mapped to `Alt` does not count as releasing
+`Alt` while the other is still held.
 
 > **Default keybinding change.** `Alt+Tab` / `Alt+Shift+Tab` used to run
 > `loopview` (workspace cycling). They now run `window_switcher(±1)`, and
