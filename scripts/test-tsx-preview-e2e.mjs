@@ -109,6 +109,26 @@ try {
   await page.getByRole('button', { name: 'Default restored 0' }).waitFor();
   assert.equal(await failure.count(), 0);
   console.log('PASS: component render error and missing default export are visible and recover on save');
+  const appPath = path.join(root, 'src/App.tsx');
+  const initPage = await browser.newPage();
+  const initFailure = initPage.getByRole('alert');
+  await writeFile(appPath,
+    'throw new Error("component initialization failed"); export default function App(){return <div>not mounted</div>;}');
+  await initPage.goto(run.url);
+  await initFailure.getByRole('heading', { name: 'Component preview failed' }).waitFor();
+  await initFailure.getByText('component initialization failed', { exact: true }).waitFor();
+  await writeFile(appPath, component('Initialization fixed'));
+  await initPage.getByRole('button', { name: 'Initialization fixed 0' }).waitFor();
+  assert.equal(await initFailure.count(), 0);
+
+  await writeFile(path.join(root, 'src/dependency.ts'), 'throw new Error("preview dependency failed");');
+  await writeFile(appPath, "import './dependency'; " + component('Dependency fixed'));
+  await initFailure.getByText('preview dependency failed', { exact: true }).waitFor();
+  await writeFile(path.join(root, 'src/dependency.ts'), 'export {};');
+  await initPage.getByRole('button', { name: 'Dependency fixed 0' }).waitFor();
+  assert.equal(await initFailure.count(), 0);
+  await initPage.close();
+  console.log('PASS: fresh component initialization and imported dependency failures are visible and recover on save');
   await stop(run);
   assert.equal(await readFile(path.join(root, '.env'), 'utf8'), 'VITE_ENV_SECRET=env-secret-marker');
   await assert.rejects(readFile(path.join(root, 'MUST_NOT_RUN')));

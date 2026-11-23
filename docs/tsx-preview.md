@@ -35,8 +35,8 @@ component can instead be mounted without props:
 Use `--port 5173` for a fixed port; an occupied port fails rather than silently
 switching. By default an available random loopback port is selected. Save edits
 to update the preview. Syntax errors appear in Vite's browser overlay. In
-component mode, a render failure or missing default export shows a message
-instead of a blank page. Fix the source and save to retry. This does not provide
+component mode, a module initialization error, render failure or missing default
+export shows a message instead of a blank page. Fix the source and save to retry. This does not provide
 React Fast Refresh state preservation or TypeScript type checking.
 
 ## Compatibility and security boundaries
