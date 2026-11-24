@@ -2078,26 +2078,27 @@ impl Jwm {
             self.open_shell_hub_route(backend, route)?;
             return Ok(true);
         }
-        if let Some(window) = self.features.system_ui.selected_window() {
-            // A recycled native window ID must never restore another client.
-            // Also reject a client restored elsewhere while this snapshot was open.
-            if let Some(target) = self.features.system_ui.restore_preview_target() {
-                let valid = target.is_some_and(|key| {
+        if let Some(entry) = self.features.system_ui.selected_window_entry() {
+            let window = WindowId::from_raw(entry.id);
+            // The minimized picker additionally rejects a client restored while
+            // the picker was open. Neither picker may activate a replacement.
+            let valid = if let Some(target) = self.features.system_ui.restore_preview_target() {
+                target.is_some_and(|key| {
                     self.state
                         .clients
                         .get(key)
-                        .is_some_and(|client| client.win.raw() == window && client.state.is_hidden)
-                });
-                if !valid {
-                    self.close_system_ui(backend);
-                    return Ok(true);
-                }
-            }
+                        .is_some_and(|client| client.win == window && client.state.is_hidden)
+                })
+            } else {
+                entry
+                    .client_key
+                    .is_some_and(|key| self.wintoclient(window) == Some(key))
+            };
             self.close_system_ui(backend);
-            if let Err(error) = self.reveal_and_focus(
-                backend,
-                crate::backend::common_define::WindowId::from_raw(window),
-            ) {
+            if !valid {
+                return Ok(true);
+            }
+            if let Err(error) = self.reveal_and_focus(backend, window) {
                 log::warn!("Launcher: could not focus window: {error}");
             }
             // reveal_and_focus may restore + retarget selected_id; occupancy needs bar.
@@ -7062,6 +7063,56 @@ mod tests {
         for (raw, key) in targets {
             assert_eq!(jwm.state.clients[key].state.is_hidden, raw != chosen);
         }
+    }
+
+    #[test]
+    fn launcher_does_not_activate_a_replacement_for_a_closed_window() {
+        use crate::core::models::WMClient;
+        use crate::jwm::features::SystemUiState;
+
+        let (mut jwm, mut backend, _) = repeat_dispatch_fixture();
+        let monitor = jwm.state.monitor_order[0];
+        let win = WindowId::from_raw(0x991);
+        let mut original = WMClient::new(win);
+        original.mon = Some(monitor);
+        original.state.tags = 1;
+        original.name = "Original document".into();
+        let original = jwm.insert_client(original);
+        jwm.attach_to_monitor(original, monitor);
+
+        jwm.features.system_ui =
+            SystemUiState::open_launcher(Default::default(), jwm.launcher_window_snapshot(), false);
+        jwm.features.system_ui.push_char('/');
+        assert_eq!(jwm.features.system_ui.selected_window(), Some(win.raw()));
+
+        jwm.unmanage(&mut backend, Some(original), true).unwrap();
+        assert!(jwm.wintoclient(win).is_none());
+        let mut replacement = WMClient::new(win);
+        replacement.mon = Some(monitor);
+        replacement.state.tags = 2;
+        replacement.name = "Replacement document".into();
+        replacement.geometry.w = 400;
+        replacement.geometry.h = 300;
+        let replacement = jwm.insert_client(replacement);
+        jwm.attach_to_monitor(replacement, monitor);
+        assert_ne!(replacement, original);
+        assert_eq!(jwm.wintoclient(win), Some(replacement));
+
+        let active = jwm.state.monitors[monitor].get_active_tags();
+        let focused = jwm.get_selected_client_key();
+        assert_eq!(jwm.features.system_ui.selected_window(), Some(win.raw()));
+        assert!(jwm.activate_launcher_selection(&mut backend).unwrap());
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), active);
+        assert_eq!(jwm.get_selected_client_key(), focused);
+
+        // A new snapshot can select this live window normally.
+        jwm.features.system_ui =
+            SystemUiState::open_launcher(Default::default(), jwm.launcher_window_snapshot(), false);
+        jwm.features.system_ui.push_char('/');
+        assert!(jwm.activate_launcher_selection(&mut backend).unwrap());
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 2);
+        assert_eq!(jwm.get_selected_client_key(), Some(replacement));
     }
 
     #[test]

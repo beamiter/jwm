@@ -16125,7 +16125,7 @@ mod tests {
             .split_once("fn activate_system_ui_pointer_row(")
             .expect("activate_system_ui_pointer_row follows")
             .0;
-        assert!(activate.contains("selected_window()"));
+        assert!(activate.contains("selected_window_entry()"));
         assert!(activate.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Launcher window activation emits `monitor/bar`"));
     }
