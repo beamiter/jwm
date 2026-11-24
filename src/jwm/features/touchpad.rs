@@ -579,15 +579,8 @@ impl Jwm {
                 return Ok(());
             }
             let entries = self.window_switcher_snapshot();
-            let windows: Vec<_> = entries
-                .iter()
-                .filter_map(|entry| {
-                    self.wintoclient(crate::backend::common_define::WindowId::from_raw(
-                        entry.window,
-                    ))
-                })
-                .collect();
-            if windows.is_empty() || windows.len() != entries.len() {
+            let windows: Vec<_> = entries.iter().map(|entry| entry.client_key).collect();
+            if windows.is_empty() {
                 return Ok(());
             }
             let origin = focused
@@ -608,6 +601,7 @@ impl Jwm {
                     text: switcher::switcher_row(entry),
                     data: RowData::WindowSwitcher {
                         window: entry.window,
+                        client_key: entry.client_key,
                     },
                 })
                 .collect();
@@ -651,14 +645,13 @@ impl Jwm {
         if !self.features.system_ui.is_window_switcher() {
             return;
         }
-        let valid = preview
-            .windows
-            .get(preview.selected)
-            .and_then(|&key| self.state.clients.get(key))
-            .is_some_and(|client| {
-                self.features.system_ui.selected_switcher_window() == Some(client.win.raw())
-            });
-        if commit && valid {
+        let selected = self
+            .features
+            .system_ui
+            .selected_switcher_target()
+            .and_then(|(window, key)| self.live_switcher_client(window, key));
+        let matches_preview = preview.windows.get(preview.selected).copied() == selected;
+        if commit && selected.is_some() && matches_preview {
             if let Err(error) = self.commit_window_switcher(backend) {
                 log::warn!("[gesture] could not switch window: {error}");
                 self.cancel_window_switcher(backend);

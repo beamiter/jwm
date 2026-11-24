@@ -10,7 +10,7 @@
 //! `navigation.rs`, `input_handler.rs` and `event_dispatcher.rs`.
 
 use crate::backend::common_define::{Mods, keys};
-use crate::core::models::MonitorKey;
+use crate::core::models::{ClientKey, MonitorKey};
 use crate::jwm::Jwm;
 use crate::jwm::features::system_ui::{ListKind, RowData, SystemUiState};
 
@@ -19,8 +19,9 @@ use crate::jwm::features::system_ui::{ListKind, RowData, SystemUiState};
 /// dies mid-gesture is caught by [`commit_disposition`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SwitcherEntry {
-    /// Raw window id; the commit path resolves it back through `wintoclient`.
     pub window: u64,
+    /// Managed instance captured at activation, even if the raw ID is recycled.
+    pub client_key: ClientKey,
     pub title: String,
     pub class: String,
     /// WM_CLASS instance / app_id instance half — icon lookup falls back here
@@ -225,19 +226,19 @@ pub(crate) enum CommitWindowState {
 /// while the modifier was held fails the re-check and the gesture degrades
 /// to a cancel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommitDisposition {
-    Focus(u64),
-    RestoreAndFocus(u64),
+pub(crate) enum CommitDisposition<T> {
+    Focus(T),
+    RestoreAndFocus(T),
     Cancel,
 }
 
 /// Resolve the highlighted row against live state: `window_state` answers
 /// [`CommitWindowState`] for a snapshotted window, `None` when it no longer
 /// resolves to anything switchable.
-pub(crate) fn commit_disposition(
-    selected: Option<u64>,
-    window_state: impl Fn(u64) -> Option<CommitWindowState>,
-) -> CommitDisposition {
+pub(crate) fn commit_disposition<T: Copy>(
+    selected: Option<T>,
+    window_state: impl Fn(T) -> Option<CommitWindowState>,
+) -> CommitDisposition<T> {
     match selected.and_then(|window| window_state(window).map(|state| (window, state))) {
         Some((window, CommitWindowState::Visible)) => CommitDisposition::Focus(window),
         Some((window, CommitWindowState::Minimized)) => CommitDisposition::RestoreAndFocus(window),
@@ -268,7 +269,7 @@ impl SystemUiState {
             return None;
         }
         let window = match rows.get(*selected).map(|row| &row.data) {
-            Some(RowData::WindowSwitcher { window }) => *window,
+            Some(RowData::WindowSwitcher { window, .. }) => *window,
             _ => return None,
         };
         rows.remove(*selected);
@@ -285,6 +286,15 @@ impl SystemUiState {
 }
 
 impl Jwm {
+    /// Validate a frozen switcher row without retargeting a reused native ID.
+    pub(crate) fn live_switcher_client(&self, window: u64, key: ClientKey) -> Option<ClientKey> {
+        let window = crate::backend::common_define::WindowId::from_raw(window);
+        if self.wintoclient(window) != Some(key) {
+            return None;
+        }
+        self.state.clients.contains_key(key).then_some(key)
+    }
+
     /// The most-recently-used windows, selected monitor first — the same
     /// ordering the launcher's window list uses, minus only the windows the
     /// switcher cannot jump to (docks, swallowed, or on an inactive tag).
@@ -333,6 +343,7 @@ impl Jwm {
                 }
                 entries.push(SwitcherEntry {
                     window: client.win.raw(),
+                    client_key,
                     title: client.name.clone(),
                     class: client.class.clone(),
                     instance: client.instance.clone(),
@@ -354,6 +365,7 @@ mod tests {
     fn entry(window: u64, title: &str, class: &str) -> SwitcherEntry {
         SwitcherEntry {
             window,
+            client_key: ClientKey::default(),
             title: title.to_string(),
             class: class.to_string(),
             instance: String::new(),
@@ -368,7 +380,10 @@ mod tests {
             .map(|n| ListRow {
                 key: n.to_string(),
                 text: format!("window {n}"),
-                data: RowData::WindowSwitcher { window: n },
+                data: RowData::WindowSwitcher {
+                    window: n,
+                    client_key: ClientKey::default(),
+                },
             })
             .collect();
         SystemUiState::window_switcher(rows, selected)
@@ -537,7 +552,7 @@ mod tests {
         let order: Vec<u64> = rows
             .iter()
             .map(|row| match &row.data {
-                RowData::WindowSwitcher { window } => *window,
+                RowData::WindowSwitcher { window, .. } => *window,
                 _ => panic!("switcher rows carry windows"),
             })
             .collect();

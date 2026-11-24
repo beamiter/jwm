@@ -12980,7 +12980,10 @@ mod tests {
                 vec![ListRow {
                     key: "only-row".into(),
                     text: "Window".into(),
-                    data: RowData::WindowSwitcher { window: 0x900 },
+                    data: RowData::WindowSwitcher {
+                        window: 0x900,
+                        client_key: ClientKey::default(),
+                    },
                 }],
                 0,
             );
@@ -13020,7 +13023,10 @@ mod tests {
             .map(|n| ListRow {
                 key: n.to_string(),
                 text: format!("window {n}"),
-                data: RowData::WindowSwitcher { window: 0x900 + n },
+                data: RowData::WindowSwitcher {
+                    window: 0x900 + n,
+                    client_key: ClientKey::default(),
+                },
             })
             .collect();
         jwm.features.system_ui = SystemUiState::window_switcher(rows, 0);
