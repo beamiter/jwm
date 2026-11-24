@@ -1,5 +1,6 @@
 //! Named, previewed desktop scenes. Layout restoration and application/session
 //! restoration are separate explicit actions. No scene stores or matches a PID.
+use super::launcher::AgentEntry;
 use super::system_ui::{LaunchEntry, ListKind, ListRow, RowData, SystemUiState};
 use crate::backend::api::Backend;
 use crate::config::{CONFIG, Config};
@@ -52,7 +53,10 @@ pub fn defaults() -> Vec<Workscene> {
 }
 
 fn actionable_row(row: &ListRow) -> bool {
-    row.key == "layout" || row.key.starts_with("session:") || row.key.starts_with("application:")
+    row.key == "layout"
+        || row.key.starts_with("session:")
+        || row.key.starts_with("session-review:")
+        || row.key.starts_with("application:")
 }
 
 fn app_identity_matches(class: &str, instance: &str, name: &str, program: &str) -> bool {
@@ -106,6 +110,7 @@ fn catalog_identity_matches(class: &str, instance: &str, entry: &LaunchEntry) ->
 pub(crate) enum WorksceneOutcome {
     LayoutApplied,
     SessionRevealRequested,
+    SessionReviewReady,
     ApplicationLaunchRequested,
 }
 
@@ -116,7 +121,63 @@ impl WorksceneOutcome {
             Self::SessionRevealRequested => {
                 "Terminal focused; session reveal requested, awaiting provider confirmation"
             }
+            Self::SessionReviewReady => "Session updated; select Reveal again to continue",
             Self::ApplicationLaunchRequested => "Application launch requested",
+        }
+    }
+}
+
+struct SceneSession {
+    id: String,
+    row: usize,
+    entry: Option<AgentEntry>,
+    review: bool,
+}
+
+impl SceneSession {
+    fn ready(&self) -> Option<&AgentEntry> {
+        self.entry
+            .as_ref()
+            .filter(|entry| Self::target(Some(entry)).is_some())
+    }
+
+    fn target(entry: Option<&AgentEntry>) -> Option<(&str, &str, u64)> {
+        let entry = entry.filter(|entry| entry.can_reveal && entry.status != "disconnected")?;
+        Some((
+            &entry.host_id,
+            entry.association_token.as_deref()?,
+            entry.revision,
+        ))
+    }
+
+    fn row(&self, index: usize) -> ListRow {
+        let (key, text) = match self.ready() {
+            Some(entry) if self.review => (
+                format!("session-review:{index}"),
+                format!("Review updated session · {}", entry.row()),
+            ),
+            Some(entry) => (
+                format!("session:{index}"),
+                format!("Reveal {}", entry.row()),
+            ),
+            None => match &self.entry {
+                Some(entry) => (
+                    "unavailable-session".into(),
+                    format!("Cannot reveal {}", entry.row()),
+                ),
+                None => (
+                    "missing".into(),
+                    format!(
+                        "Unavailable session {} · provider has not registered it",
+                        self.id
+                    ),
+                ),
+            },
+        };
+        ListRow {
+            key,
+            text,
+            data: RowData::Workscene,
         }
     }
 }
@@ -124,7 +185,7 @@ impl WorksceneOutcome {
 pub(crate) struct WorkscenePlan {
     config: Arc<Config>,
     outputs: Vec<(MonitorKey, u32, Option<LayoutEnum>)>,
-    sessions: Vec<super::launcher::AgentEntry>,
+    sessions: Vec<SceneSession>,
     applications: Vec<LaunchEntry>,
     pending_applications: Vec<(usize, String)>,
 }
@@ -207,7 +268,7 @@ impl Jwm {
             outputs.push((monitor, mask, layout));
         }
         let snapshot = self.agent_sessions_snapshot();
-        let registered = super::launcher::AgentEntry::from_snapshot(&snapshot);
+        let registered = AgentEntry::from_snapshot(&snapshot);
         let mut sessions = Vec::new();
         let mut applications = Vec::new();
         let mut pending_applications = Vec::new();
@@ -228,34 +289,17 @@ impl Jwm {
             if !seen_sessions.insert(id.as_str()) {
                 continue;
             }
-            if let Some(entry) = registered.iter().find(|entry| &entry.session_id == id) {
-                // Match the live activation policy at preview time, without
-                // dispensing with its identity and lease checks on Enter.
-                if !entry.can_reveal
-                    || entry.status == "disconnected"
-                    || entry.association_token.is_none()
-                {
-                    rows.push(ListRow {
-                        key: "unavailable-session".into(),
-                        text: format!("Cannot reveal {}", entry.row()),
-                        data: RowData::Workscene,
-                    });
-                    continue;
-                }
-                let index = sessions.len();
-                rows.push(ListRow {
-                    key: format!("session:{index}"),
-                    text: format!("Reveal {}", entry.row()),
-                    data: RowData::Workscene,
-                });
-                sessions.push(entry.clone());
-            } else {
-                rows.push(ListRow {
-                    key: "missing".into(),
-                    text: format!("Unavailable session {id} · provider has not registered it"),
-                    data: RowData::Workscene,
-                });
-            }
+            let session = SceneSession {
+                id: id.clone(),
+                row: rows.len(),
+                entry: registered
+                    .iter()
+                    .find(|entry| &entry.session_id == id)
+                    .cloned(),
+                review: false,
+            };
+            rows.push(session.row(sessions.len()));
+            sessions.push(session);
         }
         // In particular, duplicates must share the same single-use launch row
         // even before the application's first window becomes visible.
@@ -301,6 +345,44 @@ impl Jwm {
         };
         self.sync_system_ui(backend);
         Ok(())
+    }
+
+    pub(crate) fn refresh_workscene_sessions(&mut self, snapshot: &serde_json::Value) -> bool {
+        let SystemUiState::ListPanel {
+            kind: ListKind::Workscene,
+            rows,
+            selected,
+            ..
+        } = &mut self.features.system_ui
+        else {
+            return false;
+        };
+        let Some(plan) = &mut self.features.workscene_preview else {
+            return false;
+        };
+        if !Arc::ptr_eq(&plan.config, &CONFIG.load_full()) || plan.sessions.is_empty() {
+            return false;
+        }
+        let sessions = AgentEntry::from_snapshot(snapshot);
+        let mut changed = false;
+        for (index, slot) in plan.sessions.iter_mut().enumerate() {
+            let Some(row) = rows.get_mut(slot.row) else {
+                continue;
+            };
+            let entry = sessions.iter().find(|entry| entry.session_id == slot.id);
+            let previous_target = SceneSession::target(slot.entry.as_ref());
+            let target = SceneSession::target(entry);
+            // Never let an already-highlighted row silently reveal a new target.
+            slot.review = target.is_some()
+                && (slot.review || (slot.row == *selected && previous_target != target));
+            slot.entry = entry.cloned();
+            let updated = slot.row(index);
+            if *row != updated {
+                *row = updated;
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn workscene_application_row(
@@ -447,10 +529,33 @@ impl Jwm {
                 }
                 Ok(WorksceneOutcome::LayoutApplied)
             } else if let Some(index) = action
+                .strip_prefix("session-review:")
+                .and_then(|index| index.parse::<usize>().ok())
+            {
+                let slot = plan
+                    .sessions
+                    .get_mut(index)
+                    .ok_or("Session preview expired")?;
+                if !slot.review || slot.ready().is_none() {
+                    return Err("Session cannot be revealed from this preview".into());
+                }
+                let SystemUiState::ListPanel { rows, .. } = &mut self.features.system_ui else {
+                    return Err("Scene preview expired".into());
+                };
+                let row = rows.get_mut(slot.row).ok_or("Session preview expired")?;
+                slot.review = false;
+                *row = slot.row(index);
+                Ok(WorksceneOutcome::SessionReviewReady)
+            } else if let Some(index) = action
                 .strip_prefix("session:")
                 .and_then(|index| index.parse::<usize>().ok())
             {
-                let entry = plan.sessions.get(index).ok_or("Session preview expired")?;
+                let entry = plan
+                    .sessions
+                    .get(index)
+                    .filter(|slot| !slot.review)
+                    .and_then(SceneSession::ready)
+                    .ok_or("Session preview expired")?;
                 self.activate_scene_agent_session(backend, entry)?;
                 Ok(WorksceneOutcome::SessionRevealRequested)
             } else if let Some(index) = action
@@ -696,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn workscene_selects_a_usable_action_over_a_disconnected_session() {
+    fn workscene_updates_session_rows_without_default_selection_or_target_theft() {
         use crate::backend::common_define::WindowId;
         use crate::core::models::WMClient;
         use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
@@ -740,8 +845,7 @@ mod tests {
             sessions: vec!["session-one".into()],
             applications: vec!["JWM Notes".into()],
         };
-        jwm.open_workscene_preview(&mut backend, scene.clone())
-            .unwrap();
+        jwm.open_workscene_preview(&mut backend, scene).unwrap();
         assert_eq!(
             jwm.features.system_ui.selected_workscene_action(),
             Some("application:0")
@@ -757,23 +861,56 @@ mod tests {
                 .contains("cannot be revealed")
         );
         assert!(
-            jwm.features
-                .workscene_preview
-                .as_ref()
-                .unwrap()
-                .sessions
-                .is_empty()
+            jwm.features.workscene_preview.as_ref().unwrap().sessions[0]
+                .ready()
+                .is_none()
         );
+        jwm.features.system_ui.move_selection(1);
 
         args["session"]["status"] = json!("waiting");
         args["session"]["revision"] = json!(2);
         jwm.agent_session_command(&mut backend, "register_agent_session", &args)
             .unwrap();
-        jwm.open_workscene_preview(&mut backend, scene).unwrap();
+        assert_eq!(
+            jwm.features.system_ui.selected_workscene_action(),
+            Some("application:0")
+        );
+        jwm.features.system_ui.move_selection(-1);
         assert_eq!(
             jwm.features.system_ui.selected_workscene_action(),
             Some("session:0")
         );
+
+        // An already-highlighted action must not silently target a new pane.
+        args["session"]["pane_id"] = json!("pane-two");
+        args["session"]["revision"] = json!(3);
+        jwm.agent_session_command(&mut backend, "register_agent_session", &args)
+            .unwrap();
+        assert_eq!(
+            jwm.features.system_ui.selected_workscene_action(),
+            Some("session-review:0")
+        );
+        assert_eq!(
+            jwm.activate_workscene_action(&mut backend).unwrap(),
+            WorksceneOutcome::SessionReviewReady
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_workscene_action(),
+            Some("session:0")
+        );
+        let host = json!({"host_id": "host-one", "host_incarnation": "boot-one"});
+        assert_eq!(jwm.agent_session_requests(&host)["requests"], json!([]));
+
+        args["session"]["status"] = json!("disconnected");
+        args["session"]["revision"] = json!(4);
+        jwm.agent_session_command(&mut backend, "register_agent_session", &args)
+            .unwrap();
+        assert_eq!(
+            jwm.features.system_ui.selected_workscene_action(),
+            Some("unavailable-session")
+        );
+        assert!(jwm.activate_workscene_action(&mut backend).is_err());
+        assert_eq!(jwm.agent_session_requests(&host)["requests"], json!([]));
     }
 
     #[test]
