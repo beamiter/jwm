@@ -45,7 +45,7 @@ is a no-op round trip — a safe way to peek at the grid.
 | `Home` / `End` | jump to the first / last thumbnail |
 | `Page Up` / `Page Down` | jump by one grid row |
 | `Return` / keypad `Enter` | focus the highlighted window and exit |
-| `Delete` / `BackSpace` | close the highlighted window; the grid stays up |
+| `Delete` / `BackSpace` | close one highlighted window per physical press; the grid stays up if any remain |
 | `Esc` | exit without changing focus |
 | `Alt+E` | exit without changing focus (the key is a toggle) |
 
