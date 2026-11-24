@@ -57,6 +57,11 @@ pub(crate) mod wallpaper_controls;
 pub mod wallpaper_rotation;
 pub mod workscenes;
 
+use std::collections::HashMap;
+
+use crate::backend::common_define::WindowId;
+use crate::core::models::ClientKey;
+
 pub use audio_recording::AudioRecordingState;
 pub use calendar::CalendarView;
 pub use capture::{CaptureInteractionState, CaptureTarget};
@@ -279,6 +284,8 @@ pub struct FeatureStates {
     pub peek_active: bool,
     /// Expose / Mission Control 模式
     pub expose_active: bool,
+    /// Identities of the windows actually published in the current expose grid.
+    pub(crate) expose_client_keys: HashMap<WindowId, ClientKey>,
     /// Annotation (屏幕标注) 模式
     pub annotation_active: bool,
     /// Annotation 正在绘制中（鼠标按住）
@@ -329,6 +336,7 @@ impl FeatureStates {
         self.bluetooth_pairing = None;
         self.peek_active = false;
         self.expose_active = false;
+        self.expose_client_keys.clear();
         self.annotation_active = false;
         self.annotation_drawing = false;
         // `monitor_lock` is deliberately untouched. Every mode above hides
@@ -345,6 +353,7 @@ impl FeatureStates {
     /// 切换 Expose 模式
     pub fn toggle_expose(&mut self) {
         self.expose_active = !self.expose_active;
+        self.expose_client_keys.clear();
     }
 }
 

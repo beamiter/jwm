@@ -1542,6 +1542,7 @@ impl Jwm {
         }
         if self.features.expose_active && !cfg.behavior().expose_enabled {
             self.features.expose_active = false;
+            self.features.expose_client_keys.clear();
             backend.compositor_set_expose_mode(false, Vec::new());
             let _ = backend.key_ops().ungrab_keyboard();
             let _ = backend.input_ops().ungrab_pointer();
