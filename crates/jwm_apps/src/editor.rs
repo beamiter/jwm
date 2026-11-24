@@ -134,6 +134,30 @@ impl Editor {
             .map(|s| self.cursor + s.len())
             .unwrap_or(self.text.len())
     }
+    fn previous_word(&self) -> usize {
+        self.text[..self.cursor]
+            .split_word_bound_indices()
+            .rev()
+            .find(|(_, s)| s.chars().any(char::is_alphanumeric))
+            .map_or(0, |(i, _)| i)
+    }
+    fn next_word(&self) -> usize {
+        self.text[self.cursor..]
+            .split_word_bound_indices()
+            .find(|(_, s)| s.chars().any(char::is_alphanumeric))
+            .map_or(self.text.len(), |(i, s)| self.cursor + i + s.len())
+    }
+    fn erase(&mut self, backwards: bool, by_word: bool) {
+        if self.selection().is_empty() {
+            self.anchor = match (backwards, by_word) {
+                (true, true) => self.previous_word(),
+                (false, true) => self.next_word(),
+                (true, false) => self.previous(),
+                (false, false) => self.next(),
+            };
+        }
+        self.insert("");
+    }
     fn before_crlf(&self, index: usize) -> usize {
         if index > 0
             && self.text.as_bytes().get(index) == Some(&b'\n')
@@ -346,23 +370,14 @@ impl Editor {
             Key::Named(NamedKey::ArrowLeft) => Some(if !shift && !self.selection().is_empty() {
                 self.selection().start
             } else if ctrl {
-                self.text[..self.cursor]
-                    .split_word_bound_indices()
-                    .rev()
-                    .find(|(_, s)| s.chars().any(char::is_alphanumeric))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0)
+                self.previous_word()
             } else {
                 self.previous()
             }),
             Key::Named(NamedKey::ArrowRight) => Some(if !shift && !self.selection().is_empty() {
                 self.selection().end
             } else if ctrl {
-                self.text[self.cursor..]
-                    .split_word_bound_indices()
-                    .find(|(_, s)| s.chars().any(char::is_alphanumeric))
-                    .map(|(i, s)| self.cursor + i + s.len())
-                    .unwrap_or(self.text.len())
+                self.next_word()
             } else {
                 self.next()
             }),
@@ -395,17 +410,11 @@ impl Editor {
                 )
             }),
             Key::Named(NamedKey::Backspace) => {
-                if self.selection().is_empty() {
-                    self.anchor = self.previous();
-                }
-                self.insert("");
+                self.erase(true, ctrl);
                 None
             }
             Key::Named(NamedKey::Delete) => {
-                if self.selection().is_empty() {
-                    self.anchor = self.next();
-                }
-                self.insert("");
+                self.erase(false, ctrl);
                 None
             }
             Key::Named(NamedKey::Enter) if multiline => {
@@ -583,6 +592,31 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn word_erase_uses_navigation_boundaries_and_is_one_undo_step() {
+        let mut editor = Editor::new("cafe\u{301}  déjà!".into());
+        let split = "cafe\u{301}  ".len();
+        editor.select(split..split);
+        editor.erase(true, true);
+        assert_eq!(editor.text, "déjà!");
+        editor.undo(false);
+        assert_eq!(editor.text, "cafe\u{301}  déjà!");
+
+        let start = "cafe\u{301}".len();
+        editor.select(start..start);
+        editor.erase(false, true);
+        assert_eq!(editor.text, "cafe\u{301}!");
+        editor.undo(false);
+        assert_eq!(editor.text, "cafe\u{301}  déjà!");
+
+        editor.select(start..split);
+        editor.erase(true, true);
+        assert_eq!(editor.text, "cafe\u{301}déjà!");
+        editor.select(start..start);
+        editor.erase(true, false);
+        assert_eq!(editor.text, "cafdéjà!");
+    }
+
     #[test]
     fn home_and_end_respect_mixed_line_breaks_without_splitting_crlf() {
         let mut editor = Editor::new("甲\rβ\r\n尾\nend".into());
