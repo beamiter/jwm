@@ -107,6 +107,7 @@ Animated formats display their first frame. Rotation changes only the view.
 | F / 0 | Fit to window |
 | R | Rotate clockwise |
 | F11 / Escape | Toggle / leave fullscreen |
+| Ctrl + scroll | Zoom around the pointer; image edges limit panning |
 | Drag image | Pan a zoomed image |
 | Ctrl+W | Close |
 
