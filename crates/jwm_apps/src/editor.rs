@@ -69,6 +69,25 @@ impl Editor {
         self.metrics.position = Some((self.revision, self.cursor, position));
         position
     }
+    /// Restore a logical caret in changed text, clamping at line/document end.
+    pub fn move_to_position(&mut self, line: usize, column: usize) {
+        let (mut row, mut col) = (1, 1);
+        let mut target = self.text.len();
+        for (offset, grapheme) in self.text.grapheme_indices(true) {
+            let newline = matches!(grapheme, "\n" | "\r\n" | "\r");
+            if row == line && (col >= column || newline) {
+                target = offset;
+                break;
+            }
+            if newline {
+                row += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        self.select(target..target);
+    }
     pub fn line_endings(&mut self) -> &'static str {
         if let Some((revision, label)) = self.metrics.newlines
             && revision == self.revision
@@ -567,6 +586,21 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn logical_caret_clamps_without_splitting_graphemes_or_crlf() {
+        let text = "header\r\n👩‍💻e\u{301}\r\n尾";
+        let mut editor = Editor::new(text.into());
+        editor.move_to_position(2, 2);
+        assert_eq!(editor.cursor, "header\r\n👩‍💻".len());
+        assert_eq!(editor.position(), (2, 2));
+        editor.move_to_position(2, 99);
+        assert_eq!(&editor.text[editor.cursor..], "\r\n尾");
+        assert_eq!(editor.position(), (2, 3));
+        editor.move_to_position(99, 99);
+        assert_eq!(editor.selection(), text.len()..text.len());
+        assert_eq!(editor.position(), (3, 2));
+    }
+
     #[test]
     fn code_indent_selected_lines_preserves_unicode_crlf_and_single_undo() {
         let source = "中e\u{301}\r\n    二\nthird";
