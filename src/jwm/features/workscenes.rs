@@ -156,7 +156,10 @@ impl SceneSession {
                 format!("session-review:{index}"),
                 format!("Review updated session · {}", entry.row()),
             ),
-            Some(entry) => (format!("session:{index}"), format!("Reveal {}", entry.row())),
+            Some(entry) => (
+                format!("session:{index}"),
+                format!("Reveal {}", entry.row()),
+            ),
             None => match &self.entry {
                 Some(entry) => (
                     "unavailable-session".into(),
@@ -858,11 +861,7 @@ mod tests {
                 .contains("cannot be revealed")
         );
         assert!(
-            jwm.features
-                .workscene_preview
-                .as_ref()
-                .unwrap()
-                .sessions[0]
+            jwm.features.workscene_preview.as_ref().unwrap().sessions[0]
                 .ready()
                 .is_none()
         );
