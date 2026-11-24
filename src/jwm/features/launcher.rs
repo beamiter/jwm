@@ -357,7 +357,7 @@ const MAX_EXPRESSION_CHARS: usize = 256;
 /// an `inf` in the panel answers nothing.
 #[must_use]
 pub fn evaluate(query: &str) -> Option<f64> {
-    let trimmed = query.trim().trim_start_matches('=').trim();
+    let trimmed = query.trim().trim_start_matches(['=', '＝']).trim();
     if trimmed.is_empty() || trimmed.chars().nth(MAX_EXPRESSION_CHARS).is_some() {
         return None;
     }
@@ -1104,7 +1104,19 @@ enum Token {
 
 fn tokenize(text: &str) -> Option<Vec<Token>> {
     let mut tokens = Vec::new();
-    let bytes: Vec<char> = text.chars().collect();
+    // Normalize IME full-width forms and common pasted math symbols only
+    // within the calculator. An invalid expression still falls back to search
+    // with the original query, including its original character widths.
+    let bytes: Vec<char> = text
+        .chars()
+        .map(|ch| match ch {
+            '！'..='～' => char::from_u32(u32::from(ch) - 0xfee0).unwrap_or(ch),
+            '×' => '*',
+            '÷' => '/',
+            '−' => '-',
+            _ => ch,
+        })
+        .collect();
     let mut at = 0;
     while at < bytes.len() {
         let ch = bytes[at];
@@ -2210,6 +2222,32 @@ mod tests {
         assert_eq!(evaluate(".5x4"), Some(2.0));
         assert_eq!(parse_query("2x3"), QueryMode::Answer(6.0));
         assert_eq!(parse_query("2x3"), parse_query("2*3"));
+    }
+
+    #[test]
+    fn calculator_accepts_ime_width_and_pasted_math_symbols() {
+        for (query, expected) in [
+            ("＝（１２＋３）×２", 30.0),
+            ("４．５　÷　１．５", 3.0),
+            ("２ｘ３", 6.0),
+            ("１０％３", 1.0),
+            ("２＾−３", 0.125),
+            ("１Ｅ−３＊２", 0.002),
+        ] {
+            assert_eq!(parse_query(query), QueryMode::Answer(expected), "{query}");
+        }
+        assert_eq!(evaluate("８÷０"), None);
+        for query in ["４２", "１Ｅ−３", "ＧＴＫ＋", "設定×検索", "（１＋２"] {
+            assert_eq!(
+                parse_query(query),
+                QueryMode::Search(query.to_lowercase()),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            parse_query("/１２＋３"),
+            QueryMode::Windows("１２＋３".to_string())
+        );
     }
 
     #[test]
