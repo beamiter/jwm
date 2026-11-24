@@ -1,7 +1,7 @@
 //! Backend-independent modal system UI state.
 
 use crate::jwm::features::connectivity::BackgroundJob;
-use crate::jwm::features::launcher::LauncherRow;
+use crate::jwm::features::launcher::{LauncherRow, WindowEntry};
 use crate::jwm::features::shell_hub::ShellHubRoute;
 
 /// Longest interactive filter accepted by shell panels.
@@ -4925,6 +4925,10 @@ impl SystemUiState {
 
     /// The window the highlighted row would focus, if it is a window row.
     pub fn selected_window(&self) -> Option<u64> {
+        self.selected_window_entry().map(|entry| entry.id)
+    }
+
+    pub(crate) fn selected_window_entry(&self) -> Option<&WindowEntry> {
         let Self::Launcher {
             windows,
             matches,
@@ -4937,7 +4941,7 @@ impl SystemUiState {
         let LauncherRow::Window(index) = *matches.get(*selected)? else {
             return None;
         };
-        windows.get(index).map(|entry| entry.id)
+        windows.get(index)
     }
 
     /// The query's value when it is arithmetic rather than a search.
