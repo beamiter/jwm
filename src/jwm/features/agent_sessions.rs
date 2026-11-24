@@ -592,6 +592,8 @@ impl Jwm {
         if self.features.system_ui.is_launcher() {
             self.features.system_ui.set_agent_sessions(&snapshot);
             self.mark_system_ui_dirty();
+        } else if self.refresh_workscene_sessions(&snapshot) {
+            self.mark_system_ui_dirty();
         }
         self.broadcast_ipc_event("agent/sessions", snapshot.clone());
         snapshot
