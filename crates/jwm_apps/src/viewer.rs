@@ -278,6 +278,30 @@ impl Viewer {
             self.zoom
         }
     }
+    pub fn clamp_pan(&mut self, width: f64, height: f64) {
+        let (w, h) = self.dimensions();
+        let scale = self.scale(width, height);
+        let max_x = ((w * scale - width) / 2.).max(0.);
+        let max_y = ((h * scale - height) / 2.).max(0.);
+        self.pan.0 = self.pan.0.clamp(-max_x, max_x);
+        self.pan.1 = self.pan.1.clamp(-max_y, max_y);
+    }
+
+    pub fn zoom_at(&mut self, factor: f64, width: f64, height: f64, anchor: (f64, f64)) {
+        if self.image.is_none() || width <= 0. || height <= 0. {
+            return;
+        }
+        self.clamp_pan(width, height);
+        let old_scale = self.scale(width, height);
+        self.zoom_by(factor, width, height);
+        let ratio = self.zoom / old_scale;
+        // Preserve the rendered image point under the pointer, unless the
+        // new pan would expose blank space past an image edge.
+        self.pan.0 = anchor.0 - (anchor.0 - self.pan.0) * ratio;
+        self.pan.1 = anchor.1 - (anchor.1 - self.pan.1) * ratio;
+        self.clamp_pan(width, height);
+    }
+
     pub fn zoom_by(&mut self, factor: f64, width: f64, height: f64) {
         self.zoom = (self.scale(width, height) * factor).clamp(0.05, 16.);
         self.fit = false;
@@ -325,6 +349,24 @@ mod tests {
             .is_ok()
         );
         viewer.worker = Some(rx);
+    }
+
+    #[test]
+    fn pointer_zoom_preserves_the_image_point_when_pan_has_room() {
+        let mut viewer = Viewer::new(Vec::new());
+        viewer.image = Some(ImageSurface::create(Format::ARgb32, 800, 600).unwrap());
+        viewer.zoom_at(2., 400., 300., (100., -50.));
+        assert_eq!(viewer.zoom, 1.);
+        assert_eq!(viewer.pan, (-100., 50.));
+
+        // Zoom from an already panned view, not just the centered fit view.
+        viewer.zoom_at(2., 400., 300., (100., -50.));
+        assert_eq!(viewer.zoom, 2.);
+        assert_eq!(viewer.pan, (-300., 150.));
+
+        viewer.zoom_at(0.125, 400., 300., (100., -50.));
+        assert_eq!(viewer.zoom, 0.25);
+        assert_eq!(viewer.pan, (0., 0.));
     }
 
     #[test]

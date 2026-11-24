@@ -655,13 +655,10 @@ impl App {
                 }
             }
             Document::Image(v) => {
+                v.clamp_pan(body.w, body.h);
                 if let Some(image) = &v.image {
                     let (w, h) = v.dimensions();
                     let scale = v.scale(body.w, body.h);
-                    let max_x = ((w * scale - body.w) / 2.).max(0.);
-                    let max_y = ((h * scale - body.h) / 2.).max(0.);
-                    v.pan.0 = v.pan.0.clamp(-max_x, max_x);
-                    v.pan.1 = v.pan.1.clamp(-max_y, max_y);
                     let _ = cr.save();
                     cr.rectangle(body.x, body.y, body.w, body.h);
                     cr.clip();
@@ -1316,8 +1313,15 @@ impl App {
                 }
             }
             Document::Image(v) => {
-                if mods.control_key() {
-                    v.zoom_by(if delta > 0. { 1.25 } else { 0.8 }, body.w, body.h);
+                if mods.control_key() && delta != 0. {
+                    let (x, y) = self.pointer;
+                    let factor = if delta > 0. { 1.25 } else { 0.8 };
+                    let anchor = if body.contains(x, y) {
+                        (x - (body.x + body.w / 2.), y - (body.y + body.h / 2.))
+                    } else {
+                        (0., 0.)
+                    };
+                    v.zoom_at(factor, body.w, body.h, anchor);
                 } else {
                     v.pan.1 += delta * 36.;
                 }
