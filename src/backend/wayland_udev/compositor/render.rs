@@ -9101,6 +9101,7 @@ impl WaylandCompositor {
         let Some(label) = indicator::recording_indicator_label(
             self.recording.is_active(),
             self.recording.elapsed(),
+            self.recording.microphone_omitted(),
         ) else {
             return None;
         };

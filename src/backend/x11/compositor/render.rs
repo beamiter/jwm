@@ -4401,6 +4401,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let Some(label) = indicator::recording_indicator_label(
             self.recording_active,
             self.recording_started_at.map(|started| started.elapsed()),
+            self.recording_microphone_omitted,
         ) else {
             // Recording stopped (or a broken encoder pipe cleared the flag
             // mid-recording): the label texture goes with the chip.
