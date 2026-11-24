@@ -9123,6 +9123,8 @@ mod tests {
 
     #[test]
     fn expose_does_not_close_or_focus_a_replacement_from_a_stale_cell() {
+        use crate::jwm::features::expose_plan;
+
         let (mut jwm, mut backend, _) = repeat_dispatch_fixture();
         let monitor = jwm.state.monitor_order[0];
         let target = WindowId::from_raw(0x7f27);
@@ -9139,7 +9141,8 @@ mod tests {
         assert_ne!(previous_focus, Some(replacement));
 
         jwm.close_expose_highlighted(&mut backend).unwrap();
-        jwm.close_expose_clicked(&mut backend, Some(target)).unwrap();
+        jwm.close_expose_clicked(&mut backend, Some(target))
+            .unwrap();
         assert!(backend.window_ops.closed.lock().unwrap().is_empty());
         assert!(jwm.features.expose_active);
 

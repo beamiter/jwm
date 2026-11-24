@@ -5821,7 +5821,8 @@ impl Jwm {
 
     pub(crate) fn live_expose_client(&self, window: WindowId) -> Option<ClientKey> {
         let key = *self.features.expose_client_keys.get(&window)?;
-        (self.wintoclient(window) == Some(key) && self.state.clients.contains_key(key)).then_some(key)
+        (self.wintoclient(window) == Some(key) && self.state.clients.contains_key(key))
+            .then_some(key)
     }
 
     /// 执行 expose 计划：进入时排布窗口并抓取输入，退出时统一走同一段
