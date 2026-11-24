@@ -14,6 +14,9 @@ pub(crate) fn apply_theme(theme: crate::theme::NativeTheme) -> bool {
         true
     })
 }
+pub(crate) fn font_name() -> String {
+    THEME.with(|theme| theme.borrow().font.clone())
+}
 pub fn canvas() -> Color {
     THEME.with(|theme| theme.borrow().colors[0])
 }
