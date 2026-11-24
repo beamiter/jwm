@@ -17,6 +17,15 @@ struct Metrics {
     position: Option<(u64, usize, (usize, usize))>,
     newlines: Option<(u64, &'static str)>,
 }
+#[derive(PartialEq)]
+struct LayoutKey {
+    revision: u64,
+    width: f64,
+    scale: (f64, f64),
+    font: String,
+    monospace: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct Editor {
     pub text: String,
@@ -32,6 +41,7 @@ pub(crate) struct Editor {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
     layout: Option<pango::Layout>,
+    layout_key: Option<LayoutKey>,
     area: Rect,
     reveal: bool,
 }
@@ -474,19 +484,33 @@ impl Editor {
         }
         self.reveal = true;
     }
-    pub fn draw(
+    fn layout_for_draw(
         &mut self,
         cr: &cairo::Context,
-        area: Rect,
-        focused: bool,
-        caret: bool,
+        width: f64,
         multiline: bool,
-    ) {
+    ) -> pango::Layout {
+        let key = multiline.then(|| LayoutKey {
+            revision: self.revision,
+            width,
+            scale: cr.target().device_scale(),
+            font: ui::font_name(),
+            monospace: self.monospace,
+        });
+        if let (Some(key), Some(layout)) = (&key, &self.layout)
+            && self.layout_key.as_ref() == Some(key)
+        {
+            // The host may create a fresh Cairo context for the same canvas.
+            // Refresh Pango's target options without setting the text again.
+            pangocairo::functions::update_layout(cr, layout);
+            return layout.clone();
+        }
+        self.layout_key = key;
         let layout = ui::layout(
             cr,
             &self.text,
             if multiline { 15. } else { 13. },
-            area.w,
+            width,
             multiline,
         );
         if multiline && self.monospace {
@@ -498,6 +522,17 @@ impl Editor {
             layout.set_width(-1);
             layout.set_ellipsize(pango::EllipsizeMode::None);
         }
+        layout
+    }
+    pub fn draw(
+        &mut self,
+        cr: &cairo::Context,
+        area: Rect,
+        focused: bool,
+        caret: bool,
+        multiline: bool,
+    ) {
+        let layout = self.layout_for_draw(cr, area.w, multiline);
         let pos = layout.index_to_pos(self.cursor as i32);
         let cx = pos.x() as f64 / pango::SCALE as f64;
         let cy = pos.y() as f64 / pango::SCALE as f64;
@@ -772,6 +807,47 @@ mod tests {
         e.insert("");
         assert_eq!(e.position(), (1, 1));
         assert_eq!(e.line_endings(), "无换行");
+    }
+
+    #[test]
+    fn multiline_redraw_reuses_layout_and_matches_fresh_pixels() {
+        fn pixels(editor: &mut Editor, width: f64, scale: f64, caret: bool) -> Vec<u8> {
+            let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 400, 300).unwrap();
+            surface.set_device_scale(scale, scale);
+            {
+                let cr = cairo::Context::new(&surface).unwrap();
+                editor.draw(&cr, Rect::new(0., 0., width, 140.), true, caret, true);
+            }
+            let data = surface.data().unwrap();
+            data.to_vec()
+        }
+
+        let text = "Wrapped words 中e\u{301} and more words.\nArabic العربية";
+        let mut editor = Editor::new(text.into());
+        editor.select(1..9);
+        pixels(&mut editor, 120., 1., true);
+        let first = editor.layout.as_ref().unwrap().clone();
+        let blink = pixels(&mut editor, 120., 1., false);
+        assert_eq!(editor.layout.as_ref(), Some(&first));
+
+        let mut fresh = Editor::new(text.into());
+        fresh.select(1..9);
+        assert_eq!(blink, pixels(&mut fresh, 120., 1., false));
+        assert_eq!(editor.caret_position(), fresh.caret_position());
+
+        pixels(&mut editor, 100., 1., false);
+        let resized = editor.layout.as_ref().unwrap().clone();
+        assert_ne!(resized, first);
+
+        let hidpi = pixels(&mut editor, 100., 2., false);
+        let scaled = editor.layout.as_ref().unwrap().clone();
+        assert_ne!(scaled, resized);
+        assert_eq!(hidpi, pixels(&mut fresh, 100., 2., false));
+        assert_eq!(editor.caret_position(), fresh.caret_position());
+
+        editor.insert("changed");
+        pixels(&mut editor, 100., 2., false);
+        assert_ne!(editor.layout.as_ref(), Some(&scaled));
     }
 
     #[test]
