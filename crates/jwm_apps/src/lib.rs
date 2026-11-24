@@ -138,7 +138,8 @@ mod tests {
 
     #[test]
     fn bare_image_path_discovers_siblings_without_duplicating_the_open_file() {
-        let folder = std::env::temp_dir().join(format!("jwm-image-relative-{}", std::process::id()));
+        let folder =
+            std::env::temp_dir().join(format!("jwm-image-relative-{}", std::process::id()));
         std::fs::create_dir(&folder).unwrap();
         struct Cleanup(PathBuf);
         impl Drop for Cleanup {
