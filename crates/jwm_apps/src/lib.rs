@@ -81,14 +81,25 @@ pub fn image_path(path: &Path) -> bool {
 }
 
 pub fn neighbors(path: &Path) -> Vec<PathBuf> {
+    neighbors_from(path, Path::new("."))
+}
+
+fn neighbors_from(path: &Path, current_dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<_> = path
         .parent()
-        .and_then(|parent| std::fs::read_dir(parent).ok())
+        // A bare filename has an empty parent; reading it directly fails.
+        .and_then(|parent| {
+            std::fs::read_dir(current_dir.join(parent))
+                .ok()
+                .map(|entries| (parent, entries))
+        })
         .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| image_path(path) && path.is_file())
+        .flat_map(|(parent, entries)| {
+            entries.filter_map(Result::ok).filter_map(move |entry| {
+                let name = entry.file_name();
+                (image_path(Path::new(&name)) && entry.path().is_file()).then(|| parent.join(name))
+            })
+        })
         .collect();
     // Always retain an explicitly opened image, including extensionless files.
     if !paths.iter().any(|candidate| candidate == path) {
@@ -123,6 +134,29 @@ mod tests {
         assert!(image_path(Path::new("photo.webp")));
         assert!(!image_path(Path::new("script.svg")));
         assert!(!image_path(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn bare_image_path_discovers_siblings_without_duplicating_the_open_file() {
+        let folder =
+            std::env::temp_dir().join(format!("jwm-image-relative-{}", std::process::id()));
+        std::fs::create_dir(&folder).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(folder.clone());
+        for name in ["shot2.png", "shot10.png", "not-an-image.txt"] {
+            std::fs::write(folder.join(name), b"").unwrap();
+        }
+        std::fs::create_dir(folder.join("album.png")).unwrap();
+
+        assert_eq!(
+            neighbors_from(Path::new("shot2.png"), &folder),
+            vec![PathBuf::from("shot2.png"), PathBuf::from("shot10.png")]
+        );
     }
 
     #[test]
