@@ -1,5 +1,37 @@
 //! Literal, case-sensitive document search. Never records a document edit.
 use crate::editor::Editor;
+use std::ops::Range;
+
+// Literal matches are nonoverlapping and ordered. An exact selection follows
+// the same boundaries as any other selection: before its start or at/after
+// its end. Carry the ordinal and byte offset together so we never walk back
+// through the matches just to select the result.
+fn navigation_match(
+    mut hits: impl Iterator<Item = (usize, usize)>,
+    selection: Range<usize>,
+    backwards: bool,
+) -> Option<(usize, usize)> {
+    if backwards {
+        let mut previous = None;
+        let mut last = None;
+        for hit in hits {
+            if hit.1 < selection.start {
+                previous = Some(hit);
+            } else if previous.is_some() {
+                return previous;
+            }
+            last = Some(hit);
+        }
+        previous.or(last)
+    } else {
+        let first = hits.next()?;
+        if first.1 >= selection.end {
+            return Some(first);
+        }
+        hits.find(|&(_, offset)| offset >= selection.end)
+            .or(Some(first))
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Find {
@@ -77,38 +109,13 @@ impl Find {
         if self.total == 0 {
             return;
         }
-        let selection = editor.selection();
-        let exact = editor
+        let hits = editor
             .text
             .match_indices(&self.query.text)
-            .position(|(offset, _)| selection == (offset..offset + self.query.text.len()));
-        self.current = if let Some(index) = exact {
-            if backwards {
-                (index + self.total - 1) % self.total
-            } else {
-                (index + 1) % self.total
-            }
-        } else if backwards {
-            editor
-                .text
-                .match_indices(&self.query.text)
-                .enumerate()
-                .take_while(|(_, (offset, _))| *offset < selection.start)
-                .last()
-                .map(|(index, _)| index)
-                .unwrap_or(self.total - 1)
-        } else {
-            editor
-                .text
-                .match_indices(&self.query.text)
-                .position(|(offset, _)| offset >= selection.end)
-                .unwrap_or(0)
-        };
-        if let Some((offset, _)) = editor
-            .text
-            .match_indices(&self.query.text)
-            .nth(self.current)
-        {
+            .enumerate()
+            .map(|(index, (offset, _))| (index, offset));
+        if let Some((index, offset)) = navigation_match(hits, editor.selection(), backwards) {
+            self.current = index;
             editor.select(offset..offset + self.query.text.len());
         }
     }
@@ -126,6 +133,25 @@ impl Find {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn find_navigation_stops_after_the_first_candidate_and_wraps_in_one_pass() {
+        let samples = [4, 10, 20, 54];
+        let visited = std::cell::Cell::new(0);
+        let run = |selection, backwards| {
+            visited.set(0);
+            let hits = samples.into_iter().enumerate().inspect(|_| {
+                visited.set(visited.get() + 1);
+            });
+            (navigation_match(hits, selection, backwards), visited.get())
+        };
+        assert_eq!(run(10..14, false), (Some((2, 20)), 3));
+        assert_eq!(run(10..14, true), (Some((0, 4)), 2));
+        assert_eq!(run(13..17, false), (Some((2, 20)), 3));
+        assert_eq!(run(13..17, true), (Some((1, 10)), 3));
+        assert_eq!(run(0..0, true), (Some((3, 54)), 4));
+        assert_eq!(run(54..58, false), (Some((0, 4)), 4));
+    }
+
     #[test]
     fn find_selection_keeps_the_selected_unicode_occurrence() {
         let term = "编译🙂Error";
