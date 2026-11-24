@@ -30,7 +30,8 @@ flat border draw. A non-zero speed keeps the compositor rendering frames while
 a border-carrying window is visible, so prefer slow values (for example `20`)
 and leave it at `0` on battery-sensitive setups.
 
-Only the focused window's ordinary border upgrades to the gradient. Signal
-borders keep their flat colors: the focus-highlight pulse, urgent/attention
-borders, and picture-in-picture windows are unaffected, as is the unfocused
-border color.
+Only the focused window's ordinary border upgrades to the gradient. Its
+focus-highlight pulse fades both gradient colors toward the highlight color
+and back, rather than abruptly replacing the gradient at the start and end.
+Urgent/attention borders, picture-in-picture windows, and unfocused windows
+keep their flat colors.

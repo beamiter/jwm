@@ -6559,18 +6559,16 @@ impl WaylandCompositor {
                 0.0
             };
 
-            // The focused window's ordinary border upgrades to the
-            // two-color gradient ring. Focus pulse and urgent borders
-            // keep their flat signal colors.
-            let use_gradient = self.border_gradient_enabled && style.ordinary_focused;
-
-            if use_gradient {
+            if let Some([[ar, ag, ab, aa], [br, bg, bb, ba]]) = style.gradient_colors(
+                self.border_gradient_enabled,
+                self.border_gradient_color_a,
+                self.border_gradient_color_b,
+                self.focus_highlight_color,
+            ) {
                 let angle = (self.border_gradient_angle
                     + self.border_gradient_speed
                         * self.compositor_start_time.elapsed().as_secs_f32())
                 .to_radians();
-                let [ar, ag, ab, aa] = self.border_gradient_color_a;
-                let [br, bg, bb, ba] = self.border_gradient_color_b;
                 gl.UseProgram(self.gradient_border_program);
                 self.set_projection_uniform(
                     gl,

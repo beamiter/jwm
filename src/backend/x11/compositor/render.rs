@@ -7963,20 +7963,20 @@ impl<C: CompositorConnection> Compositor<C> {
                             // window's radius (no wedge gap at corners).
                             let outer_radius = if radius > 0.0 { radius + bw } else { 0.0 };
 
-                            // The focused window's ordinary border upgrades to
-                            // the two-color gradient ring. Special borders
-                            // (focus pulse, attention, PiP) keep their flat
-                            // signal colors.
-                            let use_gradient = self.border_gradient_enabled
-                                && style.is_some_and(|style| style.ordinary_focused);
+                            let gradient = style.and_then(|style| {
+                                style.gradient_colors(
+                                    self.border_gradient_enabled,
+                                    self.border_gradient_color_a,
+                                    self.border_gradient_color_b,
+                                    self.focus_highlight_color,
+                                )
+                            });
 
-                            if use_gradient {
+                            if let Some([[ar, ag, ab, aa], [br, bg, bb, ba]]) = gradient {
                                 let angle = (self.border_gradient_angle
                                     + self.border_gradient_speed
                                         * self.compositor_start_time.elapsed().as_secs_f32())
                                 .to_radians();
-                                let [ar, ag, ab, aa] = self.border_gradient_color_a;
-                                let [br, bg, bb, ba] = self.border_gradient_color_b;
                                 self.gl.use_program(Some(self.gradient_border_program));
                                 self.gl.uniform_matrix_4_f32_slice(
                                     self.gradient_border_uniforms.projection.as_ref(),
