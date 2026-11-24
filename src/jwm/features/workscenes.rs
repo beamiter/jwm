@@ -229,6 +229,19 @@ impl Jwm {
                 continue;
             }
             if let Some(entry) = registered.iter().find(|entry| &entry.session_id == id) {
+                // Match the live activation policy at preview time, without
+                // dispensing with its identity and lease checks on Enter.
+                if !entry.can_reveal
+                    || entry.status == "disconnected"
+                    || entry.association_token.is_none()
+                {
+                    rows.push(ListRow {
+                        key: "unavailable-session".into(),
+                        text: format!("Cannot reveal {}", entry.row()),
+                        data: RowData::Workscene,
+                    });
+                    continue;
+                }
                 let index = sessions.len();
                 rows.push(ListRow {
                     key: format!("session:{index}"),
@@ -472,6 +485,8 @@ impl Jwm {
                 // An accepted spawn is single-use even before the new window appears.
                 entry.command.clear();
                 Ok(WorksceneOutcome::ApplicationLaunchRequested)
+            } else if action == "unavailable-session" {
+                Err("Session cannot be revealed from this preview".into())
             } else if action == "indexing" {
                 Err("Still indexing applications; wait for the catalog to load".into())
             } else {
@@ -678,6 +693,87 @@ mod tests {
         assert_eq!(plan.applications.len(), 2);
         assert_eq!(plan.applications[0].name, "Terminal");
         assert_eq!(plan.applications[1].name, "JWM Notes");
+    }
+
+    #[test]
+    fn workscene_selects_a_usable_action_over_a_disconnected_session() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        use serde_json::json;
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.state
+            .clients
+            .insert(WMClient::new(WindowId::from_raw(12)));
+        jwm.features.launcher_catalog = Arc::from([LaunchEntry::new(
+            "JWM Notes".into(),
+            vec!["jwm-notes".into()],
+            false,
+            None,
+            "jwm notes".into(),
+        )]);
+        let context = jwm.eva_execution_context();
+        let mut args = json!({
+            "wm_instance_id": context["wm_instance_id"],
+            "session": {
+                "session_id": "session-one",
+                "project_id": "project-one",
+                "provider": "forge",
+                "host_id": "host-one",
+                "host_incarnation": "boot-one",
+                "pane_id": "pane-one",
+                "window_token": context["windows"][0]["target_token"],
+                "title": "Terminal session",
+                "status": "disconnected",
+                "can_reveal": true,
+                "revision": 1
+            }
+        });
+        jwm.agent_session_command(&mut backend, "register_agent_session", &args)
+            .unwrap();
+
+        let scene = Workscene {
+            name: "Terminal and Notes".into(),
+            outputs: Vec::new(),
+            sessions: vec!["session-one".into()],
+            applications: vec!["JWM Notes".into()],
+        };
+        jwm.open_workscene_preview(&mut backend, scene.clone())
+            .unwrap();
+        assert_eq!(
+            jwm.features.system_ui.selected_workscene_action(),
+            Some("application:0")
+        );
+        let SystemUiState::ListPanel { rows, selected, .. } = &mut jwm.features.system_ui else {
+            panic!("expected workscene preview");
+        };
+        assert_eq!(rows[0].key, "unavailable-session");
+        *selected = 0;
+        assert!(
+            jwm.activate_workscene_action(&mut backend)
+                .unwrap_err()
+                .contains("cannot be revealed")
+        );
+        assert!(
+            jwm.features
+                .workscene_preview
+                .as_ref()
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+
+        args["session"]["status"] = json!("waiting");
+        args["session"]["revision"] = json!(2);
+        jwm.agent_session_command(&mut backend, "register_agent_session", &args)
+            .unwrap();
+        jwm.open_workscene_preview(&mut backend, scene).unwrap();
+        assert_eq!(
+            jwm.features.system_ui.selected_workscene_action(),
+            Some("session:0")
+        );
     }
 
     #[test]
