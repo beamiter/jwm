@@ -7,7 +7,7 @@ use super::screenshot::{
     ScreenshotCompletion, ScreenshotCompletionJob, screenshot_completion_toast,
 };
 use crate::backend::api::Backend;
-use crate::backend::compositor_common::capture::rgba_capture_len;
+use crate::backend::compositor_common::capture::{MAX_RGBA_CAPTURE_BYTES, rgba_capture_len};
 use crate::backend::compositor_common::screenshot::{
     ScreenshotCancellation, encode_png_bounded, save_png_atomically, screenshot_memory_channel,
 };
@@ -19,6 +19,16 @@ use std::time::{Duration, Instant};
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HEIGHT: u32 = 65_535;
+// Bound spare capacity so captures don't keep a large unused buffer.
+const MAX_GROWTH_HEADROOM: usize = 8 * 1024 * 1024;
+
+fn scroll_capacity_target(current: usize, needed: usize, limit: usize) -> usize {
+    current
+        .saturating_add(current / 2)
+        .max(needed)
+        .min(needed.saturating_add(MAX_GROWTH_HEADROOM))
+        .min(limit)
+}
 
 #[derive(Debug)]
 struct ScrollImage {
@@ -73,11 +83,7 @@ impl ScrollImage {
             .checked_add(offset)
             .filter(|h| *h <= MAX_HEIGHT)
             .and_then(|height| rgba_capture_len(width, height).ok())
-            .is_some_and(|len| {
-                self.pixels
-                    .try_reserve_exact(len - self.pixels.len())
-                    .is_ok()
-            });
+            .is_some_and(|len| self.reserve_append(width, len));
         if !reserved {
             self.full = true;
             return Ok(true);
@@ -86,6 +92,23 @@ impl ScrollImage {
         self.pixels.extend_from_slice(&frame.as_raw()[start..]);
         self.previous = frame;
         Ok(true)
+    }
+
+    fn reserve_append(&mut self, width: u32, needed: usize) -> bool {
+        let current = self.pixels.capacity();
+        if needed <= current {
+            return true;
+        }
+        let limit = (width as usize)
+            .saturating_mul(4)
+            .saturating_mul(MAX_HEIGHT as usize)
+            .min(MAX_RGBA_CAPTURE_BYTES);
+        let planned = scroll_capacity_target(current, needed, limit);
+        let len = self.pixels.len();
+        // If there is only enough memory for the incoming rows, still accept
+        // them rather than declaring the capture full for spare capacity.
+        self.pixels.try_reserve_exact(planned - len).is_ok()
+            || (planned > needed && self.pixels.try_reserve_exact(needed - len).is_ok())
     }
 }
 
@@ -139,8 +162,7 @@ fn decode_frame(png: Vec<u8>) -> Result<RgbaImage, String> {
     let mut reader =
         image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
     let mut limits = image::Limits::default();
-    limits.max_alloc =
-        Some(crate::backend::compositor_common::capture::MAX_RGBA_CAPTURE_BYTES as u64);
+    limits.max_alloc = Some(MAX_RGBA_CAPTURE_BYTES as u64);
     reader.limits(limits);
     let decoder = reader.into_decoder().map_err(|e| e.to_string())?;
     let (width, height) = decoder.dimensions();
@@ -475,6 +497,33 @@ mod tests {
         }
         assert_eq!(image.dimensions(), page.dimensions());
         assert_eq!(image.pixels, page.into_raw());
+    }
+
+    #[test]
+    fn long_scrolls_grow_in_batches_and_keep_identical_pixels() {
+        let page = page();
+        let mut image = ScrollImage::new(viewport(&page, 0)).unwrap();
+        let mut growths = 0;
+        for y in (30..=660).step_by(30) {
+            let before = image.pixels.capacity();
+            assert!(image.append(viewport(&page, y)).unwrap(), "offset {y}");
+            if image.pixels.capacity() > before {
+                growths += 1;
+            }
+        }
+        assert!(growths <= 5, "capacity grew {growths} times for 22 samples");
+        assert_eq!(image.pixels, page.into_raw());
+    }
+
+    #[test]
+    fn scroll_capacity_never_requests_unbounded_spare_space() {
+        let limit = MAX_RGBA_CAPTURE_BYTES;
+        assert_eq!(scroll_capacity_target(1024, 1030, limit), 1536);
+        assert_eq!(
+            scroll_capacity_target(limit / 2, limit / 2 + 16, limit),
+            limit / 2 + 16 + MAX_GROWTH_HEADROOM
+        );
+        assert_eq!(scroll_capacity_target(limit - 32, limit - 16, limit), limit);
     }
 
     #[test]
