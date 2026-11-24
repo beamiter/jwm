@@ -3,7 +3,7 @@
 //! 这个模块包含所有窗口管理器特性的切换函数（toggle* 系列）
 
 use crate::backend::api::{Backend, MaximizeAxes};
-use crate::backend::common_define::{EventMaskBits, Mods, StdCursorKind};
+use crate::backend::common_define::{EventMaskBits, Mods, StdCursorKind, WindowId};
 use crate::config::CONFIG;
 use crate::core::maximize::MaximizeOrigin;
 use crate::core::models::ClientKey;
@@ -5813,6 +5813,18 @@ impl Jwm {
         candidates
     }
 
+    pub(crate) fn remember_expose_grid(&mut self, windows: impl Iterator<Item = WindowId>) {
+        self.features.expose_client_keys = windows
+            .filter_map(|win| self.wintoclient(win).map(|key| (win, key)))
+            .collect();
+    }
+
+    pub(crate) fn live_expose_client(&self, window: WindowId) -> Option<ClientKey> {
+        let key = *self.features.expose_client_keys.get(&window)?;
+        (self.wintoclient(window) == Some(key) && self.state.clients.contains_key(key))
+            .then_some(key)
+    }
+
     /// 执行 expose 计划：进入时排布窗口并抓取输入，退出时统一走同一段
     /// 清理序列（此前在切换、Escape 与两种点击路径中重复了四次）。
     pub(crate) fn apply_expose_action(
@@ -5852,6 +5864,7 @@ impl Jwm {
                 }
                 self.features.deferred_grab = None;
                 self.features.expose_active = true;
+                self.remember_expose_grid(windows.iter().map(|&(win, ..)| win));
                 backend.compositor_set_expose_mode(true, windows);
                 // 高亮落在当前聚焦窗口上：进入后直接回车等于回到原窗口。
                 let focused = self
@@ -5861,13 +5874,13 @@ impl Jwm {
                 backend.compositor_expose_select(focused);
             }
             expose_plan::ExposeAction::Exit { focus } => {
+                let focus = focus.and_then(|window| self.live_expose_client(window));
                 self.features.expose_active = false;
+                self.features.expose_client_keys.clear();
                 backend.compositor_set_expose_mode(false, vec![]);
                 let _ = backend.key_ops().ungrab_keyboard();
                 let _ = backend.input_ops().ungrab_pointer();
-                if let Some(wid) = focus
-                    && let Some(ck) = self.wintoclient(wid)
-                {
+                if let Some(ck) = focus {
                     self.focus(backend, Some(ck))?;
                     if let Some(mon_key) = self.state.sel_mon {
                         let _ = self.restack(backend, Some(mon_key));

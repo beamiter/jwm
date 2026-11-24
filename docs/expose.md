@@ -70,7 +70,8 @@ other button keeps its old meaning.
 Hover and the keyboard selection are one highlight: moving the pointer
 across the grid takes it over, and the arrow keys pick up from wherever it
 is. Clicking a thumbnail focuses that window and exits; clicking empty
-space exits without changing focus.
+space exits without changing focus. A stale thumbnail cannot focus
+or close a new window even if the backend reused the old window ID.
 
 Middle-clicking a thumbnail closes that window instead — browser-tab
 semantics: the clicked cell, not the highlighted one (the two may

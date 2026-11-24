@@ -1629,6 +1629,12 @@ impl Jwm {
         backend.compositor_expose_select(Some(window));
     }
 
+    fn expose_close_candidates(&self) -> Vec<expose_plan::ExposeCandidate> {
+        let mut candidates = self.expose_candidates();
+        candidates.retain(|&(win, ..)| self.live_expose_client(win).is_some());
+        candidates
+    }
+
     /// Delete or BackSpace with expose up: close the highlighted thumbnail's
     /// window without leaving the gesture — the highlighted cell, not the
     /// focused window (the two usually differ mid-gesture; the switcher
@@ -1640,7 +1646,7 @@ impl Jwm {
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let highlighted = backend.compositor_expose_selected();
-        let action = expose_plan::plan_close(self.expose_candidates(), highlighted);
+        let action = expose_plan::plan_close(self.expose_close_candidates(), highlighted);
         self.apply_expose_close(backend, action)
     }
 
@@ -1660,7 +1666,7 @@ impl Jwm {
         let Some(hit) = hit else {
             return Ok(());
         };
-        let candidates = self.expose_candidates();
+        let candidates = self.expose_close_candidates();
         // The compositor's grid is the eligible candidates in entry order,
         // so the clicked window resolves to its cell's index there.
         let Some(index) = expose_plan::grid_index(&candidates, hit) else {
@@ -1695,14 +1701,13 @@ impl Jwm {
                 survivors,
                 select,
             } => {
-                // The grid can name a window that already died mid-expose;
-                // only a live client can take the close, but its cell
-                // leaves either way.
-                if let Some(client_key) = self.wintoclient(window)
-                    && let Some(client) = self.state.clients.get(client_key)
-                {
-                    backend.window_ops().close_window(client.win)?;
-                }
+                let Some(client) = self
+                    .live_expose_client(window)
+                    .and_then(|key| self.state.clients.get(key))
+                else {
+                    return Ok(());
+                };
+                backend.window_ops().close_window(client.win)?;
                 // Rebuild in place through the same call that entered
                 // expose: the compositors rebuild each thumbnail's label
                 // texture with the entry set it names, so grid and labels
@@ -1715,15 +1720,18 @@ impl Jwm {
                 // anyway, while X11's hover only ever moves through this
                 // select call.
                 let select_id = survivors.get(select).map(|&(win, ..)| win);
+                self.remember_expose_grid(survivors.iter().map(|&(win, ..)| win));
                 backend.compositor_set_expose_mode(true, survivors);
                 backend.compositor_expose_select(select_id);
             }
             expose_plan::ExposeCloseAction::CloseLast { window } => {
-                if let Some(client_key) = self.wintoclient(window)
-                    && let Some(client) = self.state.clients.get(client_key)
-                {
-                    backend.window_ops().close_window(client.win)?;
-                }
+                let Some(client) = self
+                    .live_expose_client(window)
+                    .and_then(|key| self.state.clients.get(key))
+                else {
+                    return Ok(());
+                };
+                backend.window_ops().close_window(client.win)?;
                 return self.apply_expose_action(backend, expose_plan::plan_escape());
             }
         }
@@ -9104,14 +9112,50 @@ mod tests {
         selected: WindowId,
     ) {
         jwm.features.expose_active = true;
-        backend.compositor_set_expose_mode(
-            true,
-            windows
-                .iter()
-                .map(|&win| (win, 0, 0, 640, 480, format!("{win:?}")))
-                .collect(),
-        );
+        let windows: Vec<_> = windows
+            .iter()
+            .map(|&win| (win, 0, 0, 640, 480, format!("{win:?}")))
+            .collect();
+        jwm.remember_expose_grid(windows.iter().map(|&(win, ..)| win));
+        backend.compositor_set_expose_mode(true, windows);
         backend.compositor_expose_select(Some(selected));
+    }
+
+    #[test]
+    fn expose_does_not_close_or_focus_a_replacement_from_a_stale_cell() {
+        use crate::jwm::features::expose_plan;
+
+        let (mut jwm, mut backend, _) = repeat_dispatch_fixture();
+        let monitor = jwm.state.monitor_order[0];
+        let target = WindowId::from_raw(0x7f27);
+        let survivor = WindowId::from_raw(0x7f28);
+        let original = add_floating_configure_client(&mut jwm, target, monitor, 0, false);
+        add_floating_configure_client(&mut jwm, survivor, monitor, 0, false);
+        open_expose(&mut jwm, &mut backend, &[target, survivor], target);
+
+        jwm.unmanage(&mut backend, Some(original), true).unwrap();
+        let replacement = add_floating_configure_client(&mut jwm, target, monitor, 0, false);
+        assert_ne!(replacement, original);
+        assert_eq!(jwm.wintoclient(target), Some(replacement));
+        let previous_focus = jwm.get_selected_client_key();
+        assert_ne!(previous_focus, Some(replacement));
+
+        jwm.close_expose_highlighted(&mut backend).unwrap();
+        jwm.close_expose_clicked(&mut backend, Some(target))
+            .unwrap();
+        assert!(backend.window_ops.closed.lock().unwrap().is_empty());
+        assert!(jwm.features.expose_active);
+
+        jwm.apply_expose_action(&mut backend, expose_plan::plan_click(Some(target)))
+            .unwrap();
+        assert!(!jwm.features.expose_active);
+        assert!(jwm.features.expose_client_keys.is_empty());
+        assert_eq!(jwm.get_selected_client_key(), previous_focus);
+
+        open_expose(&mut jwm, &mut backend, &[target, survivor], target);
+        jwm.apply_expose_action(&mut backend, expose_plan::plan_click(Some(target)))
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(replacement));
     }
 
     #[test]
