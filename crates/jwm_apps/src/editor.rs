@@ -366,11 +366,7 @@ impl Editor {
             } else {
                 self.next()
             }),
-            Key::Named(NamedKey::Home) => Some(if ctrl {
-                0
-            } else {
-                self.line_start()
-            }),
+            Key::Named(NamedKey::Home) => Some(if ctrl { 0 } else { self.line_start() }),
             Key::Named(NamedKey::End) => Some(if ctrl {
                 self.text.len()
             } else {
