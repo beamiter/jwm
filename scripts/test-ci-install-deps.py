@@ -43,7 +43,7 @@ class DependencyInstallTests(unittest.TestCase):
                     sys.exit(int(os.environ['FAKE_CLEANUP_STATUS']))
                 if command == '/usr/bin/timeout':
                     assert '--download-only' in args
-                    index = ['120s', '180s'].index(args[3])
+                    index = ['120s', '360s'].index(args[3])
                     sys.exit(json.loads(os.environ['FAKE_DOWNLOAD_STATUS'])[index])
                 assert command == 'apt-get', args
                 phase = 'UPDATE' if args[-1] == 'update' else 'INSTALL'
@@ -119,7 +119,7 @@ class DependencyInstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 7)
         self.assertEqual(calls[3][3], "120s")
-        self.assertEqual(calls[4][3], "180s")
+        self.assertEqual(calls[4][3], "360s")
         self.assertEqual(calls[3][4:], calls[4][4:])
         self.assertIn("--no-download", calls[5])
         self.assertIn("retrying once from the same sources", result.stderr)
@@ -132,7 +132,7 @@ class DependencyInstallTests(unittest.TestCase):
                 result, calls = self.invoke(bridge=True, download=download)
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertEqual([c[3] for c in calls if "--download-only" in c],
-                                 ["120s", "180s"][:attempts])
+                                 ["120s", "360s"][:attempts])
                 self.assertFalse(any("--no-download" in c for c in calls))
                 self.assertEqual(calls[-1], ["-n", "/usr/bin/rm", "-rf", "--", self.ARCHIVES])
 

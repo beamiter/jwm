@@ -75,7 +75,10 @@ if [[ $bridge_retry == 1 ]]; then
             exit "$rc"
         fi
         printf 'ci-install-deps: Bridge download reached 120s; retrying once from the same sources\n' >&2
-        sudo -n /usr/bin/timeout --kill-after=5s 180s apt-get "${apt_options[@]}" \
+        # A slow mirror can still be delivering valid packages. Leave the
+        # retry six minutes while keeping both transfers below the 10-minute
+        # workflow step budget, with room for update and offline install.
+        sudo -n /usr/bin/timeout --kill-after=5s 360s apt-get "${apt_options[@]}" \
             --download-only "${install_args[@]}"
     fi
     sudo -n apt-get "${apt_options[@]}" --no-download "${install_args[@]}"
