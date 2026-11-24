@@ -144,12 +144,16 @@ impl Editor {
             index
         }
     }
+    fn line_start(&self) -> usize {
+        let cursor = self.before_crlf(self.cursor);
+        let prefix = &self.text[..cursor];
+        prefix.rfind(['\r', '\n']).map_or(0, |i| i + 1)
+    }
     fn line_end(&self) -> usize {
-        let index = self.text[self.cursor..]
-            .find('\n')
-            .map(|i| self.cursor + i)
-            .unwrap_or(self.text.len());
-        self.before_crlf(index)
+        let cursor = self.before_crlf(self.cursor);
+        self.text[cursor..]
+            .find(['\r', '\n'])
+            .map_or(self.text.len(), |i| cursor + i)
     }
     pub fn insert(&mut self, text: &str) {
         let range = self.selection();
@@ -362,14 +366,7 @@ impl Editor {
             } else {
                 self.next()
             }),
-            Key::Named(NamedKey::Home) => Some(if ctrl {
-                0
-            } else {
-                self.text[..self.cursor]
-                    .rfind('\n')
-                    .map(|i| i + 1)
-                    .unwrap_or(0)
-            }),
+            Key::Named(NamedKey::Home) => Some(if ctrl { 0 } else { self.line_start() }),
             Key::Named(NamedKey::End) => Some(if ctrl {
                 self.text.len()
             } else {
@@ -586,6 +583,26 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn home_and_end_respect_mixed_line_breaks_without_splitting_crlf() {
+        let mut editor = Editor::new("甲\rβ\r\n尾\nend".into());
+        let cr = "甲".len();
+        let crlf = "甲\rβ".len();
+        let lf = "甲\rβ\r\n尾".len();
+        for (cursor, start, end) in [
+            (0, 0, cr),
+            (cr, 0, cr),
+            (cr + 1, cr + 1, crlf),
+            (crlf + 1, cr + 1, crlf),
+            (crlf + 2, crlf + 2, lf),
+            (lf + 1, lf + 1, editor.text.len()),
+            (editor.text.len(), lf + 1, editor.text.len()),
+        ] {
+            editor.select(cursor..cursor);
+            assert_eq!((editor.line_start(), editor.line_end()), (start, end));
+        }
+    }
+
     #[test]
     fn logical_caret_clamps_without_splitting_graphemes_or_crlf() {
         let text = "header\r\n👩‍💻e\u{301}\r\n尾";
