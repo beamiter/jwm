@@ -1203,6 +1203,8 @@ dependencies = [
  "serde_json",
  "softbuffer",
  "unicode-segmentation",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "winit",
 ]
 
