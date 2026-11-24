@@ -46,7 +46,7 @@ jobs:
         timeout-minutes: 1
         run: sudo /usr/bin/python3 scripts/test-ci-prefetch-cjk.py --root-sandbox PrefetchTests.test_root_runner_apt_helper_keeps_sandbox_for_local_verification -v
       - name: Install Cairo/Pango and isolated UI test dependencies
-        timeout-minutes: 10
+        timeout-minutes: 15
         env:
           JWM_CI_PREFETCH_CJK: "1"
         run: |

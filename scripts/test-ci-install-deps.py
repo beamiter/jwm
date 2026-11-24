@@ -163,6 +163,7 @@ class DependencyInstallTests(unittest.TestCase):
     def test_all_workflow_installs_have_step_deadlines_and_no_bypass(self):
         count = 0
         bridge_count = 0
+        native_count = 0
         for name in WORKFLOWS:
             text = (ROOT / ".github/workflows" / name).read_text()
             self.assertNotIn("apt-get", text, name)
@@ -170,7 +171,12 @@ class DependencyInstallTests(unittest.TestCase):
             installs = [step for step in steps if "scripts/ci-install-deps.sh" in step]
             self.assertTrue(installs, name)
             for step in installs:
-                self.assertRegex(step, r"(?m)^[ \t]+timeout-minutes:[ \t]+10[ \t]*$")
+                native = name == "ci.yml" and step.startswith(
+                    "name: Install Cairo/Pango and isolated UI test dependencies\n"
+                )
+                deadline = 15 if native else 10
+                self.assertRegex(step, rf"(?m)^[ \t]+timeout-minutes:[ \t]+{deadline}[ \t]*$")
+                native_count += int(native)
                 self.assertNotIn("continue-on-error", step)
                 self.assertNotIn("|| true", step)
                 self.assertNotIn("cargo test", step)  # install timeout must not truncate tests
@@ -181,6 +187,7 @@ class DependencyInstallTests(unittest.TestCase):
                 count += 1
         self.assertEqual(count, 14)
         self.assertEqual(bridge_count, 1)
+        self.assertEqual(native_count, 1)
 
 
 class AptSourceSelectionTests(unittest.TestCase):
