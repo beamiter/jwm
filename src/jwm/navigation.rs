@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use crate::Jwm;
 use crate::backend::api::Backend;
-use crate::backend::common_define::{EventMaskBits, StdCursorKind, WindowId};
+use crate::backend::common_define::{EventMaskBits, StdCursorKind};
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::core::types::Rect;
