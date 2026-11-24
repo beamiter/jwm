@@ -260,10 +260,12 @@ class PrefetchTests(unittest.TestCase):
                 self.assertNotIn("unsandboxed", result.stderr)
                 self.assertNotIn("can not drop privileges", result.stderr)
 
-    def test_only_native_job_opts_in_with_original_step_deadline(self):
+    def test_only_native_job_opts_in_with_bounded_step_and_job_deadlines(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertEqual(workflow.count('JWM_CI_PREFETCH_CJK: "1"'), 1)
-        self.assertIn('timeout-minutes: 10\n        env:\n          JWM_CI_PREFETCH_CJK: "1"', workflow)
+        native = workflow.split("\n  native-apps:\n", 1)[1].split("\n    steps:\n", 1)[0]
+        self.assertIn("\n    timeout-minutes: 25\n", "\n" + native + "\n")
+        self.assertIn('timeout-minutes: 15\n        env:\n          JWM_CI_PREFETCH_CJK: "1"', workflow)
         self.assertIn("fonts-noto-cjk sway wtype grim", workflow)
 
 
