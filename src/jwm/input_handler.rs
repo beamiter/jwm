@@ -7074,6 +7074,7 @@ mod tests {
             let key = jwm.insert_client(client);
             let entry = crate::jwm::features::launcher::WindowEntry {
                 id: win.raw(),
+                client_key: Some(key),
                 title: "old".into(),
                 class: "app".into(),
                 instance: "app".into(),

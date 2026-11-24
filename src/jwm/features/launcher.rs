@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::backend::compositor_common::row_icons::WINDOW_ROW_GLYPH;
+use crate::core::models::{ClientKey, MonitorKey};
 
 /// Where the usage counts live, under the user's data directory.
 pub const USAGE_FILE: &str = "launcher-usage";
@@ -427,6 +428,8 @@ pub const WINDOWS_PREFIX: char = '/';
 pub struct WindowEntry {
     /// The handle a focus takes.
     pub id: u64,
+    /// Generational identity for updating an already-open row.
+    pub(crate) client_key: Option<ClientKey>,
     pub title: String,
     pub class: String,
     pub instance: String,
@@ -1233,13 +1236,11 @@ impl crate::jwm::Jwm {
     /// Flatten the open windows for the launcher, most-recently-focused first
     /// on the monitor the user is looking at.
     ///
-    /// A snapshot rather than a live view: the panel holds it for as long as
-    /// it is open, and a window that closes meanwhile is a quiet no-op when
-    /// its row is activated.
+    /// Membership and ordering are captured on open. Tag and monitor moves
+    /// can update a listed window's location without reranking the results.
     pub(crate) fn launcher_window_snapshot(&self) -> Vec<WindowEntry> {
-        let cfg = crate::config::CONFIG.load();
-        let tag_count = cfg.tags_length();
-        let mut ordered: Vec<crate::core::models::MonitorKey> = Vec::new();
+        let tag_count = crate::config::CONFIG.load().tags_length();
+        let mut ordered: Vec<MonitorKey> = Vec::new();
         // The monitor in front of the user first, so its windows rank ahead
         // of the ones on the other screen.
         ordered.extend(self.state.sel_mon);
@@ -1253,69 +1254,116 @@ impl crate::jwm::Jwm {
 
         let mut entries = Vec::new();
         for monitor_key in ordered {
-            let Some(monitor) = self.state.monitors.get(monitor_key) else {
-                continue;
-            };
-            // A locked monitor's windows sit behind an opaque shade and
-            // cannot be focused, so a row for one would be a row that does
-            // nothing — after printing its title on a screen that is not
-            // locked. They come back with the shade.
-            if self.monitor_is_locked(monitor.num) {
-                continue;
-            }
-            let active = monitor.get_active_tags();
             let Some(stack) = self.state.monitor_stack.get(monitor_key) else {
                 continue;
             };
-            for &client_key in stack {
-                let Some(client) = self.state.clients.get(client_key) else {
-                    continue;
-                };
-                // A swallowed terminal is standing in for its child, and a
-                // scratchpad parked on no tag at all cannot be revealed
-                // without duplicating the scratchpad's own show logic. A
-                // managed dock or desktop-type window is shell chrome on
-                // every tag: activating its row would focus the bar.
-                if client.state.is_swallowed
-                    || client.state.is_dock
-                    || client.state.is_desktop
-                    || (client.state.tags == 0 && !client.state.is_sticky)
-                {
-                    continue;
-                }
-                let tag = if client.state.is_sticky {
-                    None
-                } else {
-                    (0..tag_count).find(|index| client.state.tags & (1 << index) != 0)
-                };
-                // A minimized scratchpad opens on the current monitor, not
-                // necessarily the one that owns its saved Dock placement.
-                // Keep the source stack order and lock filter above intact.
-                let reveal_destination = if client.state.is_hidden
-                    && self.scratchpads.values().any(|&key| key == client_key)
-                {
-                    self.scratchpad_reveal_monitor(client.mon)
-                        .and_then(|key| self.state.monitors.get(key).map(|m| (key, m.num)))
-                } else {
-                    None
-                };
-                let (reveal_monitor, reveal_monitor_num) =
-                    reveal_destination.unwrap_or((monitor_key, monitor.num));
-                entries.push(WindowEntry {
-                    id: client.win.raw(),
-                    title: client.name.clone(),
-                    class: client.class.clone(),
-                    instance: client.instance.clone(),
-                    tag,
-                    monitor: reveal_monitor_num,
-                    visible: !client.state.is_hidden
-                        && (client.state.is_sticky || client.state.tags & active != 0),
-                    on_selected_monitor: Some(reveal_monitor) == self.state.sel_mon,
-                    minimized: client.state.is_hidden,
-                });
-            }
+            entries.extend(
+                stack
+                    .iter()
+                    .filter_map(|&key| self.launcher_window_entry(key, tag_count)),
+            );
         }
         entries
+    }
+
+    fn launcher_window_entry(
+        &self,
+        client_key: ClientKey,
+        tag_count: usize,
+    ) -> Option<WindowEntry> {
+        let client = self.state.clients.get(client_key)?;
+        let monitor_key = client.mon?;
+        let monitor = self.state.monitors.get(monitor_key)?;
+        // Do not describe shell chrome, swallowed terminals, parked
+        // scratchpads, or windows behind a locked monitor's shade.
+        if self.monitor_is_locked(monitor.num)
+            || client.state.is_swallowed
+            || client.state.is_dock
+            || client.state.is_desktop
+            || (client.state.tags == 0 && !client.state.is_sticky)
+        {
+            return None;
+        }
+        let tag = if client.state.is_sticky {
+            None
+        } else {
+            (0..tag_count).find(|index| client.state.tags & (1 << index) != 0)
+        };
+        // A minimized scratchpad opens on the current monitor rather than
+        // its saved Dock placement. The source still determines ordering.
+        let reveal_destination =
+            if client.state.is_hidden && self.scratchpads.values().any(|&key| key == client_key) {
+                self.scratchpad_reveal_monitor(client.mon)
+                    .and_then(|key| self.state.monitors.get(key).map(|m| (key, m.num)))
+            } else {
+                None
+            };
+        let (reveal_monitor, reveal_monitor_num) =
+            reveal_destination.unwrap_or((monitor_key, monitor.num));
+        Some(WindowEntry {
+            id: client.win.raw(),
+            client_key: Some(client_key),
+            title: client.name.clone(),
+            class: client.class.clone(),
+            instance: client.instance.clone(),
+            tag,
+            monitor: reveal_monitor_num,
+            visible: !client.state.is_hidden
+                && (client.state.is_sticky || client.state.tags & monitor.get_active_tags() != 0),
+            on_selected_monitor: Some(reveal_monitor) == self.state.sel_mon,
+            minimized: client.state.is_hidden,
+        })
+    }
+
+    pub(crate) fn refresh_launcher_window_location(&mut self, client_key: ClientKey) {
+        use super::system_ui::SystemUiState;
+
+        let SystemUiState::Launcher {
+            windows,
+            restore_targets: None,
+            ..
+        } = &self.features.system_ui
+        else {
+            return;
+        };
+        let Some(index) = windows
+            .iter()
+            .position(|entry| entry.client_key == Some(client_key))
+        else {
+            return;
+        };
+        let tag_count = crate::config::CONFIG.load().tags_length();
+        let Some(location) = self.launcher_window_entry(client_key, tag_count) else {
+            return;
+        };
+        let SystemUiState::Launcher { windows, .. } = &mut self.features.system_ui else {
+            return;
+        };
+        let window = &mut windows[index];
+        let previous = (
+            window.tag,
+            window.monitor,
+            window.visible,
+            window.on_selected_monitor,
+            window.minimized,
+        );
+        let updated = (
+            location.tag,
+            location.monitor,
+            location.visible,
+            location.on_selected_monitor,
+            location.minimized,
+        );
+        if previous != updated {
+            (
+                window.tag,
+                window.monitor,
+                window.visible,
+                window.on_selected_monitor,
+                window.minimized,
+            ) = updated;
+            self.mark_system_ui_dirty();
+        }
     }
 }
 
@@ -1708,6 +1756,7 @@ mod tests {
     fn window(id: u64, title: &str, class: &str) -> WindowEntry {
         WindowEntry {
             id,
+            client_key: None,
             title: title.into(),
             class: class.into(),
             instance: class.to_lowercase(),

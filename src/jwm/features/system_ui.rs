@@ -262,9 +262,8 @@ pub enum SystemUiState {
         list_scroll: Option<f64>,
         query: String,
         entries: Arc<[LaunchEntry]>,
-        /// Windows open when the panel was opened. A snapshot: a window can
-        /// close while the panel is up, which the focus path treats as a
-        /// quiet no-op.
+        /// Windows present when the panel opened, with locations refreshed
+        /// when an existing window is moved between tags or monitors.
         windows: Vec<crate::jwm::features::launcher::WindowEntry>,
         sessions: Vec<crate::jwm::features::launcher::AgentEntry>,
         scenes: Vec<super::workscenes::Workscene>,
@@ -11000,6 +10999,7 @@ Keywords=action-only;
     fn test_window(title: &str, class: &str) -> crate::jwm::features::launcher::WindowEntry {
         crate::jwm::features::launcher::WindowEntry {
             id: 42,
+            client_key: None,
             title: title.into(),
             class: class.into(),
             instance: class.to_lowercase(),
