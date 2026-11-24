@@ -50,14 +50,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pointer.motion_absolute(1, 640, 485, 1280, 900);
     pointer.frame();
     queue.roundtrip(&mut state)?;
-    pointer.axis_source(AxisSource::Finger);
+    // Older wlroots applies source to the most recently queued axis.
     pointer.axis(2, Axis::HorizontalScroll, 48.);
+    pointer.axis_source(AxisSource::Finger);
     pointer.axis(2, Axis::VerticalScroll, -30.);
+    pointer.axis_source(AxisSource::Finger);
     pointer.frame();
     queue.roundtrip(&mut state)?;
-    pointer.axis_source(AxisSource::Finger);
     pointer.axis_stop(3, Axis::HorizontalScroll);
+    pointer.axis_source(AxisSource::Finger);
     pointer.axis_stop(3, Axis::VerticalScroll);
+    pointer.axis_source(AxisSource::Finger);
     pointer.frame();
     queue.roundtrip(&mut state)?;
     Ok(())

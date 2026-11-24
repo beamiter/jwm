@@ -158,8 +158,11 @@ def main():
                     return b if b and b[2] - b[0] == b[3] - b[1] == expected_size else None
 
                 before = wait(actual_marker, "Pan fixture marker at actual size")
-                run(args.bin_dir / "examples" / "wayland_finger_fixture",
-                    runtime / env["WAYLAND_DISPLAY"])
+                try:
+                    run(args.bin_dir / "examples" / "wayland_finger_fixture",
+                        runtime / env["WAYLAND_DISPLAY"])
+                except subprocess.CalledProcessError as error:
+                    raise AssertionError(f"Finger fixture failed: {error.output}") from error
                 dx, dy = -48 * args.scale, 30 * args.scale
                 expected = (before[0] + dx, before[1] + dy, before[2] + dx, before[3] + dy)
 
