@@ -158,11 +158,14 @@ def main():
                     return b if b and b[2] - b[0] == b[3] - b[1] == expected_size else None
 
                 before = wait(actual_marker, "Pan fixture marker at actual size")
-                try:
-                    run(args.bin_dir / "examples" / "wayland_finger_fixture",
-                        runtime / env["WAYLAND_DISPLAY"])
-                except subprocess.CalledProcessError as error:
-                    raise AssertionError(f"Finger fixture failed: {error.output}") from error
+                def finger(*parameters):
+                    try:
+                        run(args.bin_dir / "examples" / "wayland_finger_fixture",
+                            runtime / env["WAYLAND_DISPLAY"], *parameters)
+                    except subprocess.CalledProcessError as error:
+                        raise AssertionError(f"Finger fixture failed: {error.output}") from error
+
+                finger("pan")
                 dx, dy = -48 * args.scale, 30 * args.scale
                 expected = (before[0] + dx, before[1] + dy, before[2] + dx, before[3] + dy)
 
@@ -172,6 +175,31 @@ def main():
 
                 after = wait(moved_marker, f"Finger scroll marker moved to {expected}; was {before}")
                 print(f"Wayland {args.scale}x diagonal finger pan: {before} -> {after}: PASS",
+                      flush=True)
+
+                # Hold a real seat modifier while the pointer probe sends the
+                # next finger frame. The earlier keyboard actions prime winit.
+                center = ((after[0] + after[2]) // 2, (after[1] + after[3]) // 2)
+                anchor = tuple(value // args.scale for value in center)
+                ctrl = launch("wtype", "-M", "ctrl", "-s", "2300", "-m", "ctrl")
+                time.sleep(.45)
+                if ctrl.poll() is not None:
+                    raise AssertionError("Modifier helper exited before the zoom gesture")
+                finger("zoom", *anchor)
+                if ctrl.poll() is not None or ctrl.wait(timeout=4) != 0:
+                    raise AssertionError("Modifier helper did not hold through the zoom gesture")
+
+                def anchored_marker():
+                    b = color_bounds("pan-zoom")
+                    if not b:
+                        return None
+                    size = (b[2] - b[0], b[3] - b[1])
+                    mid = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+                    return b if (all(abs(value - 60 * args.scale) <= 2 for value in size)
+                                 and all(abs(a - b) <= 2 for a, b in zip(mid, center))) else None
+
+                zoomed = wait(anchored_marker, f"Zoom marker must grow around {center}; was {after}")
+                print(f"Wayland {args.scale}x Ctrl+finger anchor: {after} -> {zoomed}: PASS",
                       flush=True)
                 type_keys("-M", "ctrl", "-k", "w", "-m", "ctrl")
                 wait(lambda: viewer.poll() is not None, "Pan viewer close")
