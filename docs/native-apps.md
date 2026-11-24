@@ -60,6 +60,7 @@ retain a previous version as a `~` backup beside the file.
 | Enter / Shift+Enter in find, F3 / Shift+F3 | Next / previous document match (wraps) |
 | Escape | Close document find and return to the selected source match |
 | Ctrl+Shift+P | Toggle Markdown split preview |
+| Ctrl+Backspace / Ctrl+Delete | Delete the previous / next word (or the selection) |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+W | Close, checking unsaved changes |
 
