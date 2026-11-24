@@ -436,9 +436,11 @@ impl Notes {
         let (document, text) = TextFile::load(file)?;
         let changed = self.editor.text != text;
         if changed {
+            let (line, column) = self.editor.position();
             let monospace = self.editor.monospace;
             self.editor = Editor::new(text);
             self.editor.monospace = monospace;
+            self.editor.move_to_position(line, column);
             let preview_enabled = self.preview.enabled;
             self.preview = crate::preview::Preview::default();
             self.preview.enabled = preview_enabled;
@@ -778,6 +780,33 @@ impl Drop for Notes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reloading_changed_external_text_keeps_the_logical_caret() {
+        let dir = std::env::temp_dir().join(format!("jwm-reload-caret-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("external.txt");
+        std::fs::write(&path, "old\r\n中e\u{301} suffix\r\nthird").unwrap();
+        let mut notes = Notes::new(Some(path.clone())).unwrap();
+        let old_caret = "old\n中e\u{301}".len();
+        notes.editor.select(0..old_caret);
+        assert_eq!(notes.editor.position(), (2, 3));
+
+        let updated = "new header\r\n👩‍💻文 changed\r\nlast";
+        std::fs::write(&path, updated).unwrap();
+        assert!(notes.reload_external().unwrap());
+        assert_eq!(notes.editor.position(), (2, 3));
+        let caret = "new header\n👩‍💻文".len();
+        assert_eq!(notes.editor.selection(), caret..caret);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), updated);
+        assert!(!notes.dirty);
+
+        std::fs::write(&path, "短").unwrap();
+        assert!(notes.reload_external().unwrap());
+        assert_eq!(notes.editor.position(), (1, 2));
+        assert_eq!(notes.editor.selection(), "短".len().."短".len());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn save_refresh_supersedes_an_already_completed_background_query() {
