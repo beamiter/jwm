@@ -34,5 +34,9 @@ unicode-segmentation = "1.12"
 pulldown-cmark = { version = "0.13", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "pnm"] }
 
+[dev-dependencies]
+wayland-client = "0.31.15"
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+
 [profile.dev]
 debug = 0

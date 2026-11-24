@@ -72,6 +72,7 @@ jobs:
         run: /usr/bin/python3 scripts/test-native-app-theme.py --evidence-dir artifacts/native-app-theme
       - name: Exercise native Wayland input and software surfaces at 1x and 2x
         run: |
+          cargo build --locked --manifest-path crates/jwm_apps/Cargo.toml --target-dir target/native-apps --example wayland_finger_fixture
           for scale in 1 2; do
             /usr/bin/python3 scripts/test-native-apps-wayland.py --scale "$scale" --evidence-dir artifacts/native-apps
           done

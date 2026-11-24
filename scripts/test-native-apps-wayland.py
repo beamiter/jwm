@@ -27,7 +27,7 @@ def main():
     if not args.under_bus:
         return subprocess.call(["dbus-run-session", "--", sys.executable, __file__,
                                 *sys.argv[1:], "--under-bus"])
-    from PIL import Image, ImageChops
+    from PIL import Image, ImageChops, ImageDraw
 
     for tool in ("sway", "swaymsg", "wtype", "grim"):
         if not shutil.which(tool):
@@ -90,12 +90,15 @@ def main():
                 run("grim", path)
                 return path
 
-            def image_bounds(name):
+            def color_bounds(name):
                 image = Image.open(capture(name)).convert("RGB")
                 red, green, _ = image.split()
                 mask = ImageChops.multiply(red.point(lambda p: 255 if p > 180 else 0),
                                           green.point(lambda p: 255 if p < 80 else 0))
-                bounds = mask.getbbox()
+                return mask.getbbox()
+
+            def image_bounds(name):
+                bounds = color_bounds(name)
                 return (bounds[2] - bounds[0], bounds[3] - bounds[1]) if bounds else None
 
             try:
@@ -136,6 +139,70 @@ def main():
                 type_keys("-M", "ctrl", "-k", "w", "-m", "ctrl")
                 wait(lambda: viewer.poll() is not None, "Native viewer close")
                 print(f"Wayland {args.scale}x image pixels, rotation, actual size and fullscreen: PASS", flush=True)
+
+                # The image is larger than the viewport on both axes at 1:1.
+                # The internal red marker remains visible and does not hit clamping.
+                large = work / "wide and tall.png"
+                image = Image.new("RGB", (2200, 1600), (35, 42, 45))
+                ImageDraw.Draw(image).rectangle((1076, 776, 1123, 823), fill=(240, 20, 20))
+                image.save(large)
+                viewer = launch(args.bin_dir / "jwm-image-viewer", "--", large)
+                wait(lambda: window("org.jwm.ImageViewer"), "Pan viewer app_id")
+                run("swaymsg", '[app_id="org.jwm.ImageViewer"] focus')
+                wait(lambda: color_bounds("pan-fit"), "Pan fixture loaded")
+                type_keys("1")
+                expected_size = 48 * args.scale
+
+                def actual_marker():
+                    b = color_bounds("pan-before")
+                    return b if b and b[2] - b[0] == b[3] - b[1] == expected_size else None
+
+                before = wait(actual_marker, "Pan fixture marker at actual size")
+                def finger(*parameters):
+                    try:
+                        run(args.bin_dir / "examples" / "wayland_finger_fixture",
+                            runtime / env["WAYLAND_DISPLAY"], *parameters)
+                    except subprocess.CalledProcessError as error:
+                        raise AssertionError(f"Finger fixture failed: {error.output}") from error
+
+                finger("pan")
+                dx, dy = -48 * args.scale, 30 * args.scale
+                expected = (before[0] + dx, before[1] + dy, before[2] + dx, before[3] + dy)
+
+                def moved_marker():
+                    b = color_bounds("pan-after")
+                    return b if b and all(abs(x - y) <= 1 for x, y in zip(b, expected)) else None
+
+                after = wait(moved_marker, f"Finger scroll marker moved to {expected}; was {before}")
+                print(f"Wayland {args.scale}x diagonal finger pan: {before} -> {after}: PASS",
+                      flush=True)
+
+                # Hold a real seat modifier while the pointer probe sends the
+                # next finger frame. The earlier keyboard actions prime winit.
+                center = ((after[0] + after[2]) // 2, (after[1] + after[3]) // 2)
+                anchor = tuple(value // args.scale for value in center)
+                ctrl = launch("wtype", "-M", "ctrl", "-s", "2300", "-m", "ctrl")
+                time.sleep(.45)
+                if ctrl.poll() is not None:
+                    raise AssertionError("Modifier helper exited before the zoom gesture")
+                finger("zoom", *anchor)
+                if ctrl.poll() is not None or ctrl.wait(timeout=4) != 0:
+                    raise AssertionError("Modifier helper did not hold through the zoom gesture")
+
+                def anchored_marker():
+                    b = color_bounds("pan-zoom")
+                    if not b:
+                        return None
+                    size = (b[2] - b[0], b[3] - b[1])
+                    mid = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+                    return b if (all(abs(value - 60 * args.scale) <= 2 for value in size)
+                                 and all(abs(a - b) <= 2 for a, b in zip(mid, center))) else None
+
+                zoomed = wait(anchored_marker, f"Zoom marker must grow around {center}; was {after}")
+                print(f"Wayland {args.scale}x Ctrl+finger anchor: {after} -> {zoomed}: PASS",
+                      flush=True)
+                type_keys("-M", "ctrl", "-k", "w", "-m", "ctrl")
+                wait(lambda: viewer.poll() is not None, "Pan viewer close")
             finally:
                 for process in reversed(processes):
                     if process.poll() is None:
