@@ -401,17 +401,21 @@ impl Jwm {
             .take()
             .ok_or("Scene preview expired")?;
         let result = (|| {
-            if !Arc::ptr_eq(&plan.config, &CONFIG.load_full())
-                || plan
-                    .outputs
-                    .iter()
-                    .any(|(key, _, _)| !self.state.monitors.contains_key(*key))
-            {
-                return Err("Scene changed or an output disconnected; open a new preview".into());
+            if !Arc::ptr_eq(&plan.config, &CONFIG.load_full()) {
+                return Err("Scene changed; open a new preview".into());
             }
             if action == "layout" {
                 if plan.outputs.is_empty() {
                     return Err("No workspace layout in this scene".into());
+                }
+                // Only layout depends on these outputs. Session and application
+                // actions use their own live identities and normal placement.
+                if plan
+                    .outputs
+                    .iter()
+                    .any(|(key, _, _)| !self.state.monitors.contains_key(*key))
+                {
+                    return Err("A scene output disconnected; reopen to apply the layout".into());
                 }
                 if plan
                     .outputs
@@ -513,6 +517,84 @@ mod tests {
                 .unwrap_err()
                 .contains("disconnected")
         );
+    }
+
+    #[test]
+    fn scene_unplug_blocks_the_layout_but_not_an_independent_app_action() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1280, 800),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let active = jwm.state.sel_mon.unwrap();
+        let unplugged = *jwm
+            .state
+            .monitor_order
+            .iter()
+            .find(|&&key| key != active)
+            .unwrap();
+        let mut notes = LaunchEntry::new(
+            "JWM Notes".into(),
+            vec!["jwm-notes".into()],
+            false,
+            None,
+            "jwm notes".into(),
+        );
+        notes.desktop_id = Some("org.jwm.Notes".into());
+        jwm.features.launcher_catalog = Arc::from([notes]);
+        let scene = Workscene {
+            name: "Two displays and Notes".into(),
+            outputs: vec![
+                SceneOutput {
+                    output: String::new(),
+                    tag: 2,
+                    layout: String::new(),
+                },
+                SceneOutput {
+                    output: jwm
+                        .output_connector_for_monitor(&backend, unplugged)
+                        .unwrap(),
+                    tag: 3,
+                    layout: String::new(),
+                },
+            ],
+            sessions: Vec::new(),
+            applications: vec!["JWM Notes".into()],
+        };
+        jwm.open_workscene_preview(&mut backend, scene).unwrap();
+
+        let before = jwm.state.monitors[active].get_active_tags();
+        jwm.state.monitors.remove(unplugged);
+        assert!(
+            jwm.activate_workscene_action(&mut backend)
+                .unwrap_err()
+                .contains("output disconnected")
+        );
+        assert_eq!(jwm.state.monitors[active].get_active_tags(), before);
+
+        let SystemUiState::ListPanel { rows, selected, .. } = &mut jwm.features.system_ui else {
+            panic!("expected workscene preview");
+        };
+        *selected = rows
+            .iter()
+            .position(|row| row.key == "application:0")
+            .unwrap();
+
+        // The application action reaches its live duplicate check after unplug,
+        // rather than refusing the whole preview or launching another copy.
+        let mut notes = WMClient::new(WindowId::from_raw(12));
+        notes.class = "org.jwm.notes".into();
+        jwm.state.clients.insert(notes);
+        assert!(
+            jwm.activate_workscene_action(&mut backend)
+                .unwrap_err()
+                .contains("Application opened since preview")
+        );
+        assert_eq!(jwm.state.monitors[active].get_active_tags(), before);
     }
 
     #[test]
