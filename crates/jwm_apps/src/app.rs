@@ -1819,7 +1819,8 @@ mod tests {
         assert_eq!(n.editor.text, "# New\nupdated\n");
         assert!(n.editor.monospace && n.preview.enabled);
         assert!(!n.dirty && !n.find.enabled);
-        assert_eq!(n.editor.selection(), 0..0);
+        assert_eq!(n.editor.selection(), 5..5);
+        assert_eq!(n.editor.position(), (1, 6));
         assert!(app.focus == Focus::Editor);
 
         // Same decoded text with a new inode preserves the current selection,
