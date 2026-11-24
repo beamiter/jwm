@@ -3682,6 +3682,10 @@ impl Jwm {
                 let hit = backend.compositor_expose_selected();
                 return self.apply_expose_action(backend, expose_plan::plan_click(hit));
             }
+            // Key repeat can browse, but must not close newly highlighted cells.
+            if repeat && matches!(keysym, keys::KEY_Delete | keys::KEY_BackSpace) {
+                return Ok(());
+            }
             if keysym == keys::KEY_Delete || keysym == keys::KEY_BackSpace {
                 return self.close_expose_highlighted(backend);
             }
@@ -9188,6 +9192,37 @@ mod tests {
         assert!(jwm.features.expose_active);
         assert_eq!(backend.expose_windows, &[survivor]);
         assert_eq!(backend.expose_selected, Some(survivor));
+    }
+
+    #[test]
+    fn holding_expose_delete_or_backspace_closes_only_one_window() {
+        for key in [keys::KEY_Delete, keys::KEY_BackSpace] {
+            let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+            let monitor = jwm.state.monitor_order[0];
+            let first = WindowId::from_raw(0x7f29);
+            let second = WindowId::from_raw(0x7f2a);
+            add_floating_configure_client(&mut jwm, first, monitor, 0, false);
+            add_floating_configure_client(&mut jwm, second, monitor, 0, false);
+            open_expose(&mut jwm, &mut backend, &[first, second], first);
+
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, key, Mods::empty(), false);
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, key, Mods::empty(), true);
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, key, Mods::empty(), true);
+
+            assert_eq!(
+                backend.window_ops.closed.lock().unwrap().as_slice(),
+                &[first]
+            );
+            assert!(jwm.features.expose_active);
+            assert_eq!(backend.expose_selected, Some(second));
+
+            dispatch_shell_test_key(&mut jwm, &mut backend, &input, key, Mods::empty(), false);
+            assert_eq!(
+                backend.window_ops.closed.lock().unwrap().as_slice(),
+                &[first, second]
+            );
+            assert!(!jwm.features.expose_active);
+        }
     }
 
     #[test]
