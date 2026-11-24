@@ -523,10 +523,8 @@ impl Jwm {
                 }
                 self.features
                     .system_ui
-                    .selected_switcher_window()
-                    .and_then(|window| {
-                        self.wintoclient(crate::backend::common_define::WindowId::from_raw(window))
-                    })
+                    .selected_switcher_target()
+                    .and_then(|(window, key)| self.live_switcher_client(window, key))
                     .and_then(|key| self.state.clients.get(key))
                     .map(|client| client.win)
             });
@@ -1582,13 +1580,11 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(window) = self.features.system_ui.selected_switcher_window() else {
+        let Some((window, key)) = self.features.system_ui.selected_switcher_target() else {
             return Ok(());
         };
-        // The snapshot can name a window that already died mid-gesture; only
-        // a live client can take the close, but the stale row leaves either
-        // way.
-        if let Some(client_key) = self.wintoclient(WindowId::from_raw(window))
+        // Only the original instance can take the close; a stale row still leaves.
+        if let Some(client_key) = self.live_switcher_client(window, key)
             && let Some(client) = self.state.clients.get(client_key)
         {
             backend.window_ops().close_window(client.win)?;
@@ -8834,10 +8830,57 @@ mod tests {
             .map(|&window| ListRow {
                 key: window.to_string(),
                 text: format!("window {window:#x}"),
-                data: RowData::WindowSwitcher { window },
+                data: RowData::WindowSwitcher {
+                    window,
+                    client_key: jwm
+                        .wintoclient(WindowId::from_raw(window))
+                        .unwrap_or_default(),
+                },
             })
             .collect();
         jwm.features.system_ui = SystemUiState::window_switcher(rows, selected);
+    }
+
+    #[test]
+    fn switcher_does_not_act_on_a_replacement_for_a_closed_window() {
+        for close in [false, true] {
+            let (mut jwm, mut backend, _) = repeat_dispatch_fixture();
+            let monitor = jwm.state.monitor_order[0];
+            let target = WindowId::from_raw(0x7f18);
+            let survivor = WindowId::from_raw(0x7f19);
+            let original = add_floating_configure_client(&mut jwm, target, monitor, 0, false);
+            add_floating_configure_client(&mut jwm, survivor, monitor, 0, false);
+            open_switcher(&mut jwm, &[target.raw(), survivor.raw()], 0);
+            assert_eq!(
+                jwm.features.system_ui.selected_switcher_target(),
+                Some((target.raw(), original))
+            );
+
+            jwm.unmanage(&mut backend, Some(original), true).unwrap();
+            let replacement = add_floating_configure_client(&mut jwm, target, monitor, 0, false);
+            assert_ne!(replacement, original);
+            assert_eq!(jwm.wintoclient(target), Some(replacement));
+            let previous_focus = jwm.get_selected_client_key();
+            assert_ne!(previous_focus, Some(replacement));
+
+            if close {
+                jwm.close_window_switcher_row(&mut backend).unwrap();
+                assert_eq!(
+                    jwm.features.system_ui.selected_switcher_window(),
+                    Some(survivor.raw())
+                );
+                assert!(backend.window_ops.closed.lock().unwrap().is_empty());
+            } else {
+                jwm.commit_window_switcher(&mut backend).unwrap();
+                assert!(!jwm.features.system_ui.is_window_switcher());
+                assert_eq!(jwm.get_selected_client_key(), previous_focus);
+
+                // A fresh snapshot may still focus the new live window.
+                open_switcher(&mut jwm, &[target.raw()], 0);
+                jwm.commit_window_switcher(&mut backend).unwrap();
+                assert_eq!(jwm.get_selected_client_key(), Some(replacement));
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Backend-independent modal system UI state.
 
+use crate::core::models::ClientKey;
 use crate::jwm::features::connectivity::BackgroundJob;
 use crate::jwm::features::launcher::{LauncherRow, WindowEntry};
 use crate::jwm::features::shell_hub::ShellHubRoute;
@@ -634,10 +635,10 @@ pub enum RowData {
     MediaPlayer,
     /// Absolute local media path in the row's key.
     MediaFile,
-    /// The Alt+Tab switcher: the row stands for this raw window id, resolved
-    /// back through `wintoclient` when the gesture commits.
+    /// The frozen native ID and managed instance of a switcher row.
     WindowSwitcher {
         window: u64,
+        client_key: ClientKey,
     },
 }
 
@@ -3583,12 +3584,17 @@ impl SystemUiState {
         self.is_list(ListKind::WindowSwitcher)
     }
 
-    /// The window the gesture would commit: the highlighted row's raw id.
-    pub fn selected_switcher_window(&self) -> Option<u64> {
+    /// Both parts of the highlighted row's frozen identity.
+    pub(crate) fn selected_switcher_target(&self) -> Option<(u64, ClientKey)> {
         match &self.selected_row(ListKind::WindowSwitcher)?.data {
-            RowData::WindowSwitcher { window } => Some(*window),
+            RowData::WindowSwitcher { window, client_key } => Some((*window, *client_key)),
             _ => None,
         }
+    }
+
+    /// The highlighted row's raw ID without its managed instance.
+    pub fn selected_switcher_window(&self) -> Option<u64> {
+        self.selected_switcher_target().map(|(window, _)| window)
     }
 
     /// Build the session menu from what this machine can actually do.
@@ -10664,7 +10670,10 @@ Keywords=action-only;
             .map(|n| ListRow {
                 key: n.to_string(),
                 text: format!("window {n}"),
-                data: RowData::WindowSwitcher { window: n },
+                data: RowData::WindowSwitcher {
+                    window: n,
+                    client_key: Default::default(),
+                },
             })
             .collect();
         let icons: Vec<Option<String>> = (0..20)
@@ -10709,7 +10718,10 @@ Keywords=action-only;
             .map(|n| ListRow {
                 key: n.to_string(),
                 text: format!("window {n}"),
-                data: RowData::WindowSwitcher { window: n },
+                data: RowData::WindowSwitcher {
+                    window: n,
+                    client_key: Default::default(),
+                },
             })
             .collect();
         let panel = SystemUiState::window_switcher_with_icons(rows, vec![None, None, None], 0);
