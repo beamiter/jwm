@@ -170,10 +170,14 @@ recording_audio_bitrate = "128k"
 ```
 
 If the ALSA device is unavailable, or the installed ffmpeg lacks ALSA input
-support, JWM logs a warning and falls back to a video-only recording. While a
-screen recording holds the microphone, the standalone recorder cannot start;
-if the standalone recorder is already running, starting a screen recording
-first stops it safely and saves the current audio file.
+support, JWM logs a warning and falls back to a video-only recording. Once
+that recording starts, the on-screen REC chip adds **No mic**. It does not
+add this label for an explicitly silent recording or GIF. The ordinary REC
+chip does not certify that a microphone track was captured.
+
+While a screen recording holds the microphone, the standalone recorder cannot
+start. If the standalone recorder is already running, starting a screen
+recording first stops it safely and saves the current audio file.
 
 The audio-enabled flag, device, and bitrate are snapshotted for each screen
 recording request, including a start queued for the next render. Changing

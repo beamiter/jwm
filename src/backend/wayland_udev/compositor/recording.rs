@@ -172,6 +172,7 @@ fn open_recording_ffmpeg_log(path: &std::path::Path) -> std::io::Result<std::fs:
 
 pub(crate) struct RecordingState {
     active: bool,
+    microphone_omitted: bool,
     sink: Option<RecordingSink>,
     pbo: [u32; 2],
     current_pbo: usize,
@@ -207,6 +208,7 @@ impl RecordingState {
     pub(crate) fn new() -> Self {
         Self {
             active: false,
+            microphone_omitted: false,
             sink: None,
             pbo: [0; 2],
             current_pbo: 0,
@@ -275,6 +277,37 @@ impl RecordingState {
             }
         };
 
+        unsafe {
+            self.start_with_diagnostics(
+                gl,
+                width,
+                height,
+                output_path,
+                fps,
+                bitrate,
+                quality,
+                configured_encoder,
+                region,
+                audio,
+                stderr,
+            )
+        }
+    }
+
+    unsafe fn start_with_diagnostics(
+        &mut self,
+        gl: &ffi::Gles2,
+        width: u32,
+        height: u32,
+        output_path: &str,
+        fps: u32,
+        bitrate: &str,
+        quality: u32,
+        configured_encoder: &str,
+        region: (i32, i32, u32, u32),
+        audio: &crate::backend::recording_admission::RecordingAudioOptions,
+        stderr: Stdio,
+    ) -> Result<(), String> {
         self.source_width = width;
         self.source_height = height;
         self.region = region;
@@ -534,6 +567,7 @@ impl RecordingState {
             self.frame_bytes(),
             "[recording]",
         ));
+        self.microphone_omitted = audio_enabled && !with_audio;
         self.active = true;
         self.frame_count = 0;
         self.current_pbo = 0;
@@ -694,6 +728,7 @@ impl RecordingState {
         if sink.is_broken() {
             log::warn!("[recording] ffmpeg input closed; stopping capture");
             self.active = false;
+            self.microphone_omitted = false;
         }
         self.sink = Some(sink);
     }
@@ -739,6 +774,7 @@ impl RecordingState {
         unsafe { self.release_gpu_resources(gl) };
 
         self.active = false;
+        self.microphone_omitted = false;
         receipt
     }
 
@@ -812,6 +848,10 @@ impl RecordingState {
 
     pub(crate) fn is_active(&self) -> bool {
         self.active
+    }
+
+    pub(super) fn microphone_omitted(&self) -> bool {
+        self.microphone_omitted
     }
 
     /// Where the current region lands on the encode canvas this frame.
@@ -1185,6 +1225,129 @@ mod ffmpeg_log_tests {
 #[cfg(test)]
 mod tests {
     use super::{Duration, Instant, RecordingState, recording_output_size};
+
+    #[cfg(feature = "backend-wayland-udev")]
+    #[test]
+    fn a_missing_requested_mic_keeps_a_video_track_and_marks_only_that_session() {
+        use crate::backend::compositor_common::recording_indicator::recording_indicator_label;
+        use crate::backend::recording_admission::RecordingAudioOptions;
+        use crate::backend::recording_completion::{RecordingStopReceipt, WriterOutcome};
+        use crate::backend::wayland_udev::compositor::headless_render::HeadlessSmithayGles;
+
+        let path = std::env::var_os("PATH");
+        let tools = ["ffmpeg", "ffprobe"];
+        let has_encoder = tools
+            .iter()
+            .all(|tool| crate::terminal_prober::command_exists_in_path(tool, path.as_deref()));
+        let Some(mut headless) = HeadlessSmithayGles::new() else {
+            return;
+        };
+        if !has_encoder {
+            eprintln!("ffmpeg/ffprobe unavailable; skipping recording encoder integration");
+            return;
+        }
+
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let path =
+            std::env::temp_dir().join(format!("jwm-mic-fallback-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let scratch = Scratch(path);
+        let mut state = RecordingState::new();
+        let device = format!("jwm-test-no-alsa-device-{:016x}", rand::random::<u64>());
+
+        for enabled in [true, false] {
+            let output = scratch.0.join(format!("audio-requested-{enabled}.mp4"));
+            let output = output.to_str().unwrap();
+            let audio = RecordingAudioOptions {
+                enabled,
+                device: device.clone(),
+                bitrate: "128k".into(),
+            };
+            let writer = headless
+                .renderer
+                .with_context(|gl| unsafe {
+                    state
+                        .start_with_diagnostics(
+                            gl,
+                            64,
+                            48,
+                            output,
+                            24,
+                            "1M",
+                            23,
+                            "software",
+                            (0, 0, 64, 48),
+                            &audio,
+                            std::process::Stdio::null(),
+                        )
+                        .expect("owned video-only recording starts");
+                    assert!(state.is_active());
+                    assert_eq!(state.microphone_omitted(), enabled);
+                    let label = recording_indicator_label(
+                        state.is_active(),
+                        Some(Duration::ZERO),
+                        state.microphone_omitted(),
+                    )
+                    .unwrap();
+                    let expected = if enabled {
+                        "REC 0:00 · No mic"
+                    } else {
+                        "REC 0:00"
+                    };
+                    assert_eq!(label, expected);
+                    // Own the video input: solid synthetic frames, no real desktop/camera.
+                    let sink = state.sink.as_mut().unwrap();
+                    for _ in 0..3 {
+                        let mut frame = sink.take_buffer();
+                        frame.fill(128);
+                        assert!(sink.submit(frame));
+                        std::thread::sleep(Duration::from_millis(45));
+                    }
+                    let writer = state.stop_tracked(gl);
+                    assert!(!state.is_active());
+                    assert!(!state.microphone_omitted());
+                    writer
+                })
+                .unwrap();
+            let mut receipt = RecordingStopReceipt::from_writer(writer);
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                if let Some(outcome) = receipt.poll() {
+                    assert_eq!(outcome, WriterOutcome::Finished);
+                    break;
+                }
+                assert!(Instant::now() < deadline, "owned encoder did not finalize");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let probe = crate::external_command::output_with_limits(
+                "ffprobe",
+                &[
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "csv=p=0",
+                    output,
+                ],
+                Duration::from_secs(5),
+                4096,
+            )
+            .unwrap();
+            assert!(
+                probe.status.success(),
+                "{}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "video");
+        }
+    }
 
     /// A recorder mid-recording, without GL: encode size from the start region
     /// the way `start` derives it, then the region moved to `region`.

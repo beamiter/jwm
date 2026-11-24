@@ -234,19 +234,26 @@ pub(crate) fn tooltip_avoiding_recording_chips(
 }
 
 /// The chip's label while recording: `REC` plus the running clock when the
-/// capture pipeline knows its start time. `None` while no recording is
-/// active — the renderer draws nothing and frees the label texture.
+/// capture pipeline knows its start time. Name a requested microphone that
+/// preflight omitted; ordinary video-only requests keep the normal label.
+/// When no recording is active, the renderer draws nothing and frees the
+/// label texture.
 ///
 /// The clock ticks at the recording's own frame pacing, which is what keeps
 /// both compositors repainting while a recording runs; no separate timer is
 /// needed for the digits to advance.
-pub(crate) fn recording_indicator_label(active: bool, elapsed: Option<Duration>) -> Option<String> {
+pub(crate) fn recording_indicator_label(
+    active: bool,
+    elapsed: Option<Duration>,
+    microphone_omitted: bool,
+) -> Option<String> {
     if !active {
         return None;
     }
+    let suffix = if microphone_omitted { " · No mic" } else { "" };
     Some(match elapsed {
-        Some(elapsed) => format!("REC {}", format_elapsed(elapsed)),
-        None => "REC".to_string(),
+        Some(elapsed) => format!("REC {}{suffix}", format_elapsed(elapsed)),
+        None => format!("REC{suffix}"),
     })
 }
 
@@ -559,43 +566,61 @@ mod tests {
     fn no_recording_means_no_chip() {
         // The state transition that clears the indicator: whatever the clock
         // last said, an inactive pipeline draws nothing.
-        assert_eq!(recording_indicator_label(false, None), None);
+        assert_eq!(recording_indicator_label(false, None, false), None);
         assert_eq!(
-            recording_indicator_label(false, Some(Duration::from_secs(5))),
+            recording_indicator_label(false, Some(Duration::from_secs(5)), false),
             None
+        );
+    }
+
+    #[test]
+    fn an_omitted_microphone_is_only_shown_for_an_active_recording() {
+        let elapsed = Some(Duration::from_secs(4));
+        assert_eq!(
+            recording_indicator_label(true, elapsed, true).as_deref(),
+            Some("REC 0:04 · No mic")
+        );
+        assert_eq!(
+            recording_indicator_label(true, None, true).as_deref(),
+            Some("REC · No mic")
+        );
+        assert_eq!(recording_indicator_label(false, elapsed, true), None);
+        assert_eq!(
+            recording_indicator_label(true, elapsed, false).as_deref(),
+            Some("REC 0:04")
         );
     }
 
     #[test]
     fn the_label_carries_a_running_clock() {
         assert_eq!(
-            recording_indicator_label(true, Some(Duration::from_secs(7))).as_deref(),
+            recording_indicator_label(true, Some(Duration::from_secs(7)), false).as_deref(),
             Some("REC 0:07")
         );
         assert_eq!(
-            recording_indicator_label(true, Some(Duration::from_secs(83))).as_deref(),
+            recording_indicator_label(true, Some(Duration::from_secs(83)), false).as_deref(),
             Some("REC 1:23")
         );
         assert_eq!(
-            recording_indicator_label(true, Some(Duration::from_secs(3599))).as_deref(),
+            recording_indicator_label(true, Some(Duration::from_secs(3599)), false).as_deref(),
             Some("REC 59:59")
         );
         assert_eq!(
-            recording_indicator_label(true, Some(Duration::from_secs(3600))).as_deref(),
+            recording_indicator_label(true, Some(Duration::from_secs(3600)), false).as_deref(),
             Some("REC 1:00:00")
         );
         assert_eq!(
-            recording_indicator_label(true, Some(Duration::from_secs(3661))).as_deref(),
+            recording_indicator_label(true, Some(Duration::from_secs(3661)), false).as_deref(),
             Some("REC 1:01:01")
         );
         // A sub-second recording still reads as a started clock.
         assert_eq!(
-            recording_indicator_label(true, Some(Duration::from_millis(400))).as_deref(),
+            recording_indicator_label(true, Some(Duration::from_millis(400)), false).as_deref(),
             Some("REC 0:00")
         );
         // The pipeline started but never reported a start time: dot + REC.
         assert_eq!(
-            recording_indicator_label(true, None).as_deref(),
+            recording_indicator_label(true, None, false).as_deref(),
             Some("REC")
         );
     }

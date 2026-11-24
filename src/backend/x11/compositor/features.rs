@@ -2054,6 +2054,7 @@ impl<C: CompositorConnection> Compositor<C> {
         self.recording_cursor_sampler = Some(RecordingCursorSampler::start(
             std::time::Duration::from_secs_f64(1.0 / f64::from(fps)),
         ));
+        self.recording_microphone_omitted = audio_enabled && !with_audio;
         self.recording_active = true;
         self.recording_last_frame = None;
         self.recording_last_cursor = None;
@@ -2160,6 +2161,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         let was_active = self.recording_active;
         self.recording_active = false;
+        self.recording_microphone_omitted = false;
 
         // Drain the last asynchronous ReadPixels before closing ffmpeg. This
         // keeps the final frame instead of silently truncating every recording.
@@ -2360,6 +2362,7 @@ impl<C: CompositorConnection> Compositor<C> {
         {
             log::warn!("compositor: recording encoder pipe closed; stopping capture");
             self.recording_active = false;
+            self.recording_microphone_omitted = false;
             return;
         }
 
@@ -2558,6 +2561,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if sink.is_broken() {
             log::warn!("compositor: recording encoder pipe closed; stopping capture");
             self.recording_active = false;
+            self.recording_microphone_omitted = false;
         }
         self.recording_sink = Some(sink);
     }

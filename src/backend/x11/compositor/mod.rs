@@ -965,6 +965,7 @@ where
 
     // --- Phase 7.3: Screen recording ---
     recording_active: bool,
+    recording_microphone_omitted: bool,
     recording_fps: u32,
     recording_bitrate: String,
     recording_quality: u32,

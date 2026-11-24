@@ -1354,6 +1354,7 @@ impl<C: CompositorConnection> Compositor<C> {
             debug_hud_extended: behavior.debug_hud_extended,
             // Phase 7.3: Screen recording
             recording_active: false,
+            recording_microphone_omitted: false,
             recording_fps: behavior.recording_fps,
             recording_bitrate: behavior.recording_bitrate.clone(),
             recording_quality: behavior.recording_quality,
