@@ -1289,11 +1289,13 @@ impl App {
             }
         }
     }
-    pub fn scroll(&mut self, delta: f64, mods: ModifiersState) {
+    pub fn scroll(&mut self, (dx, dy): (f64, f64), mods: ModifiersState) {
         if let Some(Dialog::Picker(p)) = &mut self.dialog {
-            p.offset = (p.offset as isize + if delta > 0. { -3 } else { 3 })
-                .clamp(0, p.entries.len().saturating_sub(1) as isize)
-                as usize;
+            if dy != 0. {
+                p.offset = (p.offset as isize + if dy > 0. { -3 } else { 3 })
+                    .clamp(0, p.entries.len().saturating_sub(1) as isize)
+                    as usize;
+            }
             return;
         }
         if self.dialog.is_some() {
@@ -1304,18 +1306,21 @@ impl App {
         match &mut self.document {
             Document::Notes(n) => {
                 if self.pointer.0 < sidebar {
-                    n.list_scroll = (n.list_scroll - delta * 36.)
+                    n.list_scroll = (n.list_scroll - dy * 36.)
                         .clamp(0., (n.rows.len() as f64 * 48. - body.h + 60.).max(0.));
                 } else if n.preview.enabled && self.pointer.0 >= sidebar + (body.w - sidebar) / 2. {
-                    n.preview.scroll = (n.preview.scroll - delta * 36.).max(0.);
+                    n.preview.scroll = (n.preview.scroll - dy * 36.).max(0.);
                 } else {
-                    n.editor.scroll = (n.editor.scroll - delta * 36.).max(0.);
+                    n.editor.scroll = (n.editor.scroll - dy * 36.).max(0.);
                 }
             }
             Document::Image(v) => {
-                if mods.control_key() && delta != 0. {
+                if mods.control_key() {
+                    if dy == 0. {
+                        return;
+                    }
                     let (x, y) = self.pointer;
-                    let factor = if delta > 0. { 1.25 } else { 0.8 };
+                    let factor = if dy > 0. { 1.25 } else { 0.8 };
                     let anchor = if body.contains(x, y) {
                         (x - (body.x + body.w / 2.), y - (body.y + body.h / 2.))
                     } else {
@@ -1323,7 +1328,8 @@ impl App {
                     };
                     v.zoom_at(factor, body.w, body.h, anchor);
                 } else {
-                    v.pan.1 += delta * 36.;
+                    v.pan.0 += dx * 36.;
+                    v.pan.1 += dy * 36.;
                 }
             }
         }
@@ -1764,6 +1770,36 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_pan_uses_both_axes_but_picker_and_zoom_ignore_horizontal_scroll() {
+        let mut app = App::new(false, Vec::new()).unwrap();
+        let Document::Image(viewer) = &mut app.document else {
+            unreachable!()
+        };
+        viewer.image = Some(cairo::ImageSurface::create(cairo::Format::ARgb32, 800, 600).unwrap());
+        viewer.fit = false;
+        viewer.zoom = 2.;
+        app.scroll((2., -1.), ModifiersState::empty());
+        app.scroll((-1., 0.), ModifiersState::empty());
+        app.scroll((3., 0.), ModifiersState::CONTROL);
+        let Document::Image(viewer) = &app.document else {
+            unreachable!()
+        };
+        assert_eq!(viewer.pan, (36., -36.));
+        assert_eq!(viewer.zoom, 2.);
+
+        app.dialog = Some(Dialog::Picker(Box::new(Picker {
+            mode: PickerMode::Images,
+            path: Editor::new(String::new()),
+            entries: vec![PathBuf::new(); 10],
+            offset: 2,
+        })));
+        app.scroll((-3., 0.), ModifiersState::empty());
+        assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 2));
+        app.scroll((-3., -1.), ModifiersState::empty());
+        assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 5));
+    }
 
     #[test]
     fn external_reload_preserves_dirty_input_and_reuses_current_disk_format() {
@@ -2215,7 +2251,7 @@ mod tests {
         // Manual scrolling may hide the selected row. Enter must reveal it
         // without opening (or writing) until a fresh Enter confirms it.
         app.pointer.0 = 10.;
-        app.scroll(-100., ModifiersState::empty());
+        app.scroll((0., -100.), ModifiersState::empty());
         app.draw(&cr, 960., 680., false);
         assert!(
             !app.hits

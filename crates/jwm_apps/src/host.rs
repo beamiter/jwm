@@ -444,13 +444,16 @@ impl ApplicationHandler<UserEvent> for Host {
                     native.app.pointer.1,
                 ));
             }
-            WindowEvent::MouseWheel { delta, .. } => native.app.scroll(
-                match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y as f64,
-                    MouseScrollDelta::PixelDelta(p) => p.y / 36.,
-                },
-                native.mods,
-            ),
+            WindowEvent::MouseWheel { delta, .. } => {
+                let axes = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (f64::from(x), f64::from(y)),
+                    MouseScrollDelta::PixelDelta(p) => {
+                        let p = p.to_logical::<f64>(native.window.scale_factor());
+                        (p.x / 36., p.y / 36.)
+                    }
+                };
+                native.app.scroll(axes, native.mods);
+            }
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic: false,
