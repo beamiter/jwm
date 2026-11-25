@@ -56,6 +56,7 @@ enum Action {
     Cancel,
     Accept,
     Parent,
+    PickerList,
     Entry(PathBuf),
     Discard,
     SaveClose,
@@ -86,12 +87,16 @@ enum PickerMode {
     Images,
     Save(bool),
 }
+// The list is the first Tab stop after the path field.
+const PICKER_LIST_FOCUS: usize = 0;
+
 struct Picker {
     mode: PickerMode,
     path: Editor,
     exact_path: Option<(PathBuf, u64)>,
     entries: Vec<PathBuf>,
     offset: usize,
+    selected: Option<usize>,
 }
 const CONFLICT_TITLE: &str = "原文件已被修改";
 const CONFLICT_DESCRIPTION: &str =
@@ -739,6 +744,11 @@ impl App {
             }
         }
     }
+    fn picker_rows(&self) -> usize {
+        let height = (self.size.1 - 48.).min(480.);
+        ((height - 170.) / 32.).max(0.) as usize
+    }
+
     fn draw_dialog(&mut self, cr: &cairo::Context) {
         self.hits.clear();
         cr.set_source_rgba(0., 0., 0., 0.65);
@@ -778,7 +788,11 @@ impl App {
                     self.caret,
                     false,
                 );
-                let rows = ((r.h - 170.) / 32.).max(0.) as usize;
+                let rows = self.picker_rows();
+                let list_focused = self.dialog_focus == Some(PICKER_LIST_FOCUS);
+                if list_focused && rows > 0 && !picker.entries.is_empty() {
+                    picker.reveal(picker.selected.unwrap_or(picker.offset), rows);
+                }
                 for (i, path) in picker
                     .entries
                     .iter()
@@ -796,6 +810,12 @@ impl App {
                         path.file_name().unwrap_or_default().to_string_lossy()
                     );
                     ui::text(cr, &label, rect, 13., ui::text_color());
+                    if list_focused && picker.selected == Some(picker.offset + i) {
+                        ui::color(cr, ui::accent());
+                        cr.set_line_width(2.);
+                        cr.rectangle(rect.x + 1., rect.y + 1., rect.w - 2., rect.h - 2.);
+                        let _ = cr.stroke();
+                    }
                     self.hits.push(Hit {
                         rect,
                         action: Action::Entry(path.clone()),
@@ -895,6 +915,9 @@ impl App {
     }
     fn dialog_actions(&self) -> Vec<Action> {
         match &self.dialog {
+            Some(Dialog::Picker(p)) if !p.entries.is_empty() => {
+                vec![Action::PickerList, Action::Cancel, Action::Accept, Action::Parent]
+            }
             Some(Dialog::Picker(_)) => vec![Action::Cancel, Action::Accept, Action::Parent],
             Some(Dialog::Unsaved) => vec![
                 Action::Cancel,
@@ -939,6 +962,7 @@ impl App {
             exact_path: None,
             entries: vec![],
             offset: 0,
+            selected: None,
         };
         picker.set_path(path);
         picker.path.select_all();
@@ -1250,6 +1274,7 @@ impl App {
         }
         if self.dialog.is_some() {
             if let Some(Dialog::Picker(p)) = &mut self.dialog {
+                self.dialog_focus = None;
                 p.path.click(x, y, mods.shift_key());
             }
             return false;
@@ -1291,11 +1316,17 @@ impl App {
         }
     }
     pub fn scroll(&mut self, (dx, dy): (f64, f64), mods: ModifiersState) {
+        let rows = self.picker_rows();
+        let list_focused = self.dialog_focus == Some(PICKER_LIST_FOCUS);
         if let Some(Dialog::Picker(p)) = &mut self.dialog {
-            if dy != 0. {
+            if dy.is_finite() && dy != 0. {
                 p.offset = (p.offset as isize + if dy > 0. { -3 } else { 3 })
                     .clamp(0, p.entries.len().saturating_sub(1) as isize)
                     as usize;
+                if list_focused && rows > 0 && !p.entries.is_empty() {
+                    let last = (p.offset + rows - 1).min(p.entries.len() - 1);
+                    p.selected = Some(p.selected.unwrap_or(p.offset).clamp(p.offset, last));
+                }
             }
             return;
         }
@@ -1504,6 +1535,47 @@ impl App {
         }
     }
 
+    fn picker_list_focused(&self) -> bool {
+        self.dialog_focus == Some(PICKER_LIST_FOCUS)
+            && matches!(&self.dialog, Some(Dialog::Picker(p)) if !p.entries.is_empty())
+    }
+
+    fn focus_picker_list_row(&mut self) {
+        let rows = self.picker_rows().max(1);
+        if self.picker_list_focused()
+            && let Some(Dialog::Picker(p)) = &mut self.dialog
+        {
+            p.reveal(p.selected.unwrap_or(p.offset), rows);
+        }
+    }
+
+    fn picker_list_key(&mut self, key: &Key, repeat: bool) -> bool {
+        if !self.picker_list_focused() {
+            return false;
+        }
+        let rows = self.picker_rows().max(1);
+        let Some(Dialog::Picker(p)) = &mut self.dialog else {
+            return false;
+        };
+        let current = p.selected.unwrap_or(p.offset);
+        match key {
+            Key::Named(NamedKey::ArrowUp) => p.reveal(current.saturating_sub(1), rows),
+            Key::Named(NamedKey::ArrowDown) => p.reveal(current + 1, rows),
+            Key::Named(NamedKey::Enter) if !repeat => {
+                if let Some(path) = p.entries.get(current).cloned() {
+                    p.set_path(path);
+                    self.action(Action::Accept);
+                    if matches!(&self.dialog, Some(Dialog::Picker(p)) if !p.entries.is_empty()) {
+                        self.dialog_focus = Some(PICKER_LIST_FOCUS);
+                        self.focus_picker_list_row();
+                    }
+                }
+            }
+            _ => (),
+        }
+        true
+    }
+
     pub fn key(
         &mut self,
         event: &KeyEvent,
@@ -1527,10 +1599,14 @@ impl App {
                     Some(i) if mods.shift_key() => i.checked_sub(1),
                     Some(i) => (i + 1 < count).then_some(i + 1),
                 };
+                self.focus_picker_list_row();
                 return;
             }
             if event.logical_key == Key::Named(NamedKey::Escape) {
                 self.dialog = None;
+                return;
+            }
+            if self.picker_list_key(&event.logical_key, event.repeat) {
                 return;
             }
             if event.logical_key == Key::Named(NamedKey::Enter) {
@@ -1800,6 +1876,16 @@ impl Picker {
             }
         }
     }
+    fn reveal(&mut self, index: usize, rows: usize) {
+        let index = index.min(self.entries.len() - 1);
+        self.selected = Some(index);
+        if index < self.offset {
+            self.offset = index;
+        } else if index - self.offset >= rows {
+            self.offset = index + 1 - rows;
+        }
+    }
+
     fn refresh(&mut self) {
         let path = self.resolve();
         let directory = if path.is_dir() {
@@ -1831,12 +1917,33 @@ impl Picker {
         indexed.sort_unstable();
         self.entries = indexed.into_iter().map(|(_, _, _, path)| path).collect();
         self.offset = 0;
+        self.selected = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picker_reveals_keyboard_row_in_both_directions() {
+        let mut picker = Picker {
+            mode: PickerMode::Notes,
+            path: Editor::default(),
+            exact_path: None,
+            entries: vec![PathBuf::new(); 12],
+            offset: 0,
+            selected: None,
+        };
+        picker.reveal(11, 9);
+        assert_eq!((picker.selected, picker.offset), (Some(11), 3));
+        picker.reveal(9, 9);
+        assert_eq!((picker.selected, picker.offset), (Some(9), 3));
+        picker.reveal(1, 9);
+        assert_eq!((picker.selected, picker.offset), (Some(1), 1));
+        picker.reveal(12, 9);
+        assert_eq!((picker.selected, picker.offset), (Some(11), 3));
+    }
 
     #[test]
     fn picker_uses_exact_selected_path_until_the_field_is_edited() {
@@ -1887,6 +1994,7 @@ mod tests {
             exact_path: None,
             entries: Vec::new(),
             offset: 10,
+            selected: None,
         };
         picker.refresh();
 
@@ -1950,6 +2058,7 @@ mod tests {
             exact_path: None,
             entries: vec![PathBuf::new(); 10],
             offset: 2,
+            selected: None,
         })));
         app.scroll((-3., 0.), ModifiersState::empty());
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 2));
