@@ -4330,7 +4330,8 @@ mod tests {
         let left = jwm.state.monitor_order[0];
         let right = jwm.state.monitor_order[1];
         let mut keys = Vec::new();
-        for (index, (monitor, class)) in [(left, "First"), (right, "Second")].into_iter().enumerate()
+        for (index, (monitor, class)) in
+            [(left, "First"), (right, "Second")].into_iter().enumerate()
         {
             let mut client = WMClient::new(WindowId::from_raw(0xa0 + index as u64));
             client.class = class.into();

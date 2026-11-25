@@ -915,6 +915,7 @@ mod tests {
             output_ops: SpyOutputOps {
                 authoritative: true,
                 outputs: vec![output(1, 0, 0, 1920, 1080), output(2, 1920, 0, 1920, 1080)],
+                ..SpyOutputOps::default()
             },
             key_ops: DummyKeyOps,
             cursor_provider: DummyCursorProvider,
@@ -1016,6 +1017,7 @@ mod tests {
             output_ops: SpyOutputOps {
                 authoritative: true,
                 outputs: vec![output(1, 0, 0, 1920, 1080), output(2, 1920, 0, 1920, 1080)],
+                ..SpyOutputOps::default()
             },
             key_ops: DummyKeyOps,
             cursor_provider: DummyCursorProvider,
@@ -1122,6 +1124,7 @@ mod tests {
                         output(1, 0, 0, 1920, 1080),
                         output(2, 1920, 0, 1920, target_height),
                     ],
+                    ..SpyOutputOps::default()
                 },
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,

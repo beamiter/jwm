@@ -2085,6 +2085,7 @@ pub(crate) mod test_support {
 
     /// The outputs the backend reports; a test replaces them to change the
     /// display layout.
+    #[derive(Default)]
     pub(crate) struct SpyOutputOps {
         pub(crate) outputs: Vec<OutputInfo>,
         pub(crate) authoritative: bool,
