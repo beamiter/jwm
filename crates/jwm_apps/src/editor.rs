@@ -178,10 +178,22 @@ impl Editor {
             index
         }
     }
-    fn line_start(&self) -> usize {
-        let cursor = self.before_crlf(self.cursor);
-        let prefix = &self.text[..cursor];
+    fn line_start_at(&self, offset: usize) -> usize {
+        let prefix = &self.text[..self.before_crlf(offset)];
         prefix.rfind(['\r', '\n']).map_or(0, |i| i + 1)
+    }
+    fn line_start(&self) -> usize {
+        self.line_start_at(self.cursor)
+    }
+    fn through_line_break(text: &str) -> usize {
+        text.find(['\r', '\n']).map_or(text.len(), |index| {
+            let width = if text[index..].starts_with("\r\n") {
+                2
+            } else {
+                1
+            };
+            index + width
+        })
     }
     fn line_end(&self) -> usize {
         let cursor = self.before_crlf(self.cursor);
@@ -259,20 +271,21 @@ impl Editor {
             self.insert("\t");
             return;
         }
-        let start = self.text[..selection.start]
-            .rfind('\n')
-            .map_or(0, |i| i + 1);
-        let end = if !selection.is_empty() && self.text[..selection.end].ends_with('\n') {
-            selection.end
+        let start = self.line_start_at(selection.start);
+        let last = self.before_crlf(selection.end);
+        let end = if !selection.is_empty() && last == self.line_start_at(last) {
+            last
         } else {
-            self.text[selection.end..]
-                .find('\n')
-                .map_or(self.text.len(), |i| selection.end + i + 1)
+            last + Self::through_line_break(&self.text[last..])
         };
         let original = &self.text[start..end];
         let mut replacement = String::with_capacity(original.len());
         let mut removed_first = 0;
-        for (index, line) in original.split_inclusive('\n').enumerate() {
+        let mut remaining = original;
+        while !remaining.is_empty() {
+            let first = remaining.len() == original.len();
+            let (line, tail) = remaining.split_at(Self::through_line_break(remaining));
+            remaining = tail;
             if backwards {
                 let remove = if line.starts_with('\t') {
                     1
@@ -282,7 +295,7 @@ impl Editor {
                         .take_while(|byte| *byte == b' ')
                         .count()
                 };
-                if index == 0 {
+                if first {
                     removed_first = remove;
                 }
                 replacement.push_str(&line[remove..]);
@@ -740,6 +753,45 @@ mod tests {
         assert_eq!(e.text, source);
         e.undo(false);
         assert_eq!(e.text, "\t中e\u{301}\r\n\t    二\nthird");
+    }
+
+    #[test]
+    fn code_outdent_changes_only_the_line_after_a_bare_cr() {
+        for after in ["\n", "\r"] {
+            let source = format!("  first\r\t第二{after}third");
+            let mut e = Editor::new(source.clone());
+            e.monospace = true;
+            let tab = Key::Named(NamedKey::Tab);
+            e.move_to_position(2, 3);
+            assert!(e.code_key(&tab, ModifiersState::SHIFT, true));
+            assert_eq!(e.text, format!("  first\r第二{after}third"));
+            assert_eq!(e.position(), (2, 2));
+            assert_eq!(e.undo.len(), 1);
+            e.undo(false);
+            assert_eq!(e.text, source);
+        }
+    }
+
+    #[test]
+    fn reverse_code_indent_treats_crlf_as_one_break_and_skips_next_line_start() {
+        let source = " 中\r    二\r\nthird\n next";
+        let mut e = Editor::new(source.into());
+        e.monospace = true;
+        let tab = Key::Named(NamedKey::Tab);
+        let end = source.find("third").unwrap();
+        e.anchor = end;
+        e.cursor = " ".len();
+        assert!(e.code_key(&tab, ModifiersState::empty(), true));
+        assert_eq!(e.text, "\t 中\r\t    二\r\nthird\n next");
+        assert_eq!((e.cursor, e.anchor), (0, end + 2));
+        assert_eq!(e.undo.len(), 1);
+        assert!(e.code_key(&tab, ModifiersState::SHIFT, true));
+        assert_eq!(e.text, source);
+        assert_eq!((e.cursor, e.anchor), (0, end));
+        e.undo(false);
+        assert_eq!(e.text, "\t 中\r\t    二\r\nthird\n next");
+        e.undo(false);
+        assert_eq!(e.text, source);
     }
 
     #[test]
