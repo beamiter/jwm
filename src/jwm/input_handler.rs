@@ -4226,6 +4226,22 @@ impl Jwm {
             HitTarget::Surface(wid) => Some(wid),
             HitTarget::Background { .. } => None,
         };
+        let clicked_a_managed_window = clicked_win
+            .filter(|&wid| Some(wid) != backend.root_window())
+            .and_then(|wid| self.wintoclient(wid))
+            .is_some();
+        // X11 wheel events arrive as buttons 4–7. Scrolling over the
+        // reserved tab strip is not a tab click or a request to move focus
+        // to that output. A client covering the strip keeps its scroll.
+        if !clicked_a_managed_window
+            && matches!(detail_btn, 4..=7)
+            && self
+                .window_tab_at(self.last_mouse_root.0, self.last_mouse_root.1)
+                .is_some()
+        {
+            return Ok(PointerPressDisposition::Consumed);
+        }
+
         let target_mon_key = self.target_to_monitor(
             backend,
             target,
@@ -4241,10 +4257,6 @@ impl Jwm {
         // A click on a monitor's tab bar picks that window. The strip is space
         // the layout reserved, so nothing tiled can be under it; a floating
         // window that happens to cover it still keeps its own clicks.
-        let clicked_a_managed_window = clicked_win
-            .filter(|&wid| Some(wid) != backend.root_window())
-            .and_then(|wid| self.wintoclient(wid))
-            .is_some();
         if !clicked_a_managed_window {
             // Like globe admission and capture selection, tab hit-testing
             // belongs to this press, even if QueryPointer has advanced.
@@ -9344,6 +9356,43 @@ mod tests {
         );
         assert!(jwm.features.expose_active);
         assert_eq!(backend.expose_windows, &[live, dead]);
+    }
+
+    #[test]
+    fn a_wheel_over_an_inactive_tiled_tab_does_not_move_focus() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.sel_mon.unwrap();
+        let first =
+            add_floating_configure_client(&mut jwm, WindowId::from_raw(0x7f34), monitor, 0, false);
+        let second =
+            add_floating_configure_client(&mut jwm, WindowId::from_raw(0x7f35), monitor, 0, false);
+        for client in [first, second] {
+            jwm.state.clients[client].state.is_floating = false;
+        }
+        jwm.focus(&mut backend, Some(first)).unwrap();
+        let group = jwm.tab_group_clients(monitor);
+        let slot = group.iter().position(|key| *key == second).unwrap();
+        let [x, y, w, h] = jwm.monitor_tab_bar(monitor, group.len()).unwrap();
+        jwm.last_mouse_root = (
+            f64::from(x + w * (slot as f32 + 0.5) / group.len() as f32),
+            f64::from(y + h * 0.5),
+        );
+        assert_eq!(
+            jwm.window_tab_at(jwm.last_mouse_root.0, jwm.last_mouse_root.1),
+            Some(second)
+        );
+        let background = HitTarget::Background { output: None };
+        for button in 4..=7 {
+            jwm.on_button_press_internal(&mut backend, background, 0, button, 0)
+                .unwrap();
+            assert_eq!(jwm.get_selected_client_key(), Some(first));
+            assert!(jwm.tab_drag.is_none());
+        }
+        jwm.on_button_press_internal(&mut backend, background, 0, 1, 0)
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(second));
+        assert!(jwm.tab_drag.is_some());
     }
 
     #[test]
