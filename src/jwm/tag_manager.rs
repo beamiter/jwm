@@ -955,18 +955,17 @@ mod tests {
     }
 
     #[test]
-    fn tagmon_to_tag_default_shortcut_sends_directly_to_tag_three() {
+    fn tagmon_to_tag_default_shortcuts_send_directly_to_all_nine_tags() {
         use crate::backend::common_define::{Mods, keys};
         use crate::config::Config;
 
-        let config = Config::default();
-        let binding = config
-            .get_keys()
-            .into_iter()
-            .find(|key| key.mask == (Mods::SUPER | Mods::SHIFT) && key.key_sym == keys::KEY_F3)
-            .unwrap();
-        let action = binding.func_opt.unwrap();
-        assert!(!binding.repeatable);
+        let bindings = Config::default().get_keys();
+        let binding_for = |keysym| {
+            bindings
+                .iter()
+                .find(|key| key.mask == (Mods::ALT | Mods::SHIFT) && key.key_sym == keysym)
+                .unwrap()
+        };
 
         let mut backend = DockSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
@@ -974,17 +973,31 @@ mod tests {
         let key = visible_client(&mut jwm, source, 0x4f0, Rect::new(60, 80, 400, 300));
         jwm.state.monitors[source].set_selected_client_for_current_tag(Some(key));
 
-        action(&mut jwm, &mut backend, &binding.arg).unwrap();
+        let f3 = binding_for(keys::KEY_F3);
+        f3.func_opt.unwrap()(&mut jwm, &mut backend, &f3.arg).unwrap();
         assert_eq!(jwm.state.clients[key].mon, Some(source));
         assert_eq!(jwm.state.clients[key].state.tags, 1);
 
         let target = add_right_monitor(&mut jwm, source);
-        action(&mut jwm, &mut backend, &binding.arg).unwrap();
-        assert_eq!(jwm.state.clients[key].mon, Some(target));
-        assert_eq!(jwm.state.clients[key].state.tags, 4);
-        assert_eq!(jwm.state.monitors[source].get_active_tags(), 1);
-        assert_eq!(jwm.state.monitors[target].get_active_tags(), 1);
-        assert_eq!(jwm.state.sel_mon, Some(source));
+        jwm.state.monitors[target].view_tag(2, false);
+        for (tag_index, keysym) in (keys::KEY_F1..=keys::KEY_F9).enumerate() {
+            let key = visible_client(
+                &mut jwm,
+                source,
+                0x500 + tag_index as u64,
+                Rect::new(60, 80, 400, 300),
+            );
+            jwm.state.monitors[source].set_selected_client_for_current_tag(Some(key));
+            let binding = binding_for(keysym);
+            assert!(!binding.repeatable);
+            binding.func_opt.unwrap()(&mut jwm, &mut backend, &binding.arg).unwrap();
+            assert_eq!(jwm.state.clients[key].mon, Some(target));
+            assert_eq!(jwm.state.clients[key].state.tags, 1 << tag_index);
+            assert_eq!(jwm.state.monitors[source].get_active_tags(), 1);
+            assert_eq!(jwm.state.monitors[target].get_active_tags(), 2);
+            assert_eq!(jwm.state.sel_mon, Some(source));
+        }
+        assert_eq!(jwm.state.clients[key].mon, Some(source));
     }
 
     #[test]

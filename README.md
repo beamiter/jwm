@@ -499,8 +499,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+Escape | Lock screen |
 | Alt+Shift+Escape | Session menu; logging out requires confirmation |
 | Alt+Control+O | Display layout |
-| Alt+Shift+F1–F9 | Focus the next unlocked monitor and open the corresponding tag 1–9 |
-| Super+Shift+F3 | Send the focused window to tag 3 on the next unlocked monitor and keep the current views |
+| Alt+Shift+F1–F9 | Send the focused window to tag 1–9 on the next unlocked monitor and keep both current views |
 | Alt+F10 / Alt+Shift+F10 | Control center / Bluetooth picker |
 | Alt+Control+Shift+M / V | Open the music / video library |
 | Alt+Control+Shift+, / . | [Exchange all tags, windows and layouts](docs/monitor-swap.md) with the previous / next monitor; stay on this output |
@@ -527,15 +526,15 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor's work area |
 | Alt+Shift+Up | Toggle maximize of the focused floating window (fills the work area; press again to restore) |
 
-In an existing key list, use `focusmon_tag` to open a tag on the next monitor or
-`tagmon_to_tag` to send the focused window there. Both actions take a one-based
-tag number. For example, this binding opens tag 5 on the next monitor.
+In an existing key list, set the F1–F9 bindings you want to `tagmon_to_tag` and
+use the one-based destination tag number. For example, this binding sends the
+focused window to tag 5 on the next monitor.
 
 ```toml
 [[keybindings.keys]]
 modifier = ["Mod1", "Shift"]
 key = "F5"
-function = "focusmon_tag"
+function = "tagmon_to_tag"
 argument = 5
 ```
 

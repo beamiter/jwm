@@ -1641,14 +1641,10 @@ mod scratchpad_reveal_tests {
     }
 
     #[test]
-    fn focusmon_tag_shortcuts_open_all_nine_tags_on_the_next_monitor() {
-        use crate::backend::common_define::{Mods, keys};
-        use crate::config::Config;
-
+    fn focusmon_tag_opens_numbered_tags_on_the_next_monitor() {
         let (mut jwm, client, _) = jwm_with_two_tiled_windows();
         let mut backend = ScratchpadBackend::new();
         let original = jwm.state.sel_mon.unwrap();
-        let bindings = Config::default().get_keys();
 
         jwm.focusmon_tag(&mut backend, &WMArgEnum::Int(2)).unwrap();
         assert_eq!(jwm.state.sel_mon, Some(original));
@@ -1659,19 +1655,15 @@ mod scratchpad_reveal_tests {
         jwm.focusmon_tag(&mut backend, &WMArgEnum::Int(32)).unwrap();
         assert_eq!(jwm.state.sel_mon, Some(original));
 
-        for (tag_index, keysym) in (keys::KEY_F1..=keys::KEY_F9).enumerate() {
-            let binding = bindings
-                .iter()
-                .find(|key| key.mask == (Mods::ALT | Mods::SHIFT) && key.key_sym == keysym)
-                .unwrap();
-            assert!(!binding.repeatable);
+        for tag_index in 0..9 {
             let (source, target) = if tag_index % 2 == 0 {
                 (original, other)
             } else {
                 (other, original)
             };
             let source_tags = jwm.state.monitors[source].get_active_tags();
-            binding.func_opt.unwrap()(&mut jwm, &mut backend, &binding.arg).unwrap();
+            jwm.focusmon_tag(&mut backend, &WMArgEnum::Int(tag_index + 1))
+                .unwrap();
             assert_eq!(jwm.state.sel_mon, Some(target));
             assert_eq!(jwm.state.monitors[target].get_active_tags(), 1 << tag_index);
             assert_eq!(jwm.state.monitors[source].get_active_tags(), source_tags);
