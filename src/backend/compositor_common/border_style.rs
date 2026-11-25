@@ -14,7 +14,35 @@ pub(crate) struct BorderStyle {
     pub(crate) width: f32,
     /// The ordinary focused border, the only one that may upgrade to the
     /// two-colour gradient ring. Signal borders keep their flat colours.
-    pub(crate) ordinary_focused: bool,
+    ordinary_focused: bool,
+    pulse: f32,
+}
+
+impl BorderStyle {
+    pub(crate) fn gradient_colors(
+        self,
+        enabled: bool,
+        a: [f32; 4],
+        b: [f32; 4],
+        highlight: [f32; 4],
+    ) -> Option<[[f32; 4]; 2]> {
+        (enabled && self.ordinary_focused).then(|| {
+            [
+                blend_color(a, highlight, self.pulse),
+                blend_color(b, highlight, self.pulse),
+            ]
+        })
+    }
+}
+
+fn blend_color(base: [f32; 4], highlight: [f32; 4], weight: f32) -> [f32; 4] {
+    if weight == 0.0 {
+        base
+    } else if weight == 1.0 {
+        highlight
+    } else {
+        std::array::from_fn(|i| base[i] + (highlight[i] - base[i]) * weight)
+    }
 }
 
 /// Whether a window takes part in ordinary compositor borders — both in the
@@ -58,15 +86,12 @@ pub(crate) fn focus_highlight_style(
         .unwrap_or(1.0)
         .clamp(0.0, 1.0);
     let pulse = (progress * std::f32::consts::PI).sin().max(0.0);
-    let mut color = focused_color;
-    for (channel, highlight) in color.iter_mut().zip(highlight_color) {
-        *channel += (highlight - *channel) * pulse;
-    }
     let highlight_width = (focused_width + 2.0).max(3.0);
     BorderStyle {
-        color,
+        color: blend_color(focused_color, highlight_color, pulse),
         width: focused_width + (highlight_width - focused_width) * pulse,
         ordinary_focused: false,
+        pulse,
     }
 }
 
@@ -106,35 +131,42 @@ pub(crate) fn window_border_style(inputs: &WindowBorderInputs) -> Option<BorderS
     // a zero width (no border at all on its first and last frames) and hide
     // the PiP or attention frame the window keeps otherwise.
     let style = if let Some(progress) = inputs.focus_highlight_progress.filter(|_| ordinary) {
-        focus_highlight_style(
+        let mut style = focus_highlight_style(
             inputs.focused_color,
             inputs.highlight_color,
             inputs.ordinary_width,
             progress,
-        )
+        );
+        // PiP and urgent windows retain the original flat signal path.
+        style.ordinary_focused = inputs.is_focused && !special;
+        style
     } else if let Some(attention) = inputs.attention {
         BorderStyle {
             color: attention.color,
             width: attention.width,
             ordinary_focused: false,
+            pulse: 0.0,
         }
     } else if inputs.is_pip {
         BorderStyle {
             color: inputs.pip_color,
             width: inputs.pip_width,
             ordinary_focused: false,
+            pulse: 0.0,
         }
     } else if inputs.is_focused {
         BorderStyle {
             color: inputs.focused_color,
             width: inputs.ordinary_width,
             ordinary_focused: true,
+            pulse: 0.0,
         }
     } else {
         BorderStyle {
             color: inputs.unfocused_color,
             width: inputs.ordinary_width,
             ordinary_focused: false,
+            pulse: 0.0,
         }
     };
     (style.width > 0.0).then_some(style)
@@ -199,6 +231,43 @@ mod tests {
 
         assert_eq!(peak.color, highlight);
         assert_eq!(peak.width, 3.0);
+    }
+
+    #[test]
+    fn a_focused_gradient_crossfades_to_the_highlight_and_back() {
+        let a = [0.0, 0.2, 0.8, 0.5];
+        let b = [0.8, 0.4, 0.0, 0.9];
+        let mut input = WindowBorderInputs {
+            is_focused: true,
+            ..inputs()
+        };
+        let colors = |input: &WindowBorderInputs| {
+            window_border_style(input)
+                .unwrap()
+                .gradient_colors(true, a, b, HIGHLIGHT)
+        };
+        assert_eq!(colors(&input), Some([a, b]));
+        for progress in [0.0, 1.0, f32::NAN] {
+            input.focus_highlight_progress = Some(progress);
+            assert_eq!(colors(&input), Some([a, b]));
+        }
+
+        input.focus_highlight_progress = Some(0.25);
+        let [left, right] = colors(&input).unwrap();
+        assert!(a[0] < left[0] && left[0] < right[0] && right[0] < HIGHLIGHT[0]);
+        assert!(a[3] < left[3] && left[3] < HIGHLIGHT[3]);
+        assert!(b[3] < right[3] && right[3] < HIGHLIGHT[3]);
+
+        input.focus_highlight_progress = Some(0.5);
+        let peak = window_border_style(&input).unwrap();
+        assert_eq!(colors(&input), Some([HIGHLIGHT; 2]));
+        assert_eq!(peak.width, 4.0);
+        assert_eq!(peak.gradient_colors(false, a, b, HIGHLIGHT), None);
+        input.is_pip = true;
+        assert_eq!(colors(&input), None);
+        input.is_pip = false;
+        input.is_focused = false;
+        assert_eq!(colors(&input), None);
     }
 
     #[test]
