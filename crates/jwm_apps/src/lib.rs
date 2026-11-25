@@ -85,22 +85,42 @@ pub fn neighbors(path: &Path) -> Vec<PathBuf> {
 }
 
 fn neighbors_from(path: &Path, current_dir: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<_> = path
-        .parent()
-        // A bare filename has an empty parent; reading it directly fails.
-        .and_then(|parent| {
-            std::fs::read_dir(current_dir.join(parent))
-                .ok()
-                .map(|entries| (parent, entries))
-        })
-        .into_iter()
-        .flat_map(|(parent, entries)| {
-            entries.filter_map(Result::ok).filter_map(move |entry| {
-                let name = entry.file_name();
-                (image_path(Path::new(&name)) && entry.path().is_file()).then(|| parent.join(name))
-            })
-        })
-        .collect();
+    neighbors_from_until_cancelled(path, current_dir, || false).unwrap_or_default()
+}
+
+fn neighbors_until_cancelled(path: &Path, cancelled: impl Fn() -> bool) -> Option<Vec<PathBuf>> {
+    neighbors_from_until_cancelled(path, Path::new("."), cancelled)
+}
+
+fn neighbors_from_until_cancelled(
+    path: &Path,
+    current_dir: &Path,
+    cancelled: impl Fn() -> bool,
+) -> Option<Vec<PathBuf>> {
+    if cancelled() {
+        return None;
+    }
+    let mut paths = Vec::new();
+    // A bare filename has an empty parent; reading it directly fails.
+    if let Some(parent) = path.parent()
+        && let Ok(entries) = std::fs::read_dir(current_dir.join(parent))
+    {
+        for entry in entries {
+            if cancelled() {
+                return None;
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let name = entry.file_name();
+            if image_path(Path::new(&name)) && entry.path().is_file() {
+                paths.push(parent.join(name));
+            }
+        }
+    }
+    if cancelled() {
+        return None;
+    }
     // Always retain an explicitly opened image, including extensionless files.
     if !paths.iter().any(|candidate| candidate == path) {
         paths.push(path.to_path_buf());
@@ -114,7 +134,7 @@ fn neighbors_from(path: &Path, current_dir: &Path) -> Vec<PathBuf> {
             name.to_owned(),
         )
     });
-    paths
+    (!cancelled()).then_some(paths)
 }
 
 #[cfg(test)]
@@ -134,6 +154,30 @@ mod tests {
         assert!(image_path(Path::new("photo.webp")));
         assert!(!image_path(Path::new("script.svg")));
         assert!(!image_path(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn obsolete_neighbor_scan_can_stop_before_an_entry_is_processed() {
+        let directory =
+            std::env::temp_dir().join(format!("jwm-image-cancel-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(directory.clone());
+        for index in 0..12 {
+            std::fs::write(directory.join(format!("shot{index}.png")), b"").unwrap();
+        }
+        let checks = std::cell::Cell::new(0);
+        let result = neighbors_from_until_cancelled(Path::new("shot0.png"), &directory, || {
+            checks.set(checks.get() + 1);
+            checks.get() == 4
+        });
+        assert!(result.is_none());
+        assert_eq!(checks.get(), 4);
     }
 
     #[test]
