@@ -275,6 +275,16 @@ jobs:
           python3 scripts/test-restart-x11.py --jwm target/debug/jwm --compositor off \
             --triggers hotkey --two-outputs --windows 2 --inactive-tag-focus
 
+      - name: Validate focus gradient pixels (validation-only branch)
+        run: |
+          for backend in x11rb xcb; do
+            python3 scripts/test-focus-gradient-x11.py --jwm target/debug/jwm \
+              --backend "$backend" --output "artifacts/terminal-exit-gradient-$backend"
+          done
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          LP_NUM_THREADS: '2'
+
       - name: Terminal exit full-animation overlap pixels
         timeout-minutes: 5
         run: |
