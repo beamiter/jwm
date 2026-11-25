@@ -310,6 +310,44 @@ impl Editor {
             self.cursor = start + length;
         }
     }
+    /// Use the line's terminator, or inherit the previous line's at EOF.
+    /// Do not rewrite existing mixed line endings or introduce a mixed
+    /// ending into a uniform document merely because the user pressed Enter.
+    fn insert_newline(&mut self, auto_indent: bool) {
+        let selection = self.selection();
+        let (before, after) = self.text.split_at(selection.start);
+        let previous = before.rfind(['\r', '\n']);
+        let newline = match after.find(['\r', '\n']).map(|offset| &after[offset..]) {
+            Some(tail) if tail.starts_with("\r\n") => "\r\n",
+            Some(tail) if tail.starts_with('\r') => "\r",
+            Some(_) => "\n",
+            None => match previous.map(|index| &before.as_bytes()[..=index]) {
+                Some([.., b'\r', b'\n']) => "\r\n",
+                Some([.., b'\r']) => "\r",
+                _ => "\n",
+            },
+        };
+        // A bare inserted break must not pair with the other half of a
+        // neighboring CRLF when editing a mixed document.
+        let newline = if (newline == "\n" && before.ends_with('\r'))
+            || (newline == "\r" && self.text[selection.end..].starts_with('\n'))
+        {
+            "\r\n"
+        } else {
+            newline
+        };
+        if auto_indent {
+            let start = previous.map_or(0, |index| index + 1);
+            let indentation: String = before[start..]
+                .chars()
+                .take_while(|ch| matches!(ch, ' ' | '\t'))
+                .collect();
+            self.insert(&format!("{newline}{indentation}"));
+        } else {
+            self.insert(newline);
+        }
+    }
+
     fn code_key(&mut self, key: &Key, mods: ModifiersState, multiline: bool) -> bool {
         if !multiline || !self.monospace || mods.control_key() || mods.alt_key() || mods.super_key()
         {
@@ -317,15 +355,7 @@ impl Editor {
         }
         match key {
             Key::Named(NamedKey::Tab) => self.indent_lines(mods.shift_key()),
-            Key::Named(NamedKey::Enter) => {
-                let insertion = self.selection().start;
-                let start = self.text[..insertion].rfind('\n').map_or(0, |i| i + 1);
-                let indentation: String = self.text[start..insertion]
-                    .chars()
-                    .take_while(|ch| matches!(ch, ' ' | '\t'))
-                    .collect();
-                self.insert(&format!("\n{indentation}"));
-            }
+            Key::Named(NamedKey::Enter) => self.insert_newline(true),
             _ => return false,
         }
         true
@@ -428,7 +458,7 @@ impl Editor {
                 None
             }
             Key::Named(NamedKey::Enter) if multiline => {
-                self.insert("\n");
+                self.insert_newline(false);
                 None
             }
             Key::Named(NamedKey::Tab) if multiline => {
@@ -749,14 +779,14 @@ mod tests {
         e.cursor = "\t  中".len();
         e.anchor = e.cursor;
         e.code_key(&enter, ModifiersState::empty(), true);
-        assert_eq!(e.text, "\t  中\n\t  \r\nnext");
+        assert_eq!(e.text, "\t  中\r\n\t  \r\nnext");
         assert_eq!(e.undo.len(), 1);
         e.undo(false);
         assert_eq!(e.text, "\t  中\r\nnext");
         e.cursor = 1;
         e.anchor = 1;
         e.code_key(&enter, ModifiersState::empty(), true);
-        assert_eq!(e.text, "\t\n\t  中\r\nnext");
+        assert_eq!(e.text, "\t\r\n\t  中\r\nnext");
         let mut e = Editor::new("    first\nsecond".into());
         e.monospace = true;
         e.select(4..e.text.len());
@@ -764,6 +794,57 @@ mod tests {
         assert_eq!(e.text, "    \n    ");
         e.undo(false);
         assert_eq!(e.text, "    first\nsecond");
+    }
+
+    #[test]
+    fn enter_keeps_line_endings_in_plain_and_code_documents() {
+        for (newline, label) in [("\n", "LF"), ("\r\n", "CRLF"), ("\r", "CR")] {
+            let original = format!("first{newline}  中文{newline}  tail");
+            let mut plain = Editor::new(original.clone());
+            plain.move_to_position(2, 5);
+            plain.insert_newline(false);
+            assert_eq!(
+                plain.text,
+                format!("first{newline}  中文{newline}{newline}  tail")
+            );
+            assert_eq!(plain.position(), (3, 1));
+            assert_eq!(plain.line_endings(), label);
+            plain.undo(false);
+            assert_eq!(plain.text, original);
+
+            let mut code = Editor::new(original.clone());
+            code.monospace = true;
+            code.move_to_position(3, 7);
+            assert!(code.code_key(&Key::Named(NamedKey::Enter), ModifiersState::empty(), true));
+            assert_eq!(code.text, format!("{original}{newline}  "));
+            assert_eq!(code.position(), (4, 3));
+            assert_eq!(code.line_endings(), label);
+            code.undo(false);
+            assert_eq!(code.text, original);
+        }
+        let mut empty = Editor::new(String::new());
+        empty.insert_newline(false);
+        assert_eq!(empty.text, "\n");
+    }
+
+    #[test]
+    fn enter_respects_local_mixed_line_endings_without_fusing_adjacent_breaks() {
+        let mut edit = Editor::new("one\r\nmiddle\nend".into());
+        edit.move_to_position(2, 4);
+        edit.insert_newline(false);
+        assert_eq!(edit.text, "one\r\nmid\ndle\nend");
+
+        let mut edit = Editor::new("first\rmiddle\nlast".into());
+        edit.move_to_position(2, 1);
+        edit.insert_newline(false);
+        assert_eq!(edit.text, "first\r\r\nmiddle\nlast");
+        assert_eq!(edit.position(), (3, 1));
+        edit.undo(false);
+        assert_eq!(edit.text, "first\rmiddle\nlast");
+
+        edit.select("fir".len().."first\rmiddle".len());
+        edit.insert_newline(false);
+        assert_eq!(edit.text, "fir\r\n\nlast");
     }
 
     #[test]
