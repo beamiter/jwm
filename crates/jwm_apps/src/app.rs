@@ -2423,7 +2423,7 @@ mod tests {
         }
         // Manual scrolling may hide the selected row. Enter must reveal it
         // without opening (or writing) until a fresh Enter confirms it.
-        app.pointer.0 = 10.;
+        app.pointer = (10., app.body().y + 80.);
         app.scroll((0., -100.), ModifiersState::empty());
         app.draw(&cr, 960., 680., false);
         assert!(
