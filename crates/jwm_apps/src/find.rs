@@ -38,7 +38,7 @@ pub(crate) struct Find {
     pub enabled: bool,
     pub query: Editor,
     pub total: usize,
-    pub current: usize,
+    current: Option<(usize, usize)>,
     revisions: Option<(u64, u64)>,
 }
 impl Find {
@@ -67,43 +67,55 @@ impl Find {
         self.query = Editor::new(query.to_owned());
         self.query.select_all();
         self.total = total;
-        self.current = current;
+        self.current = Some((current, range.start));
         self.revisions = Some((editor.revision, self.query.revision));
         self.enabled = true;
         true
     }
 
     pub fn sync(&mut self, editor: &mut Editor) {
+        self.refresh(editor, true);
+    }
+
+    pub fn document_edited(&mut self, editor: &mut Editor) {
+        self.refresh(editor, false);
+    }
+
+    fn refresh(&mut self, editor: &mut Editor, select_match: bool) {
         let revisions = (editor.revision, self.query.revision);
         if self.revisions == Some(revisions) {
             return;
         }
         self.revisions = Some(revisions);
         self.total = 0;
-        self.current = 0;
+        self.current = None;
         if self.query.text.is_empty() {
             return;
         }
-        let mut selected = None;
+        let selection = editor.selection();
+        let query_len = self.query.text.len();
         let mut first = None;
-        for (offset, _) in editor.text.match_indices(&self.query.text) {
-            first.get_or_insert(offset);
-            if selected.is_none() && offset >= editor.selection().start {
-                selected = Some(offset);
-                self.current = self.total;
+        for (index, (offset, _)) in editor.text.match_indices(&self.query.text).enumerate() {
+            let hit = (index, offset);
+            first.get_or_insert(hit);
+            let eligible = if select_match {
+                offset >= selection.start
+            } else {
+                selection == (offset..offset + query_len)
+            };
+            if self.current.is_none() && eligible {
+                self.current = Some(hit);
             }
             self.total += 1;
         }
-        if let Some(offset) = selected.or(first) {
-            editor.select(offset..offset + self.query.text.len());
+        if select_match {
+            self.current = self.current.or(first);
+            if let Some((_, offset)) = self.current {
+                editor.select(offset..offset + query_len);
+            }
         }
     }
-    pub fn document_edited(&mut self, editor: &mut Editor) {
-        let (anchor, cursor) = (editor.anchor, editor.cursor);
-        self.sync(editor);
-        editor.anchor = anchor;
-        editor.cursor = cursor;
-    }
+
     pub fn navigate(&mut self, editor: &mut Editor, backwards: bool) {
         self.sync(editor);
         if self.total == 0 {
@@ -115,17 +127,30 @@ impl Find {
             .enumerate()
             .map(|(index, (offset, _))| (index, offset));
         if let Some((index, offset)) = navigation_match(hits, editor.selection(), backwards) {
-            self.current = index;
+            self.current = Some((index, offset));
             editor.select(offset..offset + self.query.text.len());
         }
     }
-    pub fn label(&self) -> String {
+    fn current_index(&self, editor: &Editor) -> Option<usize> {
+        let (index, offset) = self.current?;
+        (self.revisions == Some((editor.revision, self.query.revision))
+            && editor.selection() == (offset..offset + self.query.text.len()))
+            .then_some(index)
+    }
+
+    pub fn has_current_match(&self, editor: &Editor) -> bool {
+        self.current_index(editor).is_some()
+    }
+
+    pub fn label(&self, editor: &Editor) -> String {
         if self.query.text.is_empty() {
             "区分大小写 · 文本查找".into()
         } else if self.total == 0 {
             "无匹配".into()
+        } else if let Some(index) = self.current_index(editor) {
+            format!("{} / {}", index + 1, self.total)
         } else {
-            format!("{} / {}", self.current + 1, self.total)
+            format!("{} 处匹配", self.total)
         }
     }
 }
@@ -164,7 +189,7 @@ mod tests {
         find.query.insert("previous");
         find.sync(&mut editor);
         assert!(find.use_selection(&editor));
-        assert_eq!((find.current, find.total), (1, 2));
+        assert_eq!((find.current_index(&editor), find.total), (Some(1), 2));
         assert_eq!(find.query.text, term);
         assert_eq!(editor.cursor, second);
         assert_eq!(editor.anchor, second + term.len());
@@ -188,6 +213,25 @@ mod tests {
     }
 
     #[test]
+    fn find_only_marks_the_actual_selection_as_current() {
+        let mut editor = Editor::new("前猫 后猫".into());
+        let mut find = Find::default();
+        find.query.insert("猫");
+        find.sync(&mut editor);
+        assert_eq!(find.label(&editor), "1 / 2");
+        assert!(find.has_current_match(&editor));
+
+        editor.select(0..3);
+        assert_eq!(find.label(&editor), "2 处匹配");
+        assert!(!find.has_current_match(&editor));
+
+        find.navigate(&mut editor, true);
+        assert_eq!(find.label(&editor), "2 / 2");
+        assert_eq!(&editor.text[editor.selection()], "猫");
+        assert_eq!(editor.revision, 0);
+    }
+
+    #[test]
     fn unicode_wrap_empty_missing_and_edits() {
         let mut editor = Editor::new("前🙂猫 后🙂猫".into());
         let mut find = Find::default();
@@ -197,9 +241,9 @@ mod tests {
         assert_eq!(&editor.text[editor.selection()], "🙂猫");
         assert_eq!(editor.selection().start, 3);
         find.navigate(&mut editor, true);
-        assert_eq!(find.current, 1);
+        assert_eq!(find.current_index(&editor), Some(1));
         find.navigate(&mut editor, false);
-        assert_eq!(find.current, 0);
+        assert_eq!(find.current_index(&editor), Some(0));
         assert_eq!(editor.revision, 0);
         editor.insert("替换");
         let cursor = editor.cursor;
@@ -207,6 +251,8 @@ mod tests {
         assert_eq!(editor.cursor, cursor);
         assert!(editor.selection().is_empty());
         assert_eq!(find.total, 1);
+        assert_eq!(find.label(&editor), "1 处匹配");
+        assert!(!find.has_current_match(&editor));
         find.navigate(&mut editor, false);
         assert_eq!(&editor.text[editor.selection()], "🙂猫");
         find.query.select_all();
