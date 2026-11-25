@@ -1162,6 +1162,8 @@ impl Jwm {
             "focusstack"
         } else if eq!(Jwm::focusmon) {
             "focusmon"
+        } else if eq!(Jwm::focusmon_tag) {
+            "focusmon_tag"
         } else if eq!(Jwm::swapmon) {
             "swapmon"
         } else if eq!(Jwm::take_screenshot) {
@@ -3049,6 +3051,10 @@ fn keybinding_action_desc(function: &str, argument: &crate::config::ArgumentConf
         "lastlayout" => "previous layout".to_string(),
         "restore_preview" => "restore minimized window".to_string(),
         "swapmon" => "exchange all monitor workspaces".to_string(),
+        "focusmon_tag" => match argument {
+            crate::config::ArgumentConfig::Int(tag) => format!("view tag {tag} on next monitor"),
+            _ => function.to_string(),
+        },
         "tagmon_to_tag" => match argument {
             crate::config::ArgumentConfig::Int(tag) => format!("send to tag {tag} on next monitor"),
             _ => function.to_string(),

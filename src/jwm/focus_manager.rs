@@ -103,6 +103,28 @@ impl Jwm {
         Ok(())
     }
 
+    /// Focus the next monitor and open its numbered tag.
+    pub fn focusmon_tag(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let WMArgEnum::Int(tag) = *arg else {
+            return Ok(());
+        };
+        if tag < 1 || tag as usize > CONFIG.load().tags_length() {
+            return Ok(());
+        }
+        let Some(target) = self
+            .dirtomon(&1)
+            .filter(|&key| Some(key) != self.state.sel_mon)
+        else {
+            return Ok(());
+        };
+        self.switch_to_monitor(backend, target)?;
+        self.view_on_monitor(backend, target, 1 << (tag - 1))
+    }
+
     /// 在窗口栈中切换焦点（Alt+j/k）
     ///
     /// 参数 arg 应为 `Int(i)`：正数向下，负数向上
@@ -1613,6 +1635,55 @@ mod scratchpad_reveal_tests {
             .unwrap();
         assert!(capture < clear && clear < bar && bar < guard && guard < state);
         assert_eq!(body.matches("self.broadcast_window_state_ipc(").count(), 1);
+    }
+
+    #[test]
+    fn focusmon_tag_shortcuts_open_all_nine_tags_on_the_next_monitor() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::config::Config;
+
+        let (mut jwm, client, _) = jwm_with_two_tiled_windows();
+        let mut backend = ScratchpadBackend::new();
+        let original = jwm.state.sel_mon.unwrap();
+        let bindings = Config::default().get_keys();
+
+        jwm.focusmon_tag(&mut backend, &WMArgEnum::Int(2)).unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(original));
+        assert_eq!(jwm.state.monitors[original].get_active_tags(), 1);
+
+        jwm.add_monitor(output(2, 1920));
+        let other = jwm.state.monitor_order[1];
+        jwm.focusmon_tag(&mut backend, &WMArgEnum::Int(32)).unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(original));
+
+        for (tag_index, keysym) in (keys::KEY_F1..=keys::KEY_F9).enumerate() {
+            let binding = bindings
+                .iter()
+                .find(|key| key.mask == (Mods::ALT | Mods::SHIFT) && key.key_sym == keysym)
+                .unwrap();
+            assert!(!binding.repeatable);
+            let (source, target) = if tag_index % 2 == 0 {
+                (original, other)
+            } else {
+                (other, original)
+            };
+            let source_tags = jwm.state.monitors[source].get_active_tags();
+            binding.func_opt.unwrap()(&mut jwm, &mut backend, &binding.arg).unwrap();
+            assert_eq!(jwm.state.sel_mon, Some(target));
+            assert_eq!(jwm.state.monitors[target].get_active_tags(), 1 << tag_index);
+            assert_eq!(jwm.state.monitors[source].get_active_tags(), source_tags);
+        }
+        assert_eq!(jwm.state.clients[client].mon, Some(original));
+        assert_eq!(jwm.state.clients[client].state.tags, 1);
+
+        let locked = &jwm.state.monitors[original];
+        let g = &locked.geometry;
+        jwm.features
+            .monitor_lock
+            .lock(locked.num, (g.m_x, g.m_y, g.m_w, g.m_h));
+        jwm.focusmon_tag(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(other));
+        assert_eq!(jwm.state.monitors[other].get_active_tags(), 1 << 8);
     }
 
     #[test]

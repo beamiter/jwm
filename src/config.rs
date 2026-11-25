@@ -3337,7 +3337,7 @@ impl Config {
                 argument: ArgumentConfig::Int(1),
             },
             KeyConfig {
-                modifier: vec!["Mod1".into(), "Shift".into()],
+                modifier: vec!["Mod4".into(), "Shift".into()],
                 key: "F3".into(),
                 function: "tagmon_to_tag".into(),
                 argument: ArgumentConfig::Int(3),
@@ -3466,6 +3466,12 @@ impl Config {
         ];
         keys.extend(Self::default_media_player_keys());
         keys.extend(Self::default_monitor_swap_keys());
+        keys.extend((1..=9).map(|tag| KeyConfig {
+            modifier: vec!["Mod1".into(), "Shift".into()],
+            key: format!("F{tag}"),
+            function: "focusmon_tag".into(),
+            argument: ArgumentConfig::Int(tag),
+        }));
         keys
     }
 
@@ -4453,6 +4459,7 @@ impl Config {
             "unlock_monitor" => Some(Jwm::unlock_monitor),
             "focusstack" => Some(Jwm::focusstack),
             "focusmon" => Some(Jwm::focusmon),
+            "focusmon_tag" => Some(Jwm::focusmon_tag),
             "take_screenshot" => Some(Jwm::take_screenshot),
             "take_screenshot_fullscreen" => Some(Jwm::take_screenshot_fullscreen),
             "quit" => Some(Jwm::quit),
@@ -4700,7 +4707,7 @@ impl Config {
             "view" | "tag" | "toggleview" | "toggletag" => {
                 matches!(argument, ArgumentConfig::Int(_) | ArgumentConfig::UInt(_))
             }
-            "tagmon_to_tag" => matches!(argument, ArgumentConfig::Int(1..=31)),
+            "focusmon_tag" | "tagmon_to_tag" => matches!(argument, ArgumentConfig::Int(1..=31)),
             "setcfact" => matches!(argument, ArgumentConfig::Int(_) | ArgumentConfig::Float(_)),
             _ => true,
         }
@@ -4712,7 +4719,7 @@ impl Config {
         match function {
             "setmfact" | "resize_horizontal" | "resize_vertical" => ("floating-point", "0.05"),
             "view" | "tag" | "toggleview" | "toggletag" => ("tag-mask integer", "1"),
-            "tagmon_to_tag" => ("tag number from 1 to 31", "3"),
+            "focusmon_tag" | "tagmon_to_tag" => ("tag number from 1 to 31", "3"),
             "setcfact" => ("numeric", "0.25"),
             _ => ("signed integer", "1"),
         }

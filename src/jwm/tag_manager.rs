@@ -963,7 +963,7 @@ mod tests {
         let binding = config
             .get_keys()
             .into_iter()
-            .find(|key| key.mask == (Mods::ALT | Mods::SHIFT) && key.key_sym == keys::KEY_F3)
+            .find(|key| key.mask == (Mods::SUPER | Mods::SHIFT) && key.key_sym == keys::KEY_F3)
             .unwrap();
         let action = binding.func_opt.unwrap();
         assert!(!binding.repeatable);
