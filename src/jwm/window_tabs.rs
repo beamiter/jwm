@@ -304,6 +304,9 @@ impl Jwm {
         x: f64,
         y: f64,
     ) -> Option<(MonitorKey, usize)> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
         for &mon_key in &self.state.monitor_order {
             let group = self.tab_group_clients(mon_key);
             if group.is_empty() {
@@ -322,10 +325,7 @@ impl Jwm {
             return None;
         }
         let bar = self.monitor_tab_bar(mon_key, group.len())?;
-        let [bx, by, bw, bh] = bar;
-        let cx = (x as f32).clamp(bx, bx + bw);
-        let cy = (y as f32).clamp(by, by + bh);
-        let index = tabs::tab_at(bar, group.len(), cx, cy)?;
+        let index = tabs::tab_at_clamped_x(bar, group.len(), x as f32)?;
         Some((mon_key, index))
     }
 }
