@@ -105,7 +105,7 @@ impl TextFile {
             std::str::from_utf8(&bytes).map_err(|_| "文件不是 UTF-8 文本，未修改原文件。")?;
         let bom = text.starts_with('\u{feff}');
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let crlf = text.contains("\r\n") && !text.replace("\r\n", "").contains('\n');
+        let crlf = uses_only_crlf(text);
         // Only normalize uniform CRLF documents. Mixed files keep their exact
         // separators in the editor; a global replacement would silently change
         // unrelated lines on the next save (including Save As).
@@ -150,6 +150,18 @@ impl TextFile {
         self.stamp = FileStamp::read(&self.file).map_err(SaveError::Other)?;
         Ok(())
     }
+}
+
+fn uses_only_crlf(mut text: &str) -> bool {
+    let mut seen = false;
+    while let Some(index) = text.find(['\r', '\n']) {
+        let Some(rest) = text[index..].strip_prefix("\r\n") else {
+            return false;
+        };
+        seen = true;
+        text = rest;
+    }
+    seen
 }
 
 fn encode_text(text: &str, bom: bool, crlf: bool) -> Result<String, String> {
@@ -1154,6 +1166,37 @@ mod tests {
             assert_eq!(std::fs::read(copy).unwrap(), std::fs::read(path).unwrap());
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn editing_mixed_crlf_and_bare_cr_does_not_double_inserted_breaks() {
+        let dir = std::env::temp_dir().join(format!("jwm-crlf-bare-cr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.txt");
+        let original = "\u{feff}甲\r\nsecond\rthird\r\n";
+        std::fs::write(&source, original).unwrap();
+
+        let (mut file, text) = TextFile::load(gio::File::for_path(&source)).unwrap();
+        assert!(!file.crlf);
+        assert_eq!(text, "甲\r\nsecond\rthird\r\n");
+        let mut notes = Notes::new(Some(source.clone())).unwrap();
+        notes.editor.select(0..0);
+        notes.editor.insert("new\r\n");
+        let expected = "\u{feff}new\r\n甲\r\nsecond\rthird\r\n";
+        let copy = dir.join("copy.txt");
+        notes.save_as(&copy).unwrap();
+        file.save(&notes.editor.text).unwrap();
+        assert_eq!(std::fs::read_to_string(copy).unwrap(), expected);
+        assert_eq!(std::fs::read_to_string(source).unwrap(), expected);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_literal_crlf_pairs_select_windows_conversion_mode() {
+        assert!(uses_only_crlf("甲\r\nb\r\n"));
+        for other in ["none", "\r", "\n", "\r\r\n", "\r\n\r", "\r\n\n"] {
+            assert!(!uses_only_crlf(other), "{other:?}");
+        }
     }
 
     #[test]
