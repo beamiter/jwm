@@ -3337,6 +3337,12 @@ impl Config {
                 argument: ArgumentConfig::Int(1),
             },
             KeyConfig {
+                modifier: vec!["Mod1".into(), "Shift".into()],
+                key: "F3".into(),
+                function: "tagmon_to_tag".into(),
+                argument: ArgumentConfig::Int(3),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "n".to_string(),
                 function: "togglescratchpad".to_string(),
@@ -4476,6 +4482,7 @@ impl Config {
             "toggleview" => Some(Jwm::toggleview),
             "toggletag" => Some(Jwm::toggletag),
             "tagmon" => Some(Jwm::tagmon),
+            "tagmon_to_tag" => Some(Jwm::tagmon_to_tag),
             "swapmon" | "swap_monitors" => Some(Jwm::swapmon),
             "loopview" => Some(Jwm::loopview),
             "window_switcher" => Some(Jwm::window_switcher),
@@ -4693,6 +4700,7 @@ impl Config {
             "view" | "tag" | "toggleview" | "toggletag" => {
                 matches!(argument, ArgumentConfig::Int(_) | ArgumentConfig::UInt(_))
             }
+            "tagmon_to_tag" => matches!(argument, ArgumentConfig::Int(1..=31)),
             "setcfact" => matches!(argument, ArgumentConfig::Int(_) | ArgumentConfig::Float(_)),
             _ => true,
         }
@@ -4704,6 +4712,7 @@ impl Config {
         match function {
             "setmfact" | "resize_horizontal" | "resize_vertical" => ("floating-point", "0.05"),
             "view" | "tag" | "toggleview" | "toggletag" => ("tag-mask integer", "1"),
+            "tagmon_to_tag" => ("tag number from 1 to 31", "3"),
             "setcfact" => ("numeric", "0.25"),
             _ => ("signed integer", "1"),
         }

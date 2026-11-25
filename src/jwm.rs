@@ -1216,6 +1216,8 @@ impl Jwm {
             "toggletag"
         } else if eq!(Jwm::tagmon) {
             "tagmon"
+        } else if eq!(Jwm::tagmon_to_tag) {
+            "tagmon_to_tag"
         } else if eq!(Jwm::loopview) {
             "loopview"
         } else if eq!(Jwm::movemouse) {
@@ -3047,6 +3049,10 @@ fn keybinding_action_desc(function: &str, argument: &crate::config::ArgumentConf
         "lastlayout" => "previous layout".to_string(),
         "restore_preview" => "restore minimized window".to_string(),
         "swapmon" => "exchange all monitor workspaces".to_string(),
+        "tagmon_to_tag" => match argument {
+            crate::config::ArgumentConfig::Int(tag) => format!("send to tag {tag} on next monitor"),
+            _ => function.to_string(),
+        },
         "toggle_shortcut_passthrough" => "toggle remote window shortcuts".to_string(),
         "focusstack" => match argument {
             crate::config::ArgumentConfig::Int(i) => {

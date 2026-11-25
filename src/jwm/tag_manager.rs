@@ -96,6 +96,36 @@ impl Jwm {
         Ok(())
     }
 
+    /// Send the selected window directly to a numbered tag on the next monitor.
+    pub fn tagmon_to_tag(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let WMArgEnum::Int(tag) = *arg else {
+            return Ok(());
+        };
+        if tag < 1 || tag as usize > CONFIG.load().tags_length() {
+            return Ok(());
+        }
+        let Some(client_key) = self.get_selected_client_key() else {
+            return Ok(());
+        };
+        if !self.is_application_focus_eligible(client_key)
+            || self.state.clients[client_key].state.is_sticky
+            || self.client_is_on_locked_monitor(client_key)
+        {
+            return Ok(());
+        }
+        let Some(target) = self
+            .dirtomon(&1)
+            .filter(|&key| Some(key) != self.state.sel_mon)
+        else {
+            return Ok(());
+        };
+        self.move_client_to_monitor_tag(backend, client_key, target, 1 << (tag - 1))
+    }
+
     /// 将指定窗口发送到目标显示器
     ///
     /// 内部函数，由 tagmon 调用
@@ -120,9 +150,8 @@ impl Jwm {
         self.sendmon_impl(backend, Some(client_key), Some(target_mon), true, None);
     }
 
-    /// Move an overview drop straight to its destination tag. Transferring
-    /// to the active tag first would publish and arrange an intermediate
-    /// workspace that was never selected by the user.
+    /// Move straight to the destination tag. Transferring to the active tag
+    /// first would publish and arrange an intermediate workspace.
     pub(crate) fn move_client_to_monitor_tag(
         &mut self,
         backend: &mut dyn Backend,
@@ -923,6 +952,39 @@ mod tests {
         let key = jwm.insert_client(client);
         jwm.attach_to_monitor(key, mon);
         key
+    }
+
+    #[test]
+    fn tagmon_to_tag_default_shortcut_sends_directly_to_tag_three() {
+        use crate::backend::common_define::{Mods, keys};
+        use crate::config::Config;
+
+        let config = Config::default();
+        let binding = config
+            .get_keys()
+            .into_iter()
+            .find(|key| key.mask == (Mods::ALT | Mods::SHIFT) && key.key_sym == keys::KEY_F3)
+            .unwrap();
+        let action = binding.func_opt.unwrap();
+        assert!(!binding.repeatable);
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = jwm.state.monitor_order[0];
+        let key = visible_client(&mut jwm, source, 0x4f0, Rect::new(60, 80, 400, 300));
+        jwm.state.monitors[source].set_selected_client_for_current_tag(Some(key));
+
+        action(&mut jwm, &mut backend, &binding.arg).unwrap();
+        assert_eq!(jwm.state.clients[key].mon, Some(source));
+        assert_eq!(jwm.state.clients[key].state.tags, 1);
+
+        let target = add_right_monitor(&mut jwm, source);
+        action(&mut jwm, &mut backend, &binding.arg).unwrap();
+        assert_eq!(jwm.state.clients[key].mon, Some(target));
+        assert_eq!(jwm.state.clients[key].state.tags, 4);
+        assert_eq!(jwm.state.monitors[source].get_active_tags(), 1);
+        assert_eq!(jwm.state.monitors[target].get_active_tags(), 1);
+        assert_eq!(jwm.state.sel_mon, Some(source));
     }
 
     #[test]
