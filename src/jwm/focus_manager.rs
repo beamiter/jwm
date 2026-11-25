@@ -121,8 +121,11 @@ impl Jwm {
         else {
             return Ok(());
         };
-        self.switch_to_monitor(backend, target)?;
-        self.view_on_monitor(backend, target, 1 << (tag - 1))
+        // Prepare the destination view before handing it the keyboard.
+        // Otherwise the current window on that monitor briefly gets focus
+        // (and loses its urgent hint), even though we are opening another tag.
+        self.view_on_monitor(backend, target, 1 << (tag - 1))?;
+        self.switch_to_monitor(backend, target)
     }
 
     /// 在窗口栈中切换焦点（Alt+j/k）
@@ -1684,6 +1687,39 @@ mod scratchpad_reveal_tests {
         jwm.focusmon_tag(&mut backend, &WMArgEnum::Int(1)).unwrap();
         assert_eq!(jwm.state.sel_mon, Some(other));
         assert_eq!(jwm.state.monitors[other].get_active_tags(), 1 << 8);
+    }
+
+    #[test]
+    fn focusmon_tag_never_focuses_the_destination_monitors_previous_tag() {
+        let (mut jwm, source_client, _) = jwm_with_two_tiled_windows();
+        jwm.add_monitor(output(2, 1920));
+        let destination = jwm.state.monitor_order[1];
+        let mut backend = ScratchpadBackend::new();
+
+        let mut add = |raw, tags| {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(destination);
+            client.state.tags = tags;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, destination);
+            key
+        };
+        let previous = add(0x961, 1);
+        let wanted = add(0x962, 2);
+        let monitor = &mut jwm.state.monitors[destination];
+        monitor.set_selected_client_for_current_tag(Some(previous));
+        monitor.view_tag(2, false);
+        monitor.set_selected_client_for_current_tag(Some(wanted));
+        monitor.view_tag(1, false);
+        jwm.focus(&mut backend, Some(source_client)).unwrap();
+        backend.focused.clear();
+
+        jwm.focusmon_tag(&mut backend, &WMArgEnum::Int(2)).unwrap();
+
+        assert_eq!(jwm.state.sel_mon, Some(destination));
+        assert_eq!(jwm.get_selected_client_key(), Some(wanted));
+        let focused_windows: Vec<_> = backend.focused.iter().copied().flatten().collect();
+        assert_eq!(focused_windows, vec![WindowId::from_raw(0x962)]);
     }
 
     #[test]
