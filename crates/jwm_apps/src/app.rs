@@ -1797,17 +1797,29 @@ impl Picker {
         } else {
             path.parent().unwrap_or(Path::new("/")).into()
         };
-        self.entries = std::fs::read_dir(directory)
+        let mut indexed: Vec<_> = std::fs::read_dir(directory)
             .into_iter()
             .flatten()
             .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_dir() || !matches!(self.mode, PickerMode::Images) || crate::image_path(p)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let is_dir = match entry.file_type() {
+                    Ok(kind) if !kind.is_symlink() => kind.is_dir(),
+                    _ => path.is_dir(),
+                };
+                if !is_dir && matches!(self.mode, PickerMode::Images) && !crate::image_path(&path) {
+                    return None;
+                }
+                let name = entry.file_name();
+                // Match image collection browsing and read each entry's type
+                // once, not on every comparison in a large directory.
+                let lower_name = name.to_string_lossy().to_lowercase();
+                let key = gio::glib::FilenameCollationKey::from(lower_name);
+                Some((!is_dir, key, name, path))
             })
             .collect();
-        self.entries
-            .sort_by(|a, b| (!a.is_dir(), a.file_name()).cmp(&(!b.is_dir(), b.file_name())));
+        indexed.sort_unstable();
+        self.entries = indexed.into_iter().map(|(_, _, _, path)| path).collect();
         self.offset = 0;
     }
 }
@@ -1815,6 +1827,34 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_picker_lists_folders_first_and_sorts_numbered_names_naturally() {
+        let dir = std::env::temp_dir().join(format!("jwm-picker-sort-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        for name in ["album10", "album2"] {
+            std::fs::create_dir(dir.join(name)).unwrap();
+        }
+        for name in ["frame10.png", "Frame2.PNG", "notes.txt"] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        let mut picker = Picker {
+            mode: PickerMode::Images,
+            path: Editor::new(dir.to_string_lossy().into_owned()),
+            entries: Vec::new(),
+            offset: 10,
+        };
+        picker.refresh();
+
+        assert_eq!(
+            picker.entries,
+            ["album2", "album10", "Frame2.PNG", "frame10.png"]
+                .map(|name| dir.join(name))
+                .to_vec()
+        );
+        assert_eq!(picker.offset, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn image_zoom_steps_preserve_the_center_detail_after_panning() {
