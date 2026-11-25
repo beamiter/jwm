@@ -12524,14 +12524,15 @@ mod tests {
                 0,
             );
             assert_eq!(jwm.state.clients[client_key].state.tags, 0b001);
-            assert!(jwm
-                .features
-                .system_ui
-                .tags_overview()
-                .unwrap()
-                .pending
-                .unwrap()
-                .dragging);
+            assert!(
+                jwm.features
+                    .system_ui
+                    .tags_overview()
+                    .unwrap()
+                    .pending
+                    .unwrap()
+                    .dragging
+            );
         }
 
         <Jwm as WMController>::on_button_release(
