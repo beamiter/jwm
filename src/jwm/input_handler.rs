@@ -1138,7 +1138,7 @@ impl Jwm {
             .flatten()
             .and_then(ShellHubRoute::from_shortcut);
         if let Some(route) = route {
-            if let Err(error) = self.open_shell_hub_route(backend, route) {
+            if let Err(error) = self.open_shell_hub_route(backend, route, true) {
                 log::debug!("shell hub route {}: {error}", route.label());
             }
             return;
@@ -1159,7 +1159,7 @@ impl Jwm {
             match control {
                 ControlKind::Shell(route) => {
                     if activate {
-                        if let Err(error) = self.open_shell_hub_route(backend, route) {
+                        if let Err(error) = self.open_shell_hub_route(backend, route, true) {
                             log::debug!("shell hub route {}: {error}", route.label());
                         }
                         return;
@@ -2079,7 +2079,7 @@ impl Jwm {
             return Ok(true);
         }
         if let Some(route) = self.features.system_ui.selected_setting() {
-            self.open_shell_hub_route(backend, route)?;
+            self.open_shell_hub_route(backend, route, true)?;
             return Ok(true);
         }
         if let Some(entry) = self.features.system_ui.selected_window_entry() {
@@ -6280,6 +6280,42 @@ mod tests {
         input.select(keysym);
         jwm.on_key_press_internal_with_repeat(backend, 1, mods.bits(), repeat)
             .unwrap();
+    }
+
+    #[test]
+    fn status_bar_shell_routes_close_without_returning_to_hub() {
+        use crate::jwm::features::ShellHubRoute;
+
+        let (mut jwm, mut backend, input) = repeat_dispatch_fixture();
+        backend.compositor_enabled = true;
+        let press_key = |jwm: &mut Jwm, backend: &mut ConfigureReplyBackend, keysym| {
+            dispatch_shell_test_key(jwm, backend, &input, keysym, Mods::empty(), false);
+        };
+
+        jwm.open_shell_from_status_bar(&mut backend, Some(ShellHubRoute::Theme))
+            .unwrap();
+        assert!(jwm.features.system_ui.is_theme_picker());
+        press_key(&mut jwm, &mut backend, keys::KEY_Escape);
+        assert!(!jwm.features.system_ui.is_active());
+
+        jwm.open_shell_from_status_bar(&mut backend, None).unwrap();
+        press_key(&mut jwm, &mut backend, keys::KEY_t);
+        assert!(jwm.features.system_ui.is_theme_picker());
+        press_key(&mut jwm, &mut backend, keys::KEY_Escape);
+        assert!(jwm.features.system_ui.is_control_center());
+
+        press_key(&mut jwm, &mut backend, keys::KEY_t);
+        jwm.open_shell_from_status_bar(&mut backend, Some(ShellHubRoute::Calendar))
+            .unwrap();
+        assert!(jwm.features.system_ui.is_calendar());
+        press_key(&mut jwm, &mut backend, keys::KEY_Escape);
+        assert!(!jwm.features.system_ui.is_active());
+
+        jwm.open_shell_from_status_bar(&mut backend, Some(ShellHubRoute::Notifications))
+            .unwrap();
+        assert!(jwm.features.system_ui.is_notification_center());
+        jwm.dismiss_system_ui_from_pointer(&mut backend);
+        assert!(!jwm.features.system_ui.is_active());
     }
 
     #[test]
