@@ -61,6 +61,7 @@ retain a previous version as a `~` backup beside the file.
 | Enter / Shift+Enter in find, F3 / Shift+F3 | Next / previous document match (wraps) |
 | Escape | Close document find and return to the selected source match |
 | Ctrl+Shift+P | Toggle Markdown split preview |
+| F6 | Switch focus between the source and visible Markdown preview |
 | Ctrl+Backspace / Ctrl+Delete | Delete the previous / next word (or the selection) |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+W | Close, checking unsaved changes |
@@ -69,9 +70,11 @@ retain a previous version as a `~` backup beside the file.
 
 Use **MD 预览** in the toolbar or Ctrl+Shift+P for a live, independently
 scrollable source/preview split. The preview follows unsaved edits and never
-changes the document. Click the source to resume typing; clicks and IME commits
-in the read-only preview do not edit the source. Opening another note resets
-preview state and scroll position.
+changes the document. With the split visible, press **F6** to switch between the
+editor and preview without moving the caret or selection. In the preview, use
+Up/Down, Page Up/Down, or Home/End to navigate; press Escape or F6 to resume
+editing. Clicks and IME commits in the read-only preview do not edit the source.
+Opening another note resets preview state and scroll position.
 
 The native Pango renderer supports headings, emphasis, inline/fenced code,
 lists, task markers, quotes and basic table text (not a browser table layout).

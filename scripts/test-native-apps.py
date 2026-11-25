@@ -483,9 +483,13 @@ def main():
                 print("Keep Both preserves both drafts, skips an open missing name and saves again: PASS",
                       flush=True)
 
-                # Real key/pointer events must not edit the Markdown preview.
+                # Real keyboard focus and scrolling must not edit the Markdown preview.
                 markdown = work / "preview.md"
-                source = "# Preview heading\n\n**Bold content** and `code`\n\n- one\n- two\n"
+                source = (
+                    "# Preview heading\n\n**Bold content** and `code`\n\n- one\n- two\n\n"
+                    + "A short line.\n\n" * 30
+                    + "**Different content at the end of the preview.**\n\n" * 30
+                )
                 markdown.write_text(source)
                 preview_app = launch("jwm-notes", markdown)
                 preview_window = window("preview.md.*JWM 备忘录")
@@ -497,17 +501,22 @@ def main():
                 old_pixels = list(before.crop(region).getdata())
                 new_pixels = list(after.crop(region).getdata())
                 assert sum(a != b for a, b in zip(old_pixels, new_pixels)) > 100, "Markdown content was not rendered"
-                command("xdotool", "mousemove", "--window", preview_window,
-                        after.width * 3 // 4, 200, "click", "1")
+                key("F6", "End")
+                end_pixels = list(screenshot(preview_window).crop(region).getdata())
+                assert sum(a != b for a, b in zip(new_pixels, end_pixels)) > 100, "F6 then End did not scroll the preview"
+                key("Home")
+                home_pixels = list(screenshot(preview_window).crop(region).getdata())
+                assert home_pixels == new_pixels, "Home did not restore the preview"
                 type_text("MUST NOT MODIFY SOURCE")
                 key("ctrl+s")
                 assert markdown.read_text() == source, "Preview accepted text input"
                 if args.evidence_dir:
                     screenshot(preview_window).save(args.evidence_dir / "markdown-preview.png")
-                key("ctrl+shift+p", "ctrl+End")
+                key("F6", "ctrl+End")
                 type_text("Source edit")
                 key("ctrl+s")
-                wait(lambda: markdown.read_text() == source + "Source edit", "Closing preview did not restore editing")
+                wait(lambda: markdown.read_text() == source + "Source edit", "F6 did not restore source editing")
+                key("ctrl+shift+p")
                 key("ctrl+w")
                 wait(lambda: preview_app.poll() is not None, "Markdown editor did not close")
                 print("Native Markdown rendering, read-only preview and source focus: PASS", flush=True)
