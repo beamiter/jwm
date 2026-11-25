@@ -336,16 +336,30 @@ pub fn tab_at(bar: Rect, count: usize, px: f32, py: f32) -> Option<usize> {
         return None;
     }
     let [x, y, w, h] = bar;
-    if px < x || px > x + w || py < y || py > y + h {
+    // Two adjacent strips must not both claim the pixel at their seam.
+    if px < x || px >= x + w || py < y || py >= y + h {
         return None;
     }
+    Some(tab_column(x, w, count, px))
+}
+
+/// Project a drag released off the strip onto its nearest column.
+pub(crate) fn tab_at_clamped_x(bar: Rect, count: usize, px: f32) -> Option<usize> {
+    if count == 0 || !bar_is_drawable(bar) || !px.is_finite() {
+        return None;
+    }
+    let [x, _, w, _] = bar;
+    Some(tab_column(x, w, count, px.clamp(x, x + w)))
+}
+
+fn tab_column(x: f32, w: f32, count: usize, px: f32) -> usize {
     let n = count as f32;
     for index in 0..count {
-        if px <= x + w * (index + 1) as f32 / n {
-            return Some(index);
+        if px < x + w * (index + 1) as f32 / n {
+            return index;
         }
     }
-    Some(count - 1)
+    count - 1
 }
 
 /// Dwell state for the tab-strip tooltip: which window the pointer is
@@ -738,6 +752,23 @@ mod tests {
         assert_eq!(tab_at(BAR, 3, x + 1.0, y - 1.0), None);
         assert_eq!(tab_at(BAR, 3, x + 1.0, y + h + 1.0), None);
         assert_eq!(tab_at(BAR, 0, x + 1.0, y + 1.0), None);
+    }
+
+    #[test]
+    fn adjacent_tab_strips_only_claim_their_own_pixels() {
+        let left = [-400.0, 20.0, 400.0, 24.0];
+        let right = [0.0, 20.0, 400.0, 24.0];
+        assert_eq!(tab_at(left, 2, -1.0, 21.0), Some(1));
+        assert_eq!(tab_at(left, 2, 0.0, 21.0), None);
+        assert_eq!(tab_at(right, 2, 0.0, 21.0), Some(0));
+        assert_eq!(tab_at(right, 2, 200.0, 21.0), Some(1));
+        assert_eq!(tab_at(right, 2, 0.0, 43.0), Some(0));
+        assert_eq!(tab_at(right, 2, 0.0, 44.0), None);
+
+        // Off-strip drops still clamp, unlike hits used for click and hover.
+        assert_eq!(tab_at_clamped_x(right, 2, -5.0), Some(0));
+        assert_eq!(tab_at_clamped_x(right, 2, 410.0), Some(1));
+        assert_eq!(tab_at_clamped_x(right, 2, f32::NAN), None);
     }
 
     #[test]
