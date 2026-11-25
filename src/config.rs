@@ -3337,12 +3337,6 @@ impl Config {
                 argument: ArgumentConfig::Int(1),
             },
             KeyConfig {
-                modifier: vec!["Mod4".into(), "Shift".into()],
-                key: "F3".into(),
-                function: "tagmon_to_tag".into(),
-                argument: ArgumentConfig::Int(3),
-            },
-            KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "n".to_string(),
                 function: "togglescratchpad".to_string(),
@@ -3469,7 +3463,7 @@ impl Config {
         keys.extend((1..=9).map(|tag| KeyConfig {
             modifier: vec!["Mod1".into(), "Shift".into()],
             key: format!("F{tag}"),
-            function: "focusmon_tag".into(),
+            function: "tagmon_to_tag".into(),
             argument: ArgumentConfig::Int(tag),
         }));
         keys
