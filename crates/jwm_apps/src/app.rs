@@ -628,7 +628,15 @@ impl App {
                     label: String::new(),
                 });
                 if n.preview.enabled {
-                    ui::fill(cr, Rect::new(split, body.y, 1., body.h), ui::line());
+                    let divider = if self.focus == Focus::Preview
+                        && self.focused
+                        && self.dialog.is_none()
+                    {
+                        ui::accent()
+                    } else {
+                        ui::line()
+                    };
+                    ui::fill(cr, Rect::new(split, body.y, 1., body.h), divider);
                     ui::text(
                         cr,
                         "Markdown · 只读 / 无网络",
@@ -1466,6 +1474,26 @@ impl App {
         true
     }
 
+    fn preview_focus_key(&mut self, key: &Key, mods: ModifiersState, repeat: bool) -> bool {
+        if *key != Key::Named(NamedKey::F6)
+            || !mods.is_empty()
+            || self.dialog.is_some()
+            || !matches!(self.focus, Focus::Editor | Focus::Preview)
+            || !matches!(&self.document, Document::Notes(n) if n.preview.enabled)
+        {
+            return false;
+        }
+        if !repeat {
+            self.dragging = false;
+            self.action(if self.focus == Focus::Preview {
+                Action::Edit
+            } else {
+                Action::Preview
+            });
+        }
+        true
+    }
+
     fn preview_scroll_key(&mut self, key: &Key, mods: ModifiersState) {
         if !mods.is_empty() || self.focus != Focus::Preview {
             return;
@@ -1491,6 +1519,7 @@ impl App {
         if self.refresh_key(&event.logical_key, mods, event.repeat)
             || self.notebook_results_key(&event.logical_key, mods, event.repeat)
             || self.find_selection_key(&event.logical_key, mods, event.repeat)
+            || self.preview_focus_key(&event.logical_key, mods, event.repeat)
         {
             return;
         }
@@ -1817,6 +1846,48 @@ mod tests {
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 2));
         app.scroll((-3., -1.), ModifiersState::empty());
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 5));
+    }
+
+    #[test]
+    fn preview_focus_shortcut_respects_visibility_modifiers_and_repeat() {
+        let dir = std::env::temp_dir().join(format!("jwm-preview-focus-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("preview.md");
+        std::fs::write(&path, "source text").unwrap();
+        let mut app = App::new(true, vec![path]).unwrap();
+        let f6 = Key::Named(NamedKey::F6);
+        let plain = ModifiersState::empty();
+        assert!(!app.preview_focus_key(&f6, plain, false));
+
+        app.action(Action::TogglePreview);
+        assert!(!app.preview_focus_key(&f6, ModifiersState::SHIFT, false));
+        let Document::Notes(n) = &mut app.document else {
+            unreachable!()
+        };
+        n.editor.select(0..6);
+        app.ime("pending".into(), false);
+        assert!(app.preview_focus_key(&f6, plain, false));
+        assert_eq!(app.ime_target(), 0);
+        assert!(app.preview_focus_key(&f6, plain, true));
+        assert_eq!(app.ime_target(), 0);
+        app.ime("ignored".into(), true);
+        assert!(app.preview_focus_key(&f6, plain, false));
+        assert_eq!(app.ime_target(), 1);
+        let Document::Notes(n) = &app.document else {
+            unreachable!()
+        };
+        assert_eq!(n.editor.text, "source text");
+        assert!(n.editor.preedit.is_empty());
+
+        app.ime("new".into(), true);
+        let Document::Notes(n) = &app.document else {
+            unreachable!()
+        };
+        assert_eq!(n.editor.text, "new text", "source selection was preserved");
+        app.action(Action::Find);
+        assert!(!app.preview_focus_key(&f6, plain, false));
+        assert_eq!(app.ime_target(), 4);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
