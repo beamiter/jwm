@@ -111,6 +111,48 @@ pub fn rounded(cr: &Context, r: Rect, c: Color) {
     cr.close_path();
     let _ = cr.fill();
 }
+#[derive(PartialEq)]
+pub(crate) struct TextLayoutKey {
+    width: f64,
+    scale: (f64, f64),
+    transform: (f64, f64, f64, f64),
+    font_options: cairo::FontOptions,
+    font: String,
+}
+
+// cairo-sys-rs does not expose this Cairo 1.0 API.
+#[link(name = "cairo")]
+unsafe extern "C" {
+    fn cairo_surface_get_font_options(
+        surface: *mut cairo::ffi::cairo_surface_t,
+        options: *mut cairo::ffi::cairo_font_options_t,
+    );
+}
+
+impl TextLayoutKey {
+    pub(crate) fn for_draw(cr: &Context, width: f64) -> Option<Self> {
+        let target = cr.target();
+        target.status().ok()?;
+        let mut font_options = cairo::FontOptions::new().ok()?;
+        // SAFETY: Both live wrappers own valid Cairo objects. Cairo copies
+        // the target's options to the initialized options object.
+        unsafe {
+            cairo_surface_get_font_options(target.to_raw_none(), font_options.as_ptr());
+        }
+        font_options.merge(&cr.font_options().ok()?);
+        font_options.status().ok()?;
+        let matrix = cr.matrix();
+        Some(Self {
+            width,
+            scale: target.device_scale(),
+            // PangoCairo ignores translation for shaping.
+            transform: (matrix.xx(), matrix.yx(), matrix.xy(), matrix.yy()),
+            font_options,
+            font: font_name(),
+        })
+    }
+}
+
 pub fn layout(cr: &Context, text: &str, size: f64, width: f64, wrap: bool) -> pango::Layout {
     let layout = pangocairo::functions::create_layout(cr);
     let mut font = THEME.with(|theme| pango::FontDescription::from_string(&theme.borrow().font));

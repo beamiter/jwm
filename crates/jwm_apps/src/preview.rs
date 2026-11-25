@@ -83,48 +83,6 @@ struct ParsedMarkup {
     attributes: pango::AttrList,
 }
 
-#[derive(PartialEq)]
-struct LayoutKey {
-    width: f64,
-    scale: (f64, f64),
-    transform: (f64, f64, f64, f64),
-    font_options: cairo::FontOptions,
-    font: String,
-}
-
-// cairo-sys-rs does not expose this Cairo 1.0 API.
-#[link(name = "cairo")]
-unsafe extern "C" {
-    fn cairo_surface_get_font_options(
-        surface: *mut cairo::ffi::cairo_surface_t,
-        options: *mut cairo::ffi::cairo_font_options_t,
-    );
-}
-
-impl LayoutKey {
-    fn for_draw(cr: &cairo::Context, width: f64) -> Option<Self> {
-        let target = cr.target();
-        target.status().ok()?;
-        let mut font_options = cairo::FontOptions::new().ok()?;
-        // SAFETY: Both live wrappers own valid Cairo objects. Cairo copies
-        // the target's options to the initialized options object.
-        unsafe {
-            cairo_surface_get_font_options(target.to_raw_none(), font_options.as_ptr());
-        }
-        font_options.merge(&cr.font_options().ok()?);
-        font_options.status().ok()?;
-        let matrix = cr.matrix();
-        Some(Self {
-            width,
-            scale: target.device_scale(),
-            // PangoCairo ignores translation for shaping.
-            transform: (matrix.xx(), matrix.yx(), matrix.xy(), matrix.yy()),
-            font_options,
-            font: ui::font_name(),
-        })
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct Preview {
     pub enabled: bool,
@@ -133,7 +91,7 @@ pub(crate) struct Preview {
     page_height: f64,
     revision: Option<u64>,
     parsed: Option<ParsedMarkup>,
-    layout: Option<(LayoutKey, pango::Layout)>,
+    layout: Option<(ui::TextLayoutKey, pango::Layout)>,
 }
 impl Preview {
     pub(crate) fn scroll_by(&mut self, delta: f64) {
@@ -171,7 +129,7 @@ impl Preview {
             self.revision = Some(revision);
             self.layout = None;
         }
-        let key = LayoutKey::for_draw(cr, width);
+        let key = ui::TextLayoutKey::for_draw(cr, width);
         if let (Some(key), Some((cached_key, layout))) = (&key, &self.layout)
             && key == cached_key
         {
