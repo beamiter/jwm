@@ -318,7 +318,25 @@ impl Jwm {
         }
 
         let _ = self.focus(backend, None);
-        self.arrange(backend, None);
+        if explicit_tags.is_some()
+            && !is_hidden
+            && !was_fullscreen
+            && let Some(source) = source_mon
+            && self.state.sel_mon == Some(source)
+        {
+            // The direct move kept focus on the source. Only these two
+            // layouts changed; preserve their original processing order.
+            let affected: Vec<_> = self
+                .state
+                .monitor_order
+                .iter()
+                .copied()
+                .filter(|&mon| mon == source || mon == target_mon_key)
+                .collect();
+            self.arrange_monitors(backend, &affected);
+        } else {
+            self.arrange(backend, None);
+        }
         if is_hidden && let Err(error) = self.persist_minimized_restore_state(backend, client_key) {
             warn!("could not refresh minimized restore state after sendmon: {error}");
         }
@@ -998,6 +1016,35 @@ mod tests {
             assert_eq!(jwm.state.sel_mon, Some(source));
         }
         assert_eq!(jwm.state.clients[key].mon, Some(source));
+    }
+
+    #[test]
+    fn numbered_cross_monitor_move_arranges_only_the_affected_outputs() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = jwm.state.monitor_order[0];
+        let target = add_right_monitor(&mut jwm, source);
+        jwm.add_monitor(crate::jwm::monitor::test_support::output(
+            3, 6000, 0, 1280, 720,
+        ));
+        let unrelated = jwm.state.monitor_order[2];
+        jwm.state.sel_mon = Some(source);
+        let keep = visible_client(&mut jwm, source, 0x490, Rect::new(60, 80, 400, 300));
+        let moved = visible_client(&mut jwm, source, 0x491, Rect::new(80, 90, 400, 300));
+        jwm.state.monitors[source].set_selected_client_for_current_tag(Some(moved));
+
+        // arrangemon rewrites the layout symbol even when an output is empty.
+        // Sentinel values prove which actual layouts ran, not just end geometry.
+        for mon in [source, target, unrelated] {
+            jwm.state.monitors[mon].lt_symbol = "untouched".into();
+        }
+        jwm.tagmon_to_tag(&mut backend, &WMArgEnum::Int(3)).unwrap();
+        assert_eq!(jwm.state.clients[moved].mon, Some(target));
+        assert_eq!(jwm.state.clients[moved].state.tags, 4);
+        assert_eq!(jwm.get_selected_client_key(), Some(keep));
+        assert_ne!(jwm.state.monitors[source].lt_symbol, "untouched");
+        assert_ne!(jwm.state.monitors[target].lt_symbol, "untouched");
+        assert_eq!(jwm.state.monitors[unrelated].lt_symbol, "untouched");
     }
 
     #[test]

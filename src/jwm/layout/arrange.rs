@@ -60,9 +60,6 @@ impl Jwm {
     }
 
     pub(crate) fn arrange(&mut self, backend: &mut dyn Backend, m_target: Option<MonitorKey>) {
-        if self.restart_adoption_in_progress() {
-            return;
-        }
         // A marker, not a diagnostic: this runs on every map, unmap, tag
         // switch and focus cycle, and the release default filter is `info`.
         // Keep it out of the session log.
@@ -73,7 +70,15 @@ impl Jwm {
             None => self.state.monitor_order.clone(),
         };
 
-        for &mon_key in &monitors_to_process {
+        self.arrange_monitors(backend, &monitors_to_process);
+    }
+
+    pub(crate) fn arrange_monitors(&mut self, backend: &mut dyn Backend, monitors: &[MonitorKey]) {
+        if self.restart_adoption_in_progress() {
+            return;
+        }
+
+        for &mon_key in monitors {
             self.showhide_monitor(backend, mon_key);
         }
 
@@ -81,11 +86,11 @@ impl Jwm {
         // that hides it (the fullscreen layout, a toggled-off bar, or a
         // client that went fullscreen with F11) has to physically move the
         // bar, not just stop reserving its pixels.
-        for &mon_key in &monitors_to_process {
+        for &mon_key in monitors {
             self.sync_secondary_bar_position(backend, mon_key);
         }
 
-        for &mon_key in &monitors_to_process {
+        for &mon_key in monitors {
             self.arrangemon(backend, mon_key);
             // Every work-area change (strut, dock, layer shell, bar toggle,
             // tab bar, output resize) and every fullscreen/PiP exit ends in
