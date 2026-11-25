@@ -326,13 +326,6 @@ impl Jwm {
                 {
                     return;
                 }
-                // A fresh gesture can interrupt the previous spring without
-                // treating this already-queued Begin as cancelled input.
-                if self.features.touchpad.preview.take().is_some()
-                    || backend.compositor_workspace_swipe_active()
-                {
-                    backend.compositor_end_workspace_swipe(false, false);
-                }
                 let expose = self.features.expose_active && fingers == 4;
                 if self.touchpad_session_blocked(expose)
                     || backend.compositor_session_locked()
@@ -346,6 +339,13 @@ impl Jwm {
                 let Some(mon) = self.state.monitors.get(monitor) else {
                     return;
                 };
+                // A fresh gesture can interrupt the previous spring without
+                // treating this already-queued Begin as cancelled input.
+                if self.features.touchpad.preview.take().is_some()
+                    || backend.compositor_workspace_swipe_active()
+                {
+                    backend.compositor_end_workspace_swipe(false, false);
+                }
                 let mut tracker = GestureSwipeTracker::default();
                 tracker.begin(fingers, true);
                 self.features.touchpad.active = Some(SwipeSession {
@@ -748,5 +748,51 @@ impl Jwm {
             insertion.min(scene.len())..insertion.min(scene.len()),
             preview.windows.iter().copied(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+    #[test]
+    fn stale_swipe_begin_does_not_interrupt_a_settling_workspace() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.sel_mon.expect("selected output");
+        let signature = CONFIG.load().gesture_swipe_signature();
+        let expires = Instant::now() + WORKSPACE_SWIPE_SETTLE;
+        jwm.features.touchpad.preview = Some(WorkspacePreview {
+            monitor,
+            target_tags: 2,
+            windows: Vec::new(),
+            expires: Some(expires),
+        });
+
+        jwm.handle_touchpad_input(
+            &mut backend,
+            SwipeInput::Begin {
+                id: 1,
+                fingers: 3,
+                config_signature: format!("stale-{signature}"),
+            },
+        );
+        assert!(jwm.features.touchpad.active.is_none());
+        assert_eq!(
+            jwm.features.touchpad.preview.as_ref().unwrap().expires,
+            Some(expires)
+        );
+
+        jwm.handle_touchpad_input(
+            &mut backend,
+            SwipeInput::Begin {
+                id: 2,
+                fingers: 3,
+                config_signature: signature,
+            },
+        );
+        assert!(jwm.features.touchpad.preview.is_none());
+        assert_eq!(jwm.features.touchpad.active.as_ref().unwrap().id, 2);
     }
 }
