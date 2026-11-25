@@ -1592,14 +1592,12 @@ impl SystemUiState {
             return None;
         };
         match *row {
-            LauncherRow::App(index) => entries
-                .get(index)
-                .map(|entry| {
-                    format!(
-                        "app:{:?}:{:?}:{:?}:{}",
-                        entry.desktop_id, entry.name, entry.command, entry.terminal
-                    )
-                }),
+            LauncherRow::App(index) => entries.get(index).map(|entry| {
+                format!(
+                    "app:{:?}:{:?}:{:?}:{}",
+                    entry.desktop_id, entry.name, entry.command, entry.terminal
+                )
+            }),
             LauncherRow::Window(index) => windows
                 .get(index)
                 .map(|entry| format!("window:{}", entry.id)),
