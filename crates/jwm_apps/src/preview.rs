@@ -87,10 +87,27 @@ struct ParsedMarkup {
 pub(crate) struct Preview {
     pub enabled: bool,
     pub scroll: f64,
+    scroll_limit: f64,
+    page_height: f64,
     revision: Option<u64>,
     parsed: Option<ParsedMarkup>,
 }
 impl Preview {
+    pub(crate) fn scroll_key(&mut self, key: winit::keyboard::NamedKey) {
+        use winit::keyboard::NamedKey;
+        let page = (self.page_height - 36.).max(36.);
+        let next = match key {
+            NamedKey::ArrowUp => self.scroll - 36.,
+            NamedKey::ArrowDown => self.scroll + 36.,
+            NamedKey::PageUp => self.scroll - page,
+            NamedKey::PageDown => self.scroll + page,
+            NamedKey::Home => 0.,
+            NamedKey::End => self.scroll_limit,
+            _ => return,
+        };
+        self.scroll = next.clamp(0., self.scroll_limit);
+    }
+
     pub fn draw(&mut self, cr: &cairo::Context, area: Rect, source: &str, revision: u64) {
         if self.revision != Some(revision) {
             self.parsed = pango::parse_markup(&markup(source), '\0')
@@ -105,9 +122,9 @@ impl Preview {
             layout.set_text(parsed.text.as_str());
             layout.set_attributes(Some(&parsed.attributes));
         }
-        self.scroll = self
-            .scroll
-            .clamp(0., (f64::from(layout.pixel_size().1) - area.h).max(0.));
+        self.page_height = area.h;
+        self.scroll_limit = (f64::from(layout.pixel_size().1) - area.h).max(0.);
+        self.scroll = self.scroll.clamp(0., self.scroll_limit);
         let _ = cr.save();
         cr.rectangle(area.x, area.y, area.w, area.h);
         cr.clip();

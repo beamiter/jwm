@@ -1466,6 +1466,20 @@ impl App {
         true
     }
 
+    fn preview_scroll_key(&mut self, key: &Key, mods: ModifiersState) {
+        if !mods.is_empty() || self.focus != Focus::Preview {
+            return;
+        }
+        let Key::Named(key) = key else {
+            return;
+        };
+        if let Document::Notes(n) = &mut self.document
+            && n.preview.enabled
+        {
+            n.preview.scroll_key(*key);
+        }
+    }
+
     pub fn key(
         &mut self,
         event: &KeyEvent,
@@ -1571,7 +1585,11 @@ impl App {
                 self.focus = Focus::Editor;
                 return;
             }
-            if matches!(self.focus, Focus::Preview | Focus::Results) {
+            if self.focus == Focus::Preview {
+                self.preview_scroll_key(&event.logical_key, mods);
+                return;
+            }
+            if self.focus == Focus::Results {
                 return;
             }
             let find = self.focus == Focus::Find;
@@ -1799,6 +1817,53 @@ mod tests {
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 2));
         app.scroll((-3., -1.), ModifiersState::empty());
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 5));
+    }
+
+    #[test]
+    fn focused_markdown_preview_scrolls_by_key_without_editing_source() {
+        let dir = std::env::temp_dir().join(format!("jwm-preview-keys-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("preview.md");
+        let source = "# Heading\n\nThis is a Markdown paragraph.\n\n".repeat(100);
+        std::fs::write(&path, &source).unwrap();
+
+        let mut app = App::new(true, vec![path]).unwrap();
+        app.action(Action::TogglePreview);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 900, 410).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 900., 410., false);
+        let scroll = |app: &App| match &app.document {
+            Document::Notes(n) => n.preview.scroll,
+            _ => unreachable!(),
+        };
+        let key =
+            |app: &mut App, k| app.preview_scroll_key(&Key::Named(k), ModifiersState::empty());
+        key(&mut app, NamedKey::PageDown);
+        assert_eq!(scroll(&app), 0., "editor focus must not scroll the preview");
+        app.action(Action::Preview);
+        assert_eq!(app.ime_target(), 0);
+        key(&mut app, NamedKey::ArrowDown);
+        assert_eq!(scroll(&app), 36.);
+        key(&mut app, NamedKey::PageDown);
+        let page = scroll(&app);
+        assert!(page > 72.);
+        key(&mut app, NamedKey::End);
+        let end = scroll(&app);
+        assert!(end > page);
+        key(&mut app, NamedKey::PageDown);
+        assert_eq!(scroll(&app), end, "scroll must clamp before the next paint");
+        key(&mut app, NamedKey::PageUp);
+        assert!(scroll(&app) < end);
+        key(&mut app, NamedKey::Home);
+        key(&mut app, NamedKey::ArrowUp);
+        assert_eq!(scroll(&app), 0.);
+        let Document::Notes(n) = &app.document else {
+            unreachable!()
+        };
+        assert_eq!(n.editor.text, source);
+        assert_eq!(n.editor.revision, 0);
+        assert!(!n.dirty);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
