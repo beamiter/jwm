@@ -676,10 +676,8 @@ impl WMController for Jwm {
             // Only the left press can arm the gesture. Wheel and secondary
             // releases are swallowed without settling the held click or drag.
             if detail == 1 {
-                let (x, y) = backend
-                    .input_ops()
-                    .get_pointer_position()
-                    .unwrap_or(self.last_mouse_root);
+                // A live pointer query can see motion queued after the release.
+                let (x, y) = self.last_mouse_root;
                 if let Err(error) = self.release_tags_overview(backend, x, y) {
                     error!("Error handling tags overview release: {error}");
                 }
@@ -1777,10 +1775,7 @@ impl Jwm {
             // grab so clicks never fall through to the desktop.
             match detail {
                 1 => {
-                    let (x, y) = backend
-                        .input_ops()
-                        .get_pointer_position()
-                        .unwrap_or(self.last_mouse_root);
+                    let (x, y) = self.last_mouse_root;
                     self.press_tags_overview(backend, x, y);
                 }
                 // Middle confirms the overview just like Enter.
@@ -12382,16 +12377,22 @@ mod tests {
         );
         let target = 2usize;
         let [x, y] = layout_strip::center(geometry.cells[target].cell);
-        *backend.input_ops.pointer.lock().unwrap() = (x as f64, y as f64);
+        // The backend already sees the pointer on the scrim, but the queued
+        // click happened inside the cell.
+        *backend.input_ops.pointer.lock().unwrap() = (2.0, 2.0);
 
-        <Jwm as WMController>::on_button_press(
-            &mut jwm,
+        jwm.handle_event(
             &mut backend,
-            HitTarget::Background { output: None },
-            0,
-            1,
-            0,
-        );
+            BackendEvent::ButtonPress {
+                target: HitTarget::Background { output: None },
+                state: 0,
+                detail: 1,
+                time: 0,
+                root_x: x as f64,
+                root_y: y as f64,
+            },
+        )
+        .unwrap();
         assert!(
             jwm.features.system_ui.is_tags_overview(),
             "the press must not close the panel"
@@ -12408,13 +12409,17 @@ mod tests {
         assert!(jwm.features.system_ui.is_tags_overview());
         assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 0);
 
-        <Jwm as WMController>::on_button_release(
-            &mut jwm,
+        jwm.handle_event(
             &mut backend,
-            HitTarget::Background { output: None },
-            1,
-            0,
-        );
+            BackendEvent::ButtonRelease {
+                target: HitTarget::Background { output: None },
+                detail: 1,
+                time: 0,
+                root_x: x as f64,
+                root_y: y as f64,
+            },
+        )
+        .unwrap();
         assert!(!jwm.features.system_ui.is_active());
         assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 1 << target);
     }
@@ -12473,15 +12478,18 @@ mod tests {
         let outline = jwm.features.system_ui.tags_overview().unwrap().cells[0].windows[0];
         let wire = layout_strip::window_rect(geometry.cells[0].frame, outline);
         let [press_x, press_y] = layout_strip::center(wire);
-        *backend.input_ops.pointer.lock().unwrap() = (press_x as f64, press_y as f64);
-        <Jwm as WMController>::on_button_press(
-            &mut jwm,
+        jwm.handle_event(
             &mut backend,
-            HitTarget::Background { output: None },
-            0,
-            1,
-            0,
-        );
+            BackendEvent::ButtonPress {
+                target: HitTarget::Background { output: None },
+                state: 0,
+                detail: 1,
+                time: 0,
+                root_x: press_x as f64,
+                root_y: press_y as f64,
+            },
+        )
+        .unwrap();
         assert_eq!(
             jwm.features.system_ui.tags_overview().unwrap().pending,
             Some(crate::jwm::features::tags_overview::PendingCellPress {
@@ -12496,7 +12504,6 @@ mod tests {
         // highlight there and the gesture becomes a drag.
         let target = 2usize;
         let [drop_x, drop_y] = layout_strip::center(geometry.cells[target].cell);
-        *backend.input_ops.pointer.lock().unwrap() = (drop_x as f64, drop_y as f64);
         <Jwm as WMController>::on_motion_notify(
             &mut jwm,
             &mut backend,
@@ -12535,13 +12542,19 @@ mod tests {
             );
         }
 
-        <Jwm as WMController>::on_button_release(
-            &mut jwm,
+        // Motion after the release must not replace the queued drop endpoint.
+        *backend.input_ops.pointer.lock().unwrap() = (2.0, 2.0);
+        jwm.handle_event(
             &mut backend,
-            HitTarget::Background { output: None },
-            1,
-            0,
-        );
+            BackendEvent::ButtonRelease {
+                target: HitTarget::Background { output: None },
+                detail: 1,
+                time: 0,
+                root_x: drop_x as f64,
+                root_y: drop_y as f64,
+            },
+        )
+        .unwrap();
 
         assert_eq!(
             jwm.state.clients[client_key].state.tags,
