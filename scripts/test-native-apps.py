@@ -306,6 +306,35 @@ def main():
                 wait(lambda: external_app.poll() is not None, "External reload editor did not close")
                 print("External reload F5 and toolbar, format adoption and dirty buffer: PASS", flush=True)
 
+                picker_root = work / "keyboard-picker"
+                picker_folder = picker_root / "folder"
+                picker_folder.mkdir(parents=True)
+                picker_source = picker_root / "picker-source.txt"
+                picker_source.write_text("Source")
+                for index in range(12):
+                    (picker_folder / f"row{index}.txt").write_text(str(index))
+                target = picker_folder / "row11.txt"
+                picker_host = launch("jwm-notes", picker_source)
+                source_window = window(r"picker-source\.txt.*JWM 备忘录")
+                focus(source_window)
+                key("ctrl+o", "Tab", "Escape")
+                key("ctrl+o", "Tab", "Return")
+                for _ in range(11):
+                    key("Down")
+                key("Return")
+                target_window = window(r"row11\.txt.*JWM 备忘录")
+                focus(target_window)
+                key("ctrl+End")
+                type_text(" keyboard")
+                key("ctrl+s")
+                wait(lambda: target.read_text() == "11 keyboard",
+                     "Keyboard picker did not open the selected file past the first page")
+                key("ctrl+w")
+                focus(source_window)
+                key("ctrl+w")
+                wait(lambda: picker_host.poll() is not None, "Keyboard picker editors did not close")
+                print("Keyboard picker Tab, directory Enter and off-screen file selection: PASS", flush=True)
+
                 external = work / 'file with spaces.txt'
                 external.write_bytes(b"\xef\xbb\xbfOriginal\r\n")
                 editor = launch("jwm-notes", external)
