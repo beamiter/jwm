@@ -87,7 +87,36 @@ struct ParsedMarkup {
 struct LayoutKey {
     width: f64,
     scale: (f64, f64),
+    transform: (f64, f64, f64, f64),
+    font_options: cairo::FontOptions,
     font: String,
+}
+
+impl LayoutKey {
+    fn for_draw(cr: &cairo::Context, width: f64) -> Option<Self> {
+        let target = cr.target();
+        target.status().ok()?;
+        let mut font_options = cairo::FontOptions::new().ok()?;
+        // SAFETY: Both live wrappers own valid Cairo objects. Cairo copies
+        // the target's options to the initialized options object.
+        unsafe {
+            cairo::ffi::cairo_surface_get_font_options(
+                target.to_raw_none(),
+                font_options.as_ptr(),
+            );
+        }
+        font_options.merge(&cr.font_options().ok()?);
+        font_options.status().ok()?;
+        let matrix = cr.matrix();
+        Some(Self {
+            width,
+            scale: target.device_scale(),
+            // PangoCairo ignores translation for shaping.
+            transform: (matrix.xx(), matrix.yx(), matrix.xy(), matrix.yy()),
+            font_options,
+            font: ui::font_name(),
+        })
+    }
 }
 
 #[derive(Default)]
@@ -136,16 +165,11 @@ impl Preview {
             self.revision = Some(revision);
             self.layout = None;
         }
-        let key = LayoutKey {
-            width,
-            scale: cr.target().device_scale(),
-            font: ui::font_name(),
-        };
-        if let Some((cached_key, layout)) = &self.layout
-            && *cached_key == key
+        let key = LayoutKey::for_draw(cr, width);
+        if let (Some(key), Some((cached_key, layout))) = (&key, &self.layout)
+            && key == cached_key
         {
-            // A new Cairo context can draw the same canvas on a later frame.
-            pangocairo::functions::update_layout(cr, layout);
+            // Even an unchanged PangoCairo update can invalidate shaped lines.
             return layout.clone();
         }
 
@@ -154,7 +178,7 @@ impl Preview {
             layout.set_text(parsed.text.as_str());
             layout.set_attributes(Some(&parsed.attributes));
         }
-        self.layout = Some((key, layout.clone()));
+        self.layout = key.map(|key| (key, layout.clone()));
         layout
     }
 
@@ -289,23 +313,41 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_reuses_layout_and_width_scale_or_revision_replaces_it() {
+    fn scrolling_preserves_shaped_lines_until_render_inputs_change() {
         let source = "# Heading\n\n".repeat(24);
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 400, 280).unwrap();
         let cr = cairo::Context::new(&surface).unwrap();
         let mut preview = Preview::default();
         preview.draw(&cr, Rect::new(0., 0., 180., 90.), &source, 1);
         let initial = preview.layout.as_ref().unwrap().1.clone();
+        let serial = initial.serial();
         preview.scroll_by(36.);
         assert_eq!(preview.scroll, 36.);
 
         let next_cr = cairo::Context::new(&surface).unwrap();
         preview.draw(&next_cr, Rect::new(12., 12., 180., 110.), &source, 1);
         assert_eq!(&initial, &preview.layout.as_ref().unwrap().1);
+        assert_eq!(initial.serial(), serial);
         assert_eq!(preview.scroll, 36.);
 
+        next_cr.translate(4., 6.);
+        let translated = preview.layout_for_draw(&next_cr, 180., &source, 1);
+        assert_eq!(initial, translated);
+        assert_eq!(translated.serial(), serial);
+
+        next_cr.scale(1.25, 1.);
+        let transformed = preview.layout_for_draw(&next_cr, 180., &source, 1);
+        assert_ne!(initial, transformed);
+        assert_eq!(initial.serial(), serial);
+
+        let mut options = next_cr.font_options().unwrap();
+        options.set_hint_metrics(cairo::HintMetrics::Off);
+        next_cr.set_font_options(&options);
+        let options_changed = preview.layout_for_draw(&next_cr, 180., &source, 1);
+        assert_ne!(transformed, options_changed);
+
         let narrow = preview.layout_for_draw(&next_cr, 92., &source, 1);
-        assert_ne!(initial, narrow);
+        assert_ne!(options_changed, narrow);
         let hidpi = cairo::ImageSurface::create(cairo::Format::ARgb32, 400, 280).unwrap();
         hidpi.set_device_scale(2., 2.);
         let hidpi_cr = cairo::Context::new(&hidpi).unwrap();
