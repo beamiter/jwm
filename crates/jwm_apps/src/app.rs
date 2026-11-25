@@ -628,14 +628,12 @@ impl App {
                     label: String::new(),
                 });
                 if n.preview.enabled {
-                    let divider = if self.focus == Focus::Preview
-                        && self.focused
-                        && self.dialog.is_none()
-                    {
-                        ui::accent()
-                    } else {
-                        ui::line()
-                    };
+                    let divider =
+                        if self.focus == Focus::Preview && self.focused && self.dialog.is_none() {
+                            ui::accent()
+                        } else {
+                            ui::line()
+                        };
                     ui::fill(cr, Rect::new(split, body.y, 1., body.h), divider);
                     ui::text(
                         cr,
