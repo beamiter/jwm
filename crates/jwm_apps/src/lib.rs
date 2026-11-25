@@ -113,7 +113,16 @@ fn neighbors_from_until_cancelled(
                 continue;
             };
             let name = entry.file_name();
-            if image_path(Path::new(&name)) && entry.path().is_file() {
+            if !image_path(Path::new(&name)) {
+                continue;
+            }
+            // Directory entries usually carry their type already. Only ask
+            // for target metadata on a symlink or if the type lookup fails.
+            let is_file = match entry.file_type() {
+                Ok(kind) if !kind.is_symlink() => kind.is_file(),
+                _ => entry.path().is_file(),
+            };
+            if is_file {
                 paths.push(parent.join(name));
             }
         }
@@ -182,6 +191,8 @@ mod tests {
 
     #[test]
     fn bare_image_path_discovers_siblings_without_duplicating_the_open_file() {
+        use std::os::unix::fs::symlink;
+
         let folder =
             std::env::temp_dir().join(format!("jwm-image-relative-{}", std::process::id()));
         std::fs::create_dir(&folder).unwrap();
@@ -196,10 +207,17 @@ mod tests {
             std::fs::write(folder.join(name), b"").unwrap();
         }
         std::fs::create_dir(folder.join("album.png")).unwrap();
+        symlink("shot2.png", folder.join("shot1.png")).unwrap();
+        symlink("album.png", folder.join("directory-link.png")).unwrap();
+        symlink("missing.png", folder.join("broken-link.png")).unwrap();
 
         assert_eq!(
             neighbors_from(Path::new("shot2.png"), &folder),
-            vec![PathBuf::from("shot2.png"), PathBuf::from("shot10.png")]
+            vec![
+                PathBuf::from("shot1.png"),
+                PathBuf::from("shot2.png"),
+                PathBuf::from("shot10.png"),
+            ]
         );
     }
 
