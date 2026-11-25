@@ -3664,7 +3664,9 @@ mod tests {
             "sh",
             &[
                 "-c",
-                "cat >/dev/null; (sleep 0.05; printf ready > \"$1\") &",
+                // Publish the receipt atomically: existence alone would otherwise
+                // let the observer open the file between create and printf.
+                "cat >/dev/null; (sleep 0.05; printf ready > \"$1.tmp\" && mv \"$1.tmp\" \"$1\") &",
                 "jwm-clipboard-test",
                 &marker_arg,
             ],
