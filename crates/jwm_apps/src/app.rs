@@ -1218,10 +1218,7 @@ impl App {
                                 v.fit = true;
                                 v.pan = (0., 0.);
                             }
-                            Action::Rotate => {
-                                v.rotation = (v.rotation + 1) % 4;
-                                v.pan = (0., 0.);
-                            }
+                            Action::Rotate => v.rotate_clockwise(body.w, body.h),
                             _ => (),
                         }
                         Ok(())

@@ -291,6 +291,18 @@ impl Viewer {
         self.pan.1 = self.pan.1.clamp(-max_y, max_y);
     }
 
+    pub fn rotate_clockwise(&mut self, width: f64, height: f64) {
+        if self.image.is_none() {
+            return;
+        }
+        self.clamp_pan(width, height);
+        self.rotation = (self.rotation + 1) % 4;
+        // Rotate the pan with the pixels so the same image point stays at
+        // the viewport center, unless an image edge has to be clamped.
+        self.pan = (-self.pan.1, self.pan.0);
+        self.clamp_pan(width, height);
+    }
+
     pub fn zoom_at(&mut self, factor: f64, width: f64, height: f64, anchor: (f64, f64)) {
         if self.image.is_none() || width <= 0. || height <= 0. {
             return;
@@ -373,6 +385,41 @@ mod tests {
             .is_ok()
         );
         viewer.worker = Some(rx);
+    }
+
+    #[test]
+    fn rotation_preserves_the_inspected_point_until_an_edge_clamps() {
+        let mut viewer = Viewer::new(Vec::new());
+        viewer.rotate_clockwise(400., 300.);
+        assert_eq!(viewer.rotation, 0, "rotation needs a decoded image");
+
+        viewer.image = Some(ImageSurface::create(Format::ARgb32, 800, 600).unwrap());
+        viewer.fit = false;
+        viewer.zoom = 2.;
+        viewer.pan = (120., -55.);
+        for (rotation, pan) in [
+            (1, (55., 120.)),
+            (2, (-120., 55.)),
+            (3, (-55., -120.)),
+            (0, (120., -55.)),
+        ] {
+            viewer.rotate_clockwise(400., 300.);
+            assert_eq!(viewer.rotation, rotation);
+            assert_eq!(viewer.pan, pan);
+            assert_eq!(viewer.scale(400., 300.), 2.);
+        }
+
+        viewer.image = Some(ImageSurface::create(Format::ARgb32, 800, 200).unwrap());
+        viewer.zoom = 1.;
+        viewer.pan = (90., 20.);
+        viewer.rotate_clockwise(600., 150.);
+        assert_eq!(viewer.pan, (0., 90.));
+
+        viewer.fit = true;
+        viewer.rotate_clockwise(600., 150.);
+        assert_eq!(viewer.pan, (0., 0.));
+        assert!(viewer.fit);
+        assert_eq!(viewer.scale(600., 150.), 0.75);
     }
 
     #[test]
