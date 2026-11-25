@@ -916,7 +916,12 @@ impl App {
     fn dialog_actions(&self) -> Vec<Action> {
         match &self.dialog {
             Some(Dialog::Picker(p)) if !p.entries.is_empty() => {
-                vec![Action::PickerList, Action::Cancel, Action::Accept, Action::Parent]
+                vec![
+                    Action::PickerList,
+                    Action::Cancel,
+                    Action::Accept,
+                    Action::Parent,
+                ]
             }
             Some(Dialog::Picker(_)) => vec![Action::Cancel, Action::Accept, Action::Parent],
             Some(Dialog::Unsaved) => vec![
