@@ -83,6 +83,48 @@ struct ParsedMarkup {
     attributes: pango::AttrList,
 }
 
+#[derive(PartialEq)]
+struct LayoutKey {
+    width: f64,
+    scale: (f64, f64),
+    transform: (f64, f64, f64, f64),
+    font_options: cairo::FontOptions,
+    font: String,
+}
+
+// cairo-sys-rs does not expose this Cairo 1.0 API.
+#[link(name = "cairo")]
+unsafe extern "C" {
+    fn cairo_surface_get_font_options(
+        surface: *mut cairo::ffi::cairo_surface_t,
+        options: *mut cairo::ffi::cairo_font_options_t,
+    );
+}
+
+impl LayoutKey {
+    fn for_draw(cr: &cairo::Context, width: f64) -> Option<Self> {
+        let target = cr.target();
+        target.status().ok()?;
+        let mut font_options = cairo::FontOptions::new().ok()?;
+        // SAFETY: Both live wrappers own valid Cairo objects. Cairo copies
+        // the target's options to the initialized options object.
+        unsafe {
+            cairo_surface_get_font_options(target.to_raw_none(), font_options.as_ptr());
+        }
+        font_options.merge(&cr.font_options().ok()?);
+        font_options.status().ok()?;
+        let matrix = cr.matrix();
+        Some(Self {
+            width,
+            scale: target.device_scale(),
+            // PangoCairo ignores translation for shaping.
+            transform: (matrix.xx(), matrix.yx(), matrix.xy(), matrix.yy()),
+            font_options,
+            font: ui::font_name(),
+        })
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Preview {
     pub enabled: bool,
@@ -91,6 +133,7 @@ pub(crate) struct Preview {
     page_height: f64,
     revision: Option<u64>,
     parsed: Option<ParsedMarkup>,
+    layout: Option<(LayoutKey, pango::Layout)>,
 }
 impl Preview {
     pub(crate) fn scroll_by(&mut self, delta: f64) {
@@ -114,20 +157,39 @@ impl Preview {
         self.scroll = next.clamp(0., self.scroll_limit);
     }
 
-    pub fn draw(&mut self, cr: &cairo::Context, area: Rect, source: &str, revision: u64) {
+    fn layout_for_draw(
+        &mut self,
+        cr: &cairo::Context,
+        width: f64,
+        source: &str,
+        revision: u64,
+    ) -> pango::Layout {
         if self.revision != Some(revision) {
             self.parsed = pango::parse_markup(&markup(source), '\0')
                 .ok()
                 .map(|(attributes, text, _)| ParsedMarkup { text, attributes });
             self.revision = Some(revision);
+            self.layout = None;
         }
-        // Refresh the layout for the current width, font and Cairo target, but
-        // do not parse the same Pango markup again when scrolling or redrawing.
-        let layout = ui::layout(cr, "", 15., area.w, true);
+        let key = LayoutKey::for_draw(cr, width);
+        if let (Some(key), Some((cached_key, layout))) = (&key, &self.layout)
+            && key == cached_key
+        {
+            // Even an unchanged PangoCairo update can invalidate shaped lines.
+            return layout.clone();
+        }
+
+        let layout = ui::layout(cr, "", 15., width, true);
         if let Some(parsed) = &self.parsed {
             layout.set_text(parsed.text.as_str());
             layout.set_attributes(Some(&parsed.attributes));
         }
+        self.layout = key.map(|key| (key, layout.clone()));
+        layout
+    }
+
+    pub fn draw(&mut self, cr: &cairo::Context, area: Rect, source: &str, revision: u64) {
+        let layout = self.layout_for_draw(cr, area.w, source, revision);
         self.page_height = area.h;
         self.scroll_limit = (f64::from(layout.pixel_size().1) - area.h).max(0.);
         self.scroll = self.scroll.clamp(0., self.scroll_limit);
@@ -212,7 +274,7 @@ mod tests {
         let source = "# Heading\n\n**Bold** and *italic* text that wraps.";
         let next_source = "second revision";
         let mut preview = Preview::default();
-        for (width, scale) in [(180., 1.), (92., 1.), (92., 2.)] {
+        for (width, scale) in [(180., 1.), (180., 1.), (92., 1.), (92., 2.), (92., 2.)] {
             let height = 140.;
             let area = Rect::new(0., 0., width, height);
             let render = |draw: &mut dyn FnMut(&cairo::Context)| {
@@ -254,6 +316,53 @@ mod tests {
             preview.parsed.as_ref().unwrap().text.as_str(),
             "second revision\n\n"
         );
+    }
+
+    #[test]
+    fn scrolling_preserves_shaped_lines_until_render_inputs_change() {
+        let source = "# Heading\n\n".repeat(24);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 400, 280).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        let mut preview = Preview::default();
+        preview.draw(&cr, Rect::new(0., 0., 180., 90.), &source, 1);
+        let initial = preview.layout.as_ref().unwrap().1.clone();
+        let serial = initial.serial();
+        preview.scroll_by(36.);
+        assert_eq!(preview.scroll, 36.);
+
+        let next_cr = cairo::Context::new(&surface).unwrap();
+        preview.draw(&next_cr, Rect::new(12., 12., 180., 110.), &source, 1);
+        assert_eq!(&initial, &preview.layout.as_ref().unwrap().1);
+        assert_eq!(initial.serial(), serial);
+        assert_eq!(preview.scroll, 36.);
+
+        next_cr.translate(4., 6.);
+        let translated = preview.layout_for_draw(&next_cr, 180., &source, 1);
+        assert_eq!(initial, translated);
+        assert_eq!(translated.serial(), serial);
+
+        next_cr.scale(1.25, 1.);
+        let transformed = preview.layout_for_draw(&next_cr, 180., &source, 1);
+        assert_ne!(initial, transformed);
+        assert_eq!(initial.serial(), serial);
+
+        let mut options = next_cr.font_options().unwrap();
+        options.set_hint_metrics(cairo::HintMetrics::Off);
+        next_cr.set_font_options(&options);
+        let options_changed = preview.layout_for_draw(&next_cr, 180., &source, 1);
+        assert_ne!(transformed, options_changed);
+
+        let narrow = preview.layout_for_draw(&next_cr, 92., &source, 1);
+        assert_ne!(options_changed, narrow);
+        let hidpi = cairo::ImageSurface::create(cairo::Format::ARgb32, 400, 280).unwrap();
+        hidpi.set_device_scale(2., 2.);
+        let hidpi_cr = cairo::Context::new(&hidpi).unwrap();
+        let resized = preview.layout_for_draw(&hidpi_cr, 92., &source, 1);
+        assert_ne!(narrow, resized);
+
+        let updated = preview.layout_for_draw(&hidpi_cr, 92., "New document revision", 2);
+        assert_ne!(resized, updated);
+        assert!(updated.text().contains("New document revision"));
     }
 
     #[test]
