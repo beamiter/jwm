@@ -673,15 +673,16 @@ impl WMController for Jwm {
             return;
         }
         if self.features.system_ui.is_tags_overview() {
-            // The press armed a cell; its release settles the gesture — the
-            // click's tag jump, a wireframe drag's window move, or a plain
-            // disarm over the scrim or dead space.
-            let (x, y) = backend
-                .input_ops()
-                .get_pointer_position()
-                .unwrap_or(self.last_mouse_root);
-            if let Err(error) = self.release_tags_overview(backend, x, y) {
-                error!("Error handling tags overview release: {error}");
+            // Only the left press can arm the gesture. Wheel and secondary
+            // releases are swallowed without settling the held click or drag.
+            if detail == 1 {
+                let (x, y) = backend
+                    .input_ops()
+                    .get_pointer_position()
+                    .unwrap_or(self.last_mouse_root);
+                if let Err(error) = self.release_tags_overview(backend, x, y) {
+                    error!("Error handling tags overview release: {error}");
+                }
             }
             return;
         }
@@ -12401,6 +12402,16 @@ mod tests {
             &mut jwm,
             &mut backend,
             HitTarget::Background { output: None },
+            3,
+            0,
+        );
+        assert!(jwm.features.system_ui.is_tags_overview());
+        assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 0);
+
+        <Jwm as WMController>::on_button_release(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
             1,
             0,
         );
@@ -12503,6 +12514,26 @@ mod tests {
             overview.pending.unwrap().dragging,
             "crossing the boundary with a window in hand is a drag"
         );
+
+        for detail in 4..=7 {
+            <Jwm as WMController>::on_button_release(
+                &mut jwm,
+                &mut backend,
+                HitTarget::Background { output: None },
+                detail,
+                0,
+            );
+            assert_eq!(jwm.state.clients[client_key].state.tags, 0b001);
+            assert!(
+                jwm.features
+                    .system_ui
+                    .tags_overview()
+                    .unwrap()
+                    .pending
+                    .unwrap()
+                    .dragging
+            );
+        }
 
         <Jwm as WMController>::on_button_release(
             &mut jwm,
