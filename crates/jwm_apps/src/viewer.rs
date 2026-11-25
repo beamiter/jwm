@@ -270,10 +270,14 @@ impl Viewer {
             (image.height() as f64, image.width() as f64)
         }
     }
-    pub fn scale(&self, width: f64, height: f64) -> f64 {
+    fn fit_scale(&self, width: f64, height: f64) -> f64 {
         let (w, h) = self.dimensions();
+        (width / w).min(height / h)
+    }
+
+    pub fn scale(&self, width: f64, height: f64) -> f64 {
         if self.fit {
-            (width / w).min(height / h)
+            self.fit_scale(width, height)
         } else {
             self.zoom
         }
@@ -294,7 +298,11 @@ impl Viewer {
         self.clamp_pan(width, height);
         let old_scale = self.scale(width, height);
         self.zoom_by(factor, width, height);
-        let ratio = self.zoom / old_scale;
+        let new_scale = self.scale(width, height);
+        if new_scale == old_scale {
+            return;
+        }
+        let ratio = new_scale / old_scale;
         // Preserve the rendered image point under the pointer, unless the
         // new pan would expose blank space past an image edge.
         self.pan.0 = anchor.0 - (anchor.0 - self.pan.0) * ratio;
@@ -303,8 +311,24 @@ impl Viewer {
     }
 
     pub fn zoom_by(&mut self, factor: f64, width: f64, height: f64) {
-        self.zoom = (self.scale(width, height) * factor).clamp(0.05, 16.);
-        self.fit = false;
+        if self.image.is_none() || !factor.is_finite() || factor <= 0. {
+            return;
+        }
+        let fit = self.fit_scale(width, height);
+        if !fit.is_finite() || fit <= 0. {
+            return;
+        }
+        let current = self.scale(width, height);
+        // Fit can display very large or tiny images beyond the normal zoom
+        // limits. Include fit and the current scale in the range so stepping
+        // after Fit (or after resizing) never zooms in the opposite direction.
+        let minimum = 0.05_f64.min(fit).min(current);
+        let maximum = 16_f64.max(fit).max(current);
+        let next = (current * factor).clamp(minimum, maximum);
+        if next != current {
+            self.zoom = next;
+            self.fit = false;
+        }
     }
 }
 fn prepare_surface_pixels(mut decoded: DecodedImage) -> PreparedImage {
@@ -367,6 +391,41 @@ mod tests {
         viewer.zoom_at(0.125, 400., 300., (100., -50.));
         assert_eq!(viewer.zoom, 0.25);
         assert_eq!(viewer.pan, (0., 0.));
+    }
+
+    #[test]
+    fn zoom_at_extreme_fit_never_reverses_direction_or_breaks_fit_at_a_limit() {
+        let mut viewer = Viewer::new(Vec::new());
+        viewer.image = Some(ImageSurface::create(Format::ARgb32, 800, 400).unwrap());
+        let (width, height) = (20., 10.);
+        let initial = viewer.scale(width, height);
+
+        viewer.zoom_at(0.8, width, height, (5., 0.));
+        assert!(viewer.fit);
+        assert_eq!(viewer.scale(width, height), initial);
+        assert_eq!(viewer.pan, (0., 0.));
+        viewer.zoom_at(1.25, width, height, (5., 0.));
+        assert!(!viewer.fit);
+        assert_eq!(viewer.scale(width, height), initial * 1.25);
+        assert!(viewer.pan.0 < 0.);
+
+        viewer.image = Some(ImageSurface::create(Format::ARgb32, 2, 2).unwrap());
+        viewer.fit = true;
+        let (width, height) = (100., 100.);
+        let initial = viewer.scale(width, height);
+        viewer.zoom_by(1.25, width, height);
+        assert!(viewer.fit);
+        assert_eq!(viewer.scale(width, height), initial);
+        viewer.zoom_by(0.8, width, height);
+        assert!(!viewer.fit);
+        assert_eq!(viewer.scale(width, height), 40.);
+
+        // A window resize changes the fit bound, not the current manual
+        // scale. An increase is now a no-op, not a drop to the new maximum.
+        viewer.zoom_by(1.25, 10., 10.);
+        assert_eq!(viewer.scale(10., 10.), 40.);
+        viewer.zoom_by(0.8, 10., 10.);
+        assert_eq!(viewer.scale(10., 10.), 32.);
     }
 
     #[test]
