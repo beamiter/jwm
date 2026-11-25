@@ -486,7 +486,7 @@ impl App {
                 );
                 ui::text(
                     cr,
-                    &n.find.label(),
+                    &n.find.label(&n.editor),
                     Rect::new(field_width + 24., y + 6., 146., 36.),
                     12.,
                     ui::muted(),
@@ -619,8 +619,9 @@ impl App {
                     (split - sidebar - 48.).max(1.),
                     (body.h - 48.).max(1.),
                 );
-                n.editor.highlight_selection =
-                    n.find.enabled && n.find.total > 0 && self.focus == Focus::Find;
+                n.editor.highlight_selection = n.find.enabled
+                    && self.focus == Focus::Find
+                    && n.find.has_current_match(&n.editor);
                 n.editor.draw(
                     cr,
                     edit,
@@ -2963,7 +2964,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(n.find.query.text, term);
-        assert_eq!((n.find.current, n.find.total), (1, 2));
+        assert_eq!(n.find.label(&n.editor), "2 / 2");
         assert_eq!((n.editor.cursor, n.editor.anchor), (start, source.len()));
 
         app.action(Action::FindNext(false));
