@@ -5,11 +5,13 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("terminal_exit", HERE / "test-terminal-exit-x11.py")
@@ -74,6 +76,7 @@ def run(args):
             changes = [
                 ("status_bar", "show_bar", "false"), ("status_bar", "name", '"/bin/true"'),
                 ("behavior", "compositor", "true"), ("behavior", "border_enabled", "true"),
+                ("behavior", "wallpaper_effect", '"off"'),
                 ("behavior", "border_width", "8.0"), ("behavior", "border_glow_enabled", "false"),
                 ("behavior", "border_gradient_enabled", "true"),
                 ("behavior", "border_gradient_color_a", "[1.0, 0.0, 0.0, 1.0]"),
@@ -86,8 +89,25 @@ def run(args):
                 ("animation", "enabled", "false"),
             ]
             for section, key, literal in changes:
-                content = FIXTURE.edit_setting(content, section, key, literal)
+                if literal.startswith("["):
+                    # The generated template pretty-prints arrays across lines.
+                    start = content.index("[behavior]\n")
+                    end = content.find("\n[", start + len("[behavior]\n"))
+                    if end == -1:
+                        end = len(content)
+                    pattern = rf"(?m)^{re.escape(key)}[ \t]*=[ \t]*\[[^\[\]]*\][ \t]*$"
+                    updated, count = re.subn(pattern, f"{key} = {literal}", content[start:end])
+                    assert count == 1, (section, key, count)
+                    content = content[:start] + updated + content[end:]
+                else:
+                    content = FIXTURE.edit_setting(content, section, key, literal)
             content = FIXTURE.edit_setting(content, "desktop_shell", "enabled", "false", False)
+            original = tomllib.loads(path.read_text())
+            for section, key, literal in changes:
+                original[section][key] = tomllib.loads("v = " + literal)["v"]
+            if "enabled" in original.get("desktop_shell", {}):
+                original["desktop_shell"]["enabled"] = False
+            assert tomllib.loads(content) == original, "fixture edited unrelated config values"
             path.write_text(content)
 
         def row(record):
@@ -116,9 +136,19 @@ def run(args):
             command(args.jwm, "--backend", args.backend, "--gen-config")
             for path in (work / "config/jwm").glob("config_*.toml"):
                 config_file(path)
-            command(args.jwm, "--backend", args.backend, "--check-config")
+            try:
+                command(args.jwm, "--backend", args.backend, "--check-config")
+            except subprocess.CalledProcessError as error:
+                (args.output / "config-check.log").write_bytes(error.output)
+                raise RuntimeError(error.output.decode(errors="replace")) from error
             env["DISPLAY"] = children.display("Xvfb", env, args.output)
+            host_env = env.copy()
             env["DISPLAY"] = children.display("Xephyr", env, args.output)
+            host_window = subprocess.check_output(
+                ["xdotool", "search", "--class", "Xephyr"], env=host_env, timeout=20
+            ).splitlines()[0]
+            subprocess.run(["xdotool", "windowfocus", "--sync", host_window.decode()],
+                           env=host_env, timeout=20, check=True)
             wm = children.spawn(["dbus-run-session", "--", str(args.jwm), "--backend",
                                  args.backend], env, args.output / "jwm.log")
             wait(lambda: socket.exists() and FIXTURE.query(socket, "get_status")["compositor_active"],
