@@ -1308,11 +1308,14 @@ impl App {
         let sidebar = self.sidebar();
         match &mut self.document {
             Document::Notes(n) => {
+                if !dy.is_finite() || dy == 0. || !body.contains(self.pointer.0, self.pointer.1) {
+                    return;
+                }
                 if self.pointer.0 < sidebar {
                     n.list_scroll = (n.list_scroll - dy * 36.)
                         .clamp(0., (n.rows.len() as f64 * 48. - body.h + 60.).max(0.));
                 } else if n.preview.enabled && self.pointer.0 >= sidebar + (body.w - sidebar) / 2. {
-                    n.preview.scroll = (n.preview.scroll - dy * 36.).max(0.);
+                    n.preview.scroll_by(-dy * 36.);
                 } else {
                     n.editor.scroll = (n.editor.scroll - dy * 36.).max(0.);
                 }
@@ -1841,6 +1844,45 @@ mod tests {
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 2));
         app.scroll((-3., -1.), ModifiersState::empty());
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 5));
+    }
+
+    #[test]
+    fn notes_wheel_scroll_stays_inside_content_and_reverses_at_preview_edge() {
+        let dir = std::env::temp_dir().join(format!("jwm-notes-wheel-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("preview.md");
+        std::fs::write(&path, "# Heading\n\nA paragraph.\n\n".repeat(100)).unwrap();
+        let mut app = App::new(true, vec![path]).unwrap();
+        app.action(Action::TogglePreview);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 900, 410).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 900., 410., false);
+
+        let offsets = |app: &App| match &app.document {
+            Document::Notes(n) => (n.editor.scroll, n.preview.scroll),
+            _ => unreachable!(),
+        };
+        let plain = ModifiersState::empty();
+        app.pointer = (200., 2.);
+        app.scroll((0., -2.), plain);
+        app.pointer = (700., 2.);
+        app.scroll((0., -2.), plain);
+        assert_eq!(offsets(&app), (0., 0.), "chrome cannot scroll either pane");
+
+        app.pointer = (700., 180.);
+        app.scroll((0., -10000.), plain);
+        let (editor, bottom) = offsets(&app);
+        assert_eq!(editor, 0.);
+        assert!(bottom > 36. && bottom < 360000.);
+        app.scroll((0., 0.5), plain);
+        assert_eq!(offsets(&app), (0., bottom - 18.));
+        app.scroll((3., 0.), plain);
+        assert_eq!(offsets(&app), (0., bottom - 18.));
+
+        app.pointer = (200., 180.);
+        app.scroll((0., -1.), plain);
+        assert_eq!(offsets(&app), (36., bottom - 18.));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

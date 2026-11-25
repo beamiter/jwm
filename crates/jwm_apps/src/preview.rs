@@ -93,6 +93,12 @@ pub(crate) struct Preview {
     parsed: Option<ParsedMarkup>,
 }
 impl Preview {
+    pub(crate) fn scroll_by(&mut self, delta: f64) {
+        if delta.is_finite() {
+            self.scroll = (self.scroll + delta).clamp(0., self.scroll_limit);
+        }
+    }
+
     pub(crate) fn scroll_key(&mut self, key: winit::keyboard::NamedKey) {
         use winit::keyboard::NamedKey;
         let page = (self.page_height - 36.).max(36.);
