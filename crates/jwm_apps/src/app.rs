@@ -1207,8 +1207,8 @@ impl App {
                         match action {
                             Action::Previous => v.navigate(-1),
                             Action::Next => v.navigate(1),
-                            Action::ZoomIn => v.zoom_by(1.25, body.w, body.h),
-                            Action::ZoomOut => v.zoom_by(0.8, body.w, body.h),
+                            Action::ZoomIn => v.zoom_at(1.25, body.w, body.h, (0., 0.)),
+                            Action::ZoomOut => v.zoom_at(0.8, body.w, body.h, (0., 0.)),
                             Action::Actual => {
                                 v.fit = false;
                                 v.zoom = 1.;
@@ -1815,6 +1815,32 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_zoom_steps_preserve_the_center_detail_after_panning() {
+        let mut app = App::new(false, Vec::new()).unwrap();
+        let Document::Image(viewer) = &mut app.document else {
+            unreachable!()
+        };
+        viewer.image = Some(cairo::ImageSurface::create(cairo::Format::ARgb32, 800, 600).unwrap());
+        viewer.fit = false;
+        viewer.zoom = 2.;
+        viewer.pan = (120., -60.);
+
+        app.action(Action::ZoomIn);
+        let Document::Image(viewer) = &app.document else {
+            unreachable!()
+        };
+        assert_eq!(viewer.zoom, 2.5);
+        assert_eq!(viewer.pan, (150., -75.));
+
+        app.action(Action::ZoomOut);
+        let Document::Image(viewer) = &app.document else {
+            unreachable!()
+        };
+        assert_eq!(viewer.zoom, 2.);
+        assert_eq!(viewer.pan, (120., -60.));
+    }
 
     #[test]
     fn image_pan_uses_both_axes_but_picker_and_zoom_ignore_horizontal_scroll() {
