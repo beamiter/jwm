@@ -43,10 +43,11 @@ full text. Delete moves a note to the system trash after confirmation.
 Externally opened files use explicit save and prompt before closing unsaved
 changes. Saving checks the file's etag to detect external modifications;
 conflicts keep the editor open so the user can save a separate copy. UTF-8 BOM
-and Windows CRLF line endings are preserved. Mixed LF/CRLF files retain their
-existing separators instead of silently normalizing unrelated lines; newly
-inserted line breaks use LF in mixed files. Invalid UTF-8, directories and
-files over 8 MiB are rejected. Automatic note saves use atomic replacement and
+and Windows CRLF line endings are preserved. Editing does not silently
+normalize unrelated lines in mixed LF/CRLF files. Enter follows the current
+line's terminator, or inherits the preceding line's terminator on an unterminated
+last line. Without an existing line break it defaults to LF. Invalid UTF-8,
+directories and files over 8 MiB are rejected. Automatic note saves use atomic replacement and
 retain a previous version as a `~` backup beside the file.
 
 | Shortcut | Action |
@@ -196,8 +197,8 @@ logical lines, and a tab counts as one grapheme, not its visual screen width.
 Mixed newline text is identified without conversion. Statistics are cached by
 document revision and cursor location. Moving the cursor recalculates its logical
 position from the text prefix, so very large files can incur extra work per move.
-Bare CR is counted as a line break for status reporting; Home/End retain the
-existing LF-based editor behavior. Changing views does not dirty the file.
+Home/End use the same logical line boundaries, including bare CR. Changing
+views does not dirty the file.
 Line-number gutters and an unwrapped horizontal-scroll mode are not included.
 
 ### Code-view indentation
@@ -208,14 +209,14 @@ line's start excludes that line. The selection expands to the affected whole
 lines and keeps its direction. Shift+Tab removes one leading tab or up to four
 leading ASCII spaces per selected line, or just the current line without a
 selection. Tab without a selection inserts a tab at the caret. Each multiline
-indent/outdent is one undo transaction; existing LF/CRLF bytes are retained.
+indent/outdent is one undo transaction; existing LF, CRLF and CR separators
+are retained and CRLF counts as one break.
 
-Enter replaces any selection with LF plus the current line's leading spaces and
-tabs up to the insertion point. It does not copy indentation after the caret,
-add bracket-dependent indentation, or reformat the document. LF insertion uses
-the existing file encoding policy (uniform CRLF files are saved as CRLF; mixed
-files keep existing separators and insert LF). Notebook/theme text behavior is
-unchanged. None of these operations execute source code.
+Enter uses the document's line-break policy and copies the current line's
+leading spaces and tabs up to the insertion point. It does not copy indentation
+after the caret, add bracket-dependent indentation, or reformat the document.
+Automatic indentation is specific to code view. None of these operations
+execute source code.
 
 ### Experimental Notes accessibility
 
