@@ -1594,7 +1594,12 @@ impl SystemUiState {
         match *row {
             LauncherRow::App(index) => entries
                 .get(index)
-                .map(|entry| format!("app:{}:{:?}", entry.name, entry.command)),
+                .map(|entry| {
+                    format!(
+                        "app:{:?}:{:?}:{:?}:{}",
+                        entry.desktop_id, entry.name, entry.command, entry.terminal
+                    )
+                }),
             LauncherRow::Window(index) => windows
                 .get(index)
                 .map(|entry| format!("window:{}", entry.id)),
@@ -10492,6 +10497,33 @@ Keywords=action-only;
             state.selected_launch().map(|choice| choice.id).as_deref(),
             Some("beta")
         );
+    }
+
+    #[test]
+    fn a_catalog_refresh_does_not_retarget_a_highlighted_application() {
+        for (desktop_id, terminal) in [("org.jwm.Other", false), ("org.jwm.Example", true)] {
+            let mut state = launcher_with(&[], "");
+            let mut original = LaunchEntry::new(
+                "Example".into(),
+                vec!["example".into()],
+                false,
+                None,
+                "example".into(),
+            );
+            original.desktop_id = Some("org.jwm.Example".into());
+            assert!(state.set_launcher_entries(Arc::from([original.clone()])));
+            assert!(state.selected_launch().is_some());
+
+            let mut replacement = original;
+            replacement.desktop_id = Some(desktop_id.into());
+            replacement.terminal = terminal;
+            assert!(state.set_launcher_entries(Arc::from([replacement])));
+            assert!(state.selected_launch().is_none());
+            assert_eq!(state.overlay_parts().selected, None);
+
+            state.move_selection(1);
+            assert_eq!(state.selected_launch().unwrap().terminal, terminal);
+        }
     }
 
     #[test]
