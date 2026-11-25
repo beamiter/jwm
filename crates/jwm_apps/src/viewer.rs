@@ -1,11 +1,15 @@
-use crate::neighbors;
+use crate::neighbors_until_cancelled;
 use cairo::{Format, ImageSurface};
 use std::{
     fs::{self, File, OpenOptions},
     io::BufReader,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
 };
 
 pub struct DecodedImage {
@@ -75,7 +79,14 @@ type LoadResult = (Result<PreparedImage, String>, Option<PathBuf>, u64);
 struct ScanWorker {
     generation: u64,
     receiver: Receiver<(Vec<PathBuf>, PathBuf)>,
+    cancelled: Arc<AtomicBool>,
 }
+impl Drop for ScanWorker {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
 pub(crate) struct Viewer {
     pub paths: Vec<PathBuf>,
     pub index: usize,
@@ -142,6 +153,9 @@ impl Viewer {
         self.generation = self.generation.wrapping_add(1);
         self.pending = Some((path.clone(), scan && self.paths.len() == 1, self.generation));
         self.pending_scan = None;
+        if let Some(scanner) = &self.scanner {
+            scanner.cancelled.store(true, Ordering::Relaxed);
+        }
         self.image = None;
         self.message = "正在载入图片…".into();
         self.status = path.to_string_lossy().into_owned();
@@ -169,13 +183,18 @@ impl Viewer {
             return;
         };
         let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
         self.scanner = Some(ScanWorker {
             generation,
             receiver: rx,
+            cancelled: Arc::clone(&cancelled),
         });
         std::thread::spawn(move || {
-            let entries = neighbors(&path);
-            let _ = tx.send((entries, path));
+            if let Some(entries) =
+                neighbors_until_cancelled(&path, || cancelled.load(Ordering::Relaxed))
+            {
+                let _ = tx.send((entries, path));
+            }
         });
     }
     pub fn collection_status(&self) -> String {
@@ -485,6 +504,7 @@ mod tests {
         viewer.scanner = Some(ScanWorker {
             generation: viewer.generation,
             receiver: scan_rx,
+            cancelled: Arc::new(AtomicBool::new(false)),
         });
         deliver_decoded(&mut viewer, 3, None);
 
@@ -516,6 +536,7 @@ mod tests {
         viewer.scanner = Some(ScanWorker {
             generation: viewer.generation,
             receiver: scan_rx,
+            cancelled: Arc::new(AtomicBool::new(false)),
         });
 
         // Hold the decoder lane so open queues work without touching disk.
@@ -523,6 +544,14 @@ mod tests {
         viewer.worker = Some(old_rx);
         let old_generation = viewer.generation;
         viewer.open(vec![first.clone(), second.clone()]);
+        assert!(
+            viewer
+                .scanner
+                .as_ref()
+                .unwrap()
+                .cancelled
+                .load(Ordering::Relaxed)
+        );
         let (path, scan, generation) = viewer.pending.take().unwrap();
         assert_eq!(path, first);
         assert!(!scan);
@@ -552,6 +581,7 @@ mod tests {
             viewer.scanner = Some(ScanWorker {
                 generation: viewer.generation,
                 receiver: scan_rx,
+                cancelled: Arc::new(AtomicBool::new(false)),
             });
             assert_eq!(viewer.collection_status(), "正在查找同目录图片…");
             if succeeds {
