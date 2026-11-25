@@ -1004,13 +1004,16 @@ impl Jwm {
         let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
         let old_transition_work = self.monitor_work_area(sel_mon_key);
 
-        // 1. 状态变更
-        let mut old_tag_mask = 0u32;
-        let mut new_tag_mask = mask;
-        if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-            old_tag_mask = monitor.get_active_tags();
-            monitor.view_tag(mask, true); // true = toggle
-            new_tag_mask = monitor.get_active_tags();
+        let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) else {
+            return Ok(());
+        };
+        let old_tag_mask = monitor.get_active_tags();
+        monitor.view_tag(mask, true);
+        let new_tag_mask = monitor.get_active_tags();
+        // The monitor rejects hiding every active tag. A rejected toggle
+        // must not steal focus or rearrange the unchanged workspace.
+        if new_tag_mask == old_tag_mask {
+            return Ok(());
         }
         self.update_sticky_tags(sel_mon_key);
 
@@ -1043,11 +1046,9 @@ impl Jwm {
         self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
         self.update_ewmh_desktop(backend)?;
-        if old_tag_mask != new_tag_mask {
-            self.refresh_compositor_monitors(backend);
-            self.ensure_native_root_wallpaper(backend);
-            self.refresh_wallpaper_theme();
-        }
+        self.refresh_compositor_monitors(backend);
+        self.ensure_native_root_wallpaper(backend);
+        self.refresh_wallpaper_theme();
 
         Ok(())
     }
@@ -1335,10 +1336,10 @@ mod tests {
     /// A mask with no configured tag in it names nothing to show. Before
     /// the guard, `view` still refocused the per-tag selection (restacking
     /// it), arranged, rewrote the EWMH desktop and broadcast `tag/view` with
-    /// tag 0; `toggleview` refocused the top of the stack. Neither may touch
-    /// the tagset, the focus stack or the selection now.
+    /// tag 0; `toggleview` refocused the top of the stack. The same applies
+    /// when toggling off the entire active mask, which `view_tag` rejects.
     #[test]
-    fn an_empty_view_mask_leaves_tags_focus_and_stack_untouched() {
+    fn no_op_workspace_views_leave_tags_focus_and_stack_untouched() {
         use crate::backend::common_define::WindowId;
         use crate::core::models::WMClient;
         use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
@@ -1389,6 +1390,11 @@ mod tests {
                 .expect("an empty toggleview is a no-op");
             untouched(&jwm);
         }
+
+        assert_ne!(tags, 0);
+        jwm.toggleview(&mut backend, &WMArgEnum::UInt(tags))
+            .expect("hiding every active tag is rejected without refocusing");
+        untouched(&jwm);
     }
 
     #[test]
