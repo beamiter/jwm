@@ -641,8 +641,8 @@ impl Jwm {
     /// An undragged release on the press's cell is a click: view the tag
     /// and close. An active drag drops only on a different cell. Returning
     /// to the source or releasing outside the cells simply disarms and
-    /// leaves the panel open. The pointer grab delivers releases without
-    /// the button number, so the first release settles the gesture.
+    /// leaves the panel open. The event dispatcher calls this only for
+    /// the left-button release that pairs with the armed press.
     pub(crate) fn release_tags_overview(
         &mut self,
         backend: &mut dyn Backend,
