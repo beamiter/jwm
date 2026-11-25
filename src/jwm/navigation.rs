@@ -616,6 +616,13 @@ impl Jwm {
             return Ok(());
         }
 
+        // Reject unsupported presentation before changing selection, focus or
+        // grabs. A functioning native surface renderer does not imply that the
+        // backend can paint this panel; never activate an invisible switcher.
+        if let Some(reason) = backend.window_switcher_unavailable_reason() {
+            return Err(reason.into());
+        }
+
         // Already open: a re-trigger (key repeat, or an IPC call) steps the
         // list instead of rebuilding it.
         if self.features.system_ui.is_window_switcher() {

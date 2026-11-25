@@ -4060,6 +4060,13 @@ pub trait DisplayControl: Send {
 
 /// Lightweight compositor scheduling and state queries.
 pub trait RenderScheduler: Send {
+    /// A permanent limitation of the visible Alt-Tab panel, not the current
+    /// compositor state. None preserves the existing activation path, including
+    /// its runtime safety checks. This does not authorize any other system UI.
+    fn window_switcher_unavailable_reason(&self) -> Option<&'static str> {
+        None
+    }
+
     fn request_render(&mut self) {}
     fn has_compositor(&self) -> bool {
         false

@@ -2612,6 +2612,10 @@ impl CompositorWindowEffects for WaylandWinitBackend {
 impl CompositorAnnotation for WaylandWinitBackend {}
 impl DisplayControl for WaylandWinitBackend {}
 impl RenderScheduler for WaylandWinitBackend {
+    fn window_switcher_unavailable_reason(&self) -> Option<&'static str> {
+        Some("wayland-winit does not yet support a visible Alt-Tab panel; no window was switched")
+    }
+
     fn request_render(&mut self) {
         self.needs_render = true;
         self.request_flush();

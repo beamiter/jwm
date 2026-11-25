@@ -2488,6 +2488,10 @@ impl CompositorWindowEffects for WaylandX11Backend {
 impl CompositorAnnotation for WaylandX11Backend {}
 impl DisplayControl for WaylandX11Backend {}
 impl RenderScheduler for WaylandX11Backend {
+    fn window_switcher_unavailable_reason(&self) -> Option<&'static str> {
+        Some("wayland-x11 does not yet support a visible Alt-Tab panel; no window was switched")
+    }
+
     fn request_render(&mut self) {
         self.needs_render = true;
         self.request_flush();
