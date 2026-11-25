@@ -20,9 +20,7 @@ struct Metrics {
 #[derive(PartialEq)]
 struct LayoutKey {
     revision: u64,
-    width: f64,
-    scale: (f64, f64),
-    font: String,
+    rendering: ui::TextLayoutKey,
     monospace: bool,
 }
 
@@ -533,19 +531,19 @@ impl Editor {
         width: f64,
         multiline: bool,
     ) -> pango::Layout {
-        let key = multiline.then(|| LayoutKey {
-            revision: self.revision,
-            width,
-            scale: cr.target().device_scale(),
-            font: ui::font_name(),
-            monospace: self.monospace,
-        });
+        let key = if multiline {
+            ui::TextLayoutKey::for_draw(cr, width).map(|rendering| LayoutKey {
+                revision: self.revision,
+                rendering,
+                monospace: self.monospace,
+            })
+        } else {
+            None
+        };
         if let (Some(key), Some(layout)) = (&key, &self.layout)
             && self.layout_key.as_ref() == Some(key)
         {
-            // The host may create a fresh Cairo context for the same canvas.
-            // Refresh Pango's target options without setting the text again.
-            pangocairo::functions::update_layout(cr, layout);
+            // Even a no-op PangoCairo update invalidates shaped lines.
             return layout.clone();
         }
         self.layout_key = key;
@@ -960,8 +958,10 @@ mod tests {
         editor.select(1..9);
         pixels(&mut editor, 120., 1., true);
         let first = editor.layout.as_ref().unwrap().clone();
+        let serial = first.serial();
         let blink = pixels(&mut editor, 120., 1., false);
         assert_eq!(editor.layout.as_ref(), Some(&first));
+        assert_eq!(first.serial(), serial);
 
         let mut fresh = Editor::new(text.into());
         fresh.select(1..9);
@@ -981,6 +981,27 @@ mod tests {
         editor.insert("changed");
         pixels(&mut editor, 100., 2., false);
         assert_ne!(editor.layout.as_ref(), Some(&scaled));
+    }
+
+    #[test]
+    fn multiline_layout_rebuilds_when_transform_or_font_options_change() {
+        let mut editor = Editor::new("Wrapped text 中文".into());
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 400, 300).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        let area = Rect::new(0., 0., 115., 140.);
+        editor.draw(&cr, area, true, false, true);
+        let initial = editor.layout.as_ref().unwrap().clone();
+
+        cr.scale(1.25, 1.);
+        editor.draw(&cr, area, true, false, true);
+        let transformed = editor.layout.as_ref().unwrap().clone();
+        assert_ne!(transformed, initial);
+
+        let mut options = cr.font_options().unwrap();
+        options.set_hint_metrics(cairo::HintMetrics::Off);
+        cr.set_font_options(&options);
+        editor.draw(&cr, area, true, false, true);
+        assert_ne!(editor.layout.as_ref(), Some(&transformed));
     }
 
     #[test]
