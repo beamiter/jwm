@@ -241,7 +241,7 @@ mod tests {
             is_focused: true,
             ..inputs()
         };
-        let colors = |input| {
+        let colors = |input: &WindowBorderInputs| {
             window_border_style(input)
                 .unwrap()
                 .gradient_colors(true, a, b, HIGHLIGHT)
