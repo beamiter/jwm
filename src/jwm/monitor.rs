@@ -2085,9 +2085,11 @@ pub(crate) mod test_support {
 
     /// The outputs the backend reports; a test replaces them to change the
     /// display layout.
+    #[derive(Default)]
     pub(crate) struct SpyOutputOps {
         pub(crate) outputs: Vec<OutputInfo>,
         pub(crate) authoritative: bool,
+        pub(crate) enumeration_count: std::sync::atomic::AtomicUsize,
     }
 
     impl OutputOps for SpyOutputOps {
@@ -2095,6 +2097,8 @@ pub(crate) mod test_support {
             (self.outputs.clone(), self.authoritative)
         }
         fn enumerate_outputs(&self) -> Vec<OutputInfo> {
+            self.enumeration_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.outputs.clone()
         }
 
@@ -2158,6 +2162,7 @@ pub(crate) mod test_support {
                 output_ops: SpyOutputOps {
                     outputs,
                     authoritative: true,
+                    enumeration_count: std::sync::atomic::AtomicUsize::new(0),
                 },
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,
