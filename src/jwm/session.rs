@@ -1712,7 +1712,9 @@ impl Jwm {
         let matching = self.session_restore_matching(snapshot);
         let plans = &matching.plans;
         let matched: HashSet<_> = plans.iter().map(|(key, _)| *key).collect();
-        self.apply_session_snapshot(backend, snapshot);
+        let live = self.live_monitor_identities(backend);
+        let output_refs = Self::session_monitor_refs(&live);
+        self.apply_session_restore_matching(backend, snapshot, &matching, &output_refs);
         let mut outcomes = Vec::new();
         let mut verified = 0;
         for (key, plan) in plans {
@@ -1721,8 +1723,8 @@ impl Jwm {
                 continue;
             };
             let mon = c.mon.and_then(|m| self.state.monitors.get(m));
-            let wanted_monitor = self.resolve_session_monitor_num(
-                backend,
+            let wanted_monitor = Self::resolve_session_monitor_num(
+                &output_refs,
                 plan.monitor_num,
                 plan.connector.as_deref(),
             );
@@ -1821,8 +1823,8 @@ impl Jwm {
         let mut order_verified = true;
         let mut order_skipped = 0;
         for saved in &snapshot.monitor_orders {
-            let num = self.resolve_session_monitor_num(
-                backend,
+            let num = Self::resolve_session_monitor_num(
+                &output_refs,
                 saved.monitor_num,
                 saved.connector.as_deref(),
             );
@@ -1918,22 +1920,22 @@ impl Jwm {
         }
     }
 
-    /// Resolve a saved connector / `stable_key` to the monitor number that
-    /// currently owns that output; fall back to the saved `monitor_num`.
+    fn session_monitor_refs(live: &[(i32, String, String)]) -> Vec<(i32, &str, &str)> {
+        live.iter()
+            .map(|(num, connector, stable_key)| (*num, connector.as_str(), stable_key.as_str()))
+            .collect()
+    }
+
+    /// Resolve a saved connector / `stable_key` against this restore operation's
+    /// live output snapshot; fall back to the saved `monitor_num`.
     fn resolve_session_monitor_num(
-        &self,
-        backend: &dyn Backend,
+        output_refs: &[(i32, &str, &str)],
         remembered_monitor_num: u32,
         remembered_connector: Option<&str>,
     ) -> u32 {
-        let live = self.live_monitor_identities(backend);
-        let live_refs: Vec<(i32, &str, &str)> = live
-            .iter()
-            .map(|(num, connector, stable_key)| (*num, connector.as_str(), stable_key.as_str()))
-            .collect();
         let remembered_i32 = i32::try_from(remembered_monitor_num).unwrap_or(0);
         let resolved =
-            resolve_monitor_num_by_connector(remembered_i32, remembered_connector, &live_refs);
+            resolve_monitor_num_by_connector(remembered_i32, remembered_connector, output_refs);
         u32::try_from(resolved).unwrap_or(remembered_monitor_num)
     }
 
@@ -1972,7 +1974,27 @@ impl Jwm {
         snapshot: &SessionSnapshot,
     ) -> usize {
         let matching = self.session_restore_matching(snapshot);
-        let plans = matching.plans;
+        let live = if matching.plans.is_empty() {
+            Vec::new()
+        } else {
+            self.live_monitor_identities(backend)
+        };
+        self.apply_session_restore_matching(
+            backend,
+            snapshot,
+            &matching,
+            &Self::session_monitor_refs(&live),
+        )
+    }
+
+    fn apply_session_restore_matching(
+        &mut self,
+        backend: &mut dyn Backend,
+        snapshot: &SessionSnapshot,
+        matching: &RestoreMatching,
+        output_refs: &[(i32, &str, &str)],
+    ) -> usize {
+        let plans = &matching.plans;
         if !matching.ambiguous.is_empty() {
             log::warn!(
                 "session restore left {} windows unchanged: ambiguous class/instance",
@@ -1984,9 +2006,9 @@ impl Jwm {
         }
         let matched: HashSet<_> = plans.iter().map(|(key, _)| *key).collect();
 
-        for (key, plan) in &plans {
-            let monitor_num = self.resolve_session_monitor_num(
-                backend,
+        for (key, plan) in plans {
+            let monitor_num = Self::resolve_session_monitor_num(
+                output_refs,
                 plan.monitor_num,
                 plan.connector.as_deref(),
             );
@@ -2012,7 +2034,7 @@ impl Jwm {
         // Leave fullscreen / PiP before resting placement so tag / float /
         // maximize can own the slot; modes are re-applied below after
         // stacking from the saved flags.
-        for (key, _) in &plans {
+        for (key, _) in plans {
             if self
                 .state
                 .clients
@@ -2038,7 +2060,7 @@ impl Jwm {
         // Leave maximize through the shared transaction first so resting
         // tags / float / geometry own the slot; axes are re-applied below
         // after arrange from the saved `maximize` entry.
-        for (key, _) in &plans {
+        for (key, _) in plans {
             if self
                 .state
                 .clients
@@ -2057,7 +2079,7 @@ impl Jwm {
 
         let tagmask = CONFIG.load().tagmask();
         let mut floats: Vec<(ClientKey, (i32, i32, i32, i32))> = Vec::new();
-        for (key, plan) in &plans {
+        for (key, plan) in plans {
             let restore = &plan.restore;
             let monitor_key = self.state.clients.get(*key).and_then(|client| client.mon);
             let fallback_tags = monitor_key
@@ -2115,7 +2137,7 @@ impl Jwm {
         // 全部窗口状态（tag / 浮动 / 所在显示器）恢复完成后，最后按快照
         // 重排每个显示器的平铺顺序，再统一 arrange。v1/v2 快照的
         // monitor_orders 为空，这里自然成为无操作。
-        self.restore_monitor_client_order(backend, snapshot, &matched, &matching.ambiguous);
+        self.restore_monitor_client_order(output_refs, snapshot, &matched, &matching.ambiguous);
 
         let monitor_keys: Vec<_> = self.state.monitor_order.clone();
         for mk in monitor_keys {
@@ -2127,7 +2149,7 @@ impl Jwm {
         // maximize keeps the saved restore hint. Clamp absolute restore coords
         // into the destination work area so a connector remap cannot leave
         // the hint off-screen.
-        for (key, plan) in &plans {
+        for (key, plan) in plans {
             let Some(maximize) = &plan.maximize else {
                 continue;
             };
@@ -2161,14 +2183,14 @@ impl Jwm {
         // Sticky after placement: set_client_sticky adopts the monitor's
         // current tags when turning sticky on, and mirrors the EWMH atom for
         // pagers.
-        for (key, plan) in &plans {
+        for (key, plan) in plans {
             self.set_client_sticky(backend, *key, plan.is_sticky);
         }
 
         // Above / Below: share the EWMH stacking path so restack and
         // property writes stay consistent with client requests. Above wins
         // when a snapshot somehow recorded both.
-        for (key, plan) in &plans {
+        for (key, plan) in plans {
             let want_above = plan.is_above;
             let want_below = plan.is_below && !plan.is_above;
             let (have_above, have_below) = self
@@ -2200,7 +2222,7 @@ impl Jwm {
         // own floating geometry the same way maximize does under them, and
         // minimize parks last so Dock sees the resting snapshot. Fullscreen
         // wins when a snapshot somehow recorded both (runtime mutual exclusion).
-        for (key, plan) in &plans {
+        for (key, plan) in plans {
             if plan.is_fullscreen {
                 if let Err(error) = self.setfullscreen(backend, *key, true) {
                     log::warn!(
@@ -2263,7 +2285,7 @@ impl Jwm {
         // Chrome flags that `updatesizehints` / arrange may have recomputed:
         // re-assert the snapshot's urgency / attention / skip_* / fixed /
         // border after the resting geometry pass.
-        for (key, plan) in &plans {
+        for (key, plan) in plans {
             let old_geometry = plan.old_geometry.map(|restore| {
                 let area = self
                     .state
@@ -2323,14 +2345,14 @@ impl Jwm {
     /// 优先于保存顺序——保存后浮动状态发生变化的窗口回到它当前所属的组。
     fn restore_monitor_client_order(
         &mut self,
-        backend: &dyn Backend,
+        output_refs: &[(i32, &str, &str)],
         snapshot: &SessionSnapshot,
         matched: &HashSet<ClientKey>,
         ambiguous: &HashSet<ClientKey>,
     ) {
         for saved in &snapshot.monitor_orders {
-            let monitor_num = self.resolve_session_monitor_num(
-                backend,
+            let monitor_num = Self::resolve_session_monitor_num(
+                output_refs,
                 saved.monitor_num,
                 saved.connector.as_deref(),
             );
@@ -4293,6 +4315,61 @@ mod tests {
             jwm.state.clients[key].mon,
             Some(mon_hdmi),
             "connector finds the renumbered HDMI output despite stale monitor_num"
+        );
+    }
+
+    #[test]
+    fn session_restore_enumerates_outputs_once_per_operation() {
+        use std::sync::atomic::Ordering;
+
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let left = jwm.state.monitor_order[0];
+        let right = jwm.state.monitor_order[1];
+        let mut keys = Vec::new();
+        for (index, (monitor, class)) in [(left, "First"), (right, "Second")].into_iter().enumerate()
+        {
+            let mut client = WMClient::new(WindowId::from_raw(0xa0 + index as u64));
+            client.class = class.into();
+            client.mon = Some(monitor);
+            client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            keys.push(key);
+        }
+        let mut snapshot = capture_snapshot(&jwm.state, "status-bar");
+        jwm.attach_session_connectors(&backend, &mut snapshot);
+        assert_eq!(snapshot.clients.len(), 2);
+        assert_eq!(snapshot.monitor_orders.len(), 2);
+
+        // Numeric labels change, but the output identities do not.
+        jwm.state.monitors[left].num = 1;
+        jwm.state.monitors[right].num = 0;
+        backend
+            .output_ops
+            .enumeration_count
+            .store(0, Ordering::Relaxed);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 2);
+        assert_eq!(
+            backend.output_ops.enumeration_count.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(jwm.state.clients[keys[0]].mon, Some(left));
+        assert_eq!(jwm.state.clients[keys[1]].mon, Some(right));
+
+        backend
+            .output_ops
+            .enumeration_count
+            .store(0, Ordering::Relaxed);
+        let receipt = jwm.eva_restore_frozen_snapshot(&mut backend, &snapshot);
+        assert_eq!(receipt["matched_windows"], 2);
+        assert_eq!(receipt["order_verified"], true);
+        assert_eq!(
+            backend.output_ops.enumeration_count.load(Ordering::Relaxed),
+            1
         );
     }
 
