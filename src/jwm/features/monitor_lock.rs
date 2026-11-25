@@ -331,10 +331,9 @@ impl Jwm {
         self.remote_resize_grants.retain_live(|_| false);
         self.features.monitor_lock.lock(target, rect);
 
-        // Expose and the tag overview draw the windows they were entered
-        // with and never re-plan: the expose grid would keep this monitor's
-        // windows on show across the unlocked outputs, and an overview entered
-        // here would stay on it under the shade, still holding the keyboard.
+        // Expose, the tag overview and the window switcher all take a
+        // snapshot. Drop the affected UI instead of retaining previews or
+        // window titles from the newly locked output.
         self.leave_modes_showing_locked_windows(backend);
 
         // A panel drawn on the monitor going dark would end up under the
@@ -471,6 +470,8 @@ impl Jwm {
     /// a locked one, where it would be under the shade and still swallowing
     /// every key. The same teardown `prepare_system_ui` performs.
     fn leave_modes_showing_locked_windows(&mut self, backend: &mut dyn Backend) {
+        // Unlike a monitor-local panel, the switcher includes other outputs.
+        self.cancel_window_switcher(backend);
         if self.features.overview.active
             && self
                 .features
@@ -932,6 +933,38 @@ mod tests {
             Some(1),
             "the shade still goes up"
         );
+    }
+
+    #[test]
+    fn locking_another_monitor_dismisses_the_window_switcher() {
+        use crate::jwm::features::system_ui::{ListRow, RowData, SystemUiState};
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        let selected = jwm.state.monitor_order[0];
+        jwm.state.sel_mon = Some(selected);
+        let window = 0x721;
+        let client_key = client_on(&mut jwm, window, 1);
+        jwm.features.system_ui = SystemUiState::window_switcher(
+            vec![ListRow {
+                key: window.to_string(),
+                text: "Window on the second monitor".into(),
+                data: RowData::WindowSwitcher { window, client_key },
+            }],
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(window)
+        );
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+
+        assert!(jwm.monitor_is_locked(1));
+        assert_eq!(jwm.state.sel_mon, Some(selected));
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(backend.shade_pushes.last().map(Vec::len), Some(1));
     }
 
     /// The overview's prism sits on the monitor it was entered on. Locked
