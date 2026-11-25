@@ -92,6 +92,15 @@ struct LayoutKey {
     font: String,
 }
 
+// cairo-sys-rs does not expose this Cairo 1.0 API.
+#[link(name = "cairo")]
+unsafe extern "C" {
+    fn cairo_surface_get_font_options(
+        surface: *mut cairo::ffi::cairo_surface_t,
+        options: *mut cairo::ffi::cairo_font_options_t,
+    );
+}
+
 impl LayoutKey {
     fn for_draw(cr: &cairo::Context, width: f64) -> Option<Self> {
         let target = cr.target();
@@ -100,10 +109,7 @@ impl LayoutKey {
         // SAFETY: Both live wrappers own valid Cairo objects. Cairo copies
         // the target's options to the initialized options object.
         unsafe {
-            cairo::ffi::cairo_surface_get_font_options(
-                target.to_raw_none(),
-                font_options.as_ptr(),
-            );
+            cairo_surface_get_font_options(target.to_raw_none(), font_options.as_ptr());
         }
         font_options.merge(&cr.font_options().ok()?);
         font_options.status().ok()?;
