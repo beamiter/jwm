@@ -182,11 +182,10 @@ ring buffer, with the page in `parameter`:
 | `5` | Wallpaper |
 | `6` | Theme |
 
-JWM handles it exactly like the key-bound paths, which is what makes the two
-entry points behave identically:
+Status-bar requests follow the panel keybindings' toggle and hand-over rules.
 
-- A request that names a page opens it with `Esc` returning to the Hub, the
-  same as selecting the row from the Hub itself.
+- A request that names a page opens it directly. `Esc` or a click on the
+  dimmed area closes the page.
 - A request for the page already on screen — or for Hub home while any shell
   page reached from the Hub is up — **dismisses** it, mirroring `Alt+F10` and
   the other panel keys.

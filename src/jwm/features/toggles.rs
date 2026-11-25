@@ -1477,12 +1477,12 @@ impl Jwm {
         launcher
     }
 
-    /// Swap from the shell home page to one of its native child pages while
-    /// retaining the keyboard/pointer grabs. Escape returns to the hub.
+    /// Open a shell page with the current keyboard and pointer grabs.
     pub(crate) fn open_shell_hub_route(
         &mut self,
         backend: &mut dyn Backend,
         route: crate::jwm::features::ShellHubRoute,
+        return_to_hub: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::jwm::features::ShellHubRoute;
 
@@ -1517,7 +1517,7 @@ impl Jwm {
         if route == ShellHubRoute::Theme {
             next = Self::theme_picker_state();
         }
-        self.features.system_ui_return_to_hub = true;
+        self.features.system_ui_return_to_hub = return_to_hub;
         self.features.system_ui = next;
         self.sync_system_ui(backend);
         Ok(())
@@ -1525,14 +1525,10 @@ impl Jwm {
 
     /// Open the shell from a status bar rather than from a key binding.
     ///
-    /// `None` opens the hub home page; a route opens that page directly with
-    /// Escape returning to the hub, matching what the keyboard path does. While
-    /// a panel is already up the request follows the same toggle / hand-over
-    /// rule as the panel keys: same page (or Hub home) dismisses, a different
-    /// page takes over. This is the only shell entry point that starts from an
-    /// unfocused surface, so unlike [`Self::open_shell_hub_route`] it has to
-    /// acquire the grabs first and hand them back if the requested page turns
-    /// out to be unavailable.
+    /// `None` opens the hub home page. A named route opens a standalone page
+    /// that Escape dismisses. While a panel is up, the request follows the
+    /// panel keys' toggle and hand-over rules. This entry point acquires the
+    /// grabs and releases them if the requested page is unavailable.
     pub(crate) fn open_shell_from_status_bar(
         &mut self,
         backend: &mut dyn Backend,
@@ -1597,7 +1593,7 @@ impl Jwm {
             return Ok(true);
         };
 
-        self.open_shell_hub_route(backend, route)
+        self.open_shell_hub_route(backend, route, false)
             .inspect_err(|_| {
                 // A disabled route (clipboard history switched off, say) must
                 // not leave the keyboard grabbed with nothing on screen.
