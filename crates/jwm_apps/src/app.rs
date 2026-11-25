@@ -89,6 +89,7 @@ enum PickerMode {
 struct Picker {
     mode: PickerMode,
     path: Editor,
+    exact_path: Option<(PathBuf, u64)>,
     entries: Vec<PathBuf>,
     offset: usize,
 }
@@ -934,10 +935,12 @@ impl App {
         };
         let mut picker = Picker {
             mode,
-            path: Editor::new(path.to_string_lossy().into_owned()),
+            path: Editor::default(),
+            exact_path: None,
             entries: vec![],
             offset: 0,
         };
+        picker.set_path(path);
         picker.path.select_all();
         picker.refresh();
         self.dialog = Some(Dialog::Picker(Box::new(picker)));
@@ -948,7 +951,7 @@ impl App {
         };
         let path = picker.resolve();
         if path.is_dir() {
-            picker.path = Editor::new(path.to_string_lossy().into_owned());
+            picker.set_path(path);
             picker.refresh();
             self.dialog = Some(Dialog::Picker(picker));
             return;
@@ -1078,20 +1081,15 @@ impl App {
                     } else {
                         path.parent().unwrap_or(Path::new("/")).into()
                     };
-                    p.path = Editor::new(
-                        directory
-                            .parent()
-                            .unwrap_or(Path::new("/"))
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
+                    p.set_path(directory.parent().unwrap_or(Path::new("/")).into());
                     p.refresh();
                 }
             }
             Action::Entry(path) => {
                 if let Some(Dialog::Picker(p)) = &mut self.dialog {
-                    p.path = Editor::new(path.to_string_lossy().into_owned());
-                    if path.is_dir() {
+                    let is_dir = path.is_dir();
+                    p.set_path(path);
+                    if is_dir {
                         p.refresh();
                     }
                 }
@@ -1773,7 +1771,19 @@ impl App {
     }
 }
 impl Picker {
+    fn set_path(&mut self, path: PathBuf) {
+        self.path = Editor::new(path.to_string_lossy().into_owned());
+        self.exact_path = Some((path, self.path.revision));
+    }
+
     fn resolve(&self) -> PathBuf {
+        // A row selection already has a filesystem path. Do not reopen its
+        // trimmed or lossy display label unless the user edits the field.
+        if let Some((path, revision)) = &self.exact_path
+            && self.path.revision == *revision
+        {
+            return path.clone();
+        }
         let path = self.path.text.trim();
         if path == "~" {
             gio::glib::home_dir()
@@ -1829,6 +1839,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn picker_uses_exact_selected_path_until_the_field_is_edited() {
+        let dir = std::env::temp_dir().join(format!("jwm-picker-exact-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let original = dir.join("note.txt ");
+        let other = dir.join("note.txt");
+        std::fs::write(&original, "selected").unwrap();
+        std::fs::write(&other, "typed").unwrap();
+        let mut app = App::new(true, vec![other.clone()]).unwrap();
+
+        app.action(Action::Open);
+        app.action(Action::Entry(original.clone()));
+        app.action(Action::Accept);
+        assert!(matches!(
+            app.effects.pop(),
+            Some(Effect::OpenNote(path)) if path == original
+        ));
+
+        app.action(Action::Open);
+        app.action(Action::Entry(original));
+        let Some(Dialog::Picker(picker)) = &mut app.dialog else {
+            panic!("expected file picker");
+        };
+        picker.path.select_all();
+        app.ime(other.to_string_lossy().into_owned(), true);
+        app.action(Action::Accept);
+        assert!(matches!(
+            app.effects.pop(),
+            Some(Effect::OpenNote(path)) if path == other
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn image_picker_lists_folders_first_and_sorts_numbered_names_naturally() {
         let dir = std::env::temp_dir().join(format!("jwm-picker-sort-{}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
@@ -1841,6 +1884,7 @@ mod tests {
         let mut picker = Picker {
             mode: PickerMode::Images,
             path: Editor::new(dir.to_string_lossy().into_owned()),
+            exact_path: None,
             entries: Vec::new(),
             offset: 10,
         };
@@ -1903,6 +1947,7 @@ mod tests {
         app.dialog = Some(Dialog::Picker(Box::new(Picker {
             mode: PickerMode::Images,
             path: Editor::new(String::new()),
+            exact_path: None,
             entries: vec![PathBuf::new(); 10],
             offset: 2,
         })));
