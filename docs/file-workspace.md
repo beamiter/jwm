@@ -255,14 +255,17 @@ UTF-8 files, including TSX, remain plain text. The preview does not
 execute any file and reports when only a truncated prefix is shown.
 Image previews use a separate format-specific path; audio and video are not yet supported.
 
-### Static PNG Quick Preview
+### PNG and JPEG Quick Preview
 
-Select a regular `.png` file and use the same Quick Preview action. PNG
-decoding runs off the UI thread and accepts up to 8 MiB of input, 8,388,608
+Select a regular `.png`, `.jpg` or `.jpeg` file and use the same Quick
+Preview action. Image decoding runs off the UI thread and accepts up to 8 MiB of input, 8,388,608
 pixels, and 8,192 pixels per axis. The window fits the image without
 changing the file. It rejects animated or invalid PNG data, never uses an
 external viewer and does not process embedded text or ICC profiles.
-Other image formats and icon-grid thumbnails are not included.
+JPEG uses the primary EXIF orientation tag when valid, without reading
+thumbnail directories or loading external resources. Progressive JPEGs
+are limited to 36 scans. Other image formats and icon-grid thumbnails
+are not included.
 
 ### Home Trash
 

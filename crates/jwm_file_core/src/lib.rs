@@ -25,7 +25,7 @@ pub use local::LocalProvider;
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};
 #[cfg(target_os = "linux")]
 pub use preview::{
-    PNG_PREVIEW_BYTE_LIMIT, PngPreview, PreviewError, TEXT_PREVIEW_LIMIT, TextPreview,
+    IMAGE_PREVIEW_BYTE_LIMIT, ImagePreview, PreviewError, TEXT_PREVIEW_LIMIT, TextPreview,
 };
 #[cfg(target_os = "linux")]
 pub use rename::{RenameError, RenameReceipt};
