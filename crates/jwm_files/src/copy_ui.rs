@@ -1,4 +1,4 @@
-use super::{MutationOutcome, MutationWork, Shared, SignalOnDrop};
+use super::{Browser, MutationOutcome, MutationWork, Shared, SignalOnDrop};
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
@@ -6,10 +6,10 @@ use jwm_file_core::{
     Cancellation, CopyDestination, CopyError, CopySource, DirectoryHandle, FileIdentity, FileKind,
 };
 use std::{
-    cell::RefCell,
+    cell::{OnceCell, RefCell},
     ffi::OsString,
     path::PathBuf,
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::{Arc, mpsc},
     thread,
 };
@@ -35,20 +35,7 @@ fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label
     if browser.mutation.is_some() || browser.dialog_open {
         return;
     }
-    let candidate = browser
-        .parent
-        .as_ref()
-        .filter(|_| browser.pending.is_none())
-        .zip(browser.entries.get(selected as usize))
-        .filter(|(_, entry)| entry.kind == FileKind::Regular)
-        .and_then(|(parent, entry)| {
-            Some(StashedCopy {
-                parent: parent.clone(),
-                path: browser.path().clone(),
-                name: entry.name.clone(),
-                identity: entry.identity?,
-            })
-        });
+    let candidate = copy_source(&browser, selected);
     let Some(candidate) = candidate else {
         // Refuse to leave an earlier, hidden choice armed after a failed copy.
         buffer.replace(None);
@@ -67,6 +54,76 @@ fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label
         ),
     );
     buffer.replace(Some(candidate));
+}
+
+fn copy_source(browser: &Browser, selected: u32) -> Option<StashedCopy> {
+    browser
+        .parent
+        .as_ref()
+        .filter(|_| browser.pending.is_none())
+        .zip(browser.entries.get(selected as usize))
+        .filter(|(_, entry)| entry.kind == FileKind::Regular)
+        .and_then(|(parent, entry)| {
+            Some(StashedCopy {
+                parent: parent.clone(),
+                path: browser.path().clone(),
+                name: entry.name.clone(),
+                identity: entry.identity?,
+            })
+        })
+}
+
+#[derive(Clone, glib::Boxed)]
+#[boxed_type(name = "JwmFilesLocalDragCopy")]
+struct DragCopy(StashedCopy);
+
+#[derive(Clone, Default)]
+pub(super) struct RowDrags(Rc<OnceCell<Weak<RefCell<Browser>>>>);
+
+impl RowDrags {
+    pub(super) fn bind_browser(&self, state: &Shared) {
+        let _ = self.0.set(Rc::downgrade(state));
+    }
+
+    /// Resolve the row under the drag gesture, not whichever row happens to be selected.
+    /// Read ListItem.position at gesture time because GTK reuses these widgets.
+    pub(super) fn attach(&self, item: &gtk::ListItem, widget: &impl IsA<gtk::Widget>) {
+        let source = gtk::DragSource::builder()
+            .actions(gtk::gdk::DragAction::COPY)
+            .build();
+        let (link, item) = (self.clone(), item.downgrade());
+        source.connect_prepare(move |_, _, _| {
+            let item = item.upgrade()?;
+            let state = link.0.get()?.upgrade()?;
+            let browser = state.try_borrow().ok()?;
+            if browser.dialog_open || browser.mutation.is_some() || item.item().is_none() {
+                return None;
+            }
+            let file = copy_source(&browser, item.position())?;
+            Some(gtk::gdk::ContentProvider::for_value(
+                &DragCopy(file).to_value(),
+            ))
+        });
+        widget.add_controller(source);
+    }
+}
+
+pub(super) fn install_drop_zone(zone: &gtk::Label, state: &Shared, status: &gtk::Label) {
+    let target = gtk::DropTarget::new(DragCopy::static_type(), gtk::gdk::DragAction::COPY);
+    target.connect_accept(|_, drop| {
+        drop.drag().is_some()
+            && drop.actions().contains(gtk::gdk::DragAction::COPY)
+            && drop.formats().contains_type(DragCopy::static_type())
+    });
+    let (state, status) = (state.clone(), status.clone());
+    target.connect_drop(move |_, data, _, _| {
+        if let Ok(DragCopy(source)) = data.get::<DragCopy>() {
+            queue_copy(&state, source, &status)
+        } else {
+            false
+        }
+    });
+    zone.add_controller(target);
 }
 
 fn copy_error_message(error: CopyError) -> String {
@@ -93,22 +150,26 @@ fn copy_error_message(error: CopyError) -> String {
 }
 
 fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label) {
-    let mut browser = state.borrow_mut();
-    if browser.mutation.is_some() || browser.dialog_open {
-        notice(status, "有文件操作正在进行，请稍候。");
-        return;
-    }
     let Some(source) = buffer.borrow().clone() else {
         notice(status, "请先选择要复制的普通文件。");
         return;
     };
+    queue_copy(state, source, status);
+}
+
+fn queue_copy(state: &Shared, source: StashedCopy, status: &gtk::Label) -> bool {
+    let mut browser = state.borrow_mut();
+    if browser.mutation.is_some() || browser.dialog_open {
+        notice(status, "有文件操作正在进行，请稍候。");
+        return false;
+    }
     let Some(parent) = browser.parent.clone().filter(|_| browser.pending.is_none()) else {
         notice(status, "请先打开目标目录。");
-        return;
+        return false;
     };
     if parent.identity() == source.parent.identity() {
         notice(status, "请选择不同的目标目录。同名项目不会被覆盖。");
-        return;
+        return false;
     }
     let path = browser.path().clone();
     let (target, target_path) = (parent.clone(), path.clone());
@@ -157,8 +218,12 @@ fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label) {
                 copy: Some((cancellation, label.clone())),
             });
             notice(status, &format!("正在复制：{label}"));
+            true
         }
-        Err(error) => notice(status, &format!("无法启动复制：{error}")),
+        Err(error) => {
+            notice(status, &format!("无法启动复制：{error}"));
+            false
+        }
     }
 }
 

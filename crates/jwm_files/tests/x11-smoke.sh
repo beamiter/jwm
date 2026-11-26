@@ -319,3 +319,42 @@ xdotool key --clearmodifiers ctrl+w
 # A later navigation proves the last tab is still interactive.
 visit_path tab-branch-b
 printf 'GTK4 X11 tabs: real shortcuts kept both histories and left the final tab open\n'
+
+# Real pointer drag between two native windows in the same process.
+mkdir -p "$root/drag-source" "$root/drag-target"
+drag_name=$'drag exact%\x80.txt'
+printf 'native drag bytes\n' > "$root/drag-source/$drag_name"
+visit_path drag-source
+xdotool key --clearmodifiers ctrl+1 ctrl+n
+drag_window=
+for attempt in {1..40}; do
+  drag_window=$(xdotool search --onlyvisible --name '^JWM Files · .*/drag-source$' |
+    awk -v source="$window" '$1 != source {print; exit}') || true
+  [[ -z "$drag_window" ]] || break
+  sleep 0.1
+done
+[[ -n "$drag_window" && "$drag_window" != "$window" ]]
+xdotool windowfocus --sync "$drag_window"
+xdotool key --clearmodifiers ctrl+l
+xdotool type --clearmodifiers "$root/drag-target"
+xdotool key Return
+[[ $(title_id '^JWM Files · .*/drag-target$') == "$drag_window" ]]
+xdotool windowmove "$window" 0 0
+xdotool windowmove "$drag_window" 480 90
+xdotool windowraise "$drag_window"
+drag_height=$(xdotool getwindowgeometry --shell "$drag_window" | awk -F= '$1 == "HEIGHT" {print $2}')
+[[ "$drag_height" =~ ^[0-9]+$ && "$drag_height" -gt 100 ]]
+sleep 0.3
+xdotool mousemove --window "$window" 350 72 mousedown 1
+xdotool mousemove --window "$window" 395 79
+sleep 0.2
+xdotool mousemove --window "$drag_window" 295 "$((drag_height - 14))"
+sleep 0.45
+xdotool mouseup 1
+for attempt in {1..50}; do
+  [[ ! -f "$root/drag-target/$drag_name" ]] || break
+  sleep 0.1
+done
+cmp "$root/drag-source/$drag_name" "$root/drag-target/$drag_name"
+[[ $(find "$root/drag-target" -mindepth 1 -maxdepth 1 -type f | wc -l) == 1 ]]
+printf 'GTK4 X11 drag: real pointer drop copied exact native bytes between windows\n'
