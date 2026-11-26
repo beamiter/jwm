@@ -5,6 +5,7 @@ mod comparison;
 mod copy_ui;
 mod file_manager_bus;
 mod find_in_folder;
+mod folder_terminal_handoff;
 mod grid;
 mod native_path;
 mod navigation;
@@ -850,6 +851,8 @@ fn open_window_with_tabs(
     app.set_accels_for_action("win.comparison-pane", &["F3"]);
     preview_ui::install(&window, &state, &selection, &status);
     properties_ui::install(&window, &state, &selection, &status);
+    folder_terminal_handoff::install(&window, &state, &status);
+    app.set_accels_for_action("win.folder-terminal", &["<Control><Shift>Return"]);
     session_ui::install(app, &window, &state, &status, home, special, copy_buffer);
     trash_ui::install(&window);
     copy_ui::install(
@@ -1532,6 +1535,9 @@ fn launch_directory(
 }
 
 fn main() -> glib::ExitCode {
+    if let Some(code) = folder_terminal_handoff::run_if_child() {
+        return code;
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
