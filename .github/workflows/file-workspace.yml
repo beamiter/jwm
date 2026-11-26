@@ -74,6 +74,16 @@ jobs:
             cargo test --locked native_tree_reads_independent_branches_and_activates_exact_paths -- --ignored --nocapture
           GDK_BACKEND=x11 GSK_RENDERER=cairo xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp -noreset' \
             cargo test --locked native_breadcrumb_clicks_use_exact_visible_and_overflow_paths -- --ignored --nocapture
+      - name: Install the private OpenDirectory portal test dependencies
+        run: bash scripts/ci-install-deps.sh xdg-desktop-portal xdg-desktop-portal-gtk desktop-file-utils
+      - name: Drive the real OpenDirectory portal with Unix file descriptors
+        working-directory: crates/jwm_files
+        timeout-minutes: 3
+        run: |
+          broker=$(dpkg -L xdg-desktop-portal | grep -E '/(libexec|lib/xdg-desktop-portal)/xdg-desktop-portal$')
+          test -x "$broker"
+          xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp -noreset' \
+            bash tests/portal-smoke.sh "$PWD/target/debug/jwm-files" "$broker"
       - name: Install the headless Wayland reference compositor
         run: bash scripts/ci-install-deps.sh weston
       - name: Verify native Wayland mapping and navigation
