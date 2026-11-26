@@ -57,6 +57,7 @@ enum Action {
     Accept,
     Parent,
     PickerList,
+    PickerPath,
     Entry(PathBuf),
     Discard,
     SaveClose,
@@ -777,11 +778,13 @@ impl App {
                     16.,
                     ui::text_color(),
                 );
-                ui::rounded(
-                    cr,
-                    Rect::new(r.x + 20., r.y + 56., r.w - 40., 38.),
-                    ui::canvas(),
-                );
+                let field = Rect::new(r.x + 20., r.y + 56., r.w - 40., 38.);
+                ui::rounded(cr, field, ui::canvas());
+                self.hits.push(Hit {
+                    rect: field,
+                    action: Action::PickerPath,
+                    label: String::new(),
+                });
                 picker.path.draw(
                     cr,
                     Rect::new(r.x + 30., r.y + 64., r.w - 60., 24.),
@@ -1270,6 +1273,13 @@ impl App {
             .find(|h| h.rect.contains(x, y))
             .map(|h| h.action.clone())
         {
+            if action == Action::PickerPath {
+                if let Some(Dialog::Picker(picker)) = &mut self.dialog {
+                    self.dialog_focus = None;
+                    picker.path.click(x, y, mods.shift_key());
+                }
+                return false;
+            }
             let edit = matches!(action, Action::Edit | Action::Search | Action::FindField);
             self.action(action);
             if edit {
@@ -1279,10 +1289,6 @@ impl App {
             return false;
         }
         if self.dialog.is_some() {
-            if let Some(Dialog::Picker(p)) = &mut self.dialog {
-                self.dialog_focus = None;
-                p.path.click(x, y, mods.shift_key());
-            }
             return false;
         }
         if self.body().contains(x, y) && matches!(self.document, Document::Image(_)) {
@@ -1949,6 +1955,34 @@ mod tests {
         assert_eq!((picker.selected, picker.offset), (Some(1), 1));
         picker.reveal(12, 9);
         assert_eq!((picker.selected, picker.offset), (Some(11), 3));
+    }
+
+    #[test]
+    fn picker_only_returns_keyboard_focus_on_a_path_field_click() {
+        let mut app = App::new(false, Vec::new()).unwrap();
+        app.action(Action::Open);
+        app.dialog_focus = Some(1);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 900, 600).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 900., 600., false);
+        assert_eq!(app.ime_target(), 0);
+
+        app.motion(8., 8.);
+        assert!(!app.press(ModifiersState::empty()));
+        assert_eq!(app.dialog_focus, Some(1));
+        assert_eq!(app.ime_target(), 0);
+
+        let field = app
+            .hits
+            .iter()
+            .find(|hit| hit.action == Action::PickerPath)
+            .unwrap()
+            .rect;
+        app.motion(field.x + field.w / 2., field.y + field.h / 2.);
+        assert!(!app.press(ModifiersState::empty()));
+        assert_eq!(app.dialog_focus, None);
+        assert_eq!(app.ime_target(), 3);
+        assert!(app.effects.is_empty());
     }
 
     #[test]
