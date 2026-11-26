@@ -1655,6 +1655,19 @@ mod wayland_acceptance {
         }
     }
 
+    fn text_clipboard(display: &gtk::gdk::Display) -> String {
+        let received = Rc::new(RefCell::new(None));
+        let out = received.clone();
+        let clipboard = display.clipboard();
+        clipboard.read_text_async(None::<&gio::Cancellable>, move |result| {
+            out.replace(Some(result));
+        });
+        until(|| received.borrow().is_some(), "native text clipboard");
+        let result = received.take().expect("clipboard callback");
+        let text = result.expect("read published clipboard text");
+        text.expect("nonempty clipboard contents").to_string()
+    }
+
     fn first_label(model: &row_model::FileRowModel) -> Option<String> {
         model
             .item(0)
@@ -1682,20 +1695,16 @@ mod wayland_acceptance {
         app.register(None::<&gio::Cancellable>).unwrap();
         open_window(&app, &start, &root, &[], &copy_ui::CopyBuffer::default());
         let window = app.active_window().unwrap();
-        let (source_selection, main_model) = descendants(window.upcast_ref())
+        let (source_list, source_selection, main_model) = descendants(window.upcast_ref())
             .into_iter()
             .find_map(|widget| {
-                let selection = widget
-                    .downcast::<gtk::ListView>()
-                    .ok()?
-                    .model()?
-                    .downcast::<gtk::SingleSelection>()
-                    .ok()?;
+                let list = widget.downcast::<gtk::ListView>().ok()?;
+                let selection = list.model()?.downcast::<gtk::SingleSelection>().ok()?;
                 let model = selection
                     .model()?
                     .downcast::<row_model::FileRowModel>()
                     .ok()?;
-                Some((selection, model))
+                Some((list, selection, model))
             })
             .expect("file-pane selection, not the sidebar tree");
         let first_title = format!("JWM Files · {}", start.display());
@@ -1717,6 +1726,13 @@ mod wayland_acceptance {
             }
         });
         until(|| drew.get(), "native frame clock");
+        assert!(source_list.grab_focus());
+        assert!(!comparison::has_focus(&window));
+        source_selection.set_selected(0);
+        gtk::prelude::WidgetExt::activate_action(&window, "win.copy-item-path", None).unwrap();
+        let original_path = start.join("before.txt");
+        assert_eq!(text_clipboard(&display), original_path.to_str().unwrap());
+        source_selection.set_selected(gtk::INVALID_LIST_POSITION);
 
         let mounts = descendants(window.upcast_ref())
             .into_iter()
@@ -1900,6 +1916,7 @@ mod wayland_acceptance {
         assert_ne!(main_model, sibling_model);
         source_selection.set_selected(0);
         gtk::prelude::WidgetExt::activate_action(&window, "win.copy-file", None).unwrap();
+        assert_eq!(text_clipboard(&display), original_path.to_str().unwrap());
         let label_text = |root: &gtk::Window| {
             descendants(root.upcast_ref())
                 .into_iter()
@@ -2668,6 +2685,18 @@ mod wayland_acceptance {
                 .name
                 .starts_with("z wanted%")
         );
+        assert!(reveal_list.grab_focus());
+        assert!(!comparison::has_focus(&reveal_window));
+        assert_eq!(reveal_selection.selected(), 150);
+        gtk::prelude::WidgetExt::activate_action(&reveal_window, "win.copy-item-path", None)
+            .unwrap();
+        let clipboard = text_clipboard(&display);
+        assert!(clipboard.contains("%80"));
+        assert_eq!(
+            gio::File::for_uri(&clipboard).path().unwrap(),
+            reveal_source.join(reveal_name)
+        );
+        println!("GTK4 Wayland clipboard: raw filename bytes round-tripped through a file URI");
         reveal_window.close();
         println!("GTK4 Wayland reveal: exact native item selected and scrolled into view");
         let dangling = root.join(std::ffi::OsStr::from_bytes(b"properties-%\x80"));

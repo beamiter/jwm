@@ -8,7 +8,7 @@ use jwm_file_core::{
 use std::{
     cell::RefCell,
     ffi::OsString,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, mpsc},
     thread,
@@ -67,6 +67,49 @@ fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label
         ),
     );
     buffer.replace(Some(candidate));
+}
+
+fn text_path(path: &Path) -> (String, bool) {
+    if let Some(text) = path.to_str()
+        && !text.chars().any(char::is_control)
+    {
+        return (text.into(), false);
+    }
+    // The text clipboard cannot represent arbitrary filesystem bytes.
+    // A local URI is single-line and round-trips the exact original path.
+    (gio::File::for_path(path).uri().to_string(), true)
+}
+
+fn copy_path(window: &gtk::ApplicationWindow, state: &Shared, selected: u32, status: &gtk::Label) {
+    if crate::comparison::has_focus(window) {
+        return;
+    }
+    let path = {
+        let browser = state.borrow();
+        if browser.pending.is_some() || browser.dialog_open || browser.parent.is_none() {
+            return;
+        }
+        browser
+            .entries
+            .get(selected as usize)
+            .map(|entry| browser.path().join(&entry.name))
+    };
+    let Some(path) = path else {
+        notice(status, "请选择要复制路径的项目。");
+        return;
+    };
+    let (text, uri) = text_path(&path);
+    gtk::prelude::WidgetExt::display(window)
+        .clipboard()
+        .set_text(&text);
+    notice(
+        status,
+        if uri {
+            "已复制文件 URI，保留完整路径。"
+        } else {
+            "已复制完整路径。"
+        },
+    );
 }
 
 fn copy_error_message(error: CopyError) -> String {
@@ -201,6 +244,7 @@ pub(super) fn install(
     menu.append(Some("撤销重命名（Ctrl+Z）"), Some("win.undo-rename"));
     for (name, label) in [
         ("copy-file", "复制选中文件（Ctrl+C）"),
+        ("copy-item-path", "复制完整路径（Ctrl+Shift+C）"),
         ("paste-file", "粘贴到当前目录（Ctrl+V）"),
         ("cancel-file-copy", "取消正在进行的复制"),
     ] {
@@ -211,8 +255,14 @@ pub(super) fn install(
             selection.clone(),
             status.clone(),
         );
+        let weak_window = window.downgrade();
         action.connect_activate(move |action, _| match action.name().as_str() {
             "copy-file" => stash(&state, &buffer, selection.selected(), &status),
+            "copy-item-path" => {
+                if let Some(window) = weak_window.upgrade() {
+                    copy_path(&window, &state, selection.selected(), &status);
+                }
+            }
             "paste-file" => paste(&state, &buffer, &status),
             _ => {
                 if let Some((cancel, _)) = state
@@ -237,16 +287,16 @@ pub(super) fn install(
     keys.connect_key_pressed(move |_, key, _, modifiers| {
         use gtk::gdk::{Key, ModifierType};
         if !modifiers.contains(ModifierType::CONTROL_MASK)
-            || modifiers.intersects(
-                ModifierType::ALT_MASK | ModifierType::SUPER_MASK | ModifierType::SHIFT_MASK,
-            )
+            || modifiers.intersects(ModifierType::ALT_MASK | ModifierType::SUPER_MASK)
         {
             return glib::Propagation::Proceed;
         }
-        let action = match key {
-            Key::c => "win.copy-file",
-            Key::v => "win.paste-file",
-            Key::z => "win.undo-rename",
+        let shifted = modifiers.contains(ModifierType::SHIFT_MASK);
+        let action = match (key, shifted) {
+            (Key::c | Key::C, true) => "win.copy-item-path",
+            (Key::c, false) => "win.copy-file",
+            (Key::v, false) => "win.paste-file",
+            (Key::z, false) => "win.undo-rename",
             _ => return glib::Propagation::Proceed,
         };
         let Some(window) = weak_window.upgrade() else {
@@ -275,6 +325,19 @@ pub(super) fn install(
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn copied_text_is_literal_or_round_trips_raw_bytes_without_a_newline() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let ordinary = Path::new("/tmp/a folder % 你好");
+        let expected = (ordinary.to_str().unwrap().into(), false);
+        assert_eq!(text_path(ordinary), expected);
+        let raw = Path::new(OsStr::from_bytes(b"/tmp/path%\n\x80"));
+        let (text, uri) = text_path(raw);
+        assert!(uri && text.starts_with("file:///") && !text.contains('\n'));
+        assert_eq!(gio::File::for_uri(&text).path().as_deref(), Some(raw));
+    }
 
     #[test]
     fn copy_errors_distinguish_unsupported_storage_permissions_and_cancellation() {
