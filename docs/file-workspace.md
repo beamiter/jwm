@@ -53,8 +53,7 @@ The sidebar and path entry navigate local directories. Ctrl+L focuses the
 address field; the refresh and hidden-items controls rescan. GTK virtualizes
 row widgets, and the model is populated in bounded batches. A single scan
 worker cancels and replaces obsolete requests, and does not publish stale
-results even if the old provider call ignores cancellation. File activation
-currently shows a path; opening documents remains a follow-on.
+results even if the old provider call ignores cancellation. See the document activation section below.
 
 
 ### New Folder
@@ -72,3 +71,12 @@ The Back and Forward toolbar controls and Alt+Left/Alt+Right revisit
 successfully loaded directories. Failed or cancelled loads leave the current
 directory and history intact, and refresh preserves the forward branch.
 History is in memory and bounded to 128 entries.
+
+### Open a local document
+
+Double-click or press Enter on a selected row. Directory links are resolved
+asynchronously and open in the current browser. An ordinary document goes
+to the existing system MIME handler, using a URI constructed from its exact
+native path rather than the visible label. Broken links report an error;
+special files and desktop launchers are not run. The app does not change MIME
+associations. Moving to another directory cancels an unresolved activation.

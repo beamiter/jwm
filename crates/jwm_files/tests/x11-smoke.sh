@@ -16,6 +16,33 @@ trap cleanup EXIT
 mkdir -p "$root/start" "$root/next"
 printf 'test note\n' > "$root/next/test.txt"
 
+export XDG_DATA_HOME="$root/xdg-data" XDG_CONFIG_HOME="$root/xdg-config"
+mkdir -p "$XDG_DATA_HOME/applications" "$XDG_CONFIG_HOME"
+mkdir -p "$root/open-doc" "$root/open-link" "$root/open-broken" "$root/link-target"
+printf 'original\n' > "$root/open-doc/"$'report space%\x80.txt'
+printf 'lookalike\n' > "$root/open-doc/"$'report space%\xef\xbf\xbd.txt'
+ln -s ../link-target "$root/open-link/linked"
+ln -s ../missing "$root/open-broken/broken"
+cat > "$root/record.py" <<'PYTHON'
+import os
+import sys
+with open(os.path.join(os.path.dirname(__file__), "launch.receipt"), "ab") as out:
+    out.write(os.fsencode(sys.argv[1]) + b"\n")
+PYTHON
+cat > "$XDG_DATA_HOME/applications/org.jwm.TestOpen.desktop" <<DESKTOP
+[Desktop Entry]
+Name=JWM Files private test handler
+Type=Application
+Exec=/usr/bin/python3 $root/record.py %f
+MimeType=text/plain;
+NoDisplay=true
+DESKTOP
+cat > "$XDG_CONFIG_HOME/mimeapps.list" <<'DESKTOP'
+[Default Applications]
+text/plain=org.jwm.TestOpen.desktop;
+DESKTOP
+
+
 title_id() {
   timeout 15s xdotool search --sync --onlyvisible --name "$1" | sed -n '1p'
 }
@@ -62,3 +89,38 @@ xdotool key --clearmodifiers alt+Right
 forward=$(title_id '^JWM Files · .*/next$')
 [[ "$forward" == "$window" ]]
 printf 'GTK4 X11 smoke: Back and Forward revisited both directories in the same window\n'
+
+visit_path() {
+  xdotool windowfocus --sync "$window"
+  xdotool key --clearmodifiers ctrl+l
+  xdotool type --clearmodifiers "$root/$1"
+  xdotool key Return
+  [[ $(title_id "^JWM Files · .*/$1\$") == "$window" ]]
+}
+activate_first_row() {
+  # The view is populated in batches after the new title is set.
+  sleep 0.2
+  xdotool mousemove --window "$window" 350 72 click --repeat 2 --delay 85 1
+}
+
+visit_path open-doc
+activate_first_row
+for attempt in {1..50}; do
+  [[ ! -s "$root/launch.receipt" ]] || break
+  sleep 0.1
+done
+sleep 0.2
+printf '%s\n' "$root/open-doc/"$'report space%\x80.txt' > "$root/expected.receipt"
+cmp "$root/expected.receipt" "$root/launch.receipt"
+printf 'GTK4 X11 smoke: the MIME handler received the exact non-UTF-8 path once\n'
+
+visit_path open-link
+activate_first_row
+[[ $(title_id '^JWM Files · .*/open-link/linked$') == "$window" ]]
+
+visit_path open-broken
+activate_first_row
+sleep 0.3
+[[ $(xdotool getwindowname "$window") == "JWM Files · $root/open-broken" ]]
+cmp "$root/expected.receipt" "$root/launch.receipt"
+printf 'GTK4 X11 smoke: directory links stayed in the browser and broken links did not launch\n'

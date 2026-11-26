@@ -1,7 +1,7 @@
 mod navigation;
 
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gio, glib};
 use gtk4 as gtk;
 use jwm_file_core::{DirectoryHandle, MakeDirectoryError};
 use jwm_file_core::{
@@ -29,6 +29,7 @@ struct Browser {
     visible_count: usize,
     parent: Option<Arc<DirectoryHandle>>,
     mkdir: Option<FolderOperation>,
+    activation: Option<Activation>,
 }
 
 impl Browser {
@@ -47,6 +48,132 @@ impl Browser {
 }
 
 type Shared = Rc<RefCell<Browser>>;
+
+struct Activation {
+    path: PathBuf,
+    cancel: gio::Cancellable,
+}
+
+fn current_activation(state: &Shared, cancel: &gio::Cancellable) -> bool {
+    state
+        .borrow()
+        .activation
+        .as_ref()
+        .is_some_and(|active| &active.cancel == cancel && !cancel.is_cancelled())
+}
+
+fn finish_activation(state: &Shared, cancel: &gio::Cancellable) -> bool {
+    if !current_activation(state, cancel) {
+        return false;
+    }
+    state.borrow_mut().activation = None;
+    true
+}
+
+fn safe_document(path: &Path, content_type: Option<&str>, can_execute: bool) -> bool {
+    let launcher_name = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("desktop"));
+    !launcher_name
+        && content_type.is_some_and(|kind| {
+            !(kind == "application/x-desktop"
+                || gio::content_type_is_unknown(kind)
+                || gio::content_type_is_a(kind, "application/x-executable")
+                || can_execute && gio::content_type_can_be_executable(kind))
+        })
+}
+
+fn activate_entry(
+    state: &Shared,
+    path: PathBuf,
+    listed_kind: FileKind,
+    address: &gtk::Entry,
+    status: &gtk::Label,
+) {
+    let cancel = {
+        let mut browser = state.borrow_mut();
+        if browser.pending.is_some()
+            || browser
+                .activation
+                .as_ref()
+                .is_some_and(|active| active.path == path)
+        {
+            return;
+        }
+        if let Some(previous) = browser.activation.take() {
+            previous.cancel.cancel();
+        }
+        let cancel = gio::Cancellable::new();
+        browser.activation = Some(Activation {
+            path: path.clone(),
+            cancel: cancel.clone(),
+        });
+        cancel
+    };
+
+    status.set_text("正在检查所选项目…");
+    let file = gio::File::for_path(&path);
+    let (state, address, status) = (state.clone(), address.clone(), status.clone());
+    let callback_cancel = cancel.clone();
+    let uri = file.uri();
+    file.query_info_async(
+        "standard::type,standard::content-type,access::can-execute",
+        gio::FileQueryInfoFlags::NONE,
+        glib::Priority::DEFAULT,
+        Some(&cancel),
+        move |result| {
+            let cancel = callback_cancel;
+            if !current_activation(&state, &cancel) {
+                return;
+            }
+            let info = match result {
+                Ok(info) => info,
+                Err(error) => {
+                    finish_activation(&state, &cancel);
+                    status.set_text(&format!("无法打开所选项目：{error}"));
+                    return;
+                }
+            };
+            match info.file_type() {
+                gio::FileType::Directory
+                    if matches!(listed_kind, FileKind::Directory | FileKind::Symlink) =>
+                {
+                    finish_activation(&state, &cancel);
+                    start_scan(&state, path, &address, &status);
+                }
+                gio::FileType::Regular
+                    if matches!(listed_kind, FileKind::Regular | FileKind::Symlink)
+                        && safe_document(
+                            &path,
+                            info.content_type().as_deref(),
+                            info.boolean("access::can-execute"),
+                        ) =>
+                {
+                    let done_token = cancel.clone();
+                    gio::AppInfo::launch_default_for_uri_async(
+                        &uri,
+                        None::<&gio::AppLaunchContext>,
+                        Some(&cancel),
+                        move |result| {
+                            if finish_activation(&state, &done_token) {
+                                match result {
+                                    Ok(()) => status.set_text("已交给系统应用打开"),
+                                    Err(error) => {
+                                        status.set_text(&format!("无法打开文件：{error}"))
+                                    }
+                                }
+                            }
+                        },
+                    );
+                }
+                _ => {
+                    finish_activation(&state, &cancel);
+                    status.set_text("该项目不是可打开的文档或目录。");
+                }
+            }
+        },
+    );
+}
 
 struct FolderOperation {
     parent: Arc<DirectoryHandle>,
@@ -148,6 +275,9 @@ fn request_scan(state: &Shared, target: Destination, address: &gtk::Entry, statu
                 show_hidden: browser.show_hidden,
             },
         );
+        if let Some(activation) = browser.activation.take() {
+            activation.cancel.cancel();
+        }
         browser.pending = Some((id, target));
     }
     address.set_text(&path.to_string_lossy());
@@ -283,6 +413,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         visible_count: 0,
         parent: None,
         mkdir: None,
+        activation: None,
     }));
     {
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
@@ -359,11 +490,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
                     .map(|e| (e.kind, e.location.clone()))
             };
             if let Some((kind, Location::Local(path))) = row {
-                if kind == FileKind::Directory {
-                    start_scan(&state, path, &address, &status);
-                } else {
-                    status.set_text(&path.to_string_lossy());
-                }
+                activate_entry(&state, path, kind, &address, &status);
             }
         });
     }
@@ -415,6 +542,15 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     new_folder.set_action_name(Some("win.new-folder"));
     app.set_accels_for_action("win.new-folder", &["<Control><Shift>n"]);
 
+    {
+        let state = state.clone();
+        window.connect_close_request(move |_| {
+            if let Some(active) = state.borrow_mut().activation.take() {
+                active.cancel.cancel();
+            }
+            glib::Propagation::Proceed
+        });
+    }
     start_scan(&state, initial.into(), &address, &status);
     let weak_window = window.downgrade();
     glib::timeout_add_local(Duration::from_millis(16), move || {
@@ -526,4 +662,53 @@ fn main() -> glib::ExitCode {
         .build();
     app.connect_activate(move |app| open_window(app, &initial, &home));
     app.run_with_args(&["jwm-files"])
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::*;
+
+    #[test]
+    fn permits_ordinary_text_but_not_launchers_or_executables() {
+        assert!(safe_document(
+            Path::new("report.txt"),
+            Some("text/plain"),
+            false
+        ));
+        assert!(!safe_document(
+            Path::new("report.txt"),
+            Some("text/plain"),
+            true
+        ));
+        assert!(!safe_document(
+            Path::new("test.DESKTOP"),
+            Some("text/plain"),
+            false
+        ));
+        assert!(!safe_document(
+            Path::new("alias"),
+            Some("application/x-desktop"),
+            false
+        ));
+        assert!(!safe_document(
+            Path::new("program"),
+            Some("application/x-executable"),
+            false
+        ));
+        assert!(!safe_document(Path::new("unknown"), None, false));
+    }
+
+    #[test]
+    fn gio_uri_round_trips_exact_native_path_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let original = PathBuf::from(OsString::from_vec(b"/tmp/test space%\xff.txt".to_vec()));
+        let uri = gio::File::for_path(&original).uri();
+        assert!(uri.contains("%20") && uri.contains("%25") && uri.contains("%FF"));
+        assert_eq!(
+            gio::File::for_uri(&uri).path().as_deref(),
+            Some(original.as_path())
+        );
+    }
 }
