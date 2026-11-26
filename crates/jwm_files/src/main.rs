@@ -726,7 +726,14 @@ fn open_window(
         reload_due: None,
         dialog_open: false,
     }));
-    comparison::install(&window, &comparison_split, &state, &status);
+    comparison::install(
+        &window,
+        &comparison_split,
+        &state,
+        &status,
+        copy_buffer,
+        &copy_status,
+    );
     app.set_accels_for_action("win.comparison-pane", &["F3"]);
     preview_ui::install(&window, &state, &selection, &status);
     trash_ui::install(&window);
@@ -1544,6 +1551,71 @@ mod wayland_acceptance {
             }),
             "F2 must not target the left selection when the right pane has focus"
         );
+        gtk::prelude::WidgetExt::activate_action(&window, "win.copy-file", None).unwrap();
+        let paste_right = button("粘贴副本到此");
+        let destination = next.join("before.txt");
+        fs::write(&destination, b"right conflict").unwrap();
+        until(
+            || right_model.n_items() == 2 && paste_right.is_sensitive(),
+            "right watcher saw conflict",
+        );
+        paste_right.emit_clicked();
+        let copy_noticed = |needle: &str| {
+            descendants(window.upcast_ref()).iter().any(|widget| {
+                widget
+                    .downcast_ref::<gtk::Label>()
+                    .is_some_and(|label| label.text().contains(needle))
+            })
+        };
+        until(
+            || copy_noticed("目标已有同名项目，未覆盖"),
+            "right copy reports conflict",
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"right conflict");
+        fs::remove_file(&destination).unwrap();
+        until(
+            || right_model.n_items() == 1 && paste_right.is_sensitive(),
+            "right watcher saw clearance",
+        );
+        paste_right.emit_clicked();
+        until(
+            || {
+                fs::read(&destination).is_ok_and(|bytes| bytes == b"old")
+                    && right_model.n_items() == 2
+                    && copy_noticed("已复制：")
+            },
+            "explicit right copy committed and refreshed only the destination",
+        );
+        assert_eq!(fs::read(start.join("before.txt")).unwrap(), b"old");
+        assert_eq!(first_label(&main_model).as_deref(), Some("before.txt"));
+        fs::remove_file(&destination).unwrap();
+        until(
+            || right_model.n_items() == 1 && paste_right.is_sensitive(),
+            "right fixture cleanup",
+        );
+        println!(
+            "GTK4 Wayland comparison: explicit right-pane copy refused overwrite and refreshed exact bytes"
+        );
+        let moved_directory = root.join("moved-right");
+        fs::rename(&next, &moved_directory).unwrap();
+        fs::create_dir(&next).unwrap();
+        fs::write(next.join("sentinel.txt"), b"new directory").unwrap();
+        until(
+            || !paste_right.is_sensitive() && copy_noticed("对照目录已变化，请刷新后再粘贴"),
+            "replaced right directory disables paste until refresh",
+        );
+        paste_right.emit_clicked();
+        assert!(!next.join("before.txt").exists());
+        assert!(!moved_directory.join("before.txt").exists());
+        fs::remove_file(next.join("sentinel.txt")).unwrap();
+        fs::remove_dir(&next).unwrap();
+        fs::rename(&moved_directory, &next).unwrap();
+        button("刷新").emit_clicked();
+        until(
+            || paste_right.is_sensitive(),
+            "right destination deliberately refreshed",
+        );
+        println!("GTK4 Wayland comparison: replaced right directory required an explicit refresh");
         button("后退").emit_clicked();
         until(
             || right_model.n_items() == 2,

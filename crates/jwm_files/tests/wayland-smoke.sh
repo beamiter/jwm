@@ -40,6 +40,8 @@ grep -F 'GTK4 Wayland smoke: native window mapped and navigation replaced the li
 grep -Eq 'xdg_surface[@#][0-9]+\.configure\(' "$client_log"
 grep -Eq 'wl_surface[@#][0-9]+\.attach\(wl_buffer' "$client_log"
 printf 'GTK4 Wayland smoke: compositor configured a native surface and the client attached a buffer\n'
+grep -F 'GTK4 Wayland comparison: explicit right-pane copy refused overwrite and refreshed exact bytes' "$client_log"
+grep -F 'GTK4 Wayland comparison: replaced right directory required an explicit refresh' "$client_log"
 grep -F 'GTK4 Wayland comparison: independent navigation and read-only shortcut focus verified' "$client_log"
 grep -F 'GTK4 Wayland windows: cross-window copy preserved conflicts and published exact bytes' "$client_log"
 grep -F 'GTK4 Wayland windows: secondary navigation left the original browser unchanged' "$client_log"

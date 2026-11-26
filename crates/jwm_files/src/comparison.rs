@@ -1,6 +1,7 @@
-//! An independent, read-only local directory view. It does not route file
-//! operations to the main view or share the main view's navigation history.
+//! An independent local comparison view with an explicit copy destination.
+//! It does not share the main view's navigation history.
 use crate::{
+    copy_ui::{CopyBuffer, paste_into},
     navigation::{Destination, Navigation},
     row_model::{FileRowModel, RowPresentation},
     wake::Wake,
@@ -9,9 +10,10 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
-    FileEntry, FileKind, ListOptions, LocalProvider, Location, ScanId, ScanWorker,
+    DirectoryChange, DirectoryHandle, FileEntry, FileKind, ListOptions, LocalProvider, Location,
+    ScanId, ScanWorker,
 };
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
 
 pub(super) const FOCUS_CLASS: &str = "jwm-files-readonly-comparison";
 
@@ -21,6 +23,8 @@ struct State {
     path: PathBuf,
     navigation: Navigation,
     entries: Rc<Vec<FileEntry>>,
+    parent: Option<Arc<DirectoryHandle>>,
+    watched: Option<ScanId>,
 }
 
 impl State {
@@ -33,7 +37,12 @@ impl State {
     }
 }
 
-fn browse_widgets(initial: PathBuf) -> Result<(gtk::Box, glib::JoinHandle<()>), std::io::Error> {
+fn browse_widgets(
+    initial: PathBuf,
+    source: &crate::Shared,
+    buffer: &CopyBuffer,
+    copy_status: &gtk::Label,
+) -> Result<(gtk::Box, glib::JoinHandle<()>), std::io::Error> {
     let (wake, mut notifications) = Wake::channel();
     let scanner = ScanWorker::start_notifying(LocalProvider, move || wake.signal())?;
     let state = Rc::new(RefCell::new(State {
@@ -42,6 +51,8 @@ fn browse_widgets(initial: PathBuf) -> Result<(gtk::Box, glib::JoinHandle<()>), 
         path: initial.clone(),
         navigation: Navigation::default(),
         entries: Rc::default(),
+        parent: None,
+        watched: None,
     }));
     let pane = gtk::Box::new(gtk::Orientation::Vertical, 6);
     pane.set_hexpand(true);
@@ -62,10 +73,37 @@ fn browse_widgets(initial: PathBuf) -> Result<(gtk::Box, glib::JoinHandle<()>), 
     path.set_selectable(true);
     path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     pane.append(&path);
-    let status = gtk::Label::new(Some("对照目录（只读）"));
+    let status = gtk::Label::new(Some("对照目录"));
     status.set_xalign(0.0);
     status.set_wrap(true);
     pane.append(&status);
+    let paste = gtk::Button::with_label("粘贴副本到此");
+    paste.set_tooltip_text(Some(
+        "先在主栏复制一个普通文件，再粘贴到此目录；不覆盖同名文件",
+    ));
+    paste.set_sensitive(false);
+    pane.append(&paste);
+    paste.connect_clicked({
+        let (state, source, buffer, copy_status) = (
+            state.clone(),
+            source.clone(),
+            buffer.clone(),
+            copy_status.clone(),
+        );
+        move |_| {
+            let committed = {
+                let state = state.borrow();
+                state
+                    .parent
+                    .clone()
+                    .filter(|_| state.pending.is_none())
+                    .map(|parent| (parent, state.path.clone()))
+            };
+            if let Some((parent, path)) = committed {
+                paste_into(&source, &buffer, &copy_status, parent, path);
+            }
+        }
+    });
 
     let model = FileRowModel::new();
     let selection = gtk::SingleSelection::new(Some(model.clone()));
@@ -101,12 +139,16 @@ fn browse_widgets(initial: PathBuf) -> Result<(gtk::Box, glib::JoinHandle<()>), 
         .child(&listing)
         .build();
     pane.append(&scroll);
-    let navigate = |destination: Destination, state: &Rc<RefCell<State>>, status: &gtk::Label| {
+    let navigate = |destination: Destination,
+                    state: &Rc<RefCell<State>>,
+                    status: &gtk::Label,
+                    paste: &gtk::Button| {
         state.borrow_mut().request(destination);
+        paste.set_sensitive(false);
         status.set_text("正在读取对照目录…");
     };
     for (button, direction) in [(&back, 0), (&forward, 1), (&up, 2), (&reload, 3)] {
-        let (state, status) = (state.clone(), status.clone());
+        let (state, status, paste) = (state.clone(), status.clone(), paste.clone());
         button.connect_clicked(move |_| {
             let destination = {
                 let state = state.borrow();
@@ -118,12 +160,12 @@ fn browse_widgets(initial: PathBuf) -> Result<(gtk::Box, glib::JoinHandle<()>), 
                 }
             };
             if let Some(destination) = destination {
-                navigate(destination, &state, &status);
+                navigate(destination, &state, &status, &paste);
             }
         });
     }
     listing.connect_activate({
-        let (state, status) = (state.clone(), status.clone());
+        let (state, status, paste) = (state.clone(), status.clone(), paste.clone());
         move |_, row| {
             let destination = {
                 let state = state.borrow();
@@ -136,19 +178,33 @@ fn browse_widgets(initial: PathBuf) -> Result<(gtk::Box, glib::JoinHandle<()>), 
                 })
             };
             if let Some(destination) = destination {
-                navigate(destination, &state, &status);
+                navigate(destination, &state, &status, &paste);
             }
         }
     });
 
-    navigate(Destination::Visit(initial), &state, &status);
+    navigate(Destination::Visit(initial), &state, &status, &paste);
     let worker = glib::MainContext::default().spawn_local(async move {
         while notifications.recv().await.is_ok() {
             let update = {
                 let mut state = state.borrow_mut();
-                // Explicit Refresh is the initial contract; drain unused watch signals.
-                let _ = state.scanner.take_directory_change();
+                let watch = state.scanner.take_directory_change();
                 let Some(reply) = state.scanner.take_reply() else {
+                    if let Some(watch) = watch
+                        && state.watched == Some(watch.id)
+                        && (state.pending.is_none() || watch.change == DirectoryChange::Invalidated)
+                    {
+                        if watch.change == DirectoryChange::Invalidated {
+                            state.parent = None;
+                            state.watched = None;
+                            paste.set_sensitive(false);
+                            status.set_text("对照目录已变化，请刷新后再粘贴。");
+                        } else if watch.change == DirectoryChange::Dirty {
+                            let target = Destination::Visit(state.path.clone());
+                            state.request(target);
+                            paste.set_sensitive(false);
+                        }
+                    }
                     continue;
                 };
                 let Some((id, destination)) = state.pending.clone() else {
@@ -165,25 +221,51 @@ fn browse_widgets(initial: PathBuf) -> Result<(gtk::Box, glib::JoinHandle<()>), 
                             continue;
                         }
                         state.path = committed;
+                        let change = watch
+                            .filter(|watch| watch.id == id)
+                            .map(|watch| watch.change);
+                        let invalidated = change == Some(DirectoryChange::Invalidated);
+                        state.watched = (!invalidated).then_some(id);
+                        state.parent = if invalidated {
+                            None
+                        } else {
+                            snapshot.local_parent
+                        };
+                        if change == Some(DirectoryChange::Dirty) {
+                            let target = Destination::Visit(state.path.clone());
+                            state.request(target);
+                        }
+                        paste.set_sensitive(state.parent.is_some() && state.pending.is_none());
                         state.entries = Rc::new(snapshot.entries);
                         let unreadable = snapshot.skipped_entries;
-                        Ok((state.path.clone(), state.entries.clone(), unreadable))
+                        Ok((
+                            state.path.clone(),
+                            state.entries.clone(),
+                            unreadable,
+                            invalidated,
+                        ))
                     }
-                    Err(error) => Err(error),
+                    Err(error) => {
+                        state.parent = None;
+                        paste.set_sensitive(false);
+                        Err(error)
+                    }
                 }
             };
             match update {
-                Ok((committed, entries, unreadable)) => {
+                Ok((committed, entries, unreadable, invalidated)) => {
                     let text = committed.to_string_lossy().escape_debug().to_string();
                     path.set_text(&text);
                     path.set_tooltip_text(Some(&text));
                     selection.set_selected(gtk::INVALID_LIST_POSITION);
                     let count = entries.len();
                     model.replace(entries);
-                    status.set_text(&if unreadable == 0 {
-                        format!("对照目录（只读） · {count} 项")
+                    status.set_text(&if invalidated {
+                        "对照目录已变化，请刷新后再粘贴。".to_owned()
+                    } else if unreadable == 0 {
+                        format!("对照目录 · {count} 项")
                     } else {
-                        format!("对照目录（只读） · {count} 项 · {unreadable} 项读取失败")
+                        format!("对照目录 · {count} 项 · {unreadable} 项读取失败")
                     });
                 }
                 Err(error) => status.set_text(&format!("无法读取对照目录：{error}")),
@@ -209,11 +291,14 @@ pub(super) fn install(
     split: &gtk::Paned,
     source: &crate::Shared,
     status: &gtk::Label,
+    copy_buffer: &CopyBuffer,
+    copy_status: &gtk::Label,
 ) {
     let action = gio::SimpleAction::new("comparison-pane", None);
     let worker = Rc::new(RefCell::new(None::<glib::JoinHandle<()>>));
     let (split, status) = (split.downgrade(), status.downgrade());
     let source = source.clone();
+    let (copy_buffer, copy_status) = (copy_buffer.clone(), copy_status.clone());
     let state = worker.clone();
     action.connect_activate(move |_, _| {
         let Some(split) = split.upgrade() else { return };
@@ -223,7 +308,7 @@ pub(super) fn install(
             return;
         }
         let path = source.borrow().path().clone();
-        match browse_widgets(path) {
+        match browse_widgets(path, &source, &copy_buffer, &copy_status) {
             Ok((pane, worker)) => {
                 let midpoint = (split.width() / 2).max(230);
                 split.set_end_child(Some(&pane));
