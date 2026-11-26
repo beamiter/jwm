@@ -1072,3 +1072,109 @@ mod activation_tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod wayland_acceptance {
+    use super::*;
+    use std::fs;
+
+    fn descendants(widget: &gtk::Widget) -> Vec<gtk::Widget> {
+        let mut result = vec![widget.clone()];
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            result.extend(descendants(&widget));
+        }
+        result
+    }
+
+    fn until(mut check: impl FnMut() -> bool, description: &str) {
+        let context = glib::MainContext::default();
+        let end = Instant::now() + Duration::from_secs(6);
+        while !check() {
+            assert!(Instant::now() < end, "Wayland timed out: {description}");
+            for _ in 0..16 {
+                if !context.iteration(false) {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(8));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a private native Wayland compositor"]
+    fn native_wayland_window_maps_and_navigates() {
+        gtk::init().unwrap();
+        let display = gtk::gdk::Display::default().unwrap();
+        assert_eq!(display.type_().name(), "GdkWaylandDisplay");
+        let root = PathBuf::from(std::env::var_os("JWM_FILE_SMOKE_FIXTURE").unwrap());
+        let start = root.join("start");
+        let next = root.join("next");
+        fs::create_dir(&start).unwrap();
+        fs::create_dir(&next).unwrap();
+        fs::write(start.join("before.txt"), b"old").unwrap();
+        fs::write(next.join("after.txt"), b"new").unwrap();
+        let app = gtk::Application::builder()
+            .application_id("org.jwm.Files.WaylandSmoke")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        open_window(&app, &start, &root, &[]);
+        let window = app.active_window().unwrap();
+        let main_model = descendants(window.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                widget
+                    .downcast::<gtk::ListView>()
+                    .ok()?
+                    .model()?
+                    .downcast::<gtk::SingleSelection>()
+                    .ok()?
+                    .model()?
+                    .downcast::<gtk::StringList>()
+                    .ok()
+            })
+            .unwrap();
+        let first_title = format!("JWM Files · {}", start.display());
+        until(
+            || {
+                window.is_mapped()
+                    && window.surface().is_some_and(|surface| surface.is_mapped())
+                    && window.title().as_deref() == Some(&first_title)
+                    && main_model.string(0).as_deref() == Some("before.txt")
+            },
+            "first directory",
+        );
+        let drew = Rc::new(Cell::new(false));
+        window.add_tick_callback({
+            let drew = drew.clone();
+            move |_, _| {
+                drew.set(true);
+                glib::ControlFlow::Break
+            }
+        });
+        until(|| drew.get(), "native frame clock");
+
+        gtk::prelude::WidgetExt::activate_action(&window, "win.location", None).unwrap();
+        let address = descendants(window.upcast_ref())
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::Entry>().ok())
+            .unwrap();
+        address.set_text(next.to_str().unwrap());
+        address.emit_activate();
+        let second_title = format!("JWM Files · {}", next.display());
+        until(
+            || {
+                window.is_mapped()
+                    && window.title().as_deref() == Some(&second_title)
+                    && main_model.n_items() == 1
+                    && main_model.string(0).as_deref() == Some("after.txt")
+            },
+            "replacement directory",
+        );
+
+        println!("GTK4 Wayland smoke: native window mapped and navigation replaced the listing");
+        window.close();
+    }
+}

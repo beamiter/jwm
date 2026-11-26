@@ -121,3 +121,11 @@ Escape leaves it without navigating. A failed address load leaves the
 breadcrumb and the existing file list intact. Documents and Downloads use
 the desktop's XDG user directories rather than assumed English names;
 missing or duplicate configuration entries are omitted.
+
+### Display-backend acceptance
+
+The File Workspace CI includes private X11 and native Wayland checks. The
+Wayland test uses a headless Weston compositor with software rendering and
+no XWayland fall-back. It checks surface configure/buffer-attach protocol
+events, GTK mapping and a frame tick, and navigation in the same window.
+This is not a hardware performance or JWM compositor acceptance test.

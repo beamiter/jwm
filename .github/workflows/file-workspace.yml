@@ -66,3 +66,9 @@ jobs:
             cargo test --locked native_tree_reads_independent_branches_and_activates_exact_paths -- --ignored --nocapture
           GDK_BACKEND=x11 GSK_RENDERER=cairo xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp -noreset' \
             cargo test --locked native_breadcrumb_clicks_use_exact_visible_and_overflow_paths -- --ignored --nocapture
+      - name: Install the headless Wayland reference compositor
+        run: bash scripts/ci-install-deps.sh weston
+      - name: Verify native Wayland mapping and navigation
+        working-directory: crates/jwm_files
+        timeout-minutes: 3
+        run: bash tests/wayland-smoke.sh
