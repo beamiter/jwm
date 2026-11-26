@@ -1,3 +1,4 @@
+mod breadcrumb;
 mod navigation;
 mod selection;
 #[cfg(target_os = "linux")]
@@ -361,7 +362,38 @@ fn request_scan(state: &Shared, target: Destination, address: &gtk::Entry, statu
     status.set_text("正在读取目录…");
 }
 
-fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
+fn place_locations(
+    home: &Path,
+    special: &[(glib::UserDirectory, Option<PathBuf>)],
+) -> Vec<(&'static str, PathBuf)> {
+    let mut locations = vec![("主目录", home.to_path_buf())];
+    for (kind, path) in special {
+        let label = match kind {
+            glib::UserDirectory::Documents => "文档",
+            glib::UserDirectory::Downloads => "下载",
+            _ => continue,
+        };
+        if let Some(path) = path
+            .as_ref()
+            .filter(|path| path.is_absolute() && path != &home)
+            && path != Path::new("/")
+            && !locations.iter().any(|(_, existing)| existing == path)
+        {
+            locations.push((label, path.clone()));
+        }
+    }
+    if home != Path::new("/") {
+        locations.push(("根目录", PathBuf::from("/")));
+    }
+    locations
+}
+
+fn open_window(
+    app: &gtk::Application,
+    initial: &Path,
+    home: &Path,
+    special: &[(glib::UserDirectory, Option<PathBuf>)],
+) {
     if let Some(window) = app.active_window() {
         window.present();
         return;
@@ -391,6 +423,10 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         .hexpand(true)
         .placeholder_text("输入目录路径")
         .build();
+    let location_bar = gtk::Stack::builder().hexpand(true).build();
+    location_bar.set_hhomogeneous(false);
+    location_bar.set_vhomogeneous(true);
+    location_bar.add_named(&address, Some("entry"));
     let hidden = gtk::ToggleButton::with_label("隐藏项");
     for widget in [
         back.upcast_ref::<gtk::Widget>(),
@@ -398,7 +434,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         up.upcast_ref(),
         refresh.upcast_ref(),
         new_folder.upcast_ref(),
-        address.upcast_ref(),
+        location_bar.upcast_ref(),
         hidden.upcast_ref(),
     ] {
         header.append(widget);
@@ -408,12 +444,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     let places = gtk::ListBox::new();
     places.add_css_class("navigation-sidebar");
     places.set_selection_mode(gtk::SelectionMode::None);
-    let mut locations = vec![("主目录", home.to_path_buf())];
-    locations.extend([
-        ("文档", home.join("Documents")),
-        ("下载", home.join("Downloads")),
-        ("根目录", PathBuf::from("/")),
-    ]);
+    let locations = place_locations(home, special);
     for (name, _) in &locations {
         let label = gtk::Label::new(Some(name));
         label.set_xalign(0.0);
@@ -528,6 +559,12 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         reload_at: None,
         dialog_open: false,
     }));
+    let breadcrumb = breadcrumb::Breadcrumb::new({
+        let (state, address, status) = (state.clone(), address.clone(), status.clone());
+        move |path| start_scan(&state, path, &address, &status)
+    });
+    location_bar.add_named(&breadcrumb.container, Some("path"));
+    location_bar.set_visible_child_name("path");
     #[cfg(target_os = "linux")]
     {
         let tree_hidden = Rc::new(Cell::new(hidden.is_active()));
@@ -605,6 +642,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     }
     {
         let (state, status, home) = (state.clone(), status.clone(), home.to_path_buf());
+        let (weak_bar, weak_list) = (location_bar.downgrade(), list.downgrade());
         address.connect_activate(move |entry| {
             let input = entry.text();
             if input.is_empty() {
@@ -613,18 +651,50 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
             let target = state.borrow().requested_destination();
             if input.as_str() == target.path().to_string_lossy() {
                 request_scan(&state, target, entry, &status);
-                return;
-            }
-            let path = if input.as_str() == "~" {
-                home.clone()
-            } else if let Some(tail) = input.strip_prefix("~/") {
-                home.join(tail)
             } else {
-                target.path().join(Path::new(input.as_str()))
-            };
-            start_scan(&state, path, entry, &status);
+                let path = if input.as_str() == "~" {
+                    home.clone()
+                } else if let Some(tail) = input.strip_prefix("~/") {
+                    home.join(tail)
+                } else {
+                    target.path().join(Path::new(input.as_str()))
+                };
+                start_scan(&state, path, entry, &status);
+            }
+            if let Some(bar) = weak_bar.upgrade() {
+                bar.set_visible_child_name("path");
+            }
+            if let Some(list) = weak_list.upgrade() {
+                list.grab_focus();
+            }
         });
     }
+    let address_keys = gtk::EventControllerKey::new();
+    address_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let state = state.clone();
+        let (bar, entry, list) = (
+            location_bar.downgrade(),
+            address.downgrade(),
+            list.downgrade(),
+        );
+        address_keys.connect_key_pressed(move |_, key, _, _| {
+            if key != gtk::gdk::Key::Escape {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(entry) = entry.upgrade() {
+                entry.set_text(&state.borrow().requested_path().to_string_lossy());
+            }
+            if let Some(bar) = bar.upgrade() {
+                bar.set_visible_child_name("path");
+            }
+            if let Some(list) = list.upgrade() {
+                list.grab_focus();
+            }
+            glib::Propagation::Stop
+        });
+    }
+    address.add_controller(address_keys);
     {
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
         list.connect_activate(move |_, index| {
@@ -644,9 +714,10 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         });
     }
     let action = gtk::gio::SimpleAction::new("location", None);
-    let weak = address.downgrade();
+    let (weak, weak_bar) = (address.downgrade(), location_bar.downgrade());
     action.connect_activate(move |_, _| {
-        if let Some(address) = weak.upgrade() {
+        if let (Some(address), Some(bar)) = (weak.upgrade(), weak_bar.upgrade()) {
+            bar.set_visible_child_name("entry");
             address.grab_focus();
             address.select_region(0, -1);
         }
@@ -732,6 +803,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         });
     }
     start_scan(&state, initial.into(), &address, &status);
+    let mut breadcrumb_path = None::<PathBuf>;
     let mut restore = None::<(usize, u64, ScanId)>;
     let weak_window = window.downgrade();
     glib::timeout_add_local(Duration::from_millis(16), move || {
@@ -788,7 +860,12 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
             }
         }
         if replaced {
+            let path = browser.path.clone();
             drop(browser);
+            if breadcrumb_path.as_ref() != Some(&path) {
+                breadcrumb.show(&path);
+                breadcrumb_path = Some(path);
+            }
             model.splice(0, model.n_items(), &[]);
             restore = restore_row.map(|(row, id)| (row, epoch.get(), id));
             return glib::ControlFlow::Continue;
@@ -910,13 +987,46 @@ fn main() -> glib::ExitCode {
         .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
-    app.connect_activate(move |app| open_window(app, &initial, &home));
+    // GLib may consult the desktop's XDG user-directories file on first use.
+    // Do so once before GTK event processing, not on the navigation path.
+    let special = [
+        glib::UserDirectory::Documents,
+        glib::UserDirectory::Downloads,
+    ]
+    .map(|kind| (kind, glib::user_special_dir(kind)));
+    app.connect_activate(move |app| open_window(app, &initial, &home, &special));
     app.run_with_args(&["jwm-files"])
 }
 
 #[cfg(test)]
 mod activation_tests {
     use super::*;
+
+    #[test]
+    fn desktop_places_use_configured_paths_without_duplicates() {
+        use glib::UserDirectory::{Documents, Downloads};
+        let home = Path::new("/home/example");
+        let custom = home.join("资料");
+        let actual = place_locations(
+            home,
+            &[
+                (Documents, Some(custom.clone())),
+                (Downloads, Some(custom.clone())),
+                (Downloads, Some(PathBuf::from("/"))),
+                (Downloads, Some(PathBuf::from("relative"))),
+                (Downloads, Some(home.to_path_buf())),
+                (Downloads, None),
+            ],
+        );
+        assert_eq!(
+            actual,
+            [
+                ("主目录", home.to_path_buf()),
+                ("文档", custom),
+                ("根目录", PathBuf::from("/")),
+            ]
+        );
+    }
 
     #[test]
     fn permits_ordinary_text_but_not_launchers_or_executables() {
