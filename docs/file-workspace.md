@@ -90,6 +90,15 @@ and filesystem changes are not one atomic action across processes, so the
 source check rejects changes it observes rather than promising exclusive
 access to a directory.
 
+### Undo the last rename
+
+**Ctrl+Z** from the file view, or **撤销重命名** in the operation menu,
+reverses the most recent successful F2 rename in this window. Return to
+the original directory first. If the original name is occupied or the
+renamed item no longer matches, nothing is overwritten. The undo is
+in-memory only; it is not a journal, does not add redo, and does not
+change text-entry undo.
+
 ### Tabs
 
 Open a tab at the current directory with **Ctrl+T** or the operation

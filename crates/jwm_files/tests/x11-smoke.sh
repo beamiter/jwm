@@ -155,6 +155,25 @@ done
 [[ $(cat "$root/rename-fixture/z-existing.txt") == 'destination' ]]
 printf 'GTK4 X11 smoke: F2 renamed the selected item without replacing a conflict\n'
 
+# Revisit the directory through a fresh listing so the successful rename
+# receipt is already available before delivering a real undo shortcut.
+visit_path next
+visit_path rename-fixture
+xdotool key --clearmodifiers ctrl+l
+xdotool type --clearmodifiers 'unsubmitted-text'
+xdotool key --clearmodifiers ctrl+z Escape
+[[ ! -e "$root/rename-fixture/a-source.txt" ]]
+[[ $(cat "$root/rename-fixture/renamed.txt") == 'source' ]]
+xdotool key --clearmodifiers ctrl+z
+for attempt in {1..40}; do
+  [[ ! -f "$root/rename-fixture/a-source.txt" ]] || break
+  sleep 0.1
+done
+[[ $(cat "$root/rename-fixture/a-source.txt") == 'source' ]]
+[[ ! -e "$root/rename-fixture/renamed.txt" ]]
+[[ $(cat "$root/rename-fixture/z-existing.txt") == 'destination' ]]
+printf 'GTK4 X11 undo: Ctrl+Z restored the original name without capturing address edits\n'
+
 mkdir -p "$root/watch-fixture"
 printf 'first\n' > "$root/watch-fixture/a-first.txt"
 printf 'target\n' > "$root/watch-fixture/m-middle.txt"
