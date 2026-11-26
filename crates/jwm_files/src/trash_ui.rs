@@ -20,7 +20,7 @@ const TITLE: &str = "JWM Files · Home Trash";
 
 /// Keep ordinary Unicode readable, but distinguish raw Unix bytes from a
 /// literal replacement character or a filename containing escape notation.
-fn display_path(path: &OsStr) -> String {
+pub(super) fn display_path(path: &OsStr) -> String {
     let mut display = String::new();
     for chunk in path.as_bytes().utf8_chunks() {
         for ch in chunk.valid().chars() {

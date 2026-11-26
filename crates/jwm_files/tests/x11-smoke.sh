@@ -462,4 +462,10 @@ done
 cmp "$reveal_file" "$paste_path/${reveal_file##*/}"
 printf 'GTK4 X11 FileManager1: ShowItems selected the requested file rather than an adjacent row\n'
 
+gdbus call --session --dest "$name" --object-path /org/freedesktop/FileManager1 \
+  --method org.freedesktop.FileManager1.ShowItemProperties "['$item_uri']" ""
+property_window=$(timeout 10s xdotool search --sync --onlyvisible --name '^JWM Files · Properties$' | sed -n '1p')
+[[ $(xdotool getwindowpid "$property_window") == "$first" ]]
+printf 'GTK4 X11 FileManager1: ShowItemProperties mapped a native panel without convenience activation\n'
+
 BUS

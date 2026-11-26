@@ -194,6 +194,7 @@ pub(super) fn install(
     menu.append(Some("新建标签页（Ctrl+T）"), Some("win.new-tab"));
     menu.append(Some("目录对照栏（F3）"), Some("win.comparison-pane"));
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
+    menu.append(Some("属性（Alt+Enter）"), Some("win.item-properties"));
     menu.append(Some("主目录回收站"), Some("win.home-trash"));
     menu.append(Some("撤销重命名（Ctrl+Z）"), Some("win.undo-rename"));
     for (name, label) in [
