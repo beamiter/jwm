@@ -10,8 +10,32 @@ use std::{
     sync::Arc,
 };
 
-struct Matches {
+#[derive(Clone)]
+struct Target {
     entries: Arc<Vec<FileEntry>>,
+    text: String,
+}
+
+impl Target {
+    fn is_current(&self, entries: &Arc<Vec<FileEntry>>, text: &str) -> bool {
+        Arc::ptr_eq(&self.entries, entries) && self.text == text
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Next,
+    Previous,
+}
+
+struct Pending {
+    target: Target,
+    cancel: Cancellation,
+    step: Option<Direction>,
+}
+
+struct Matches {
+    target: Target,
     rows: Vec<usize>,
     cursor: Option<usize>,
 }
@@ -19,8 +43,32 @@ struct Matches {
 #[derive(Default)]
 struct Requests {
     generation: u64,
-    cancel: Option<Cancellation>,
+    pending: Option<Pending>,
     matches: Option<Matches>,
+}
+
+#[cfg(test)]
+struct QueryPause {
+    resume: std::sync::mpsc::Receiver<()>,
+    finished: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PAUSE_NEXT_QUERY: RefCell<Option<QueryPause>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn pause_next_query() -> (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>) {
+    let (release, resume) = std::sync::mpsc::channel();
+    let (finished, done) = std::sync::mpsc::channel();
+    PAUSE_NEXT_QUERY.with(|slot| {
+        assert!(
+            slot.replace(Some(QueryPause { resume, finished }))
+                .is_none()
+        );
+    });
+    (release, done)
 }
 
 pub(super) struct Finder {
@@ -39,8 +87,8 @@ pub(super) struct Finder {
 impl Finder {
     fn reset(&self) -> u64 {
         let mut r = self.requests.borrow_mut();
-        if let Some(cancel) = r.cancel.take() {
-            cancel.cancel();
+        if let Some(pending) = r.pending.take() {
+            pending.cancel.cancel();
         }
         r.matches = None;
         r.generation = r.generation.wrapping_add(1);
@@ -70,35 +118,81 @@ impl Finder {
 
     pub(super) fn snapshot_changed(self: &Rc<Self>) {
         if self.bar.reveals_child() {
-            self.query();
+            self.reset();
+            self.query(None);
         }
     }
 
-    fn query(self: &Rc<Self>) {
-        let generation = self.reset();
+    fn query(self: &Rc<Self>, step: Option<Direction>) {
         if !self.bar.reveals_child() {
             return;
         }
-        let Some(query) = NameQuery::parse(self.entry.text().as_str()) else {
+        let text = self.entry.text();
+        let Some(query) = NameQuery::parse(text.as_str()) else {
+            self.reset();
             self.info.set_text("输入文件名中的文字。");
             return;
         };
         let Some(entries) = self.committed_entries() else {
+            self.reset();
             self.info.set_text("请等待目录加载完成，再按回车查找。");
             return;
         };
+        {
+            let mut requests = self.requests.borrow_mut();
+            if let Some(pending) = requests.pending.as_mut()
+                && pending.target.is_current(&entries, text.as_str())
+            {
+                if step.is_some() {
+                    pending.step = step;
+                }
+                return;
+            }
+            let completed = requests
+                .matches
+                .as_ref()
+                .is_some_and(|ready| ready.target.is_current(&entries, text.as_str()));
+            if completed {
+                drop(requests);
+                if let Some(direction) = step {
+                    self.step(direction);
+                }
+                return;
+            }
+        }
+        let generation = self.reset();
+        let target = Target {
+            entries,
+            text: text.to_string(),
+        };
         self.info.set_text("正在查找…");
         let cancel = Cancellation::default();
-        self.requests.borrow_mut().cancel = Some(cancel.clone());
+        self.requests.borrow_mut().pending = Some(Pending {
+            target: target.clone(),
+            cancel: cancel.clone(),
+            step,
+        });
         let (send, receive) = futures_channel::oneshot::channel();
-        let source = entries.clone();
+        let source = target.entries;
+        #[cfg(test)]
+        let barrier = PAUSE_NEXT_QUERY.with(RefCell::take);
         let spawned = std::thread::Builder::new()
             .name("jwm-files-find".into())
             .spawn(move || {
+                #[cfg(test)]
+                if let Some(barrier) = &barrier {
+                    let _ = barrier
+                        .resume
+                        .recv_timeout(std::time::Duration::from_secs(3));
+                }
                 let _ = send.send(query.matching_rows(&source, &cancel));
+                #[cfg(test)]
+                if let Some(barrier) = barrier {
+                    let _ = barrier.finished.send(());
+                }
             });
         if let Err(error) = spawned {
-            self.requests.borrow_mut().cancel = None;
+            self.requests.borrow_mut().pending = None;
             self.info.set_text(&format!("查找未启动：{error}"));
             return;
         }
@@ -112,11 +206,14 @@ impl Finder {
             if requests.generation != generation {
                 return;
             }
-            requests.cancel = None;
+            let Some(pending) = requests.pending.take() else {
+                return;
+            };
             let current = finder.committed_entries();
+            let text = finder.entry.text();
             let same = current
                 .as_ref()
-                .is_some_and(|now| Arc::ptr_eq(now, &entries));
+                .is_some_and(|entries| pending.target.is_current(entries, text.as_str()));
             if !same {
                 finder.info.set_text("目录已更新。按回车重新查找。");
                 return;
@@ -129,37 +226,42 @@ impl Finder {
             finder.next.set_sensitive(!rows.is_empty());
             finder.prev.set_sensitive(!rows.is_empty());
             requests.matches = Some(Matches {
-                entries,
+                target: pending.target,
                 rows,
                 cursor: None,
             });
+            drop(requests);
+            if let Some(direction) = pending.step {
+                finder.step(direction);
+            }
         });
     }
 
-    fn step(self: &Rc<Self>, backward: bool) {
+    fn step(self: &Rc<Self>, direction: Direction) {
+        if !self.bar.reveals_child() {
+            return;
+        }
         let current = self.committed_entries();
+        let text = self.entry.text();
         let mut request = self.requests.borrow_mut();
         let matched = current
             .as_ref()
             .zip(request.matches.as_mut())
-            .filter(|(now, ready)| Arc::ptr_eq(now, &ready.entries));
+            .filter(|(entries, ready)| ready.target.is_current(entries, text.as_str()));
         let Some((_, matches)) = matched else {
-            if request.cancel.is_some() {
-                return;
-            }
             drop(request);
-            self.query();
+            self.query(Some(direction));
             return;
         };
         let count = matches.rows.len();
         if count == 0 {
             return;
         }
-        let next = match (matches.cursor, backward) {
-            (None, false) => 0,
-            (None, true) => count - 1,
-            (Some(i), false) => (i + 1) % count,
-            (Some(i), true) => i.checked_sub(1).unwrap_or(count - 1),
+        let next = match (matches.cursor, direction) {
+            (None, Direction::Next) => 0,
+            (None, Direction::Previous) => count - 1,
+            (Some(i), Direction::Next) => (i + 1) % count,
+            (Some(i), Direction::Previous) => i.checked_sub(1).unwrap_or(count - 1),
         };
         let Ok(row) = u32::try_from(matches.rows[next]) else {
             return;
@@ -180,8 +282,8 @@ impl Finder {
 
 impl Drop for Finder {
     fn drop(&mut self) {
-        if let Some(cancel) = self.requests.get_mut().cancel.take() {
-            cancel.cancel();
+        if let Some(pending) = self.requests.get_mut().pending.take() {
+            pending.cancel.cancel();
         }
     }
 }
@@ -242,7 +344,7 @@ pub(super) fn install(
         let weak = Rc::downgrade(&finder);
         move |_| {
             if let Some(finder) = weak.upgrade() {
-                finder.query();
+                finder.query(None);
             }
         }
     });
@@ -250,7 +352,7 @@ pub(super) fn install(
         let weak = Rc::downgrade(&finder);
         move |_| {
             if let Some(finder) = weak.upgrade() {
-                finder.step(false);
+                finder.step(Direction::Next);
             }
         }
     });
@@ -258,7 +360,7 @@ pub(super) fn install(
         let weak = Rc::downgrade(&finder);
         move |_| {
             if let Some(finder) = weak.upgrade() {
-                finder.step(false);
+                finder.step(Direction::Next);
             }
         }
     });
@@ -266,7 +368,7 @@ pub(super) fn install(
         let weak = Rc::downgrade(&finder);
         move |_| {
             if let Some(finder) = weak.upgrade() {
-                finder.step(true);
+                finder.step(Direction::Previous);
             }
         }
     });
@@ -286,11 +388,14 @@ pub(super) fn install(
             }
         }
     });
-    for (button, backward) in [(&finder.prev, true), (&finder.next, false)] {
+    for (button, direction) in [
+        (&finder.prev, Direction::Previous),
+        (&finder.next, Direction::Next),
+    ] {
         let weak = Rc::downgrade(&finder);
         button.connect_clicked(move |_| {
             if let Some(finder) = weak.upgrade() {
-                finder.step(backward);
+                finder.step(direction);
             }
         });
     }
@@ -309,7 +414,7 @@ pub(super) fn install(
                     }
                 });
             }
-            finder.query();
+            finder.query(None);
         }
     });
     window.add_action(&action);

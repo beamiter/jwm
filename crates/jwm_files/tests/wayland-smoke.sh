@@ -66,3 +66,4 @@ grep -F 'GTK4 Wayland clipboard: raw filename bytes round-tripped through a file
 grep -F 'GTK4 Wayland properties: dangling link metadata and exact raw path shown without follow' "$client_log"
 grep -F 'GTK4 Wayland location: raw bytes round-tripped through the editable URI' "$client_log"
 grep -F 'GTK4 Wayland find: exact selected row and stale snapshot rejection verified' "$client_log"
+grep -F 'GTK4 Wayland find: one early Enter applied once and an edited query discarded it' "$client_log"

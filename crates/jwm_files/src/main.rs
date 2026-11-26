@@ -2790,14 +2790,29 @@ mod wayland_acceptance {
             .downcast::<gtk::SearchEntry>()
             .unwrap();
         until(|| finder.is_mapped(), "native folder search field");
+        let debounced = Rc::new(Cell::new(false));
+        finder.connect_search_changed({
+            let debounced = debounced.clone();
+            move |entry| {
+                if entry.text().as_str() == "TARGET" {
+                    debounced.set(true);
+                }
+            }
+        });
         finder.set_text("a-");
         finder.set_text("TARGET");
+        let (release, _done) = find_in_folder::pause_next_query();
+        finder.emit_activate(); // One explicit request, before debounce.
+        assert_eq!(source_selection.selected(), gtk::INVALID_LIST_POSITION);
+        until(|| debounced.get(), "deferred GTK search signal");
+        assert_eq!(source_selection.selected(), gtk::INVALID_LIST_POSITION);
+        release.send(()).unwrap();
         until(
-            || copy_noticed("1 个匹配项"),
-            "latest name query had the exact one match",
+            || source_selection.selected() == 120,
+            "one early Enter selected the exact result after release",
         );
-        finder.emit_activate();
-        assert_eq!(source_selection.selected(), 120);
+        let current_title = format!("JWM Files · {}", find_path.display());
+        assert_eq!(window.title().as_deref(), Some(current_title.as_str()));
         let selected = source_selection
             .selected_item()
             .and_downcast::<glib::BoxedAnyObject>()
@@ -2805,6 +2820,25 @@ mod wayland_acceptance {
         let selected = selected.borrow::<row_model::RowPresentation>();
         assert_eq!(selected.name, "z target.txt");
         drop(selected);
+
+        source_selection.set_selected(gtk::INVALID_LIST_POSITION);
+        finder.set_text("a-");
+        let (release, done) = find_in_folder::pause_next_query();
+        finder.emit_previous_match();
+        finder.set_text("no such fixture");
+        release.send(()).unwrap();
+        until(
+            || done.try_recv().is_ok(),
+            "superseded search worker completed",
+        );
+        until(
+            || copy_noticed("0 个匹配项"),
+            "new search finished without a carried-over step",
+        );
+        assert_eq!(source_selection.selected(), gtk::INVALID_LIST_POSITION);
+        println!(
+            "GTK4 Wayland find: one early Enter applied once and an edited query discarded it"
+        );
 
         navigate(&other_path);
         at(&other_path, "other.txt");
