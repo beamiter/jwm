@@ -154,6 +154,7 @@ pub(super) fn install(
     status: &gtk::Label,
 ) {
     let menu = gio::Menu::new();
+    menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
     for (name, label) in [
         ("copy-file", "复制选中文件（Ctrl+C）"),
         ("paste-file", "粘贴到当前目录（Ctrl+V）"),

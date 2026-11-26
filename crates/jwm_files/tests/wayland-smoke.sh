@@ -42,3 +42,4 @@ grep -Eq 'wl_surface[@#][0-9]+\.attach\(wl_buffer' "$client_log"
 printf 'GTK4 Wayland smoke: compositor configured a native surface and the client attached a buffer\n'
 grep -F 'GTK4 Wayland grid: list and icon modes kept the same selection' "$client_log"
 grep -F 'GTK4 Wayland grid: moving the active directory cleared stale selection' "$client_log"
+grep -F 'GTK4 Wayland preview: selected file text shown in the quick preview' "$client_log"
