@@ -72,6 +72,14 @@ association or change an existing or inferred default handler.
 Remove that desktop entry to remove the launcher. The FileManager1 D-Bus
 interface, GVFS volumes, and default handler migration remain separate.
 
+### Already-mounted locations
+
+Expand **已挂载设备** to see mounted locations that GIO exposes as native
+paths. A click opens the exact local mount folder. The list updates when
+mounts are added, changed, or removed while expanded. It excludes hidden
+shadowed mount aliases and remote URI-only locations. It does not mount,
+unmount, eject, or request credentials.
+
 ### New Folder
 
 The toolbar action or Ctrl+Shift+N creates one named folder in the currently

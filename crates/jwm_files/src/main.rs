@@ -13,6 +13,7 @@ mod tabs;
 mod trash_ui;
 #[cfg(target_os = "linux")]
 mod tree;
+mod volumes;
 mod wake;
 
 use gtk::prelude::*;
@@ -726,6 +727,11 @@ fn open_window(
         reload_due: None,
         dialog_open: false,
     }));
+    let mounts = volumes::install({
+        let (state, address, status) = (state.clone(), address.clone(), status.clone());
+        move |mount| start_scan(&state, mount, &address, &status)
+    });
+    sidebar.append(&mounts);
     comparison::install(
         &window,
         &comparison_split,
@@ -1532,6 +1538,30 @@ mod wayland_acceptance {
             }
         });
         until(|| drew.get(), "native frame clock");
+
+        let mounts = descendants(window.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                let expander = widget.downcast::<gtk::Expander>().ok()?;
+                (expander.label().as_deref() == Some("已挂载设备")).then_some(expander)
+            })
+            .unwrap();
+        assert!(!mounts.is_expanded());
+        mounts.set_expanded(true);
+        let mount_list = descendants(mounts.upcast_ref())
+            .into_iter()
+            .find(|widget| widget.widget_name() == "jwm-files-mounted-list")
+            .and_downcast::<gtk::Box>()
+            .unwrap();
+        until(
+            || mount_list.is_mapped() && mount_list.first_child().is_some(),
+            "GIO mount sidebar rendered a list or an explicit empty state",
+        );
+        assert_eq!(window.title().as_deref(), Some(first_title.as_str()));
+        mounts.set_expanded(false);
+        println!(
+            "GTK4 Wayland mounts: lazy native locations panel opened without changing the folder"
+        );
 
         assert_eq!(app.accels_for_action("win.comparison-pane").len(), 1);
         gtk::prelude::WidgetExt::activate_action(&window, "win.comparison-pane", None).unwrap();
