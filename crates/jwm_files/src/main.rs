@@ -1295,15 +1295,35 @@ fn open_window(
     window.present();
 }
 
+fn launch_directory(
+    cwd: &Path,
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<PathBuf, &'static str> {
+    let mut args = args.into_iter();
+    let argument = args.next();
+    let path = if argument.as_deref() == Some(std::ffi::OsStr::new("--")) {
+        args.next()
+    } else {
+        argument
+    };
+    if args.next().is_some() {
+        return Err("expected at most one local directory");
+    }
+    Ok(path.map_or_else(|| cwd.to_path_buf(), |path| cwd.join(path)))
+}
+
 fn main() -> glib::ExitCode {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.clone());
-    let initial = std::env::args_os()
-        .nth(1)
-        .map(|path| cwd.join(path))
-        .unwrap_or(cwd);
+    let initial = match launch_directory(&cwd, std::env::args_os().skip(1)) {
+        Ok(initial) => initial,
+        Err(error) => {
+            eprintln!("Usage: jwm-files [--] [directory]: {error}");
+            return glib::ExitCode::FAILURE;
+        }
+    };
     let app = gtk::Application::builder()
         .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
@@ -1329,6 +1349,26 @@ fn main() -> glib::ExitCode {
 #[cfg(test)]
 mod activation_tests {
     use super::*;
+    #[test]
+    fn desktop_launch_preserves_literal_local_directory_argument() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let cwd = Path::new("/tmp/jwm");
+        let raw = OsString::from_vec(b"-\xe7\xa9\xba \xe6\xa0\xbc%\x80".to_vec());
+        assert_eq!(launch_directory(cwd, []).unwrap(), cwd);
+        assert_eq!(launch_directory(cwd, ["--".into()]).unwrap(), cwd);
+        assert_eq!(
+            launch_directory(cwd, ["--".into(), raw])
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            b"/tmp/jwm/-\xe7\xa9\xba \xe6\xa0\xbc%\x80"
+        );
+        assert_eq!(
+            launch_directory(cwd, ["/home/test/space name".into()]).unwrap(),
+            Path::new("/home/test/space name")
+        );
+        assert!(launch_directory(cwd, ["--".into(), "one".into(), "two".into()]).is_err());
+    }
 
     #[test]
     fn desktop_places_use_configured_paths_without_duplicates() {

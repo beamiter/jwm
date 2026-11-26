@@ -56,6 +56,22 @@ worker cancels and replaces obsolete requests, and does not publish stale
 results even if the old provider call ignores cancellation. See the document activation section below.
 
 
+### Optional application menu launcher
+
+The repository ships `crates/jwm_files/data/org.jwm.Files.desktop`. If
+`jwm-files` is already installed on the desktop session's PATH, you can
+add the launcher for your account explicitly:
+
+```sh
+install -Dm644 crates/jwm_files/data/org.jwm.Files.desktop \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/applications/org.jwm.Files.desktop"
+```
+
+This makes JWM Files available from the application menu and as a folder
+handler; it does not set it as the default or change MIME associations.
+Remove that desktop entry to remove the launcher. The FileManager1 D-Bus
+interface, GVFS volumes, and default handler migration remain separate.
+
 ### New Folder
 
 The toolbar action or Ctrl+Shift+N creates one named folder in the currently

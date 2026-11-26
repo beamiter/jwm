@@ -4,7 +4,11 @@ set -euo pipefail
 binary=$1
 root=$(mktemp -d)
 child=
+desktop_child=
 cleanup() {
+  if [[ -n "$desktop_child" && $(readlink "/proc/$desktop_child/exe" || true) == "$binary" ]]; then
+    kill "$desktop_child" 2>/dev/null || true
+  fi
   if [[ -n "$child" ]]; then
     kill "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
@@ -34,12 +38,13 @@ cat > "$XDG_DATA_HOME/applications/org.jwm.TestOpen.desktop" <<DESKTOP
 Name=JWM Files private test handler
 Type=Application
 Exec=/usr/bin/python3 $root/record.py %f
-MimeType=text/plain;
+MimeType=text/plain;inode/directory;
 NoDisplay=true
 DESKTOP
 cat > "$XDG_CONFIG_HOME/mimeapps.list" <<'DESKTOP'
 [Default Applications]
 text/plain=org.jwm.TestOpen.desktop;
+inode/directory=org.jwm.TestOpen.desktop;
 DESKTOP
 
 
@@ -319,3 +324,22 @@ xdotool key --clearmodifiers ctrl+w
 # A later navigation proves the last tab is still interactive.
 visit_path tab-branch-b
 printf 'GTK4 X11 tabs: real shortcuts kept both histories and left the final tab open\n'
+
+# Launch through the shipped desktop entry in a disposable XDG profile.
+desktop_entry="$(dirname "$0")/../data/org.jwm.Files.desktop"
+desktop_folder="$root/desktop fixture % 你好"
+mkdir "$desktop_folder"
+before_mime=$(sha256sum "$XDG_CONFIG_HOME/mimeapps.list")
+before_default=$(gio mime inode/directory | sed -n '1p')
+[[ "$before_default" == *org.jwm.TestOpen.desktop* ]]
+install -m644 "$desktop_entry" "$XDG_DATA_HOME/applications/org.jwm.Files.desktop"
+PATH="$(dirname "$binary"):$PATH" GDK_BACKEND=x11 GSK_RENDERER=cairo \
+  gio launch "$XDG_DATA_HOME/applications/org.jwm.Files.desktop" "$desktop_folder"
+desktop_window=$(title_id '^JWM Files · .*/desktop fixture % 你好$')
+[[ -n "$desktop_window" && "$desktop_window" != "$window" ]]
+desktop_child=$(xdotool getwindowpid "$desktop_window")
+[[ "$desktop_child" =~ ^[0-9]+$ && $(readlink "/proc/$desktop_child/exe") == "$binary" ]]
+[[ $(xdotool getwindowname "$desktop_window") == "JWM Files · $desktop_folder" ]]
+[[ "$before_mime" == "$(sha256sum "$XDG_CONFIG_HOME/mimeapps.list")" ]]
+[[ "$before_default" == "$(gio mime inode/directory | sed -n '1p')" ]]
+printf 'GTK4 X11 launcher: shipped desktop entry opened the exact local folder without changing defaults\n'
