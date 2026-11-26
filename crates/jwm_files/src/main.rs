@@ -2827,13 +2827,18 @@ mod wayland_acceptance {
         finder.emit_previous_match();
         finder.set_text("no such fixture");
         release.send(()).unwrap();
-        until(|| done.try_recv().is_ok(), "superseded search worker completed");
+        until(
+            || done.try_recv().is_ok(),
+            "superseded search worker completed",
+        );
         until(
             || copy_noticed("0 个匹配项"),
             "new search finished without a carried-over step",
         );
         assert_eq!(source_selection.selected(), gtk::INVALID_LIST_POSITION);
-        println!("GTK4 Wayland find: one early Enter applied once and an edited query discarded it");
+        println!(
+            "GTK4 Wayland find: one early Enter applied once and an edited query discarded it"
+        );
 
         navigate(&other_path);
         at(&other_path, "other.txt");

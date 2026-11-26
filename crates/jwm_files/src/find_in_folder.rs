@@ -63,7 +63,10 @@ pub(super) fn pause_next_query() -> (std::sync::mpsc::Sender<()>, std::sync::mps
     let (release, resume) = std::sync::mpsc::channel();
     let (finished, done) = std::sync::mpsc::channel();
     PAUSE_NEXT_QUERY.with(|slot| {
-        assert!(slot.replace(Some(QueryPause { resume, finished })).is_none());
+        assert!(
+            slot.replace(Some(QueryPause { resume, finished }))
+                .is_none()
+        );
     });
     (release, done)
 }
@@ -178,7 +181,9 @@ impl Finder {
             .spawn(move || {
                 #[cfg(test)]
                 if let Some(barrier) = &barrier {
-                    let _ = barrier.resume.recv_timeout(std::time::Duration::from_secs(3));
+                    let _ = barrier
+                        .resume
+                        .recv_timeout(std::time::Duration::from_secs(3));
                 }
                 let _ = send.send(query.matching_rows(&source, &cancel));
                 #[cfg(test)]
