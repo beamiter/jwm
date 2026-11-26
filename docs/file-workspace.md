@@ -162,6 +162,12 @@ its own back/forward history. Switching rescans the target and clears old
 selection before allowing file actions. List/grid and hidden-item settings
 are shared across the window. Up to 16 tabs can be open at once.
 
+**Ctrl+Shift+T** or **恢复关闭的标签页** reopens the most recently closed
+tab in that window, keeping both Back and Forward history. The last 16
+closed tabs are retained in memory only; another window or application
+restart does not inherit them. Reopening reloads the directory rather than
+restoring stale rows or open file handles.
+
 ### Directory comparison and explicit copy
 
 **F3** or **操作 → 目录对照栏** opens a side-by-side view at the current

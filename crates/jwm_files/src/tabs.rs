@@ -3,6 +3,7 @@ use crate::navigation::Navigation;
 use std::path::{Path, PathBuf};
 
 const LIMIT: usize = 16;
+const CLOSED_LIMIT: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TabId(u64);
@@ -33,6 +34,7 @@ impl Tab {
 
 pub(super) struct Tabs {
     records: Vec<(TabId, Tab)>,
+    closed: Vec<(usize, Tab)>,
     active: usize,
     next_id: u64,
 }
@@ -41,6 +43,7 @@ impl Tabs {
     pub(super) fn new(path: PathBuf) -> Self {
         Self {
             records: vec![(TabId(1), Tab::new(path))],
+            closed: Vec::new(),
             active: 0,
             next_id: 2,
         }
@@ -65,17 +68,41 @@ impl Tabs {
     }
 
     pub(super) fn new_next(&mut self) -> bool {
-        if self.records.len() == LIMIT {
-            return false;
-        }
-        let id = TabId(self.next_id);
-        let Some(next) = self.next_id.checked_add(1) else {
+        let Some(id) = self.claim_id() else {
             return false;
         };
-        self.next_id = next;
         let cloned = Tab::new(self.active().path.clone());
         self.active += 1;
         self.records.insert(self.active, (id, cloned));
+        true
+    }
+
+    pub(super) fn is_full(&self) -> bool {
+        self.records.len() >= LIMIT
+    }
+
+    fn claim_id(&mut self) -> Option<TabId> {
+        if self.is_full() {
+            return None;
+        }
+        let id = TabId(self.next_id);
+        self.next_id = self.next_id.checked_add(1)?;
+        Some(id)
+    }
+
+    pub(super) fn reopen_latest(&mut self) -> bool {
+        if self.closed.is_empty() {
+            return false;
+        }
+        let Some(id) = self.claim_id() else {
+            return false;
+        };
+        let Some((position, tab)) = self.closed.pop() else {
+            return false;
+        };
+        self.active = position.min(self.records.len());
+        // A closed tab's button or queued action must never target this tab.
+        self.records.insert(self.active, (id, tab));
         true
     }
 
@@ -107,7 +134,11 @@ impl Tabs {
         if self.records.len() <= 1 {
             return false;
         }
-        self.records.remove(self.active);
+        let (_, tab) = self.records.remove(self.active);
+        if self.closed.len() == CLOSED_LIMIT {
+            self.closed.remove(0);
+        }
+        self.closed.push((self.active, tab));
         self.active = self.active.min(self.records.len() - 1);
         true
     }
@@ -146,6 +177,65 @@ mod tests {
         assert_eq!(tabs.active_id(), second);
         assert_eq!(tabs.active().path, Path::new("second-only"));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn reopen_keeps_both_history_directions_but_not_a_stale_id() {
+        let mut tabs = Tabs::new("root".into());
+        assert!(!tabs.reopen_latest());
+        let first = tabs.active_id();
+        assert!(tabs.new_next());
+        let old = tabs.active_id();
+        for path in ["root", "middle", "end"] {
+            navigate(&mut tabs, path);
+        }
+        let tab = tabs.active_mut();
+        let back = tab.navigation.back().unwrap();
+        tab.path = back.path().into();
+        assert!(tab.navigation.accept(back));
+        assert!(tabs.close_active());
+        assert_eq!(tabs.active_id(), first);
+        assert!(tabs.reopen_latest());
+        assert_eq!(tabs.active().path, Path::new("middle"));
+        assert_eq!(
+            tabs.active().navigation.back().unwrap().path(),
+            Path::new("root")
+        );
+        assert_eq!(
+            tabs.active().navigation.forward().unwrap().path(),
+            Path::new("end")
+        );
+        assert_ne!(tabs.active_id(), old);
+        assert!(!tabs.activate(old));
+        assert!(!tabs.reopen_latest());
+    }
+
+    #[test]
+    fn reopen_is_window_local_lifo_bounded_and_preserves_history_when_full() {
+        let mut tabs = Tabs::new("root".into());
+        for i in 0..CLOSED_LIMIT + 2 {
+            assert!(tabs.new_next());
+            navigate(&mut tabs, &i.to_string());
+            assert!(tabs.close_active());
+        }
+        assert!(!Tabs::new("other".into()).reopen_latest());
+        let first = tabs.active_id();
+        for _ in 1..LIMIT {
+            assert!(tabs.new_next());
+        }
+        assert!(!tabs.reopen_latest());
+        assert_eq!(tabs.closed.len(), CLOSED_LIMIT);
+
+        // Free room without creating new close records for the capacity test.
+        tabs.records.truncate(1);
+        assert!(tabs.activate(first));
+        for expected in (3..CLOSED_LIMIT + 2).rev() {
+            assert!(tabs.reopen_latest());
+            assert_eq!(tabs.active().path, Path::new(&expected.to_string()));
+        }
+        assert!(tabs.is_full());
+        assert!(!tabs.reopen_latest());
+        assert_eq!(tabs.closed[0].1.path, Path::new("2"));
     }
 
     #[test]
