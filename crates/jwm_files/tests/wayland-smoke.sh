@@ -21,7 +21,7 @@ trap cleanup EXIT
 
 mkdir -m 700 "$fixture/run" "$fixture/config" "$fixture/data" "$fixture/files"
 export XDG_RUNTIME_DIR="$fixture/run" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
-export WAYLAND_DISPLAY=jwm-files-test GDK_BACKEND=wayland GSK_RENDERER=cairo GTK_A11Y=none
+export WAYLAND_DISPLAY=jwm-files-test GDK_BACKEND=wayland GSK_RENDERER=cairo GTK_A11Y=test
 export JWM_FILE_SMOKE_FIXTURE="$fixture/files"
 unset DISPLAY WAYLAND_SOCKET
 weston --backend=headless --renderer=pixman --shell=kiosk --no-config   --socket="$WAYLAND_DISPLAY" --width=1280 --height=800 --idle-time=0   --log="$weston_log" &
@@ -46,3 +46,4 @@ grep -F 'GTK4 Wayland preview: selected file text shown in the quick preview' "$
 grep -F 'GTK4 Wayland wake: cancelling a dialog delivered deferred invalidation' "$client_log"
 grep -F 'GTK4 Wayland copy: delivered conflict status before a successful paste' "$client_log"
 grep -F 'GTK4 Wayland tabs: separate history, cancelled scans and tab buttons verified' "$client_log"
+grep -F 'GTK4 Wayland tabs: matching folder names disambiguated and accessible selection changed' "$client_log"
