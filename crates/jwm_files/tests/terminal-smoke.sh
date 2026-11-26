@@ -28,7 +28,7 @@ export GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none XDG_CURRENT_DESKTOP=JwmF
 export JWM_FILES_TERMINAL_FIXTURE="$root"
 export JWM_FILES_TERMINAL_CHOSEN="$root/"$'folder-%20-\x80'
 export SHELL="$root/expected-shell"
-mkdir -p "$HOME" "$XDG_DATA_HOME/applications" "$XDG_CONFIG_HOME" "$JWM_FILES_TERMINAL_CHOSEN"
+mkdir -p "$HOME" "$XDG_DATA_HOME/applications" "$XDG_DATA_HOME/xdg-terminals" "$XDG_CONFIG_HOME" "$JWM_FILES_TERMINAL_CHOSEN"
 cat > "$root/expected-shell" <<'SCRIPT'
 #!/bin/sh
 set -eu
@@ -62,12 +62,29 @@ Terminal=false
 X-TerminalArgExec=-e
 X-ExecArg=-e
 DESKTOP
+# Older packaged xdg-terminal-exec reads xdg-terminals; current versions use applications.
+cp "$XDG_DATA_HOME/applications/org.jwm.FilesTerminalTest.desktop" \
+  "$XDG_DATA_HOME/xdg-terminals/org.jwm.FilesTerminalTest.desktop"
 printf '%s\n' org.jwm.FilesTerminalTest.desktop > "$XDG_CONFIG_HOME/xdg-terminals.list"
 expected=$(stat -c '%d:%i' "$JWM_FILES_TERMINAL_CHOSEN")
-"$binary" -- "$JWM_FILES_TERMINAL_CHOSEN" >"$root/files.log" 2>&1 & files=$!
-id=$(timeout 10s xdotool search --sync --onlyvisible --name '^JWM Files · .*/folder-%20-.*$' | sed -n '1p')
+mkdir "$root/start"
+"$binary" -- "$root/start" >"$root/files.log" 2>&1 & files=$!
+id=$(timeout 10s xdotool search --sync --onlyvisible --pid "$files" | sed -n '1p')
 [[ $(xdotool getwindowpid "$id") == "$files" ]]
+printf 'Files fixture window before navigation: %s\n' "$(xdotool getwindowname "$id")"
 xdotool windowfocus --sync "$id"
+uri=$(python3 -c 'import os,pathlib; print(pathlib.Path(os.environ["JWM_FILES_TERMINAL_CHOSEN"]).as_uri())')
+xdotool key --clearmodifiers ctrl+l
+xdotool type --clearmodifiers "$uri"
+xdotool key --clearmodifiers Return
+title=''
+for _ in {1..75}; do
+  title=$(xdotool getwindowname "$id")
+  [[ "$title" != "JWM Files · $root/folder-%20-"* ]] || break
+  sleep 0.1
+done
+printf 'Files fixture window after native URI navigation: %s\n' "$title"
+[[ "$title" == "JWM Files · $root/folder-%20-"* ]]
 xdotool key --clearmodifiers ctrl+shift+Return
 for _ in {1..85}; do [[ ! -f "$root/shell.receipt" ]] || break; sleep 0.1; done
 grep -Fx 'native launcher invoked' "$root/launcher.receipt"
