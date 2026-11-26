@@ -111,3 +111,13 @@ directories appear, and symlink children and repeated directory identities
 are not expanded. Collapsing and reopening refreshes a branch. The hidden
 items toggle rebuilds the tree from its selected root. File lists and their
 watchers remain independent; expanded tree branches are not live-watched.
+
+### Breadcrumb and desktop places
+
+The confirmed directory is shown as clickable path segments. The ellipsis
+opens older ancestors when the path is deep. Labels may be shortened, but
+clicks use the underlying native path. Ctrl+L opens the address editor and
+Escape leaves it without navigating. A failed address load leaves the
+breadcrumb and the existing file list intact. Documents and Downloads use
+the desktop's XDG user directories rather than assumed English names;
+missing or duplicate configuration entries are omitted.

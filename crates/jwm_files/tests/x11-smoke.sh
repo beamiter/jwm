@@ -195,3 +195,13 @@ if xdotool search --onlyvisible --name '^JWM Files · Rename$' >/dev/null 2>&1; 
   exit 1
 fi
 printf 'GTK4 X11 smoke: watcher refresh kept an unchanged selection and cleared a deleted one\n'
+
+mkdir -p "$root/location-cancel"
+xdotool windowfocus --sync "$window"
+xdotool key --clearmodifiers ctrl+l
+xdotool type --clearmodifiers "$root/location-cancel"
+xdotool key Escape
+sleep 0.25
+[[ $(xdotool getwindowname "$window") == "JWM Files · $root/watch-fixture" ]]
+visit_path location-cancel
+printf 'GTK4 X11 smoke: Escape cancelled address editing and Ctrl+L reopened it\n'
