@@ -1,8 +1,8 @@
 //! Independent tab records; one shared view reloads the newly active tab.
-use crate::navigation::Navigation;
+use crate::{navigation::Navigation, saved_session::SavedTabs};
 use std::path::{Path, PathBuf};
 
-const LIMIT: usize = 16;
+const LIMIT: usize = crate::saved_session::MAX_TABS;
 const CLOSED_LIMIT: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +47,32 @@ impl Tabs {
             active: 0,
             next_id: 2,
         }
+    }
+
+    pub(super) fn snapshot(&self) -> SavedTabs {
+        SavedTabs {
+            paths: self.iter().map(|(_, path)| path.to_path_buf()).collect(),
+            active: self.active,
+        }
+    }
+
+    pub(super) fn from_saved(saved: SavedTabs) -> Option<Self> {
+        if saved.paths.is_empty() || saved.paths.len() > LIMIT || saved.active >= saved.paths.len()
+        {
+            return None;
+        }
+        let records: Vec<_> = saved
+            .paths
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| (TabId(index as u64 + 1), Tab::new(path)))
+            .collect();
+        Some(Self {
+            next_id: records.len() as u64 + 1,
+            records,
+            active: saved.active,
+            closed: Vec::new(),
+        })
     }
 
     pub(super) fn active_id(&self) -> TabId {
@@ -153,6 +179,26 @@ mod tests {
         let active = tabs.active_mut();
         assert!(active.navigation.accept(Destination::Visit(path.into())));
         active.path = path.into();
+    }
+
+    #[test]
+    fn session_restores_order_but_not_navigation_or_closed_tabs() {
+        let mut tabs = Tabs::new("/one".into());
+        navigate(&mut tabs, "/one");
+        navigate(&mut tabs, "/two");
+        assert!(tabs.new_next());
+        navigate(&mut tabs, "/other");
+        assert!(tabs.new_next());
+        assert!(tabs.close_active());
+        let saved = tabs.snapshot();
+        assert_eq!(saved.active, 1);
+        let mut restored = Tabs::from_saved(saved).unwrap();
+        assert_eq!(restored.active().path, Path::new("/other"));
+        assert!(restored.active().navigation.back().is_none());
+        assert!(!restored.reopen_latest());
+        assert!(restored.cycle(true));
+        assert_eq!(restored.active().path, Path::new("/two"));
+        assert!(restored.active().navigation.back().is_none());
     }
 
     #[test]
