@@ -13,6 +13,8 @@ mod preview;
 mod rename;
 mod scan_worker;
 #[cfg(target_os = "linux")]
+mod terminal_handoff;
+#[cfg(target_os = "linux")]
 mod trash_info;
 #[cfg(target_os = "linux")]
 mod trash_snapshot;
@@ -34,6 +36,8 @@ pub use rename::{RenameError, RenameReceipt};
 #[cfg(target_os = "linux")]
 pub use scan_worker::WatchNotice;
 pub use scan_worker::{ScanId, ScanReply, ScanWorker};
+#[cfg(target_os = "linux")]
+pub use terminal_handoff::{TerminalChildSetup, TerminalHandoff, TerminalLocator};
 #[cfg(target_os = "linux")]
 pub use trash_info::{HomeTrashInfo, TRASH_INFO_LIMIT, parse_home_trash_info};
 #[cfg(target_os = "linux")]
