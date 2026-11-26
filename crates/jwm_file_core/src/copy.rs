@@ -1,4 +1,5 @@
 //! Staged, no-replace copies of one regular local file.
+use crate::copy_names::{COPY_NAMES, sibling_copy_name};
 use crate::{Cancellation, DirectoryHandle, FileIdentity};
 use rustix::{
     fd::AsRawFd,
@@ -6,7 +7,7 @@ use rustix::{
     io::Errno,
 };
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fmt,
     fs::File,
     io,
@@ -31,6 +32,18 @@ pub struct CopyReceipt {
     pub bytes: u64,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct CopySiblingReceipt {
+    pub name: OsString,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Copy)]
+enum PublishName<'a> {
+    Literal(&'a OsStr),
+    Sibling,
+}
+
 #[derive(Debug)]
 pub enum CopyError {
     InvalidName,
@@ -39,6 +52,7 @@ pub enum CopyError {
     NotRegular,
     Cancelled,
     DestinationExists,
+    SiblingNamesExhausted,
     StagingUnavailable(io::Error),
     Io(io::Error),
 }
@@ -52,6 +66,7 @@ impl fmt::Display for CopyError {
             Self::NotRegular => f.write_str("only regular files can be copied"),
             Self::Cancelled => f.write_str("copy cancelled before publication"),
             Self::DestinationExists => f.write_str("destination already exists"),
+            Self::SiblingNamesExhausted => f.write_str("no available sibling copy name"),
             Self::StagingUnavailable(error) => {
                 write!(f, "private copy staging is unavailable: {error}")
             }
@@ -245,6 +260,17 @@ impl DirectoryHandle {
         self.copy_with_observation(source, destination, cancel, None)
     }
 
+    /// Copy once to anonymous staging and attempt at most 32 sibling names.
+    /// Every publication is no-replace; occupied names are never followed.
+    pub fn copy_regular_keep_both(
+        &self,
+        source: CopySource<'_>,
+        displayed_parent: &Path,
+        cancel: &Cancellation,
+    ) -> Result<CopySiblingReceipt, CopyError> {
+        self.copy_with_naming(source, displayed_parent, PublishName::Sibling, cancel, None)
+    }
+
     pub(crate) fn copy_with_observation(
         &self,
         source: CopySource<'_>,
@@ -252,12 +278,32 @@ impl DirectoryHandle {
         cancel: &Cancellation,
         expected: Option<[i128; 5]>,
     ) -> Result<CopyReceipt, CopyError> {
+        self.copy_with_naming(
+            source,
+            destination.displayed_parent,
+            PublishName::Literal(destination.name),
+            cancel,
+            expected,
+        )
+        .map(|receipt| CopyReceipt { bytes: receipt.bytes })
+    }
+
+    fn copy_with_naming(
+        &self,
+        source: CopySource<'_>,
+        displayed_parent: &Path,
+        naming: PublishName<'_>,
+        cancel: &Cancellation,
+        expected: Option<[i128; 5]>,
+    ) -> Result<CopySiblingReceipt, CopyError> {
         check(cancel)?;
-        if !crate::mkdir::single_name(source.name) || !crate::mkdir::single_name(destination.name) {
+        if !crate::mkdir::single_name(source.name)
+            || matches!(naming, PublishName::Literal(name) if !crate::mkdir::single_name(name))
+        {
             return Err(CopyError::InvalidName);
         }
         verify_parent(source.parent, source.displayed_parent)?;
-        verify_parent(self, destination.displayed_parent)?;
+        verify_parent(self, displayed_parent)?;
         let pin = fs::openat(
             &source.parent.fd,
             source.name,
@@ -302,42 +348,125 @@ impl DirectoryHandle {
         if !same_content_observation(&before, &after) {
             return Err(CopyError::SourceChanged);
         }
-        verify_parent(source.parent, source.displayed_parent)?;
-        verify_parent(self, destination.displayed_parent)?;
-        let observed = fs::statat(&source.parent.fd, source.name, AtFlags::SYMLINK_NOFOLLOW)
+        let publish = |name: &OsStr| {
+            verify_parent(source.parent, source.displayed_parent)?;
+            verify_parent(self, displayed_parent)?;
+            let observed = fs::statat(&source.parent.fd, source.name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|e| {
+                    if e == Errno::NOENT {
+                        CopyError::SourceChanged
+                    } else {
+                        io_error(e)
+                    }
+                })?;
+            verify_source(&observed, source.expected_file)?;
+            if !same_content_observation(&before, &observed) {
+                return Err(CopyError::SourceChanged);
+            }
+            check(cancel)?;
+            fs::linkat(
+                CWD,
+                fd_path(&output),
+                &self.fd,
+                name,
+                AtFlags::SYMLINK_FOLLOW,
+            )
             .map_err(|e| {
-                if e == Errno::NOENT {
-                    CopyError::SourceChanged
+                if e == Errno::EXIST {
+                    CopyError::DestinationExists
                 } else {
                     io_error(e)
                 }
-            })?;
-        verify_source(&observed, source.expected_file)?;
-        if !same_content_observation(&before, &observed) {
-            return Err(CopyError::SourceChanged);
-        }
-        check(cancel)?;
-        fs::linkat(
-            CWD,
-            fd_path(&output),
-            &self.fd,
-            destination.name,
-            AtFlags::SYMLINK_FOLLOW,
-        )
-        .map_err(|e| {
-            if e == Errno::EXIST {
-                CopyError::DestinationExists
-            } else {
-                io_error(e)
+            })
+        };
+        let name = match naming {
+            PublishName::Literal(name) => {
+                publish(name)?;
+                name.to_os_string()
             }
-        })?;
-        Ok(CopyReceipt { bytes })
+            PublishName::Sibling => {
+                for attempt in 1..=COPY_NAMES {
+                    let name = sibling_copy_name(source.name, attempt);
+                    match publish(&name) {
+                        Ok(()) => return Ok(CopySiblingReceipt { name, bytes }),
+                        Err(CopyError::DestinationExists) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+                return Err(CopyError::SiblingNamesExhausted);
+            }
+        };
+        Ok(CopySiblingReceipt { name, bytes })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_both_preserves_existing_entries_and_is_bounded() {
+        use std::os::unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, symlink},
+        };
+
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("jwm-copy-{}-{now}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let _cleanup = Cleanup(dir.clone());
+        let original = OsStr::from_bytes(b"file-%20-\x80.txt");
+        let first = sibling_copy_name(original, 1);
+        let second = sibling_copy_name(original, 2);
+        symlink("missing", dir.join(&first)).unwrap();
+        std::fs::write(dir.join(original), b"source").unwrap();
+        std::fs::write(dir.join(&second), b"old bytes").unwrap();
+        let meta = std::fs::metadata(dir.join(original)).unwrap();
+        let parent = DirectoryHandle::open(&dir).unwrap();
+        let source = || CopySource {
+            parent: &parent,
+            displayed_parent: &dir,
+            name: original,
+            expected_file: FileIdentity {
+                device: meta.dev(),
+                inode: meta.ino(),
+            },
+        };
+
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            parent.copy_regular_keep_both(source(), &dir, &cancelled),
+            Err(CopyError::Cancelled)
+        ));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+        let copy = parent
+            .copy_regular_keep_both(source(), &dir, &Cancellation::default())
+            .unwrap();
+        assert_eq!(copy.name, sibling_copy_name(original, 3));
+        assert_eq!(copy.bytes, 6);
+        assert_eq!(std::fs::read(dir.join(copy.name)).unwrap(), b"source");
+        assert_eq!(std::fs::read_link(dir.join(first)).unwrap(), Path::new("missing"));
+        assert_eq!(std::fs::read(dir.join(second)).unwrap(), b"old bytes");
+        for number in 4..=COPY_NAMES {
+            std::fs::write(dir.join(sibling_copy_name(original, number)), b"old").unwrap();
+        }
+        assert!(matches!(
+            parent.copy_regular_keep_both(source(), &dir, &Cancellation::default()),
+            Err(CopyError::SiblingNamesExhausted)
+        ));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), usize::from(COPY_NAMES) + 1);
+        assert_eq!(std::fs::read(dir.join(original)).unwrap(), b"source");
+    }
 
     #[test]
     fn cancellation_between_chunks_and_source_size_changes_stop_copy() {

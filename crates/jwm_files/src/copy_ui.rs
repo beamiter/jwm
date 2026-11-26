@@ -106,6 +106,7 @@ fn copy_error_message(error: CopyError) -> String {
     match error {
         CopyError::Cancelled => "已取消，未写入目标文件。".into(),
         CopyError::DestinationExists => "目标已有同名项目，未覆盖。".into(),
+        CopyError::SiblingNamesExhausted => "没有可用的副本名，已有文件未更改。".into(),
         CopyError::ParentChanged | CopyError::SourceChanged | CopyError::NotRegular => {
             "源或目标已改变，未写入目标文件。".into()
         }
@@ -124,7 +125,7 @@ fn copy_error_message(error: CopyError) -> String {
     }
 }
 
-fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label) {
+fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label, keep_both: bool) {
     let destination = {
         let browser = state.borrow();
         browser
@@ -137,7 +138,7 @@ fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label) {
         notice(status, "请先打开目标目录。");
         return;
     };
-    paste_into(state, buffer, status, parent, path);
+    paste_with_mode(state, buffer, status, parent, path, keep_both);
 }
 
 /// The destination is the clicked pane's committed directory, never the
@@ -149,6 +150,17 @@ pub(super) fn paste_into(
     parent: Arc<DirectoryHandle>,
     path: PathBuf,
 ) {
+    paste_with_mode(state, buffer, status, parent, path, false);
+}
+
+fn paste_with_mode(
+    state: &Shared,
+    buffer: &CopyBuffer,
+    status: &gtk::Label,
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+    keep_both: bool,
+) {
     let mut browser = state.borrow_mut();
     if browser.mutation.is_some() || browser.dialog_open {
         notice(status, "有文件操作正在进行，请稍候。");
@@ -158,7 +170,7 @@ pub(super) fn paste_into(
         notice(status, "请先选择要复制的普通文件。");
         return;
     };
-    if parent.identity() == source.parent.identity() {
+    if !keep_both && parent.identity() == source.parent.identity() {
         notice(status, "请选择不同的目标目录。同名项目不会被覆盖。");
         return;
     }
@@ -180,24 +192,29 @@ pub(super) fn paste_into(
         .name("jwm-files-copy".into())
         .spawn(move || {
             let _notify = SignalOnDrop(wake);
-            let send = send;
-            let result = target
-                .copy_regular_no_replace(
-                    CopySource {
-                        parent: &source.parent,
-                        displayed_parent: &source.path,
-                        name: &source.name,
-                        expected_file: source.identity,
-                    },
-                    CopyDestination {
-                        displayed_parent: &target_path,
-                        name: &source.name,
-                    },
-                    &on_worker,
-                )
-                .map(|_| MutationOutcome::FileOperation)
-                .map_err(copy_error_message);
-            let _ = send.send(result);
+            let from = CopySource {
+                parent: &source.parent,
+                displayed_parent: &source.path,
+                name: &source.name,
+                expected_file: source.identity,
+            };
+            let result = if keep_both {
+                target
+                    .copy_regular_keep_both(from, &target_path, &on_worker)
+                    .map(|receipt| MutationOutcome::CopyAsSibling(receipt.name))
+            } else {
+                target
+                    .copy_regular_no_replace(
+                        from,
+                        CopyDestination {
+                            displayed_parent: &target_path,
+                            name: &source.name,
+                        },
+                        &on_worker,
+                    )
+                    .map(|_| MutationOutcome::FileOperation)
+            };
+            let _ = send.send(result.map_err(copy_error_message));
         }) {
         Ok(_) => {
             browser.mutation = Some(MutationWork {
@@ -244,6 +261,7 @@ pub(super) fn install(
         ("copy-file", "复制选中文件（Ctrl+C）"),
         ("copy-item-path", "复制完整路径（Ctrl+Shift+C）"),
         ("paste-file", "粘贴到当前目录（Ctrl+V）"),
+        ("paste-as-copy", "粘贴为副本（Ctrl+Shift+V）"),
         ("cancel-file-copy", "取消正在进行的复制"),
     ] {
         let action = gio::SimpleAction::new(name, None);
@@ -261,7 +279,8 @@ pub(super) fn install(
                     copy_path(&window, &state, selection.selected(), &status);
                 }
             }
-            "paste-file" => paste(&state, &buffer, &status),
+            "paste-file" => paste(&state, &buffer, &status, false),
+            "paste-as-copy" => paste(&state, &buffer, &status, true),
             _ => {
                 if let Some((cancel, _)) = state
                     .borrow()
@@ -294,6 +313,7 @@ pub(super) fn install(
             (Key::c | Key::C, true) => "win.copy-item-path",
             (Key::c, false) => "win.copy-file",
             (Key::v, false) => "win.paste-file",
+            (Key::v | Key::V, true) => "win.paste-as-copy",
             (Key::z, false) => "win.undo-rename",
             _ => return glib::Propagation::Proceed,
         };

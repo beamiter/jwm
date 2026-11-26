@@ -316,6 +316,14 @@ The **操作** menu also exposes this primitive in the file browser.
 Select a regular file and press Ctrl+C, then browse to a different
 directory and press Ctrl+V. The same source is available to sibling
 windows in this JWM Files process, not to other applications or processes.
+To keep both copies explicitly, choose **粘贴为副本** or use
+**Ctrl+Shift+V** in the main pane. It works in the same or another folder
+and picks a sibling name such as `report (copy).txt` or
+`report (copy 2).txt`. Existing files and links are never replaced. Data
+is staged only once and each of the up to 32 candidate names is published
+without replacement. The status shows the selected name. Ordinary
+**Ctrl+V** still refuses a conflict.
+
 The browser does not modify the system clipboard or intercept normal
 text-field copy/paste. At most one filesystem mutation runs per
 window. Use the menu to request cancellation before publication.

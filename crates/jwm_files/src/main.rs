@@ -220,6 +220,7 @@ struct MutationWork {
 
 enum MutationOutcome {
     FileOperation,
+    CopyAsSibling(OsString),
     Rename(Option<RenameReceipt>),
     RenameUndone,
 }
@@ -1416,9 +1417,16 @@ fn open_window_with_tabs(
             && let Some(work) = browser.mutation.take()
         {
             let result = result.map(|outcome| match outcome {
-                MutationOutcome::Rename(receipt) => browser.rename_undo = receipt.map(Arc::new),
-                MutationOutcome::RenameUndone => browser.rename_undo = None,
-                MutationOutcome::FileOperation => {}
+                MutationOutcome::Rename(receipt) => {
+                    browser.rename_undo = receipt.map(Arc::new);
+                    None
+                }
+                MutationOutcome::RenameUndone => {
+                    browser.rename_undo = None;
+                    None
+                }
+                MutationOutcome::FileOperation => None,
+                MutationOutcome::CopyAsSibling(name) => Some(name),
             });
             let should_refresh = browser.pending.is_none()
                 && browser.path() == &work.path
@@ -1428,14 +1436,15 @@ fn open_window_with_tabs(
                     .is_some_and(|p| p.identity() == work.parent.identity());
             if let Some((_, detail)) = &work.copy {
                 let text = match &result {
-                    Ok(()) => format!("已复制：{detail}"),
+                    Ok(Some(name)) => format!("已复制为副本：{name:?}"),
+                    Ok(None) => format!("已复制：{detail}"),
                     Err(error) => error.to_string(),
                 };
                 copy_ui::notice(&copy_status, &text);
             }
             if should_refresh {
                 match result {
-                    Ok(()) => {
+                    Ok(_) => {
                         let path = browser.path().clone();
                         drop(browser);
                         start_scan(&state, path, &address, &status);
@@ -2124,6 +2133,19 @@ mod wayland_acceptance {
             "copy rejected a named conflict",
         );
         assert_eq!(fs::read(conflict.join("after.txt")).unwrap(), b"existing");
+        std::os::unix::fs::symlink("absent", conflict.join("after (copy).txt")).unwrap();
+        action("win.paste-as-copy");
+        until(
+            || status_matches(&|text| text.starts_with("已复制为副本：")),
+            "copy-as published an alternate name",
+        );
+        assert_eq!(fs::read(conflict.join("after (copy 2).txt")).unwrap(), b"new");
+        assert_eq!(fs::read(conflict.join("after.txt")).unwrap(), b"existing");
+        assert_eq!(
+            fs::read_link(conflict.join("after (copy).txt")).unwrap(),
+            Path::new("absent")
+        );
+        println!("GTK4 Wayland copy: keep-both preserved the original and dangling link");
         navigate(&target);
         action("win.paste-file");
         until(
