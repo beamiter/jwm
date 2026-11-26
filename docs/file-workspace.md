@@ -108,6 +108,14 @@ its own back/forward history. Switching rescans the target and clears old
 selection before allowing file actions. List/grid and hidden-item settings
 are shared across the window. Up to 16 tabs can be open at once.
 
+### Separate windows
+
+**Ctrl+N** or **操作 → 新建窗口** opens a second browser at the last
+successfully displayed directory. Its tabs, history, selection and scanning
+are independent. Use the window close control to close it; **Ctrl+W** still
+closes a tab. Up to eight browser windows per process are allowed. This is
+not the in-window split-pane view.
+
 ### Live directory refresh
 
 Linux watches only the displayed local directory, non-recursively. The scan
@@ -187,8 +195,9 @@ provide a crash-durable completion receipt.
 
 The **操作** menu also exposes this primitive in the file browser.
 Select a regular file and press Ctrl+C, then browse to a different
-directory and press Ctrl+V. The browser remembers only that source,
-does not modify the system clipboard, and does not intercept normal
+directory and press Ctrl+V. The same source is available to sibling
+windows in this JWM Files process, not to other applications or processes.
+The browser does not modify the system clipboard or intercept normal
 text-field copy/paste. At most one filesystem mutation runs per
 window. Use the menu to request cancellation before publication.
 The operation status remains visible while you browse elsewhere.

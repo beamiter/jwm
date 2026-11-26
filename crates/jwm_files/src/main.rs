@@ -33,6 +33,7 @@ use tabs::{TabId, Tabs};
 use wake::{SignalOnDrop, Wake};
 
 const APP_ID: &str = "org.jwm.Files";
+const WINDOW_LIMIT: usize = 8;
 
 struct Browser {
     worker: ScanWorker,
@@ -44,7 +45,6 @@ struct Browser {
     parent: Option<Arc<DirectoryHandle>>,
     mutation: Option<MutationWork>,
     rename_undo: Option<Arc<RenameReceipt>>,
-    copy_item: Option<copy_ui::StashedCopy>,
     activation: Option<Activation>,
     active_scan: Option<ScanId>,
     automatic_scan: Option<ScanId>,
@@ -498,11 +498,8 @@ fn open_window(
     initial: &Path,
     home: &Path,
     special: &[(glib::UserDirectory, Option<PathBuf>)],
+    copy_buffer: &copy_ui::CopyBuffer,
 ) {
-    if let Some(window) = app.active_window() {
-        window.present();
-        return;
-    }
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("JWM Files")
@@ -720,7 +717,6 @@ fn open_window(
         parent: None,
         mutation: None,
         rename_undo: None,
-        copy_item: None,
         activation: None,
         active_scan: None,
         automatic_scan: None,
@@ -729,7 +725,14 @@ fn open_window(
     }));
     preview_ui::install(&window, &state, &selection, &status);
     trash_ui::install(&window);
-    copy_ui::install(&window, &file_actions, &state, &selection, &copy_status);
+    copy_ui::install(
+        &window,
+        &file_actions,
+        &state,
+        copy_buffer,
+        &selection,
+        &copy_status,
+    );
     let breadcrumb = Rc::new(breadcrumb::Breadcrumb::new({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
         move |path| start_scan(&state, path, &address, &status)
@@ -969,6 +972,39 @@ fn open_window(
         move |_, _| start_undo_rename(&state, &status)
     });
     window.add_action(&undo);
+
+    let new_window = gio::SimpleAction::new("new-window", None);
+    new_window.connect_activate({
+        let (window, state, status) = (window.downgrade(), state.clone(), status.clone());
+        let (home, special, copy_buffer) =
+            (home.to_path_buf(), special.to_vec(), copy_buffer.clone());
+        move |_, _| {
+            let Some(app) = window.upgrade().and_then(|window| window.application()) else {
+                return;
+            };
+            if app
+                .windows()
+                .iter()
+                .filter(|window| window.is::<gtk::ApplicationWindow>())
+                .count()
+                >= WINDOW_LIMIT
+            {
+                status.set_text(&format!("最多可打开 {WINDOW_LIMIT} 个文件窗口。"));
+                return;
+            }
+            let path = {
+                let browser = state.borrow();
+                if browser.dialog_open {
+                    return;
+                }
+                // Follow the committed directory, not a typed or pending path.
+                browser.path().clone()
+            };
+            open_window(&app, &path, &home, &special, &copy_buffer);
+        }
+    });
+    window.add_action(&new_window);
+    app.set_accels_for_action("win.new-window", &["<Control>n"]);
 
     {
         let (state, tabs, breadcrumb, weak_window) = (
@@ -1262,7 +1298,14 @@ fn main() -> glib::ExitCode {
         glib::UserDirectory::Downloads,
     ]
     .map(|kind| (kind, glib::user_special_dir(kind)));
-    app.connect_activate(move |app| open_window(app, &initial, &home, &special));
+    let copy_buffer = copy_ui::CopyBuffer::default();
+    app.connect_activate(move |app| {
+        if let Some(window) = app.active_window() {
+            window.present();
+        } else {
+            open_window(app, &initial, &home, &special, &copy_buffer);
+        }
+    });
     app.run_with_args(&["jwm-files"])
 }
 
@@ -1395,7 +1438,7 @@ mod wayland_acceptance {
             .flags(gio::ApplicationFlags::NON_UNIQUE)
             .build();
         app.register(None::<&gio::Cancellable>).unwrap();
-        open_window(&app, &start, &root, &[]);
+        open_window(&app, &start, &root, &[], &copy_ui::CopyBuffer::default());
         let window = app.active_window().unwrap();
         let main_model = descendants(window.upcast_ref())
             .into_iter()
@@ -1430,6 +1473,97 @@ mod wayland_acceptance {
             }
         });
         until(|| drew.get(), "native frame clock");
+
+        assert_eq!(app.accels_for_action("win.new-window").len(), 1);
+        gtk::prelude::WidgetExt::activate_action(&window, "win.new-window", None).unwrap();
+        let sibling = app
+            .windows()
+            .into_iter()
+            .find(|candidate| candidate != &window)
+            .expect("Ctrl+N creates a distinct top-level browser window");
+        let sibling_model = descendants(sibling.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                widget
+                    .downcast::<gtk::ListView>()
+                    .ok()?
+                    .model()?
+                    .downcast::<gtk::SingleSelection>()
+                    .ok()?
+                    .model()?
+                    .downcast::<row_model::FileRowModel>()
+                    .ok()
+            })
+            .unwrap();
+        assert_ne!(main_model, sibling_model);
+        let source_view = descendants(window.upcast_ref())
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::ListView>().ok())
+            .unwrap();
+        let source_selection = source_view
+            .model()
+            .and_downcast::<gtk::SingleSelection>()
+            .unwrap();
+        source_selection.set_selected(0);
+        gtk::prelude::WidgetExt::activate_action(&window, "win.copy-file", None).unwrap();
+        until(
+            || {
+                sibling.surface().is_some_and(|surface| surface.is_mapped())
+                    && sibling.title().as_deref() == Some(&first_title)
+                    && first_label(&sibling_model).as_deref() == Some("before.txt")
+            },
+            "independent window opened at the committed directory",
+        );
+        gtk::prelude::WidgetExt::activate_action(&sibling, "win.location", None).unwrap();
+        let sibling_address = descendants(sibling.upcast_ref())
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::Entry>().ok())
+            .unwrap();
+        sibling_address.set_text(next.to_str().unwrap());
+        sibling_address.emit_activate();
+        until(
+            || first_label(&sibling_model).as_deref() == Some("after.txt"),
+            "secondary window completed its own navigation",
+        );
+        assert_eq!(window.title().as_deref(), Some(first_title.as_str()));
+        assert_eq!(first_label(&main_model).as_deref(), Some("before.txt"));
+        let copied = next.join("before.txt");
+        fs::write(&copied, b"destination must stay").unwrap();
+        until(|| sibling_model.n_items() == 2, "the conflict was listed");
+        let sibling_status = |needle: &str| {
+            descendants(sibling.upcast_ref()).iter().any(|widget| {
+                widget
+                    .downcast_ref::<gtk::Label>()
+                    .is_some_and(|label| label.text().contains(needle))
+            })
+        };
+        let paste_in_sibling =
+            || gtk::prelude::WidgetExt::activate_action(&sibling, "win.paste-file", None).unwrap();
+        paste_in_sibling();
+        until(
+            || sibling_status("目标已有同名项目，未覆盖"),
+            "cross-window paste delivered an explicit conflict",
+        );
+        assert_eq!(fs::read(&copied).unwrap(), b"destination must stay");
+        fs::remove_file(&copied).unwrap();
+        until(|| sibling_model.n_items() == 1, "the conflict was cleared");
+        paste_in_sibling();
+        until(
+            || sibling_status("已复制：") && fs::read(&copied).is_ok_and(|bytes| bytes == b"old"),
+            "cross-window paste published the exact source bytes",
+        );
+        assert_eq!(fs::read(start.join("before.txt")).unwrap(), b"old");
+        fs::remove_file(&copied).unwrap();
+        println!(
+            "GTK4 Wayland windows: cross-window copy preserved conflicts and published exact bytes"
+        );
+        sibling.close();
+        until(
+            || !app.windows().contains(&sibling),
+            "secondary window closed",
+        );
+        window.present();
+        println!("GTK4 Wayland windows: secondary navigation left the original browser unchanged");
 
         gtk::prelude::WidgetExt::activate_action(&window, "win.location", None).unwrap();
         let address = descendants(window.upcast_ref())
