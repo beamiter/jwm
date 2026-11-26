@@ -31,7 +31,7 @@ class UpdateInstallTests(unittest.TestCase):
         self.env = {**os.environ, 'PATH': str(self.tools) + ':/usr/bin:/bin',
                     'TEST_CALLS': str(self.calls), 'GIT_CONFIG_NOSYSTEM': '1',
                     'GIT_CONFIG_GLOBAL': '/dev/null'}
-        for name in ('jsh', 'anvil', 'ember', 'forge', 'frost'):
+        for name in ('jsh', 'aether', 'anvil', 'ember', 'forge', 'frost'):
             self.env[name.upper() + '_INSTALL_ARGS'] = '--bin-dir ' + str(self.installed)
         for tool in ('cargo', 'nix', 'sudo'):
             self.executable(self.tools / tool,
@@ -59,15 +59,20 @@ class UpdateInstallTests(unittest.TestCase):
                         '#!/bin/sh\nprintf "installer:%s\\n" "' + name + '" >> "$TEST_CALLS"\n'
                         'if [ "${TEST_RECORD_ARGS:-}" = 1 ]; then printf "args:%s:%s\\n" "' + name + '" "$*" >> "$TEST_CALLS"; fi\n'
                         'exit ' + ('9' if fail else '0') + '\n')
+        if name == 'aether':
+            self.executable(scripts / 'build-release.sh',
+                            '#!/bin/sh\nprintf "builder:aether:%s\\n" "$*" >> "$TEST_CALLS"\n')
         self.git('-C', seed, 'add', '.')
         self.git('-C', seed, 'commit', '-qm', 'fixture')
         remote = self.root / (name + '.git')
         self.git('clone', '-q', '--bare', seed, remote)
         checkout = self.projects / name
         self.git('clone', '-q', remote, checkout)
-        artifact = checkout / 'target' / 'release' / name
-        artifact.parent.mkdir(parents=True)
-        self.executable(artifact, '#!/bin/sh\nexit 0\n')
+        release = checkout / 'target' / 'release'
+        release.mkdir(parents=True)
+        binaries = ('tauri-terminal-lab', 'aether-terminal-host') if name == 'aether' else (name,)
+        for binary in binaries:
+            self.executable(release / binary, '#!/bin/sh\nexit 0\n')
         if updated:
             (seed / 'changed').write_text('new source\n')
             self.git('-C', seed, 'add', '.')
@@ -230,7 +235,7 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *args])
                 self.assert_no_auth_ui()
 
     def test_default_installs_each_known_project_through_its_own_script(self):
-        names = ('jsh', 'anvil', 'ember', 'frost', 'forge', 'jwm')
+        names = ('jsh', 'aether', 'anvil', 'ember', 'frost', 'forge', 'jwm')
         for name in names:
             self.project(name)
         result = self.run_script('-B', '-q', '-J', '2')
@@ -289,6 +294,48 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *args])
         result = self.run_script('-q')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.lines(), [])
+
+    def test_aether_install_requires_both_executables_in_the_staged_bin_dir(self):
+        self.project('aether')
+        stage = self.root / 'stage'
+        bin_dir = stage / 'opt/aether/bin'
+        bin_dir.mkdir(parents=True)
+        self.env.update(DESTDIR=str(stage), TEST_RECORD_ARGS='1',
+                        AETHER_INSTALL_ARGS='--prefix=/unused --bin-dir /opt/aether/bin --no-desktop')
+        self.executable(bin_dir / 'aether', '#!/bin/sh\nexit 0\n')
+        skipped = self.run_script('-q', '-B', '-T', 'aether', '-X', 'aether')
+        self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
+        self.assertEqual(self.lines(), [])
+
+        result = self.run_script('-q', '-T', 'aether')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = ['installer:aether', 'args:aether:' + self.env['AETHER_INSTALL_ARGS']]
+        self.assertEqual(self.lines(), calls)
+
+        self.executable(bin_dir / 'aether-terminal-host', '#!/bin/sh\nexit 0\n')
+        ready = self.run_script('-q', '-T', 'aether')
+        self.assertEqual(ready.returncode, 0, ready.stdout + ready.stderr)
+        self.assertEqual(self.lines(), calls)
+
+    def test_aether_build_only_checks_both_cargo_artifacts(self):
+        checkout = self.project('aether')
+        self.env['CARGO_TARGET_DIR'] = 'target/custom'
+        release = checkout / 'target/custom/release'
+        release.mkdir(parents=True)
+        self.executable(release / 'tauri-terminal-lab', '#!/bin/sh\nexit 0\n')
+
+        result = self.run_script('-C', '-q', '-T', 'aether')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lines(), ['builder:aether:'])
+
+        self.executable(release / 'aether-terminal-host', '#!/bin/sh\nexit 0\n')
+        ready = self.run_script('-C', '-q', '-T', 'aether')
+        self.assertEqual(ready.returncode, 0, ready.stdout + ready.stderr)
+        self.assertEqual(self.lines(), ['builder:aether:'])
+
+        local = self.run_script('-B', '-C', '-L', '-q', '-T', 'aether')
+        self.assertEqual(local.returncode, 0, local.stdout + local.stderr)
+        self.assertEqual(self.lines(), ['builder:aether:', 'builder:aether:--local-sources'])
 
     def test_update_only_and_dry_run_never_build_or_install(self):
         self.project('ember', updated=True)
@@ -364,6 +411,14 @@ os.execv(os.environ['TEST_REAL_GIT'], [os.environ['TEST_REAL_GIT'], *args])
         result = self.run_script('-B', '-L', '-q')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.lines(), ['local:ember build --release'])
+
+    def test_aether_installs_the_local_sources_build(self):
+        self.project('aether')
+        self.env['TEST_RECORD_ARGS'] = '1'
+        result = self.run_script('-B', '-L', '-q', '-T', 'aether')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lines(), ['installer:aether',
+                                      'args:aether:--local-sources --bin-dir ' + str(self.installed)])
 
     def test_jsh_rebuilds_even_if_the_version_number_has_not_changed(self):
         self.project('jsh')

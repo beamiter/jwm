@@ -13,7 +13,7 @@ DRY_RUN=0
 QUIET=0
 PUSH=1          # 默认把 rebase 后仍领先 upstream 的提交推送上去
 INSTALL=1        # 默认编译并安装；-C 仅编译
-LOCAL_SOURCES=0  # -L: 四终端使用同级共享库源码联编
+LOCAL_SOURCES=0  # -L: 终端使用同级共享库源码联编
 BUILD=1          # 更新后是否编译
 BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
 BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
@@ -28,8 +28,8 @@ MAX_PARALLEL_JOBS=64
 
 # 名字必须与扫描到的仓库 basename 一致。LifeAI 是给命令行使用的便捷别名，
 # 规范名仍是实际目录 LifeAI.jl。
-KNOWN_TARGETS="jagent jsh jterm_core anvil ember frost forge jwm cplus LifeAI.jl"
-INSTALL_TARGETS="jsh anvil ember forge frost jwm"
+KNOWN_TARGETS="jagent jsh jterm_core aether anvil ember frost forge jwm cplus LifeAI.jl"
+INSTALL_TARGETS="jsh aether anvil ember forge frost jwm"
 
 is_known_target() {
     case " $KNOWN_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
@@ -131,6 +131,7 @@ sanitize_text() {
 # 或 ANVIL_INSTALL_ARGS='--backend cargo --no-desktop'
 JWM_INSTALL_ARGS="${JWM_INSTALL_ARGS:-}"
 JSH_INSTALL_ARGS="${JSH_INSTALL_ARGS:-}"
+AETHER_INSTALL_ARGS="${AETHER_INSTALL_ARGS:-}"
 ANVIL_INSTALL_ARGS="${ANVIL_INSTALL_ARGS:-}"
 EMBER_INSTALL_ARGS="${EMBER_INSTALL_ARGS:-}"
 FORGE_INSTALL_ARGS="${FORGE_INSTALL_ARGS:-}"
@@ -164,12 +165,12 @@ usage() {
   -p, --no-push  只拉取，不推送；host 模式默认不推送，-u 可显式开启
   -q            只输出汇总表
 
-构建选项 (只作用于已知项目: jagent jsh jterm_core anvil ember frost forge jwm cplus LifeAI.jl):
+构建选项 (只作用于已知项目: jagent jsh jterm_core aether anvil ember frost forge jwm cplus LifeAI.jl):
   -B            全部重新构建，不管本次有没有拉到新提交
   -N            不构建、不安装，只更新仓库
   -C            仅编译，不调用安装器
   -I            编译并安装（默认；安装器负责构建）
-  -L            四终端用同级 jterm_core/jagent 源码联编，再安装产物
+  -L            五个终端用同级 jterm_core/jagent 源码联编，再安装产物
                 使用临时 manifest/lock，不改各仓库发布依赖版本
   -T 列表       只更新和构建这些项目，逗号分隔，如 -T jagent,jwm,LifeAI
   -X, --skip-build 列表  这些项目仍更新仓库，但跳过编译和安装，如 -X jwm,jsh
@@ -182,10 +183,10 @@ usage() {
 或者产物不存在的项目。
 
 各项目的构建方式并不相同，脚本里按名字分派:
-  anvil,forge       scripts/install.sh —— 后端 (nix / cargo) 由 --backend auto 挑；
-                    四个终端默认都装到 ~/.local/bin。
+  aether            scripts/install.sh —— 用 cargo 构建并安装桌面程序和 SSH helper
+  anvil,forge       scripts/install.sh —— 后端 (nix / cargo) 由 --backend auto 挑
   ember,frost       scripts/install.sh —— 默认用 cargo 构建，也可用 --binary 安装
-                    预构建产物；默认装到 ~/.local/bin。这四个目标都不需要 sudo。
+                    预构建产物。五个终端默认都装到 ~/.local/bin，无需 sudo。
   jwm              scripts/install-jwm.sh —— 默认安装完整组件：
                    裸 cargo build 只出根 package 的四个二进制，不编 bar 和
                    jwm-bridge/jwm-player，也不同步到 /usr/local/bin，更新完跑的还是旧的
@@ -196,12 +197,14 @@ usage() {
   LifeAI.jl        锁定项目环境下 instantiate/precompile 并加载 LifeAI
 
 jagent/jterm_core/cplus/LifeAI.jl 只构建或预编译。-C 可让应用也只编译不安装。
-产物检测看的是各项目真正落地的位置: jwm 检查 /usr/local/bin 下的 jwm、bridge、player，四个终端看
-安装脚本的目标目录（四终端默认 ~/.local/bin，跟随 --prefix/--bin-dir/DESTDIR），
+产物检测看的是各项目真正落地的位置。jwm 检查 /usr/local/bin 下的 jwm、bridge、player。
+五个终端看安装脚本的目标目录（默认 ~/.local/bin，跟随 --prefix/--bin-dir/DESTDIR），
+aether 同时检查 aether 和 aether-terminal-host。
 jsh 看其安装目录；仅编译模式和 jagent/jterm_core 看 Cargo release 产物，cplus 看 build/m；
 LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在更新或 -B 时执行。
 
 环境变量:
+  AETHER_INSTALL_ARGS 追加给 aether/scripts/install.sh 的参数，如 '--no-desktop'
   ANVIL_INSTALL_ARGS 追加给 anvil/scripts/install.sh 的参数，如 '--backend cargo'
   EMBER_INSTALL_ARGS 追加给 ember/scripts/install.sh，如 '--no-desktop'
   FORGE_INSTALL_ARGS 追加给 forge/scripts/install.sh，如 '--backend nix'
@@ -650,15 +653,15 @@ update_one() {
 
 # ——— 构建：每个项目的方式都不一样，差异全部集中在下面几个函数里 ———
 
-# 四个终端共用同一套 install.sh 接口，额外参数按 <大写名字>_INSTALL_ARGS 取。
+# 终端安装脚本的额外参数按 <大写名字>_INSTALL_ARGS 取。
 install_args_for() {
     local var
     var="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')_INSTALL_ARGS"
     printf '%s' "${!var:-}"
 }
 
-# 复刻 anvil/ember/forge/frost install.sh 里 BIN_DIR 的解析：显式 --bin-dir 优先，
-# 其次 --prefix/bin；四终端默认 ~/.local/bin。DESTDIR 是打包暂存前缀。
+# 显式 --bin-dir 优先，其次 --prefix/bin，终端默认 ~/.local/bin。
+# DESTDIR 是打包暂存前缀。
 install_bin_dir() {
     local name="$1" prefix="" bindir=""
     shift
@@ -773,6 +776,10 @@ artifact_path() {
         printf '%s/release/lib%s.rlib\n' "$target_dir" "$name"
         return
     fi
+    if [ "$name" = "aether" ]; then
+        printf '%s/release/tauri-terminal-lab\n' "$target_dir"
+        return
+    fi
     printf '%s/release/%s\n' "$target_dir" "$name"
 }
 
@@ -792,6 +799,10 @@ artifact_is_ready() {
     [ "$name" = "LifeAI.jl" ] && return 0
     artifact="$(artifact_path "$name" "$repo")"
     case "$name" in
+        aether)
+            local helper="${artifact%/*}/aether-terminal-host"
+            [ -f "$artifact" ] && [ -x "$artifact" ] && [ -f "$helper" ] && [ -x "$helper" ]
+            ;;
         jwm)              jwm_helpers_are_ready "$artifact" ;;
         jagent|jterm_core) [ -f "$artifact" ] ;;
         *)                 [ -x "$artifact" ] ;;
@@ -809,6 +820,7 @@ built_binary_path() {
 
 is_local_family_target() {
     [ "$LOCAL_SOURCES" -eq 1 ] || return 1
+    # Aether's build-release.sh runs the family builder for both manifests.
     case "$1" in anvil|ember|forge|frost) return 0 ;; *) return 1 ;; esac
 }
 
@@ -828,6 +840,10 @@ build_cmd() {
     local -a extra_args=()
     if [ "$INSTALL" -eq 0 ]; then
         case "$name" in
+            aether)
+                printf '%s\n' ./scripts/build-release.sh
+                if [ "$LOCAL_SOURCES" -eq 1 ]; then printf '%s\n' --local-sources; fi
+                return ;;
             anvil|forge)
                 if command -v nix >/dev/null 2>&1; then
                     printf '%s\n' nix develop --command cargo build --release --locked
@@ -840,14 +856,14 @@ build_cmd() {
         esac
     fi
     case "$name" in
-        # 四个终端各自带 scripts/install.sh，构建加安装一步到位。anvil/forge
-        # 自己选择 nix/cargo 后端，ember/frost 选择 cargo 或显式 --binary；脚本
-        # 还负责 desktop/AppStream/图标和 PATH 遮挡检查。目标在用户 HOME 下
-        #（四终端默认 ~/.local/bin），不需要 sudo。
-        anvil|ember|forge|frost)
+        # 终端安装器负责构建、安装和桌面集成，默认装到 ~/.local/bin。
+        aether|anvil|ember|forge|frost)
             raw_args="$(install_args_for "$name")"
             [ -z "$raw_args" ] || read -r -a extra_args <<<"$raw_args"
             printf '%s\n' ./scripts/install.sh
+            if [ "$name" = aether ] && [ "$LOCAL_SOURCES" -eq 1 ]; then
+                printf '%s\n' --local-sources
+            fi
             [ "${#extra_args[@]}" -eq 0 ] || printf '%s\n' "${extra_args[@]}"
             ;;
         # jwm 只有“安装”这一种做法：根 workspace 的 cargo build 只产出
@@ -1068,13 +1084,13 @@ if [ "$BUILD" -eq 1 ]; then
         break
     done
 
-    # 逐项目只检查真正的入口工具。四个终端必须交给 install.sh 自己解析
-    # --backend/--binary：anvil/forge 的 auto 会优先选 nix，而 ember/frost
-    # 也可能安装预构建二进制；在这里一律要求 cargo 会提前否决合法调用。
+    # 逐项目只检查真正的入口工具。各终端的 install.sh 自己解析
+    # --backend/--binary，预构建安装也可以在没有 cargo 的机器上运行。
     available_idx=()
     for i in "${run_idx[@]}"; do
         name="$(basename "${repos[$i]}")"
         case "$name" in
+            aether|cplus) required_tool="bash" ;;
             anvil|ember|forge|frost)
                 if is_local_family_target "$name"; then
                     required_tool="python3"
@@ -1085,7 +1101,6 @@ if [ "$BUILD" -eq 1 ]; then
                     required_tool="bash"
                 fi ;;
             jsh) if is_install_target "$name"; then required_tool="sh"; else required_tool="cargo"; fi ;;
-            cplus)      required_tool="bash" ;;
             LifeAI.jl)  required_tool="julia" ;;
             *)          required_tool="cargo" ;;
         esac

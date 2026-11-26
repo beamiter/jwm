@@ -107,22 +107,25 @@ tool may still compile shared dependencies it needs.
 
 ```sh
 # Build and install the current published terminal dependency revisions.
-./git-update-all.sh -B -T anvil,ember,frost,forge ~/projects
+./git-update-all.sh -B -T aether,anvil,ember,frost,forge ~/projects
 
 # Before publishing a coordinated core change, use sibling source checkouts.
-./git-update-all.sh -B -L -T anvil,ember,frost,forge ~/projects
+./git-update-all.sh -B -L -T aether,anvil,ember,frost,forge ~/projects
 
 # Compile only; keep the installed apps unchanged.
-./git-update-all.sh -B -C -T anvil,ember,frost,forge ~/projects
+./git-update-all.sh -B -C -T aether,anvil,ember,frost,forge ~/projects
 ```
 
-`-L` uses `jterm_core/scripts/family-cargo.py`, builds against sibling
-`jterm_core` and `jagent` sources with temporary manifests and lockfiles, then
-passes the exact compiled binary to each terminal's `scripts/install.sh`.
-It does not rewrite release dependency pins. All four terminal installers
-default to `~/.local/bin`; explicit installer arguments retain their target
-directory settings. Existing source-selection, dirty-tree and dry-run rules
-still apply.
+`-L` uses `jterm_core/scripts/family-cargo.py` with Python 3.11 or newer.
+The runner builds against sibling `jterm_core` and `jagent` sources using
+temporary manifests and lockfiles. Each installer uses the resulting binaries.
+All five terminal installers default to `~/.local/bin` and accept custom
+target directories.
+
+Aether's installer places `aether` and `aether-terminal-host` in the same
+binary directory. The updater installs again when either executable is missing.
+Use `AETHER_INSTALL_ARGS='--no-desktop'` to skip the launcher and icon or
+`-X aether` to update the repository without building it.
 
 The install-routing regression suite is
 `python3 scripts/test-git-update-all-install.py`; it uses local repositories
