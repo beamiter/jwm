@@ -1699,10 +1699,7 @@ mod wayland_acceptance {
             .into_iter()
             .find_map(|widget| {
                 let list = widget.downcast::<gtk::ListView>().ok()?;
-                let selection = list
-                    .model()?
-                    .downcast::<gtk::SingleSelection>()
-                    .ok()?;
+                let selection = list.model()?.downcast::<gtk::SingleSelection>().ok()?;
                 let model = selection
                     .model()?
                     .downcast::<row_model::FileRowModel>()
