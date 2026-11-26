@@ -39,7 +39,7 @@ fn stash(state: &Shared, selected: u32, status: &gtk::Label) {
         .and_then(|(parent, entry)| {
             Some(StashedCopy {
                 parent: parent.clone(),
-                path: browser.path.clone(),
+                path: browser.path().clone(),
                 name: entry.name.clone(),
                 identity: entry.identity?,
             })
@@ -101,7 +101,7 @@ fn paste(state: &Shared, status: &gtk::Label) {
         notice(status, "请选择不同的目标目录。同名项目不会被覆盖。");
         return;
     }
-    let path = browser.path.clone();
+    let path = browser.path().clone();
     let (target, target_path) = (parent.clone(), path.clone());
     let cancellation = Cancellation::default();
     let on_worker = cancellation.clone();
@@ -157,6 +157,7 @@ pub(super) fn install(
     status: &gtk::Label,
 ) {
     let menu = gio::Menu::new();
+    menu.append(Some("新建标签页（Ctrl+T）"), Some("win.new-tab"));
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
     for (name, label) in [
         ("copy-file", "复制选中文件（Ctrl+C）"),

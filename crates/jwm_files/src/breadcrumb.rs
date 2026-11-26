@@ -1,6 +1,7 @@
 use gtk::prelude::*;
 use gtk4 as gtk;
 use std::{
+    cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -31,6 +32,7 @@ type Navigate = Rc<dyn Fn(PathBuf)>;
 pub(super) struct Breadcrumb {
     pub(super) container: gtk::Box,
     children: gtk::Box,
+    shown: RefCell<Option<PathBuf>>,
     navigate: Navigate,
 }
 
@@ -48,11 +50,16 @@ impl Breadcrumb {
         Self {
             container,
             children,
+            shown: RefCell::new(None),
             navigate: Rc::new(navigate),
         }
     }
 
     pub(super) fn show(&self, path: &Path) {
+        if self.shown.borrow().as_deref() == Some(path) {
+            return;
+        }
+        self.shown.replace(Some(path.to_path_buf()));
         while let Some(child) = self.children.first_child() {
             self.children.remove(&child);
         }
