@@ -252,9 +252,12 @@ Images, audio and video are separate milestones.
 directory. Entries include their original path and deletion time when
 metadata is available, plus the unique storage name so repeated deletes
 at the same path and second remain distinguishable. Missing metadata is
-shown explicitly. The scan is limited to 4,096 entries, with a visible
-notice if incomplete. Select an ordinary file with an intact original
-path and choose **恢复副本** to preview the destination and confirm.
+shown explicitly. Non-UTF-8 bytes are displayed as distinct `\xNN`
+escapes, also in the recovery confirmation. **下一批** continues the same directory scan without
+retaining previous lists in memory. Each batch has up to 4,096 entries
+and is sorted on its own. **刷新** starts again at the first batch, and
+is required if the directory changes during a scan. Select an ordinary
+file with an intact original path and choose **恢复副本** to preview the destination and confirm.
 The action creates a no-overwrite copy at the original path, leaving
 the Trash entry and metadata in place. It refuses a missing or
 symlinked parent. It does not enumerate other mounts, move files to

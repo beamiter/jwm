@@ -52,3 +52,4 @@ grep -F 'GTK4 Wayland undo: directory-bound rename conflicts were non-destructiv
 grep -F 'GTK4 Wayland Markdown: native heading style and exact source toggle verified' "$client_log"
 grep -F 'GTK4 Wayland Trash: same-path entries remained distinct in the home view' "$client_log"
 grep -F 'GTK4 Wayland Trash: selected the exact revision and kept both entries on recovery' "$client_log"
+grep -F 'GTK4 Wayland Trash pages: next page reached the exact omitted newest entry' "$client_log"
