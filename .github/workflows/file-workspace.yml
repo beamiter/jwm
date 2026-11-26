@@ -62,3 +62,5 @@ jobs:
           cargo build --locked
           xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp -noreset' \
             bash tests/x11-smoke.sh "$PWD/target/debug/jwm-files"
+          GDK_BACKEND=x11 GSK_RENDERER=cairo xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp -noreset' \
+            cargo test --locked native_tree_reads_independent_branches_and_activates_exact_paths -- --ignored --nocapture
