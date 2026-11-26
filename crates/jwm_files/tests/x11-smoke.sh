@@ -359,3 +359,73 @@ fi
 [[ "$clean_before" == "$(clean_mime)" ]]
 printf 'GTK4 X11 launcher: menu-only entry preserved an empty folder resolution\n'
 printf 'GTK4 X11 launcher: shipped desktop entry opened the exact local folder without changing defaults\n'
+
+# Opt-in service runs only in an isolated session bus, never an existing desktop bus.
+GDK_BACKEND=x11 GSK_RENDERER=cairo timeout 35s dbus-run-session -- bash -s -- "$binary" "$root" <<'BUS'
+set -euo pipefail
+binary=$1
+root=$2
+first=
+second=
+ordinary=
+cleanup() {
+  if [[ -n "$ordinary" ]]; then kill "$ordinary" 2>/dev/null || true; wait "$ordinary" 2>/dev/null || true; fi
+  if [[ -n "$second" ]]; then kill "$second" 2>/dev/null || true; wait "$second" 2>/dev/null || true; fi
+  if [[ -n "$first" ]]; then kill "$first" 2>/dev/null || true; wait "$first" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+name=org.freedesktop.FileManager1
+export_file() {
+  gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.GetNameOwner "$name"
+}
+if export_file >/dev/null 2>&1; then
+  echo 'fresh session bus unexpectedly has a FileManager1 owner' >&2
+  exit 1
+fi
+first_path="$root/bus-start"
+second_path="$root/bus-other"
+opened_path="$root/bus exact % 你好"
+ordinary_path="$root/bus-ordinary"
+mkdir "$first_path" "$second_path" "$opened_path" "$ordinary_path"
+"$binary" -- "$ordinary_path" > "$root/bus-ordinary.log" 2>&1 & ordinary=$!
+ordinary_window=$(timeout 10s xdotool search --sync --onlyvisible --name '^JWM Files · .*/bus-ordinary$' | sed -n '1p')
+[[ $(xdotool getwindowpid "$ordinary_window") == "$ordinary" ]]
+if export_file >/dev/null 2>&1; then
+  echo 'ordinary window must not claim FileManager1' >&2
+  exit 1
+fi
+"$binary" --file-manager-service -- "$first_path" > "$root/bus-first.log" 2>&1 & first=$!
+owner=
+for n in {1..50}; do
+  if owner=$(export_file 2>/dev/null); then break; fi
+  sleep 0.1
+done
+[[ -n "$owner" ]]
+"$binary" --file-manager-service -- "$second_path" > "$root/bus-second.log" 2>&1 & second=$!
+for n in {1..50}; do
+  if grep -Fq 'session name unavailable; existing owner unchanged' "$root/bus-second.log"; then break; fi
+  sleep 0.1
+done
+grep -Fq 'session name unavailable; existing owner unchanged' "$root/bus-second.log"
+[[ $(export_file) == "$owner" ]]
+uri=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$opened_path")
+call() {
+  gdbus call --session --dest "$name" --object-path /org/freedesktop/FileManager1 \
+    --method org.freedesktop.FileManager1.ShowFolders "$1" ""
+}
+if call "['$uri','file://remote.invalid/tmp/not-local']" > "$root/bus-invalid.log" 2>&1; then
+  echo 'invalid mixed local and remote request was not rejected' >&2
+  exit 1
+fi
+grep -Fq 'org.freedesktop.DBus.Error.InvalidArgs' "$root/bus-invalid.log"
+if xdotool search --onlyvisible --name '^JWM Files · .*/bus exact % 你好$' >/dev/null 2>&1; then
+  echo 'invalid batch partially opened a folder' >&2
+  exit 1
+fi
+call "['$uri']"
+opened=$(timeout 10s xdotool search --sync --onlyvisible --name '^JWM Files · .*/bus exact % 你好$' | sed -n '1p')
+[[ $(xdotool getwindowname "$opened") == "JWM Files · $opened_path" ]]
+[[ $(xdotool getwindowpid "$opened") == "$first" ]]
+printf 'GTK4 X11 FileManager1: opt-in folder request opened exact native folder and preserved existing owner\n'
+BUS

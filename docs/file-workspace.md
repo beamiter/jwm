@@ -69,8 +69,22 @@ install -Dm644 crates/jwm_files/data/org.jwm.Files.desktop \
 
 This adds a menu launcher only. It does not advertise a folder MIME
 association or change an existing or inferred default handler.
-Remove that desktop entry to remove the launcher. The FileManager1 D-Bus
-interface, GVFS volumes, and default handler migration remain separate.
+Remove that desktop entry to remove the launcher. The launcher does not start the optional FileManager1 D-Bus service.
+
+### Opt-in FileManager1 folder requests
+
+For manual integration testing, run `jwm-files --file-manager-service`.
+This process tries to offer `ShowFolders` on the existing session bus
+using the [freedesktop FileManager1 interface](https://wiki.freedesktop.org/Specifications/file-manager-interface/).
+It never replaces an existing owner, queues for the name, changes desktop
+settings, or installs a bus-activation service. Ordinary JWM Files launches
+do not register this name.
+
+Only local `file://` folders are accepted, with up to eight browser
+windows per process. The whole request is rejected if any URI is invalid
+or remote. The startup ID is not used for focus negotiation yet. Item
+selection and item properties methods, GVFS volumes, and default handler
+migration are outside this slice.
 
 ### Already-mounted locations
 
