@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "linux")]
 mod copy;
+#[cfg(target_os = "linux")]
+mod copy_names;
 mod local;
 #[cfg(target_os = "linux")]
 mod mkdir;
@@ -22,7 +24,7 @@ mod trash_snapshot;
 mod watch;
 
 #[cfg(target_os = "linux")]
-pub use copy::{CopyDestination, CopyError, CopyReceipt, CopySource};
+pub use copy::{CopyDestination, CopyError, CopyReceipt, CopySiblingReceipt, CopySource};
 pub use local::LocalProvider;
 #[cfg(target_os = "linux")]
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};

@@ -272,6 +272,18 @@ visit_path copy-conflict
 xdotool key --clearmodifiers ctrl+v
 sleep 0.55
 [[ $(cat "$root/copy-conflict/$copy_name") == 'existing' ]]
+copy_link=$'file space%\x80 (copy).txt'
+copy_sibling=$'file space%\x80 (copy 2).txt'
+ln -s missing "$root/copy-conflict/$copy_link"
+xdotool key --clearmodifiers ctrl+shift+v
+for attempt in {1..40}; do
+  [[ ! -f "$root/copy-conflict/$copy_sibling" ]] || break
+  sleep 0.1
+done
+cmp "$root/copy-from/$copy_name" "$root/copy-conflict/$copy_sibling"
+[[ $(cat "$root/copy-conflict/$copy_name") == 'existing' ]]
+[[ $(readlink "$root/copy-conflict/$copy_link") == missing ]]
+printf 'GTK4 X11 copy: explicit keep-both published a byte-exact sibling without replacement\n'
 visit_path copy-to
 xdotool key --clearmodifiers ctrl+v
 for attempt in {1..40}; do
