@@ -1582,6 +1582,65 @@ mod wayland_acceptance {
         println!(
             "GTK4 Wayland tabs: matching folder names disambiguated and accessible selection changed"
         );
+        let project_a = root.join("project-a");
+        let project_b = root.join("project-b");
+        fs::create_dir(&project_a).unwrap();
+        fs::create_dir(&project_b).unwrap();
+        fs::write(project_a.join("README.md"), b"project A preview").unwrap();
+        fs::write(project_b.join("README.md"), b"project B preview").unwrap();
+        navigate(&project_a);
+        at(&project_a, "README.md");
+        grid_selection.set_selected(0);
+        action("win.quick-preview");
+        let popup_for = || {
+            app.windows()
+                .into_iter()
+                .find(|w| w.title().as_deref() == Some("JWM Files · Preview"))
+        };
+        let mut popup = None;
+        until(
+            || {
+                popup = popup_for();
+                popup.is_some()
+            },
+            "same-name preview popup",
+        );
+        let popup = popup.unwrap();
+        let preview_at = |path: &Path, expected: &str| {
+            let full = path.join("README.md");
+            until(
+                || {
+                    let widgets = descendants(popup.upcast_ref());
+                    widgets.iter().any(|w| {
+                        w.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                            label.text().as_str() == full.to_string_lossy().as_ref()
+                        })
+                    }) && widgets.iter().any(|w| {
+                        w.downcast_ref::<gtk::TextView>().is_some_and(|text| {
+                            let buffer = text.buffer();
+                            buffer
+                                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                                .as_str()
+                                == expected
+                        })
+                    })
+                },
+                "current preview body and source path",
+            );
+        };
+        preview_at(&project_a, "project A preview");
+        action("win.next-tab");
+        at(&companion_source, "companion.txt");
+        navigate(&project_b);
+        at(&project_b, "README.md");
+        grid_selection.set_selected(0);
+        action("win.quick-preview");
+        assert_eq!(popup_for().as_ref(), Some(&popup));
+        preview_at(&project_b, "project B preview");
+        println!(
+            "GTK4 Wayland preview: an open preview followed the newly selected same-name file"
+        );
+        popup.close();
         window.close();
     }
 }
