@@ -345,6 +345,83 @@ fn staged_copy_publishes_exact_bytes_without_replacing_destination() {
 }
 
 #[test]
+fn staged_copy_keeps_sparse_payloads_and_trailing_holes() {
+    use jwm_file_core::{CopyDestination, CopySource, FileIdentity};
+    use std::{
+        fs::File,
+        io::{Read, Seek},
+        os::unix::fs::{FileExt, MetadataExt},
+    };
+
+    let fixture = Fixture::new();
+    let from = fixture.0.join("from");
+    let to = fixture.0.join("to");
+    fs::create_dir(&from).unwrap();
+    fs::create_dir(&to).unwrap();
+    let from_handle = DirectoryHandle::open(&from).unwrap();
+    let to_handle = DirectoryHandle::open(&to).unwrap();
+    let size = 64 * 1024 * 1024;
+    for name in ["two-extents", "hole-only"] {
+        let source = File::create_new(from.join(name)).unwrap();
+        source.set_len(size).unwrap();
+        if name == "two-extents" {
+            source.write_all_at(b"begin", 0).unwrap();
+            source.write_all_at(b"middle", size / 2).unwrap();
+        }
+        source.sync_all().unwrap();
+        let expected = source.metadata().unwrap();
+        let input = File::open(from.join(name)).unwrap();
+        let hole_reported =
+            rustix::fs::seek(&input, rustix::fs::SeekFrom::Hole(0)).is_ok_and(|hole| hole < size);
+        let receipt = to_handle
+            .copy_regular_no_replace(
+                CopySource {
+                    parent: &from_handle,
+                    displayed_parent: &from,
+                    name: OsStr::new(name),
+                    expected_file: FileIdentity {
+                        device: expected.dev(),
+                        inode: expected.ino(),
+                    },
+                },
+                CopyDestination {
+                    displayed_parent: &to,
+                    name: OsStr::new(name),
+                },
+                &Cancellation::default(),
+            )
+            .unwrap();
+        assert_eq!(receipt.bytes, size);
+        let mut copied = File::open(to.join(name)).unwrap();
+        let actual = copied.metadata().unwrap();
+        assert_eq!(actual.len(), size);
+        if hole_reported && expected.blocks() * 512 < size / 4 {
+            println!(
+                "sparse copy {name}: {size} logical bytes, {} -> {} allocated blocks (512 bytes each)",
+                expected.blocks(),
+                actual.blocks()
+            );
+            assert!(
+                actual.blocks() * 512 < size / 4,
+                "sparse source became dense: {} -> {} blocks",
+                expected.blocks(),
+                actual.blocks()
+            );
+        }
+
+        let mut input = input;
+        input.rewind().unwrap();
+        let (mut original, mut clone) = (vec![0; 128 * 1024], vec![0; 128 * 1024]);
+        for _ in 0..(size / original.len() as u64) {
+            input.read_exact(&mut original).unwrap();
+            copied.read_exact(&mut clone).unwrap();
+            assert_eq!(original, clone);
+        }
+        assert_eq!(copied.read(&mut clone).unwrap(), 0);
+    }
+}
+
+#[test]
 fn staged_copy_refuses_moved_parent_and_replaced_source_link() {
     use jwm_file_core::{CopyDestination, CopyError, CopySource};
     use std::os::unix::fs::symlink;
