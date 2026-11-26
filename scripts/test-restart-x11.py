@@ -374,10 +374,17 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                     # Teardown may close IPC after accepting the request.
                     pass
 
+            probe = {"trigger": trigger, "before_instance": previous["wm_instance_id"],
+                     "stage": "waiting for new IPC context"}
+            report["restart_probe"] = probe
+
             def restored():
                 current = context()
+                probe["instance"] = current["wm_instance_id"]
                 if current["wm_instance_id"] == previous["wm_instance_id"]:
+                    probe["stage"] = "waiting for WM instance to change"
                     return None
+                probe["stage"] = "checking restored state"
                 if identity(wm_pid) != wm_identity:
                     raise RuntimeError("restart changed the JWM PID/start time")
                 if two_outputs:
@@ -389,34 +396,45 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
                         "new_instance": current["wm_instance_id"],
                     }
                     if observed_outputs != prior_outputs or observed_focus != prior_focused_xid:
+                        probe["stage"] = "waiting for output and focus restore"
                         return None
                 elif current["monitors"][0]["visible_tag_mask"] != 4:
+                    probe["stage"] = "waiting for visible tag 3"
+                    probe["visible_tag_mask"] = current["monitors"][0]["visible_tag_mask"]
                     return None
                 if FIXTURE.query(socket, "get_layout") != prior_layout:
+                    probe["stage"] = "waiting for layout restore"
                     return None
                 rows = {item["name"]: item for item in FIXTURE.query(socket, "get_windows")}
                 for application in tracked_apps:
                     if identity(application["identity"]["pid"]) != application["identity"]:
                         raise AssertionError("foreign application process did not survive restart")
                     if application["name"] not in rows:
+                        probe["stage"] = "waiting for fixture window adoption"
+                        probe["pending_window"] = application["name"]
                         return None
                     if two_outputs:
                         row = rows[application["name"]]
                         side = application["output"]
                         if row["monitor"] != prior_outputs[side]["num"] or row["tags"] != application["tags"]:
+                            probe["stage"] = "waiting for fixture window monitor and tags"
+                            probe["pending_window"] = application["name"]
                             return None
                     xids = [int(item) for item in run("xdotool", "search", "--name", "^" + re.escape(application["name"]) + "$").splitlines()]
                     if application["xid"] not in xids:
                         raise AssertionError("application XID did not survive restart")
                 geometry = wallpaper_ready(prior_wallpaper.get("uploads", 0) + 1)
                 if not geometry:
+                    probe["stage"] = "waiting for native wallpaper readiness"
                     return None
+                probe["stage"] = "checking X connection after wallpaper restore"
                 run("xdpyinfo")
                 return {"trigger": trigger, "status": "passed", "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
                         "old_instance": previous["wm_instance_id"], "new_instance": current["wm_instance_id"],
                         "wallpaper": geometry, "outputs": prior_outputs, "native_focus": prior_focused_xid}
 
             report["steps"].append(wait(restored, f"{trigger} restart with native wallpaper"))
+            report.pop("restart_probe", None)
             # A response immediately before a delayed BadPixmap/connection
             # failure is insufficient. Observe this same owner after settling.
             time.sleep(0.25)
@@ -450,6 +468,14 @@ def run_case(binary, backend, compositor, triggers, windows, keep, case_timeout,
             report["final_wm_identity"] = identity(wm_pid)
         if isinstance(error, KeyboardInterrupt):
             raise
+        log = work / "jwm.log"
+        if log.is_file() and "restart_probe" in report:
+            # This log comes only from the isolated test's own JWM and fixtures.
+            with log.open("rb") as stream:
+                stream.seek(max(0, log.stat().st_size - 24_000))
+                lines = stream.read(24_000).decode("utf-8", "replace").splitlines()
+            needle = re.compile(r"restart|wallpaper|keycode|keypress|keyboard|xkb", re.I)
+            report["restart_log_tail"] = [line[:600] for line in lines if needle.search(line)][-35:]
     finally:
         children.close()
         (work / "report.json").write_text(json.dumps(report, indent=2) + "\n")
