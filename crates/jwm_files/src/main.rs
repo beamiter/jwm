@@ -701,12 +701,14 @@ fn open_window(
     copy_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     copy_status.set_visible(false);
     layout.append(&copy_status);
-    let drop_zone = gtk::Label::builder()
-        .label("拖放到当前目录（复制）")
-        .tooltip_text("从同一 JWM Files 进程中的文件列表拖放一个普通文件")
-        .height_request(56)
-        .build();
-    drop_zone.add_css_class("dim-label");
+    let drop_zone = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    drop_zone.set_height_request(56);
+    drop_zone.set_tooltip_text(Some("从同一 JWM Files 进程中的文件列表拖放一个普通文件"));
+    drop_zone.add_css_class("frame");
+    let drop_caption = gtk::Label::new(Some("拖放到当前目录（复制）"));
+    drop_caption.set_hexpand(true);
+    drop_caption.set_can_target(false);
+    drop_zone.append(&drop_caption);
     layout.append(&drop_zone);
     window.set_child(Some(&layout));
     let (wake, mut notifications) = Wake::channel();

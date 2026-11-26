@@ -345,6 +345,10 @@ xdotool windowraise "$drag_window"
 drag_height=$(xdotool getwindowgeometry --shell "$drag_window" | awk -F= '$1 == "HEIGHT" {print $2}')
 [[ "$drag_height" =~ ^[0-9]+$ && "$drag_height" -gt 100 ]]
 sleep 0.3
+xdotool getwindowgeometry "$drag_window"
+if command -v xprop >/dev/null; then xprop -id "$drag_window" XdndAware; fi
+xdotool mousemove --window "$drag_window" 310 "$((drag_height - 39))"
+xdotool getmouselocation
 xdotool mousemove --window "$window" 350 72 mousedown 1
 xdotool mousemove --window "$window" 395 79
 sleep 0.2

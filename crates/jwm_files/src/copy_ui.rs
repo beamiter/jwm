@@ -107,9 +107,15 @@ impl RowDrags {
             }
             let file = copy_source(&browser, item.position())?;
             drag_trace("prepared a regular row");
-            Some(gtk::gdk::ContentProvider::for_value(
-                &DragCopy(file).to_value(),
-            ))
+            let typed = gtk::gdk::ContentProvider::for_value(&DragCopy(file).to_value());
+            // XDND announces MIME atoms even for same-process top-level windows.
+            // Advertise a valueless marker, never a filename or contents. Local
+            // identity plus the non-serializable DragCopy is still mandatory.
+            let marker = gtk::gdk::ContentProvider::for_bytes(
+                "application/x-jwm-files-local-copy",
+                &glib::Bytes::from_static(b"JWM Files local copy"),
+            );
+            Some(gtk::gdk::ContentProvider::new_union(&[typed, marker]))
         });
         source.connect_drag_begin(|_, _| drag_trace("started"));
         source.connect_drag_cancel(|_, _, reason| {
@@ -120,7 +126,7 @@ impl RowDrags {
     }
 }
 
-pub(super) fn install_drop_zone(zone: &gtk::Label, state: &Shared, status: &gtk::Label) {
+pub(super) fn install_drop_zone(zone: &impl IsA<gtk::Widget>, state: &Shared, status: &gtk::Label) {
     let target = gtk::DropTarget::new(DragCopy::static_type(), gtk::gdk::DragAction::COPY);
     target.connect_accept(|_, drop| {
         let local = drop.drag().is_some();
@@ -142,6 +148,7 @@ pub(super) fn install_drop_zone(zone: &gtk::Label, state: &Shared, status: &gtk:
             false
         }
     });
+    target.set_preload(true);
     zone.add_controller(target);
 }
 
