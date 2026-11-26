@@ -98,7 +98,7 @@ visit_path() {
   [[ $(title_id "^JWM Files · .*/$1\$") == "$window" ]]
 }
 activate_first_row() {
-  # The view is populated in batches after the new title is set.
+  # Wait for the first row widgets to bind following navigation.
   sleep 0.2
   xdotool mousemove --window "$window" 350 72 click --repeat 2 --delay 85 1
 }
@@ -205,3 +205,26 @@ sleep 0.25
 [[ $(xdotool getwindowname "$window") == "JWM Files · $root/watch-fixture" ]]
 visit_path location-cancel
 printf 'GTK4 X11 smoke: Escape cancelled address editing and Ctrl+L reopened it\n'
+
+mkdir -p "$root/grid-switch"
+printf 'intended\n' > "$root/grid-switch/a-target.txt"
+printf 'untouched\n' > "$root/grid-switch/z-other.txt"
+visit_path grid-switch
+sleep 0.2
+xdotool mousemove --window "$window" 350 72 click 1
+xdotool key --clearmodifiers ctrl+2 F2
+dialog=$(title_id '^JWM Files · Rename$')
+xdotool windowfocus --sync "$dialog"
+xdotool key --clearmodifiers ctrl+a
+xdotool type --clearmodifiers 'grid-renamed.txt'
+xdotool key Return
+for attempt in {1..30}; do
+  [[ ! -f "$root/grid-switch/grid-renamed.txt" ]] || break
+  sleep 0.1
+done
+[[ ! -e "$root/grid-switch/a-target.txt" ]]
+[[ $(cat "$root/grid-switch/grid-renamed.txt") == 'intended' ]]
+[[ $(cat "$root/grid-switch/z-other.txt") == 'untouched' ]]
+xdotool windowfocus --sync "$window"
+xdotool key --clearmodifiers ctrl+1
+printf 'GTK4 X11 grid: switching modes preserved the selected rename target\n'
