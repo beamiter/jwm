@@ -1,5 +1,7 @@
 mod breadcrumb;
+mod grid;
 mod navigation;
+mod row_model;
 mod selection;
 #[cfg(target_os = "linux")]
 mod tree;
@@ -21,7 +23,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const APP_ID: &str = "org.jwm.Files";
-const ROW_BATCH: usize = 768;
 
 struct Browser {
     worker: ScanWorker,
@@ -29,8 +30,7 @@ struct Browser {
     pending: Option<(ScanId, Destination)>,
     navigation: Navigation,
     show_hidden: bool,
-    entries: Vec<FileEntry>,
-    visible_count: usize,
+    entries: Rc<Vec<FileEntry>>,
     parent: Option<Arc<DirectoryHandle>>,
     mutation: Option<MutationWork>,
     activation: Option<Activation>,
@@ -388,6 +388,17 @@ fn place_locations(
     locations
 }
 
+fn focus_current_view(views: &glib::WeakRef<gtk::Stack>) {
+    if let Some(content) = views
+        .upgrade()
+        .and_then(|views| views.visible_child())
+        .and_downcast::<gtk::ScrolledWindow>()
+        .and_then(|scroll| scroll.child())
+    {
+        content.grab_focus();
+    }
+}
+
 fn open_window(
     app: &gtk::Application,
     initial: &Path,
@@ -428,6 +439,8 @@ fn open_window(
     location_bar.set_vhomogeneous(true);
     location_bar.add_named(&address, Some("entry"));
     let hidden = gtk::ToggleButton::with_label("隐藏项");
+    let view_toggle = gtk::ToggleButton::with_label("图标");
+    view_toggle.set_tooltip_text(Some("图标（Ctrl+2）／列表（Ctrl+1）"));
     for widget in [
         back.upcast_ref::<gtk::Widget>(),
         forward.upcast_ref(),
@@ -436,6 +449,7 @@ fn open_window(
         new_folder.upcast_ref(),
         location_bar.upcast_ref(),
         hidden.upcast_ref(),
+        view_toggle.upcast_ref(),
     ] {
         header.append(widget);
     }
@@ -454,7 +468,7 @@ fn open_window(
         label.set_margin_bottom(8);
         places.append(&label);
     }
-    let model = gtk::StringList::new(&[]);
+    let model = row_model::FileRowModel::new();
     let selection = gtk::SingleSelection::new(Some(model.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
@@ -475,23 +489,19 @@ fn open_window(
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
-        let name = item.item().and_downcast::<gtk::StringObject>();
+        let row = item.item().and_downcast::<glib::BoxedAnyObject>();
         let label = item.child().and_downcast::<gtk::Label>();
-        if let (Some(name), Some(label)) = (name, label) {
-            label.set_text(&name.string());
+        if let (Some(row), Some(label)) = (row, label) {
+            label.set_text(&row.borrow::<row_model::RowPresentation>().list_label());
         }
     });
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
-    let epoch = Rc::new(Cell::new(0u64));
-    {
-        let epoch = epoch.clone();
-        selection.connect_selected_notify(move |_| epoch.set(epoch.get().wrapping_add(1)));
-    }
-    let enter = gtk::EventControllerKey::new();
-    enter.set_propagation_phase(gtk::PropagationPhase::Capture);
-    {
+    let grid = grid::new(&selection);
+    for view in [list.upcast_ref::<gtk::Widget>(), grid.upcast_ref()] {
+        let enter = gtk::EventControllerKey::new();
+        enter.set_propagation_phase(gtk::PropagationPhase::Capture);
         let selection = selection.clone();
-        let weak_list = list.downgrade();
+        let weak_view = view.downgrade();
         enter.connect_key_pressed(move |_, key, _, modifiers| {
             if !matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
                 || modifiers.intersects(
@@ -502,27 +512,64 @@ fn open_window(
             {
                 return glib::Propagation::Proceed;
             }
-            if let Some(list) = weak_list.upgrade()
+            if let Some(view) = weak_view.upgrade()
                 && selection.selected() != gtk::INVALID_LIST_POSITION
             {
-                list.emit_by_name::<()>("activate", &[&selection.selected()]);
+                view.emit_by_name::<()>("activate", &[&selection.selected()]);
             }
             glib::Propagation::Stop
         });
+        view.add_controller(enter);
     }
-    list.add_controller(enter);
 
     list.set_single_click_activate(false);
-    let scroll = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .hexpand(true)
-        .child(&list)
-        .build();
+    let views = gtk::Stack::builder().hexpand(true).vexpand(true).build();
+    for (name, content) in [
+        ("list", list.upcast_ref::<gtk::Widget>()),
+        ("grid", grid.upcast_ref()),
+    ] {
+        let scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hexpand(true)
+            .child(content)
+            .build();
+        views.add_named(&scroll, Some(name));
+    }
+    views.set_visible_child_name("list");
+    {
+        let (views, list, grid) = (views.downgrade(), list.downgrade(), grid.downgrade());
+        view_toggle.connect_toggled(move |toggle| {
+            if let (Some(views), Some(list), Some(grid)) =
+                (views.upgrade(), list.upgrade(), grid.upgrade())
+            {
+                views.set_visible_child_name(if toggle.is_active() { "grid" } else { "list" });
+                if toggle.is_active() {
+                    grid.grab_focus();
+                } else {
+                    list.grab_focus();
+                }
+            }
+        });
+    }
+    for (name, active, key) in [
+        ("show-list", false, "<Control>1"),
+        ("show-grid", true, "<Control>2"),
+    ] {
+        let action = gio::SimpleAction::new(name, None);
+        let toggle = view_toggle.downgrade();
+        action.connect_activate(move |_, _| {
+            if let Some(toggle) = toggle.upgrade() {
+                toggle.set_active(active);
+            }
+        });
+        window.add_action(&action);
+        app.set_accels_for_action(&format!("win.{name}"), &[key]);
+    }
     let panes = gtk::Paned::new(gtk::Orientation::Horizontal);
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sidebar.append(&places);
     panes.set_start_child(Some(&sidebar));
-    panes.set_end_child(Some(&scroll));
+    panes.set_end_child(Some(&views));
     panes.set_position(180);
     panes.set_resize_start_child(false);
     layout.append(&panes);
@@ -549,8 +596,7 @@ fn open_window(
         pending: None,
         navigation: Navigation::default(),
         show_hidden: false,
-        entries: Vec::new(),
-        visible_count: 0,
+        entries: Rc::default(),
         parent: None,
         mutation: None,
         activation: None,
@@ -642,7 +688,7 @@ fn open_window(
     }
     {
         let (state, status, home) = (state.clone(), status.clone(), home.to_path_buf());
-        let (weak_bar, weak_list) = (location_bar.downgrade(), list.downgrade());
+        let (weak_bar, weak_views) = (location_bar.downgrade(), views.downgrade());
         address.connect_activate(move |entry| {
             let input = entry.text();
             if input.is_empty() {
@@ -664,19 +710,17 @@ fn open_window(
             if let Some(bar) = weak_bar.upgrade() {
                 bar.set_visible_child_name("path");
             }
-            if let Some(list) = weak_list.upgrade() {
-                list.grab_focus();
-            }
+            focus_current_view(&weak_views);
         });
     }
     let address_keys = gtk::EventControllerKey::new();
     address_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
         let state = state.clone();
-        let (bar, entry, list) = (
+        let (bar, entry, views) = (
             location_bar.downgrade(),
             address.downgrade(),
-            list.downgrade(),
+            views.downgrade(),
         );
         address_keys.connect_key_pressed(move |_, key, _, _| {
             if key != gtk::gdk::Key::Escape {
@@ -688,16 +732,14 @@ fn open_window(
             if let Some(bar) = bar.upgrade() {
                 bar.set_visible_child_name("path");
             }
-            if let Some(list) = list.upgrade() {
-                list.grab_focus();
-            }
+            focus_current_view(&views);
             glib::Propagation::Stop
         });
     }
     address.add_controller(address_keys);
     {
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
-        list.connect_activate(move |_, index| {
+        let activate = move |index| {
             let row = {
                 let browser = state.borrow();
                 if browser.pending.is_some() {
@@ -711,7 +753,10 @@ fn open_window(
             if let Some((kind, Location::Local(path))) = row {
                 activate_entry(&state, path, kind, &address, &status);
             }
-        });
+        };
+        let list_activation = activate.clone();
+        list.connect_activate(move |_, row| list_activation(row));
+        grid.connect_activate(move |_, row| activate(row));
     }
     let action = gtk::gio::SimpleAction::new("location", None);
     let (weak, weak_bar) = (address.downgrade(), location_bar.downgrade());
@@ -804,7 +849,6 @@ fn open_window(
     }
     start_scan(&state, initial.into(), &address, &status);
     let mut breadcrumb_path = None::<PathBuf>;
-    let mut restore = None::<(usize, u64, ScanId)>;
     let weak_window = window.downgrade();
     glib::timeout_add_local(Duration::from_millis(16), move || {
         let Some(window) = weak_window.upgrade() else {
@@ -840,8 +884,7 @@ fn open_window(
                         return glib::ControlFlow::Continue;
                     }
                     browser.path = path;
-                    browser.entries = snapshot.entries;
-                    browser.visible_count = 0;
+                    browser.entries = Rc::new(snapshot.entries);
                     browser.parent = snapshot.local_parent;
                     replaced = true;
                     let base = format!("{} 项", browser.entries.len());
@@ -861,13 +904,24 @@ fn open_window(
         }
         if replaced {
             let path = browser.path.clone();
+            let entries = browser.entries.clone();
             drop(browser);
             if breadcrumb_path.as_ref() != Some(&path) {
                 breadcrumb.show(&path);
                 breadcrumb_path = Some(path);
             }
-            model.splice(0, model.n_items(), &[]);
-            restore = restore_row.map(|(row, id)| (row, epoch.get(), id));
+            selection.set_selected(gtk::INVALID_LIST_POSITION);
+            model.replace(entries);
+            if let Some((row, id)) = restore_row
+                && let Ok(row) = u32::try_from(row)
+                && {
+                    let state = state.borrow();
+                    state.active_scan == Some(id) && state.pending.is_none()
+                }
+                && selection.selected() == gtk::INVALID_LIST_POSITION
+            {
+                selection.set_selected(row);
+            }
             return glib::ControlFlow::Continue;
         }
         let completed = browser
@@ -901,7 +955,6 @@ fn open_window(
             && browser.mutation.is_none()
             && !browser.dialog_open
             && browser.activation.is_none()
-            && browser.visible_count == browser.entries.len()
         {
             if let Some(notice) = browser.worker.take_directory_change()
                 && browser.active_scan == Some(notice.id)
@@ -935,40 +988,7 @@ fn open_window(
                 browser.pending = Some((id, Destination::Visit(path)));
             }
         }
-        if browser.visible_count < browser.entries.len() {
-            let start = browser.visible_count;
-            let limit = (start + ROW_BATCH).min(browser.entries.len());
-            let labels: Vec<_> = browser.entries[start..limit]
-                .iter()
-                .map(|entry| {
-                    let prefix = match entry.kind {
-                        FileKind::Directory => "▸ ",
-                        FileKind::Symlink => "↪ ",
-                        _ => "",
-                    };
-                    format!("{prefix}{}", entry.name.to_string_lossy().escape_debug())
-                })
-                .collect();
-            browser.visible_count = limit;
-            let active = browser
-                .pending
-                .is_none()
-                .then_some(browser.active_scan)
-                .flatten();
-            drop(browser);
-            let strings: Vec<_> = labels.iter().map(String::as_str).collect();
-            model.splice(start as u32, 0, &strings);
-            if let Some((row, initial_epoch, id)) = restore {
-                if active != Some(id) || epoch.get() != initial_epoch {
-                    restore = None;
-                } else if row < limit {
-                    restore = None;
-                    if selection.selected() == gtk::INVALID_LIST_POSITION {
-                        selection.set_selected(row as u32);
-                    }
-                }
-            }
-        }
+
         glib::ControlFlow::Continue
     });
     window.present();
@@ -1102,6 +1122,13 @@ mod wayland_acceptance {
         }
     }
 
+    fn first_label(model: &row_model::FileRowModel) -> Option<String> {
+        model
+            .item(0)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .map(|row| row.borrow::<row_model::RowPresentation>().list_label())
+    }
+
     #[test]
     #[ignore = "requires a private native Wayland compositor"]
     fn native_wayland_window_maps_and_navigates() {
@@ -1132,7 +1159,7 @@ mod wayland_acceptance {
                     .downcast::<gtk::SingleSelection>()
                     .ok()?
                     .model()?
-                    .downcast::<gtk::StringList>()
+                    .downcast::<row_model::FileRowModel>()
                     .ok()
             })
             .unwrap();
@@ -1142,7 +1169,7 @@ mod wayland_acceptance {
                 window.is_mapped()
                     && window.surface().is_some_and(|surface| surface.is_mapped())
                     && window.title().as_deref() == Some(&first_title)
-                    && main_model.string(0).as_deref() == Some("before.txt")
+                    && first_label(&main_model).as_deref() == Some("before.txt")
             },
             "first directory",
         );
@@ -1169,11 +1196,37 @@ mod wayland_acceptance {
                 window.is_mapped()
                     && window.title().as_deref() == Some(&second_title)
                     && main_model.n_items() == 1
-                    && main_model.string(0).as_deref() == Some("after.txt")
+                    && first_label(&main_model).as_deref() == Some("after.txt")
             },
             "replacement directory",
         );
 
+        let grid = descendants(window.upcast_ref())
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::GridView>().ok())
+            .unwrap();
+        let grid_selection = grid.model().and_downcast::<gtk::SingleSelection>().unwrap();
+        grid_selection.set_selected(0);
+        gtk::prelude::WidgetExt::activate_action(&window, "win.show-grid", None).unwrap();
+        until(|| grid.is_mapped(), "icon view mapping");
+        assert_eq!(grid_selection.selected(), 0);
+        gtk::prelude::WidgetExt::activate_action(&window, "win.show-list", None).unwrap();
+        until(|| !grid.is_mapped(), "return to list view");
+        assert_eq!(grid_selection.selected(), 0);
+        println!("GTK4 Wayland grid: list and icon modes kept the same selection");
+        fs::rename(&next, root.join("moved")).unwrap();
+        until(
+            || {
+                grid_selection.selected() == gtk::INVALID_LIST_POSITION
+                    && descendants(window.upcast_ref()).iter().any(|widget| {
+                        widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                            label.text().as_str() == "目录已移动或不可用，请刷新或重新打开。"
+                        })
+                    })
+            },
+            "active directory invalidation",
+        );
+        println!("GTK4 Wayland grid: moving the active directory cleared stale selection");
         println!("GTK4 Wayland smoke: native window mapped and navigation replaced the listing");
         window.close();
     }

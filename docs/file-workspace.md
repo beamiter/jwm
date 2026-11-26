@@ -51,7 +51,7 @@ cargo run --locked --manifest-path crates/jwm_files/Cargo.toml -- /path/to/direc
 
 The sidebar and path entry navigate local directories. Ctrl+L focuses the
 address field; the refresh and hidden-items controls rescan. GTK virtualizes
-row widgets, and the model is populated in bounded batches. A single scan
+row widgets, and the snapshot-backed model constructs labels on demand. A single scan
 worker cancels and replaces obsolete requests, and does not publish stale
 results even if the old provider call ignores cancellation. See the document activation section below.
 
@@ -129,3 +129,21 @@ Wayland test uses a headless Weston compositor with software rendering and
 no XWayland fall-back. It checks surface configure/buffer-attach protocol
 events, GTK mapping and a frame tick, and navigation in the same window.
 This is not a hardware performance or JWM compositor acceptance test.
+
+### Large-directory row model
+
+A directory snapshot publishes its complete row count in one GTK model
+change. Label objects are created when the view requests them, rather than
+prebuilding one object per item. The model retains only weak references to
+live row objects and does not obtain any filesystem metadata on the UI
+thread. Ordering and action paths still come from the provider snapshot.
+The large-fixture test covers 100,000 rows and the last item. It does not
+measure filesystem latency or the time to present a frame.
+
+### List and icon views
+
+Switch with the toolbar button or Ctrl+1 (list) and Ctrl+2 (icons). Both
+views share the same selected item and exact action paths. Folders,
+documents, symbolic links and other file kinds have distinct generic
+icons. Icon mode does not request thumbnails; previews are a later
+milestone.
