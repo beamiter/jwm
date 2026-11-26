@@ -72,3 +72,10 @@ jobs:
         working-directory: crates/jwm_files
         timeout-minutes: 3
         run: bash tests/wayland-smoke.sh
+      - name: Exercise the opt-in UI benchmark in a private X11 window
+        working-directory: crates/jwm_files
+        timeout-minutes: 3
+        run: |
+          GDK_BACKEND=x11 GSK_RENDERER=cairo JWM_FILE_BENCH_SAMPLES=5 \
+            xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+            cargo test --locked native_listing_benchmark -- --ignored --nocapture
