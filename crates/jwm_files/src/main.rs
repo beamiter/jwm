@@ -2149,6 +2149,9 @@ mod wayland_acceptance {
             Path::new("absent")
         );
         println!("GTK4 Wayland copy: keep-both preserved the original and dangling link");
+        // Keep the subsequent tab-order fixture's one-row baseline independent.
+        fs::remove_file(conflict.join("after (copy 2).txt")).unwrap();
+        fs::remove_file(conflict.join("after (copy).txt")).unwrap();
         navigate(&target);
         action("win.paste-file");
         until(
