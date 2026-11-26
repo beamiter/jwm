@@ -1896,6 +1896,45 @@ mod wayland_acceptance {
         source_mode.set_active(false);
         preview_at(&project_b, "project B preview");
         println!("GTK4 Wayland Markdown: native heading style and exact source toggle verified");
+
+        let images = root.join("png-fixture");
+        fs::create_dir(&images).unwrap();
+        fs::write(images.join("sample.PNG"), b"\x89\x50\x4E\x47\x0D\x0A\x1A\x0A\x00\x00\x00\x0D\x49\x48\x44\x52\x00\x00\x00\x02\x00\x00\x00\x01\x08\x02\x00\x00\x00\x7B\x40\xE8\xDD\x00\x00\x00\x0D\x49\x44\x41\x54\x78\x9C\x63\xF8\xCF\x00\x04\xFF\x01\x07\x00\x01\xFF\xE2\x23\x9E\x59\x00\x00\x00\x00\x49\x45\x4E\x44\xAE\x42\x60\x82").unwrap();
+        navigate(&images);
+        at(&images, "sample.PNG");
+        grid_selection.set_selected(0);
+        action("win.quick-preview");
+        assert_eq!(popup_for().as_ref(), Some(&popup));
+        let picture = descendants(popup.upcast_ref())
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::Picture>().ok())
+            .unwrap();
+        until(
+            || picture.is_mapped() && picture.paintable().is_some(),
+            "PNG preview mapped a native picture",
+        );
+        let texture = picture
+            .paintable()
+            .and_downcast::<gtk::gdk::Texture>()
+            .unwrap();
+        assert_eq!((texture.width(), texture.height()), (2, 1));
+        assert_eq!(
+            picture.alternative_text().as_deref(),
+            Some("PNG 图片 · 2 × 1")
+        );
+        assert!(!source_mode.is_visible());
+        assert_eq!(buffer.char_count(), 0);
+        navigate(&project_b);
+        at(&project_b, "README.md");
+        grid_selection.set_selected(0);
+        action("win.quick-preview");
+        preview_at(&project_b, "project B preview");
+        assert!(!picture.is_visible());
+        assert!(picture.paintable().is_none());
+        assert!(source_mode.is_visible());
+        println!(
+            "GTK4 Wayland PNG: native texture appeared and cleared when returning to Markdown"
+        );
         popup.close();
 
         let undo_folder = root.join("undo-fixture");
