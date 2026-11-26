@@ -161,6 +161,30 @@ class TestProbe(unittest.TestCase):
                 probe.conflict_tree_snapshot(report, check, TransportError)
             self.assertIs(raised.exception, error)
 
+    def test_probe_failure_reports_only_safe_atspi_error_categories(self):
+        class TransportError(Exception):
+            code = 1
+
+            def __init__(self, domain, message):
+                super().__init__(message)
+                self.domain, self.message = domain, message
+
+        path = "/org/a11y/atspi/accessible/0/42"
+        for domain, message, expected in (
+            ("atspi_error", path, "numeric-object-path"),
+            ("atspi_error", "/org/a11y/atspi/accessible/root", "application-root-path"),
+            ("atspi_error", "Missing object " + path, "contains-accessible-path"),
+            ("atspi_error", "private error body", "other"),
+            ("private domain", path, "non-atspi-domain"),
+        ):
+            with self.subTest(expected=expected):
+                payload = probe.failure_payload(TransportError(domain, message))
+                self.assertEqual(payload["atspi_message_kind"], expected)
+                self.assertEqual(payload["error_code"], 1)
+                self.assertNotIn(message, str(payload))
+                self.assertNotIn(domain, str(payload))
+        self.assertNotIn("atspi_message_kind", probe.failure_payload(OSError("private")))
+
     def test_bounded_tree(self):
         self.desk.children.extend([self.gtk] * 256)
         with self.assertRaisesRegex(probe.ProbeError, "invalid-node-count"):

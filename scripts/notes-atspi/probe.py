@@ -388,6 +388,23 @@ def failure_payload(exc):
         "error_type": type(exc).__name__,
         "probe_stack": frames[-4:],
     }
+    # A stable category distinguishes retired accessibility objects from
+    # other bus errors without exposing exception messages or object paths.
+    domain = getattr(exc, "domain", None)
+    message = getattr(exc, "message", None)
+    if isinstance(domain, str) and isinstance(message, str):
+        if domain == "atspi_error":
+            if re.fullmatch(r"/org/a11y/atspi/accessible/[0-9]+/[0-9]+", message):
+                kind = "numeric-object-path"
+            elif message == "/org/a11y/atspi/accessible/root":
+                kind = "application-root-path"
+            elif re.search(r"/org/a11y/atspi/accessible(?:/|\b)", message):
+                kind = "contains-accessible-path"
+            else:
+                kind = "other"
+            payload["atspi_message_kind"] = kind
+        else:
+            payload["atspi_message_kind"] = "non-atspi-domain"
     code = getattr(exc, "code", None)
     if not isinstance(code, int):
         code = getattr(exc, "errno", None)
