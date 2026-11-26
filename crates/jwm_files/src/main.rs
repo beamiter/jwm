@@ -1548,6 +1548,40 @@ mod wayland_acceptance {
         action("win.close-tab");
         assert!(window.is_mapped());
         println!("GTK4 Wayland tabs: separate history, cancelled scans and tab buttons verified");
+
+        let jwm_source = root.join("jwm/src");
+        let companion_source = root.join("companion/src");
+        fs::create_dir_all(&jwm_source).unwrap();
+        fs::create_dir_all(&companion_source).unwrap();
+        fs::write(jwm_source.join("jwm.txt"), b"first").unwrap();
+        fs::write(companion_source.join("companion.txt"), b"second").unwrap();
+        navigate(&jwm_source);
+        action("win.new-tab");
+        at(&jwm_source, "jwm.txt");
+        navigate(&companion_source);
+        at(&companion_source, "companion.txt");
+        let tab_button = |name: &str| {
+            descendants(window.upcast_ref())
+                .into_iter()
+                .find_map(|widget| {
+                    let button = widget.downcast::<gtk::Button>().ok()?;
+                    let label = button.child().and_downcast::<gtk::Label>()?;
+                    (button.is_mapped()
+                        && button.action_name().as_deref() == Some("win.activate-tab")
+                        && label.text().as_str() == name)
+                        .then_some(button)
+                })
+                .unwrap()
+        };
+        tab_strip::assert_selected(&tab_button("jwm/src"), false);
+        tab_strip::assert_selected(&tab_button("companion/src"), true);
+        tab_button("jwm/src").emit_clicked();
+        at(&jwm_source, "jwm.txt");
+        tab_strip::assert_selected(&tab_button("jwm/src"), true);
+        tab_strip::assert_selected(&tab_button("companion/src"), false);
+        println!(
+            "GTK4 Wayland tabs: matching folder names disambiguated and accessible selection changed"
+        );
         window.close();
     }
 }
