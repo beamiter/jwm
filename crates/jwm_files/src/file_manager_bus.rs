@@ -1,4 +1,4 @@
-//! Opt-in FileManager1 folder requests; no bus activation or replacing an owner.
+//! Opt-in FileManager1 local folder and item reveal requests; no bus activation or replacing an owner.
 use gtk4 as gtk;
 use gtk4::{gio, glib, prelude::*};
 use std::{
@@ -14,7 +14,7 @@ const MAX_URI_BYTES: usize = 4096;
 const MAX_STARTUP_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize =
     (MAX_URI_BYTES + 16) * crate::WINDOW_LIMIT + MAX_STARTUP_BYTES + 32;
-const XML: &str = "<node><interface name='org.freedesktop.FileManager1'> <method name='ShowFolders'><arg type='as' name='URIs' direction='in'/> <arg type='s' name='StartupId' direction='in'/></method></interface></node>";
+const XML: &str = "<node><interface name='org.freedesktop.FileManager1'> <method name='ShowFolders'><arg type='as' name='URIs' direction='in'/> <arg type='s' name='StartupId' direction='in'/></method> <method name='ShowItems'><arg type='as' name='URIs' direction='in'/><arg type='s' name='StartupId' direction='in'/></method></interface></node>";
 
 fn native_folders(values: &[String]) -> Result<Vec<PathBuf>, &'static str> {
     if values.is_empty() || values.len() > crate::WINDOW_LIMIT {
@@ -119,9 +119,7 @@ pub(super) fn install(
                         );
                         return;
                     };
-                    if !binding.upgrade().is_some_and(|binding| binding.owns.get())
-                        || method != "ShowFolders"
-                    {
+                    if !binding.upgrade().is_some_and(|binding| binding.owns.get()) {
                         invocation.return_dbus_error(
                             "org.freedesktop.DBus.Error.Failed",
                             "JWM Files does not own this service",
@@ -139,6 +137,14 @@ pub(super) fn install(
                             return;
                         }
                     };
+                    let items = method == "ShowItems";
+                    if items && (paths.len() != 1 || paths[0].file_name().is_none()) {
+                        invocation.return_dbus_error(
+                            "org.freedesktop.DBus.Error.InvalidArgs",
+                            "ShowItems requires one native item other than the filesystem root",
+                        );
+                        return;
+                    }
                     if crate::browser_window_count(&app) + paths.len() > crate::WINDOW_LIMIT {
                         invocation.return_dbus_error(
                             "org.freedesktop.DBus.Error.LimitsExceeded",
@@ -148,6 +154,47 @@ pub(super) fn install(
                     }
                     // The request only opens folder views. Each view independently
                     // loads and reports filesystem errors on its normal scan worker.
+                    if items {
+                        let path = &paths[0];
+                        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                            unreachable!("ShowItems requests were already validated");
+                        };
+                        let pending = Rc::new(RefCell::new(Some(invocation)));
+                        glib::timeout_add_seconds_local_once(6, {
+                            let pending = pending.clone();
+                            move || {
+                                if let Some(invocation) = pending.take() {
+                                    invocation.return_dbus_error(
+                                        "org.freedesktop.DBus.Error.TimedOut",
+                                        "The requested item could not be revealed in time",
+                                    );
+                                }
+                            }
+                        });
+                        let complete = Box::new(move |result| {
+                            if let Some(invocation) = pending.take() {
+                                match result {
+                                    Ok(()) => invocation.return_value(Some(&().to_variant())),
+                                    Err(reason) => invocation.return_dbus_error(
+                                        "org.freedesktop.DBus.Error.Failed",
+                                        reason,
+                                    ),
+                                }
+                            }
+                        });
+                        crate::open_window_with_reveal(
+                            &app,
+                            parent,
+                            &home,
+                            &special,
+                            &copy_buffer,
+                            Some(crate::RevealRequest {
+                                name: name.to_owned(),
+                                complete: Some(complete),
+                            }),
+                        );
+                        return;
+                    }
                     for path in paths {
                         crate::open_window(&app, &path, &home, &special, &copy_buffer);
                     }

@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tabs::{TabId, Tabs};
 use wake::{SignalOnDrop, Wake};
 
@@ -510,6 +510,58 @@ fn open_window(
     special: &[(glib::UserDirectory, Option<PathBuf>)],
     copy_buffer: &copy_ui::CopyBuffer,
 ) {
+    open_window_with_reveal(app, initial, home, special, copy_buffer, None);
+}
+
+type RevealCallback = Box<dyn FnOnce(Result<(), &'static str>)>;
+struct RevealRequest {
+    name: OsString,
+    complete: Option<RevealCallback>,
+}
+
+impl RevealRequest {
+    fn reply(mut self, result: Result<(), &'static str>) {
+        if let Some(complete) = self.complete.take() {
+            complete(result);
+        }
+    }
+}
+
+impl Drop for RevealRequest {
+    fn drop(&mut self) {
+        if let Some(complete) = self.complete.take() {
+            complete(Err("The reveal was cancelled before selection"));
+        }
+    }
+}
+
+#[derive(Default)]
+struct RevealWidget {
+    position: Cell<Option<u32>>,
+    item: glib::WeakRef<gtk::ListItem>,
+}
+
+fn visible_in_file_list(label: &gtk::Widget, list: &gtk::ListView) -> bool {
+    label.is_mapped()
+        && list.height() > 0
+        && label.compute_bounds(list).is_some_and(|bounds| {
+            bounds.height() > 0.0
+                && bounds.y() >= 0.0
+                && bounds.y() + bounds.height() <= list.height() as f32
+        })
+}
+
+fn open_window_with_reveal(
+    app: &gtk::Application,
+    initial: &Path,
+    home: &Path,
+    special: &[(glib::UserDirectory, Option<PathBuf>)],
+    copy_buffer: &copy_ui::CopyBuffer,
+    reveal: Option<RevealRequest>,
+) {
+    let initial_show_hidden = reveal
+        .as_ref()
+        .is_some_and(|request| request.name.as_encoded_bytes().first() == Some(&b'.'));
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("JWM Files")
@@ -540,6 +592,7 @@ fn open_window(
     location_bar.set_vhomogeneous(true);
     location_bar.add_named(&address, Some("entry"));
     let hidden = gtk::ToggleButton::with_label("隐藏项");
+    hidden.set_active(initial_show_hidden);
     let file_actions = gtk::MenuButton::builder().label("操作").build();
     let view_toggle = gtk::ToggleButton::with_label("图标");
     view_toggle.set_tooltip_text(Some("图标（Ctrl+2）／列表（Ctrl+1）"));
@@ -577,6 +630,9 @@ fn open_window(
     let selection = gtk::SingleSelection::new(Some(model.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
+    // A reveal can outlive the first map tick. Track only its target's
+    // realized list item so an action submission is never mistaken for visibility.
+    let reveal_widget = reveal.as_ref().map(|_| Rc::new(RevealWidget::default()));
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, object| {
         if let Ok(item) = object.clone().downcast::<gtk::ListItem>() {
@@ -590,14 +646,22 @@ fn open_window(
             item.set_child(Some(&label));
         }
     });
-    factory.connect_bind(|_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let row = item.item().and_downcast::<glib::BoxedAnyObject>();
-        let label = item.child().and_downcast::<gtk::Label>();
-        if let (Some(row), Some(label)) = (row, label) {
-            label.set_text(&row.borrow::<row_model::RowPresentation>().list_label());
+    factory.connect_bind({
+        let reveal_widget = reveal_widget.clone();
+        move |_, object| {
+            let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let row = item.item().and_downcast::<glib::BoxedAnyObject>();
+            let label = item.child().and_downcast::<gtk::Label>();
+            if let (Some(row), Some(label)) = (row, label) {
+                label.set_text(&row.borrow::<row_model::RowPresentation>().list_label());
+            }
+            if let Some(reveal) = &reveal_widget
+                && reveal.position.get() == Some(item.position())
+            {
+                reveal.item.set(Some(item));
+            }
         }
     });
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
@@ -724,7 +788,7 @@ fn open_window(
         wake,
         tabs: Tabs::new(initial.into()),
         pending: None,
-        show_hidden: false,
+        show_hidden: initial_show_hidden,
         entries: Rc::default(),
         parent: None,
         mutation: None,
@@ -1125,18 +1189,26 @@ fn open_window(
     }
     start_scan(&state, initial.into(), &address, &status);
     let weak_window = window.downgrade();
-    let process = move || {
+    let reveal_list = list.downgrade();
+    // Associate the incoming item only with the initial scan. User navigation
+    // can cancel it; the same folder revisited later must not revive it.
+    let mut reveal_pending =
+        reveal.and_then(|name| state.borrow().pending.as_ref().map(|(id, _)| (*id, name)));
+    let mut process = move || {
         let Some(window) = weak_window.upgrade() else {
             return glib::ControlFlow::Break;
         };
         let mut browser = state.borrow_mut();
         let mut replaced = false;
         let mut restore_row = None;
+        let mut scroll_revealed_row = false;
+        let mut reveal_reply = None;
         if let Some(reply) = browser.worker.take_reply()
             && let Some((id, requested)) = browser.pending.take()
             && id == reply.id
         {
             let automatic = browser.automatic_scan.take() == Some(id);
+            let requested_item = reveal_pending.take().filter(|(initial, _)| *initial == id);
             match reply.result {
                 Ok(snapshot) => {
                     if automatic
@@ -1151,6 +1223,14 @@ fn open_window(
                             .get(selection.selected() as usize)
                             .and_then(|old| selection::find_restorable_row(old, &snapshot.entries))
                             .map(|row| (row, id));
+                    }
+                    if let Some((_, request)) = requested_item.as_ref() {
+                        restore_row = snapshot
+                            .entries
+                            .iter()
+                            .position(|entry| entry.name == request.name)
+                            .map(|row| (row, id));
+                        scroll_revealed_row = restore_row.is_some();
                     }
                     browser.active_scan = Some(id);
                     browser.reload_due = None;
@@ -1169,7 +1249,19 @@ fn open_window(
                     } else {
                         format!("{base} · {} 项读取失败", snapshot.skipped_entries)
                     };
-                    status.set_text(&label);
+                    if let Some((_, request)) = requested_item {
+                        if scroll_revealed_row {
+                            reveal_reply = Some(request);
+                            status.set_text(&label);
+                        } else {
+                            status.set_text(&format!("{label} · 未找到要定位的项目"));
+                            request.reply(Err(
+                                "The requested native item was not found in its parent folder",
+                            ));
+                        }
+                    } else {
+                        status.set_text(&label);
+                    }
                     window.set_title(Some(&format!("JWM Files · {}", browser.path().display())));
                 }
                 Err(error) => {
@@ -1189,6 +1281,15 @@ fn open_window(
             drop(browser);
             breadcrumb.show(&path);
             selection.set_selected(gtk::INVALID_LIST_POSITION);
+            if let Some(reveal) = &reveal_widget {
+                let position = if reveal_reply.is_some() {
+                    restore_row.and_then(|(row, _)| u32::try_from(row).ok())
+                } else {
+                    None
+                };
+                reveal.position.set(position);
+                reveal.item.set(None);
+            }
             model.replace(entries);
             if let Some((row, id)) = restore_row
                 && let Ok(row) = u32::try_from(row)
@@ -1199,6 +1300,60 @@ fn open_window(
                 && selection.selected() == gtk::INVALID_LIST_POSITION
             {
                 selection.set_selected(row);
+                if let Some(request) = reveal_reply
+                    && let Some(list) = reveal_list.upgrade()
+                    && let Some(reveal) = reveal_widget.clone()
+                {
+                    let (state, selection) = (Rc::downgrade(&state), selection.downgrade());
+                    let request = RefCell::new(Some(request));
+                    let deadline = Instant::now() + Duration::from_secs(4);
+                    let last_scroll = Cell::new(None);
+                    list.add_tick_callback(move |list, _| {
+                        let valid = state.upgrade().zip(selection.upgrade()).filter(
+                            |(state, selection)| {
+                                let state = state.borrow();
+                                state.active_scan == Some(id)
+                                    && state.pending.is_none()
+                                    && selection.selected() == row
+                            },
+                        );
+                        let visible = valid.as_ref().is_some_and(|(_, selection)| {
+                            reveal.item.upgrade().is_some_and(|item| {
+                                item.position() == row
+                                    && item.item() == selection.selected_item()
+                                    && item
+                                        .child()
+                                        .is_some_and(|child| visible_in_file_list(&child, list))
+                            })
+                        });
+                        let now = Instant::now();
+                        if !visible && valid.is_some() && now < deadline {
+                            // Mapping can precede the first layout; GTK can accept
+                            // the action with no row allocation and do nothing.
+                            if list.is_mapped()
+                                && list.vadjustment().is_some_and(|a| a.page_size() > 0.0)
+                                && last_scroll.get().is_none_or(|last| {
+                                    now.duration_since(last) >= Duration::from_millis(80)
+                                })
+                            {
+                                let _ = list.activate_action(
+                                    "list.scroll-to-item",
+                                    Some(&row.to_variant()),
+                                );
+                                last_scroll.set(Some(now));
+                            }
+                            return glib::ControlFlow::Continue;
+                        }
+                        if let Some(request) = request.take() {
+                            request.reply(if visible {
+                                Ok(())
+                            } else {
+                                Err("The requested item could not be shown in the active list")
+                            });
+                        }
+                        glib::ControlFlow::Break
+                    });
+                }
             }
             return glib::ControlFlow::Continue;
         }
@@ -2430,6 +2585,73 @@ mod wayland_acceptance {
         assert_eq!(trash_selection.selected(), gtk::INVALID_LIST_POSITION);
         println!("GTK4 Wayland Trash pages: next page reached the exact omitted newest entry");
         panel.close();
+        let reveal_source = root.join("reveal-fixture");
+        fs::create_dir(&reveal_source).unwrap();
+        for index in 0..150 {
+            fs::write(reveal_source.join(format!("a-{index:03}.txt")), b"decoy").unwrap();
+        }
+        let reveal_name = std::ffi::OsStr::from_bytes(b"z wanted%\x80.txt");
+        fs::write(reveal_source.join(reveal_name), b"exact native reveal").unwrap();
+        let reveal_reply = Rc::new(RefCell::new(None));
+        open_window_with_reveal(
+            &app,
+            &reveal_source,
+            &root,
+            &[],
+            &copy_ui::CopyBuffer::default(),
+            Some(RevealRequest {
+                name: reveal_name.into(),
+                complete: Some(Box::new({
+                    let reveal_reply = reveal_reply.clone();
+                    move |result| {
+                        reveal_reply.replace(Some(result));
+                    }
+                })),
+            }),
+        );
+        let reveal_window = app
+            .windows()
+            .into_iter()
+            .find(|candidate| candidate != &window)
+            .unwrap();
+        let (reveal_list, reveal_selection) = descendants(reveal_window.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                let list = widget.downcast::<gtk::ListView>().ok()?;
+                let selection = list.model().and_downcast::<gtk::SingleSelection>()?;
+                selection
+                    .model()
+                    .and_downcast::<row_model::FileRowModel>()?;
+                Some((list, selection))
+            })
+            .unwrap();
+        until(
+            || {
+                reveal_selection.selected() == 150
+                    && reveal_list
+                        .vadjustment()
+                        .is_some_and(|adjustment| adjustment.value() > 0.0)
+                    && reveal_reply.borrow().as_ref().is_some_and(Result::is_ok)
+                    && descendants(reveal_list.upcast_ref()).iter().any(|widget| {
+                        widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                            label.text().starts_with("z wanted%")
+                                && visible_in_file_list(widget, &reveal_list)
+                        })
+                    })
+            },
+            "ShowItems initial selection scrolled to the off-screen exact item",
+        );
+        let row = reveal_selection
+            .selected_item()
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        assert!(
+            row.borrow::<row_model::RowPresentation>()
+                .name
+                .starts_with("z wanted%")
+        );
+        reveal_window.close();
+        println!("GTK4 Wayland reveal: exact native item selected and scrolled into view");
         window.close();
     }
 }
