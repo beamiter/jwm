@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=JWM Files
+Name[zh_CN]=JWM 文件
+Comment=Browse local folders in JWM Files
+Comment[zh_CN]=使用 JWM Files 浏览本地目录
+Exec=jwm-files -- %f
+TryExec=jwm-files
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileTools;FileManager;
+StartupNotify=true
