@@ -126,6 +126,11 @@ the original bytes. This does not open the item, change the directory,
 or replace the separate file-copy selection. The shortcut does not
 intercept text editing or act on the read-only comparison pane.
 
+Paste a local file URI into **Ctrl+L** to revisit the exact directory,
+including native names that cannot be shown as UTF-8. Explicit local URIs
+decode percent escapes; ordinary path text keeps percent signs literally.
+Remote file URIs are rejected without changing the current view.
+
 ### New Folder
 
 The toolbar action or Ctrl+Shift+N creates one named folder in the currently

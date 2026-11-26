@@ -8,7 +8,7 @@ use jwm_file_core::{
 use std::{
     cell::RefCell,
     ffi::OsString,
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, mpsc},
     thread,
@@ -69,17 +69,6 @@ fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label
     buffer.replace(Some(candidate));
 }
 
-fn text_path(path: &Path) -> (String, bool) {
-    if let Some(text) = path.to_str()
-        && !text.chars().any(char::is_control)
-    {
-        return (text.into(), false);
-    }
-    // The text clipboard cannot represent arbitrary filesystem bytes.
-    // A local URI is single-line and round-trips the exact original path.
-    (gio::File::for_path(path).uri().to_string(), true)
-}
-
 fn copy_path(window: &gtk::ApplicationWindow, state: &Shared, selected: u32, status: &gtk::Label) {
     if crate::comparison::has_focus(window) {
         return;
@@ -98,7 +87,7 @@ fn copy_path(window: &gtk::ApplicationWindow, state: &Shared, selected: u32, sta
         notice(status, "请选择要复制路径的项目。");
         return;
     };
-    let (text, uri) = text_path(&path);
+    let (text, uri) = crate::native_path::path_text(&path);
     gtk::prelude::WidgetExt::display(window)
         .clipboard()
         .set_text(&text);
@@ -328,7 +317,8 @@ mod tests {
 
     #[test]
     fn copied_text_is_literal_or_round_trips_raw_bytes_without_a_newline() {
-        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        use crate::native_path::path_text as text_path;
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
 
         let ordinary = Path::new("/tmp/a folder % 你好");
         let expected = (ordinary.to_str().unwrap().into(), false);

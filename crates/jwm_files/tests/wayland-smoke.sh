@@ -64,3 +64,4 @@ grep -F 'GTK4 Wayland Trash pages: next page reached the exact omitted newest en
 grep -F 'GTK4 Wayland reveal: exact native item selected and scrolled into view' "$client_log"
 grep -F 'GTK4 Wayland clipboard: raw filename bytes round-tripped through a file URI' "$client_log"
 grep -F 'GTK4 Wayland properties: dangling link metadata and exact raw path shown without follow' "$client_log"
+grep -F 'GTK4 Wayland location: raw bytes round-tripped through the editable URI' "$client_log"

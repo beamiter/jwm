@@ -5,6 +5,7 @@ mod comparison;
 mod copy_ui;
 mod file_manager_bus;
 mod grid;
+mod native_path;
 mod navigation;
 mod preview_ui;
 mod properties_ui;
@@ -456,7 +457,7 @@ fn request_scan(state: &Shared, target: Destination, address: &gtk::Entry, statu
         browser.pending = Some((id, target));
         browser.automatic_scan = None;
     }
-    address.set_text(&path.to_string_lossy());
+    address.set_text(&native_path::path_text(&path).0);
     status.set_text("正在读取目录…");
 }
 
@@ -915,17 +916,20 @@ fn open_window_with_reveal(
                 return;
             }
             let target = state.borrow().requested_destination();
-            if input.as_str() == target.path().to_string_lossy() {
+            let (current_text, _) = native_path::path_text(target.path());
+            if input.as_str() == current_text.as_str() {
                 request_scan(&state, target, entry, &status);
             } else {
-                let path = if input.as_str() == "~" {
-                    home.clone()
-                } else if let Some(tail) = input.strip_prefix("~/") {
-                    home.join(tail)
-                } else {
-                    target.path().join(Path::new(input.as_str()))
-                };
-                start_scan(&state, path, entry, &status);
+                match native_path::resolve_location(input.as_str(), target.path(), &home) {
+                    Ok(path) if path.as_path() == target.path() => {
+                        request_scan(&state, target, entry, &status);
+                    }
+                    Ok(path) => start_scan(&state, path, entry, &status),
+                    Err(_) => {
+                        status.set_text("仅支持有效的本地文件 URI。");
+                        return;
+                    }
+                }
             }
             if let Some(bar) = weak_bar.upgrade() {
                 bar.set_visible_child_name("path");
@@ -947,7 +951,7 @@ fn open_window_with_reveal(
                 return glib::Propagation::Proceed;
             }
             if let Some(entry) = entry.upgrade() {
-                entry.set_text(&state.borrow().requested_path().to_string_lossy());
+                entry.set_text(&native_path::path_text(state.borrow().requested_path()).0);
             }
             if let Some(bar) = bar.upgrade() {
                 bar.set_visible_child_name("path");
@@ -1274,7 +1278,7 @@ fn open_window_with_reveal(
                     window.set_title(Some(&format!("JWM Files · {}", browser.path().display())));
                 }
                 Err(error) => {
-                    address.set_text(&browser.path().to_string_lossy());
+                    address.set_text(&native_path::path_text(browser.path()).0);
                     status.set_text(&format!("无法读取目录：{error}"));
                     window.set_title(Some(&format!("JWM Files · {}", browser.path().display())));
                 }
@@ -2734,6 +2738,27 @@ mod wayland_acceptance {
         println!(
             "GTK4 Wayland properties: dangling link metadata and exact raw path shown without follow"
         );
+
+        let raw_location = root.join(std::ffi::OsStr::from_bytes(b"location-%20-\x80"));
+        let lookalike = root.join("location-%20-\u{fffd}");
+        fs::create_dir(&raw_location).unwrap();
+        fs::create_dir(&lookalike).unwrap();
+        fs::write(raw_location.join("exact.txt"), b"exact").unwrap();
+        fs::write(lookalike.join("not-exact.txt"), b"decoy").unwrap();
+        let (uri, is_uri) = native_path::path_text(&raw_location);
+        assert!(is_uri && uri.contains("%2520") && uri.contains("%80"));
+        action("win.location");
+        address.set_text(&uri);
+        address.emit_activate();
+        at(&raw_location, "exact.txt");
+        assert_eq!(address.text().as_str(), uri);
+        action("win.location");
+        address.set_text("file://outside.invalid/tmp/never");
+        address.emit_activate();
+        let rejected = || copy_noticed("仅支持有效的本地文件 URI。");
+        until(rejected, "rejected remote file URI");
+        at(&raw_location, "exact.txt");
+        println!("GTK4 Wayland location: raw bytes round-tripped through the editable URI");
         window.close();
     }
 }
