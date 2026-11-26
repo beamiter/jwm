@@ -2179,10 +2179,12 @@ mod tests {
             mode: PickerMode::Images,
             path: Editor::new(String::new()),
             exact_path: None,
-            entries: vec![PathBuf::new(); 10],
+            entries: vec![PathBuf::new(); 20],
             offset: 2,
             selected: None,
         })));
+        let list = app.picker_list_rect(app.picker_rows());
+        app.motion(list.x + 1., list.y + 1.);
         app.scroll((-3., 0.), ModifiersState::empty());
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 2));
         app.scroll((-3., -1.), ModifiersState::empty());
