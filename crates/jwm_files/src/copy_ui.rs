@@ -173,6 +173,7 @@ pub(super) fn install(
     let menu = gio::Menu::new();
     menu.append(Some("新建窗口"), Some("win.new-window"));
     menu.append(Some("新建标签页（Ctrl+T）"), Some("win.new-tab"));
+    menu.append(Some("目录对照栏（F3）"), Some("win.comparison-pane"));
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
     menu.append(Some("主目录回收站"), Some("win.home-trash"));
     menu.append(Some("撤销重命名（Ctrl+Z）"), Some("win.undo-rename"));
@@ -229,6 +230,9 @@ pub(super) fn install(
         let Some(window) = weak_window.upgrade() else {
             return glib::Propagation::Proceed;
         };
+        if crate::comparison::has_focus(&window) {
+            return glib::Propagation::Proceed;
+        }
         let mut focused = gtk::prelude::GtkWindowExt::focus(&window);
         while let Some(widget) = focused {
             if widget.is::<gtk::Editable>() || widget.is::<gtk::TextView>() {

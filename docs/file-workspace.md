@@ -108,6 +108,17 @@ its own back/forward history. Switching rescans the target and clears old
 selection before allowing file actions. List/grid and hidden-item settings
 are shared across the window. Up to 16 tabs can be open at once.
 
+### Read-only directory comparison
+
+**F3** or **操作 → 目录对照栏** opens a side-by-side view at the current
+folder. Use the right pane's directory rows and Back, Forward, Up, or
+Refresh buttons to compare another directory without changing the
+left pane. The right pane is read-only, uses its own worker, and
+shows only committed results; hidden files stay hidden. It does not
+implicitly apply the main pane's file shortcut to a different target.
+F3 closes it. Paste, drag-and-drop, and full two-pane editing are not
+part of this comparison view.
+
 ### Separate windows
 
 **Ctrl+N** or **操作 → 新建窗口** opens a second browser at the last
