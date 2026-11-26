@@ -391,7 +391,7 @@ fn exif_orientation(tiff: &[u8]) -> Option<u16> {
     }
     let directory = tiff.get(offset..)?;
     let count = usize::from(short(directory.get(..2)?)?);
-    for field in directory.get(2..)?.chunks_exact(12).take(count) {
+    for field in directory.get(2..)?.as_chunks::<12>().0.iter().take(count) {
         if short(&field[..2])? != 0x0112 {
             continue;
         }
@@ -495,7 +495,9 @@ mod tests {
             assert_eq!(
                 result
                     .rgba
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|rgba| rgba[0])
                     .collect::<Vec<_>>(),
                 order
