@@ -1,6 +1,7 @@
 #[cfg(all(test, target_os = "linux"))]
 mod bench_ui;
 mod breadcrumb;
+mod comparison;
 mod copy_ui;
 mod grid;
 mod navigation;
@@ -677,7 +678,9 @@ fn open_window(
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sidebar.append(&places);
     panes.set_start_child(Some(&sidebar));
-    panes.set_end_child(Some(&views));
+    let comparison_split = gtk::Paned::new(gtk::Orientation::Horizontal);
+    comparison_split.set_start_child(Some(&views));
+    panes.set_end_child(Some(&comparison_split));
     panes.set_position(180);
     panes.set_resize_start_child(false);
     layout.append(&panes);
@@ -723,6 +726,8 @@ fn open_window(
         reload_due: None,
         dialog_open: false,
     }));
+    comparison::install(&window, &comparison_split, &state, &status);
+    app.set_accels_for_action("win.comparison-pane", &["F3"]);
     preview_ui::install(&window, &state, &selection, &status);
     trash_ui::install(&window);
     copy_ui::install(
@@ -927,7 +932,9 @@ fn open_window(
     let weak_window = window.downgrade();
     let (mkdir_state, mkdir_status) = (state.clone(), status.clone());
     mkdir_action.connect_activate(move |_, _| {
-        if let Some(window) = weak_window.upgrade() {
+        if let Some(window) = weak_window.upgrade()
+            && !comparison::has_focus(&window)
+        {
             show_name_dialog(&window, &mkdir_state, &mkdir_status, Mutation::NewFolder);
         }
     });
@@ -942,6 +949,9 @@ fn open_window(
         let Some(window) = weak_window.upgrade() else {
             return;
         };
+        if comparison::has_focus(&window) {
+            return;
+        }
         let target = {
             let browser = rename_state.borrow();
             if browser.pending.is_some() {
@@ -1475,6 +1485,75 @@ mod wayland_acceptance {
             }
         });
         until(|| drew.get(), "native frame clock");
+
+        assert_eq!(app.accels_for_action("win.comparison-pane").len(), 1);
+        gtk::prelude::WidgetExt::activate_action(&window, "win.comparison-pane", None).unwrap();
+        let comparison = descendants(window.upcast_ref())
+            .into_iter()
+            .find(|widget| widget.has_css_class(comparison::FOCUS_CLASS))
+            .unwrap();
+        let right = descendants(&comparison)
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::ListView>().ok())
+            .unwrap();
+        let right_selection = right
+            .model()
+            .and_downcast::<gtk::SingleSelection>()
+            .unwrap();
+        let right_model = right_selection
+            .model()
+            .and_downcast::<row_model::FileRowModel>()
+            .unwrap();
+        assert_ne!(main_model, right_model);
+        until(
+            || right.is_mapped() && first_label(&right_model).as_deref() == Some("before.txt"),
+            "comparison pane mapped with its own file model",
+        );
+        let button = |title| {
+            descendants(&comparison)
+                .into_iter()
+                .find_map(|widget| {
+                    let button = widget.downcast::<gtk::Button>().ok()?;
+                    (button.label().as_deref() == Some(title)).then_some(button)
+                })
+                .unwrap()
+        };
+        button("上一级").emit_clicked();
+        until(
+            || right_model.n_items() == 2,
+            "comparison pane opened the parent",
+        );
+        right.emit_by_name::<()>("activate", &[&0u32]);
+        until(
+            || first_label(&right_model).as_deref() == Some("after.txt"),
+            "comparison pane opened the exact first directory",
+        );
+        assert_eq!(first_label(&main_model).as_deref(), Some("before.txt"));
+        assert_eq!(window.title().as_deref(), Some(first_title.as_str()));
+
+        right_selection.set_selected(0);
+        assert!(right.grab_focus());
+        assert!(comparison::has_focus(&window));
+        source_selection.set_selected(0);
+        gtk::prelude::WidgetExt::activate_action(&window, "win.rename", None).unwrap();
+        assert!(
+            !gtk::Window::list_toplevels().iter().any(|candidate| {
+                candidate
+                    .downcast_ref::<gtk::Window>()
+                    .is_some_and(|pane| pane.title().as_deref() == Some("JWM Files · Rename"))
+            }),
+            "F2 must not target the left selection when the right pane has focus"
+        );
+        button("后退").emit_clicked();
+        until(
+            || right_model.n_items() == 2,
+            "comparison history returned to parent",
+        );
+        gtk::prelude::WidgetExt::activate_action(&window, "win.comparison-pane", None).unwrap();
+        assert!(!right.is_mapped());
+        println!(
+            "GTK4 Wayland comparison: independent navigation and read-only shortcut focus verified"
+        );
 
         assert_eq!(app.accels_for_action("win.new-window").len(), 1);
         gtk::prelude::WidgetExt::activate_action(&window, "win.new-window", None).unwrap();
