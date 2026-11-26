@@ -286,6 +286,18 @@ xdotool key --clearmodifiers Return
 [[ ! -e "$root/next/$copy_name" ]]
 printf 'GTK4 X11 copy: address editing retained normal text clipboard shortcuts\n'
 
+# The clipboard path shortcut must populate an editable field, not the
+# process-local file-copy buffer. Navigate only from that pasted text.
+mkdir -p "$root/path-copy/target folder %"
+visit_path path-copy
+sleep 0.2
+xdotool mousemove --window "$window" 350 72 click 1
+xdotool key --clearmodifiers ctrl+shift+c ctrl+l ctrl+a BackSpace ctrl+v
+sleep 0.2
+xdotool key --clearmodifiers Return
+[[ $(title_id '^JWM Files · .*/path-copy/target folder %$') == "$window" ]]
+printf 'GTK4 X11 clipboard: Ctrl+Shift+C pasted the exact path into the address bar\n'
+
 visit_path copy-from
 sleep 0.2
 xdotool mousemove --window "$window" 350 72 click 1

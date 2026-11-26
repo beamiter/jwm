@@ -1655,6 +1655,18 @@ mod wayland_acceptance {
         }
     }
 
+    fn text_clipboard(display: &gtk::gdk::Display) -> String {
+        let received = Rc::new(RefCell::new(None));
+        display.clipboard().read_text_async(None::<&gio::Cancellable>, {
+            let received = received.clone();
+            move |result| {
+                received.replace(Some(result.unwrap().unwrap().to_string()));
+            }
+        });
+        until(|| received.borrow().is_some(), "native text clipboard");
+        received.take().unwrap()
+    }
+
     fn first_label(model: &row_model::FileRowModel) -> Option<String> {
         model
             .item(0)
@@ -1900,6 +1912,11 @@ mod wayland_acceptance {
         assert_ne!(main_model, sibling_model);
         source_selection.set_selected(0);
         gtk::prelude::WidgetExt::activate_action(&window, "win.copy-file", None).unwrap();
+        gtk::prelude::WidgetExt::activate_action(&window, "win.copy-item-path", None).unwrap();
+        assert_eq!(
+            text_clipboard(&display),
+            start.join("before.txt").to_str().unwrap()
+        );
         let label_text = |root: &gtk::Window| {
             descendants(root.upcast_ref())
                 .into_iter()
@@ -2668,6 +2685,15 @@ mod wayland_acceptance {
                 .name
                 .starts_with("z wanted%")
         );
+        gtk::prelude::WidgetExt::activate_action(&reveal_window, "win.copy-item-path", None)
+            .unwrap();
+        let clipboard = text_clipboard(&display);
+        assert!(clipboard.contains("%80"));
+        assert_eq!(
+            gio::File::for_uri(&clipboard).path().unwrap(),
+            reveal_source.join(reveal_name)
+        );
+        println!("GTK4 Wayland clipboard: raw filename bytes round-tripped through a file URI");
         reveal_window.close();
         println!("GTK4 Wayland reveal: exact native item selected and scrolled into view");
         let dangling = root.join(std::ffi::OsStr::from_bytes(b"properties-%\x80"));

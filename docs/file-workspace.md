@@ -89,6 +89,13 @@ is invalid or remote. The startup ID is not used for focus negotiation
 yet. Remote GVFS locations, automatic activation and default-handler
 migration remain outside this slice.
 
+The native Linux integration test starts the packaged XDG Desktop Portal
+on a private X11 session bus and sends a real `OpenDirectory` descriptor
+for both a regular and a hidden file. It verifies that JWM Files selects
+the exact item rather than falling back to opening only its folder.
+This does not configure the system’s default file manager or test a
+particular browser build.
+
 ### Read-only file properties
 
 Select a main-pane item and choose **属性** or **Alt+Enter**. The native
@@ -109,6 +116,15 @@ paths. A click opens the exact local mount folder. The list updates when
 mounts are added, changed, or removed while expanded. It excludes hidden
 shadowed mount aliases and remote URI-only locations. It does not mount,
 unmount, eject, or request credentials.
+
+### Copy full path
+
+**Ctrl+Shift+C** or **复制完整路径** copies the selected item’s absolute
+path as text. If the filename is not valid UTF-8 or includes a control
+character, the clipboard gets a single-line local file URI that preserves
+the original bytes. This does not open the item, change the directory,
+or replace the separate file-copy selection. The shortcut does not
+intercept text editing or act on the read-only comparison pane.
 
 ### New Folder
 
