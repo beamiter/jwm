@@ -342,10 +342,8 @@ sleep 0.25
 xdotool type --clearmodifiers 'INTENDED TARGET'
 # Searching and stepping must not activate the directory until we paste
 # the copied selection into the address bar.
-for attempt in {1..6}; do
-  xdotool key --clearmodifiers Return
-  sleep 0.12
-done
+xdotool key --clearmodifiers Return
+sleep 0.72
 [[ $(xdotool getwindowname "$window") == "JWM Files · $root/find-in-folder" ]]
 xdotool key --clearmodifiers Escape ctrl+shift+c ctrl+l ctrl+a BackSpace ctrl+v
 sleep 0.2

@@ -138,6 +138,9 @@ filename substring. Press Enter or **下一个** to select the next match, and
 **上一个** to go back. The search never opens a file or walks other folders.
 It does no filesystem I/O or indexing and stores no search history on disk.
 A result from a previous directory or an older snapshot is never applied.
+If a search hasn't finished when you press Enter, Files remembers one
+explicit step for that query. Editing the query, changing directories, or
+closing search discards that request.
 
 ### New Folder
 
