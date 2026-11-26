@@ -1,6 +1,8 @@
-//! Read-only home Trash snapshot. No discovery of removable-volume trashes.
+//! Home Trash inspection and recovering a copy without modifying Trash.
+use crate::copy::content_observation;
 use crate::{
-    Cancellation, FileIdentity, FileKind, HomeTrashInfo, TRASH_INFO_LIMIT, parse_home_trash_info,
+    Cancellation, CopyDestination, CopyError, CopyReceipt, CopySource, DirectoryHandle,
+    FileIdentity, FileKind, HomeTrashInfo, TRASH_INFO_LIMIT, parse_home_trash_info,
 };
 use rustix::{
     fd::{AsRawFd, OwnedFd},
@@ -9,6 +11,7 @@ use rustix::{
 };
 use std::{
     ffi::{OsStr, OsString},
+    fmt,
     fs::File,
     io::{self, Read},
     os::unix::ffi::OsStrExt,
@@ -25,6 +28,8 @@ pub struct HomeTrashEntry {
     pub kind: FileKind,
     /// Missing or invalid metadata is shown, never guessed from the basename.
     pub info: Option<HomeTrashInfo>,
+    // An inode by itself can be recycled between the listing and the action.
+    version: [i128; 5],
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -112,8 +117,7 @@ fn check(cancel: &Cancellation) -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error))
 }
 
-pub fn list_home_trash(data_home: &Path, cancel: &Cancellation) -> io::Result<HomeTrashSnapshot> {
-    check(cancel)?;
+fn open_home_trash(data_home: &Path) -> io::Result<Option<(OwnedFd, OwnedFd)>> {
     if !data_home.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -122,18 +126,26 @@ pub fn list_home_trash(data_home: &Path, cancel: &Cancellation) -> io::Result<Ho
     }
     let data_dir = match fs::open(data_home, directory_flags(), Mode::empty()) {
         Ok(fd) => fd,
-        Err(Errno::NOENT) => return Ok(HomeTrashSnapshot::default()),
+        Err(Errno::NOENT) => return Ok(None),
         Err(err) => return Err(err.into()),
     };
     let trash = match private_child(&data_dir, "Trash") {
         Ok(fd) => fd,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Ok(HomeTrashSnapshot::default());
+            return Ok(None);
         }
         Err(err) => return Err(err),
     };
     let files = private_child(&trash, "files")?;
     let info_dir = private_child(&trash, "info")?;
+    Ok(Some((files, info_dir)))
+}
+
+pub fn list_home_trash(data_home: &Path, cancel: &Cancellation) -> io::Result<HomeTrashSnapshot> {
+    check(cancel)?;
+    let Some((files, info_dir)) = open_home_trash(data_home)? else {
+        return Ok(HomeTrashSnapshot::default());
+    };
     let iterate = Dir::read_from(&files)?;
     let mut snapshot = HomeTrashSnapshot::default();
     let mut inspected = 0;
@@ -172,6 +184,7 @@ pub fn list_home_trash(data_home: &Path, cancel: &Cancellation) -> io::Result<Ho
             },
             kind,
             info,
+            version: content_observation(&observed),
         });
     }
     let date = |row: &HomeTrashEntry| {
@@ -185,4 +198,111 @@ pub fn list_home_trash(data_home: &Path, cancel: &Cancellation) -> io::Result<Ho
         .sort_by_cached_key(|row| (std::cmp::Reverse(date(row)), row.name.clone()));
     check(cancel)?;
     Ok(snapshot)
+}
+
+#[derive(Debug)]
+pub enum RecoverCopyError {
+    NotRegular,
+    NoOriginal,
+    EntryChanged,
+    InvalidTarget,
+    Io(io::Error),
+    Copy(CopyError),
+}
+
+impl fmt::Display for RecoverCopyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRegular => f.write_str("only a regular Trash file can be recovered as a copy"),
+            Self::NoOriginal => f.write_str("the original path is not known"),
+            Self::EntryChanged => {
+                f.write_str("the selected Trash entry changed; refresh and select it again")
+            }
+            Self::InvalidTarget => f.write_str("cannot recover a copy inside the Trash directory"),
+            Self::Io(err) => err.fmt(f),
+            Self::Copy(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RecoverCopyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Copy(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+/// Recover a specific listed home-Trash entry by creating a new file at the
+/// recorded original path. The Trash bytes and metadata are untouched. Do not
+/// infer the source from its timestamp, follow destination symlinks, create
+/// missing directories, or replace an existing file.
+pub fn recover_home_trash_copy(
+    data_home: &Path,
+    entry: &HomeTrashEntry,
+    cancel: &Cancellation,
+) -> Result<CopyReceipt, RecoverCopyError> {
+    check(cancel).map_err(RecoverCopyError::Io)?;
+    if entry.kind != FileKind::Regular {
+        return Err(RecoverCopyError::NotRegular);
+    }
+    if !crate::mkdir::single_name(&entry.name) {
+        return Err(RecoverCopyError::EntryChanged);
+    }
+    let expected = entry.info.as_ref().ok_or(RecoverCopyError::NoOriginal)?;
+    let Some((files, info_dir)) = open_home_trash(data_home).map_err(RecoverCopyError::Io)? else {
+        return Err(RecoverCopyError::EntryChanged);
+    };
+    let pin = fs::openat(
+        &files,
+        &entry.name,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| match error {
+        Errno::NOENT => RecoverCopyError::EntryChanged,
+        other => RecoverCopyError::Io(other.into()),
+    })?;
+    let observed = fs::fstat(&pin).map_err(|e| RecoverCopyError::Io(e.into()))?;
+    if FileType::from_raw_mode(observed.st_mode) != FileType::RegularFile
+        || observed.st_dev != entry.file.device
+        || observed.st_ino != entry.file.inode
+        || content_observation(&observed) != entry.version
+        || read_info(&info_dir, &entry.name, data_home).as_ref() != Some(expected)
+    {
+        return Err(RecoverCopyError::EntryChanged);
+    }
+    let trash = data_home.join("Trash");
+    if expected.original.starts_with(&trash) {
+        return Err(RecoverCopyError::InvalidTarget);
+    }
+    let (Some(parent_path), Some(name)) =
+        (expected.original.parent(), expected.original.file_name())
+    else {
+        return Err(RecoverCopyError::NoOriginal);
+    };
+    let parent =
+        DirectoryHandle::open_without_symlinks(parent_path).map_err(RecoverCopyError::Io)?;
+    let from = DirectoryHandle::from_directory_fd(files).map_err(RecoverCopyError::Io)?;
+    if parent.identity() == from.identity() {
+        return Err(RecoverCopyError::InvalidTarget);
+    }
+    let result = parent.copy_with_observation(
+        CopySource {
+            parent: &from,
+            displayed_parent: &trash.join("files"),
+            name: &entry.name,
+            expected_file: entry.file,
+        },
+        CopyDestination {
+            displayed_parent: parent_path,
+            name,
+        },
+        cancel,
+        Some(entry.version),
+    );
+    drop(pin); // Keep the observed inode alive until the copy finishes.
+    result.map_err(RecoverCopyError::Copy)
 }

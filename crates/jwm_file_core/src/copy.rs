@@ -102,12 +102,18 @@ fn verify_source(stat: &Stat, expected: FileIdentity) -> Result<(), CopyError> {
     }
 }
 
+pub(crate) fn content_observation(stat: &Stat) -> [i128; 5] {
+    [
+        i128::from(stat.st_size),
+        i128::from(stat.st_ctime),
+        i128::from(stat.st_ctime_nsec),
+        i128::from(stat.st_mtime),
+        i128::from(stat.st_mtime_nsec),
+    ]
+}
+
 fn same_content_observation(before: &Stat, after: &Stat) -> bool {
-    before.st_size == after.st_size
-        && before.st_mtime == after.st_mtime
-        && before.st_mtime_nsec == after.st_mtime_nsec
-        && before.st_ctime == after.st_ctime
-        && before.st_ctime_nsec == after.st_ctime_nsec
+    content_observation(before) == content_observation(after)
 }
 
 fn check(cancel: &Cancellation) -> Result<(), CopyError> {
@@ -236,6 +242,16 @@ impl DirectoryHandle {
         destination: CopyDestination<'_>,
         cancel: &Cancellation,
     ) -> Result<CopyReceipt, CopyError> {
+        self.copy_with_observation(source, destination, cancel, None)
+    }
+
+    pub(crate) fn copy_with_observation(
+        &self,
+        source: CopySource<'_>,
+        destination: CopyDestination<'_>,
+        cancel: &Cancellation,
+        expected: Option<[i128; 5]>,
+    ) -> Result<CopyReceipt, CopyError> {
         check(cancel)?;
         if !crate::mkdir::single_name(source.name) || !crate::mkdir::single_name(destination.name) {
             return Err(CopyError::InvalidName);
@@ -257,6 +273,9 @@ impl DirectoryHandle {
         })?;
         let before = fs::fstat(&pin).map_err(io_error)?;
         verify_source(&before, source.expected_file)?;
+        if expected.is_some_and(|expected| content_observation(&before) != expected) {
+            return Err(CopyError::SourceChanged);
+        }
         // Follow only our own pinned FD, never reopen the untrusted filename.
         let input = File::from(
             fs::open(

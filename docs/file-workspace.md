@@ -246,12 +246,16 @@ UTF-8 files, including TSX, remain plain text. The preview does not
 execute any file and reports when only a truncated prefix is shown.
 Images, audio and video are separate milestones.
 
-### Read-only home Trash
+### Home Trash
 
-**操作 → 主目录回收站（只读）** displays the home Trash in your XDG data
+**操作 → 主目录回收站** displays the home Trash in your XDG data
 directory. Entries include their original path and deletion time when
 metadata is available, plus the unique storage name so repeated deletes
 at the same path and second remain distinguishable. Missing metadata is
 shown explicitly. The scan is limited to 4,096 entries, with a visible
-notice if incomplete. It does not enumerate other mounts, move files to
-Trash, restore entries, or change any file.
+notice if incomplete. Select an ordinary file with an intact original
+path and choose **恢复副本** to preview the destination and confirm.
+The action creates a no-overwrite copy at the original path, leaving
+the Trash entry and metadata in place. It refuses a missing or
+symlinked parent. It does not enumerate other mounts, move files to
+Trash, remove an original Trash entry, or offer Trash undo.

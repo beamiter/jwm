@@ -133,3 +133,76 @@ fn trash_snapshot_bounds_enumeration_and_reports_incomplete_results() {
     assert!(snapshot.incomplete);
     assert!(snapshot.entries.iter().all(|row| row.info.is_none()));
 }
+
+#[test]
+fn recovery_uses_exact_trash_slot_and_keeps_both_revisions_on_conflict_and_success() {
+    use jwm_file_core::{CopyError, RecoverCopyError, recover_home_trash_copy};
+    use std::ffi::OsStr;
+    let data = Fixture::new();
+    data.populate();
+    fs::create_dir(data.0.join("working")).unwrap();
+    let name = OsStr::from_bytes(b"doc-%-\x80");
+    let target = data.0.join("working").join(name);
+    let info = b"[Trash Info]\nPath=working/doc-%25-%80\nDeletionDate=2026-11-26T12:26:00";
+    for (slot, bytes) in [("A", b"older"), ("B", b"newer")] {
+        fs::write(data.0.join("Trash/files").join(slot), bytes).unwrap();
+        fs::write(
+            data.0.join("Trash/info").join(format!("{slot}.trashinfo")),
+            info,
+        )
+        .unwrap();
+    }
+    let snapshot = list_home_trash(&data.0, &Cancellation::default()).unwrap();
+    let selected = snapshot.entries.iter().find(|e| e.name == "B").unwrap();
+    fs::write(&target, b"occupied").unwrap();
+    assert!(matches!(
+        recover_home_trash_copy(&data.0, selected, &Cancellation::default()),
+        Err(RecoverCopyError::Copy(CopyError::DestinationExists))
+    ));
+    assert_eq!(fs::read(&target).unwrap(), b"occupied");
+    assert_eq!(fs::read(data.0.join("Trash/files/A")).unwrap(), b"older");
+    assert_eq!(fs::read(data.0.join("Trash/files/B")).unwrap(), b"newer");
+    fs::remove_file(&target).unwrap();
+    let receipt = recover_home_trash_copy(&data.0, selected, &Cancellation::default()).unwrap();
+    assert_eq!(receipt.bytes, 5);
+    assert_eq!(fs::read(&target).unwrap(), b"newer");
+    assert_eq!(fs::read(data.0.join("Trash/files/A")).unwrap(), b"older");
+    assert_eq!(fs::read(data.0.join("Trash/files/B")).unwrap(), b"newer");
+    assert_eq!(
+        fs::read(data.0.join("Trash/info/A.trashinfo")).unwrap(),
+        info
+    );
+    assert_eq!(
+        fs::read(data.0.join("Trash/info/B.trashinfo")).unwrap(),
+        info
+    );
+}
+
+#[test]
+fn recovery_refuses_changed_slot_or_symlinked_destination_parent() {
+    use jwm_file_core::{RecoverCopyError, recover_home_trash_copy};
+    let data = Fixture::new();
+    data.populate();
+    fs::create_dir(data.0.join("outside")).unwrap();
+    symlink(data.0.join("outside"), data.0.join("via-link")).unwrap();
+    let source = data.0.join("Trash/files/slot");
+    fs::write(&source, b"untouched").unwrap();
+    fs::write(
+        data.0.join("Trash/info/slot.trashinfo"),
+        b"[Trash Info]\nPath=via-link/file\nDeletionDate=2026-11-26T12:26:00",
+    )
+    .unwrap();
+    let snapshot = list_home_trash(&data.0, &Cancellation::default()).unwrap();
+    let selected = &snapshot.entries[0];
+    assert!(matches!(
+        recover_home_trash_copy(&data.0, selected, &Cancellation::default()),
+        Err(RecoverCopyError::Io(_))
+    ));
+    assert!(!data.0.join("outside/file").exists());
+    fs::write(&source, b"replaced bytes").unwrap();
+    assert!(matches!(
+        recover_home_trash_copy(&data.0, selected, &Cancellation::default()),
+        Err(RecoverCopyError::EntryChanged)
+    ));
+    assert!(!data.0.join("outside/file").exists());
+}

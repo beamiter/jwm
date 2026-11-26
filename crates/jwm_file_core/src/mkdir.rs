@@ -1,6 +1,6 @@
 use crate::FileIdentity;
 use rustix::fd::OwnedFd;
-use rustix::fs::{self, Mode, OFlags};
+use rustix::fs::{self, CWD, Mode, OFlags, ResolveFlags};
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
@@ -57,6 +57,21 @@ impl DirectoryHandle {
             OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | extra,
             Mode::empty(),
         )?;
+        Self::from_directory_fd(fd)
+    }
+
+    pub(crate) fn open_without_symlinks(path: &Path) -> io::Result<Self> {
+        let fd = fs::openat2(
+            CWD,
+            path,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS,
+        )?;
+        Self::from_directory_fd(fd)
+    }
+
+    pub(crate) fn from_directory_fd(fd: OwnedFd) -> io::Result<Self> {
         let metadata = fs::fstat(&fd)?;
         Ok(Self {
             fd,

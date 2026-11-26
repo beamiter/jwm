@@ -1344,7 +1344,7 @@ mod activation_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod wayland_acceptance {
     use super::*;
-    use std::{fs, time::Instant};
+    use std::{fs, os::unix::ffi::OsStrExt, time::Instant};
 
     fn descendants(widget: &gtk::Widget) -> Vec<gtk::Widget> {
         let mut result = vec![widget.clone()];
@@ -1843,18 +1843,17 @@ mod wayland_acceptance {
             "read-only home Trash panel",
         );
         let panel = panel.unwrap();
-        let model = descendants(panel.upcast_ref())
+        let (trash_selection, model) = descendants(panel.upcast_ref())
             .into_iter()
             .find_map(|widget| {
-                widget
+                let selection = widget
                     .downcast::<gtk::ListView>()
                     .ok()?
                     .model()?
-                    .downcast::<gtk::NoSelection>()
-                    .ok()?
-                    .model()?
-                    .downcast::<gtk::StringList>()
-                    .ok()
+                    .downcast::<gtk::SingleSelection>()
+                    .ok()?;
+                let rows = selection.model()?.downcast::<gtk::StringList>().ok()?;
+                Some((selection, rows))
             })
             .unwrap();
         until(|| model.n_items() == 3, "home Trash snapshot published");
@@ -1867,8 +1866,68 @@ mod wayland_acceptance {
         assert!(model.string(2).unwrap().starts_with("原路径未知"));
         assert_eq!(fs::read(trash.join("files/slot-A")).unwrap(), b"old");
         assert_eq!(fs::read(trash.join("files/slot-B")).unwrap(), b"new");
+        println!("GTK4 Wayland Trash: same-path entries remained distinct in the home view");
+
+        let original_folder = glib::user_data_dir().join("tests");
+        fs::create_dir(&original_folder).unwrap();
+        let original = original_folder.join(std::ffi::OsStr::from_bytes(b"note%\x80.txt"));
+        fs::write(&original, b"occupied").unwrap();
+        let recover = descendants(panel.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                let button = widget.downcast::<gtk::Button>().ok()?;
+                (button.label().as_deref() == Some("恢复副本")).then_some(button)
+            })
+            .unwrap();
+        trash_selection.set_selected(2);
+        assert!(!recover.is_sensitive(), "orphan must not offer recovery");
+        trash_selection.set_selected(1);
+        assert!(recover.is_sensitive());
+        let confirm = |response| {
+            recover.emit_clicked();
+            let dialog = gtk::Window::list_toplevels()
+                .into_iter()
+                .find_map(|widget| {
+                    let dialog = widget.downcast::<gtk::Dialog>().ok()?;
+                    (dialog.title().as_deref() == Some("JWM Files · Recover Copy")
+                        && dialog.transient_for().as_ref() == Some(&panel))
+                    .then_some(dialog)
+                })
+                .unwrap();
+            assert!(descendants(dialog.upcast_ref()).iter().any(|widget| {
+                widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                    label.text().contains("项目：slot-B") && label.text().contains("保留回收站原件")
+                })
+            }));
+            dialog.response(response);
+        };
+        let say = |expected| {
+            descendants(panel.upcast_ref()).iter().any(|widget| {
+                widget
+                    .downcast_ref::<gtk::Label>()
+                    .is_some_and(|label| label.text().as_str() == expected)
+            })
+        };
+        confirm(gtk::ResponseType::Cancel);
+        assert_eq!(fs::read(&original).unwrap(), b"occupied");
+        confirm(gtk::ResponseType::Accept);
+        until(
+            || say("原位置已有同名项目，未覆盖。回收站原件保留。"),
+            "occupied restore destination accurately reported",
+        );
+        assert_eq!(fs::read(&original).unwrap(), b"occupied");
+        fs::remove_file(&original).unwrap();
+        confirm(gtk::ResponseType::Accept);
+        until(
+            || say("已恢复副本，回收站原件保留。"),
+            "confirmed recovery copy",
+        );
+        assert_eq!(fs::read(&original).unwrap(), b"new");
+        assert_eq!(fs::read(trash.join("files/slot-A")).unwrap(), b"old");
+        assert_eq!(fs::read(trash.join("files/slot-B")).unwrap(), b"new");
+        assert_eq!(model.n_items(), 3);
         println!(
-            "GTK4 Wayland Trash: same-path entries remained distinct in the read-only home view"
+            "GTK4 Wayland Trash: selected the exact revision and kept both entries on recovery"
         );
         panel.close();
         window.close();
