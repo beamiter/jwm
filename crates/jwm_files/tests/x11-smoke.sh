@@ -280,3 +280,23 @@ if xdotool search --onlyvisible --name '^JWM Files · Preview$' >/dev/null 2>&1;
 fi
 [[ $(title_id '^JWM Files · .*/copy-from$') == "$window" ]]
 printf 'GTK4 X11 preview: Space opened the selected text and Escape returned to browsing\n'
+
+mkdir -p "$root/tab-start" "$root/tab-branch-a" "$root/tab-branch-b"
+visit_path tab-start
+visit_path tab-branch-a
+xdotool key --clearmodifiers ctrl+t
+visit_path tab-branch-b
+xdotool key --clearmodifiers ctrl+Page_Up
+[[ $(title_id '^JWM Files · .*/tab-branch-a$') == "$window" ]]
+xdotool key --clearmodifiers alt+Left
+[[ $(title_id '^JWM Files · .*/tab-start$') == "$window" ]]
+xdotool key --clearmodifiers ctrl+Page_Down
+[[ $(title_id '^JWM Files · .*/tab-branch-b$') == "$window" ]]
+xdotool key --clearmodifiers alt+Left
+[[ $(title_id '^JWM Files · .*/tab-branch-a$') == "$window" ]]
+xdotool key --clearmodifiers ctrl+w
+[[ $(title_id '^JWM Files · .*/tab-start$') == "$window" ]]
+xdotool key --clearmodifiers ctrl+w
+# A later navigation proves the last tab is still interactive.
+visit_path tab-branch-b
+printf 'GTK4 X11 tabs: real shortcuts kept both histories and left the final tab open\n'

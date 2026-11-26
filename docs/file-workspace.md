@@ -90,6 +90,15 @@ and filesystem changes are not one atomic action across processes, so the
 source check rejects changes it observes rather than promising exclusive
 access to a directory.
 
+### Tabs
+
+Open a tab at the current directory with **Ctrl+T** or the operation
+menu. Switch with the tab strip or **Ctrl+Page Up/Down**, and close the
+current tab with **Ctrl+W** without closing the last tab. Each tab keeps
+its own back/forward history. Switching rescans the target and clears old
+selection before allowing file actions. List/grid and hidden-item settings
+are shared across the window. Up to 16 tabs can be open at once.
+
 ### Live directory refresh
 
 Linux watches only the displayed local directory, non-recursively. The scan

@@ -7,6 +7,8 @@ mod navigation;
 mod preview_ui;
 mod row_model;
 mod selection;
+mod tab_strip;
+mod tabs;
 #[cfg(target_os = "linux")]
 mod tree;
 mod wake;
@@ -18,7 +20,7 @@ use jwm_file_core::{DirectoryChange, DirectoryHandle, FileIdentity};
 use jwm_file_core::{
     FileEntry, FileKind, ListOptions, LocalProvider, Location, ScanId, ScanWorker,
 };
-use navigation::{Destination, Navigation};
+use navigation::Destination;
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,6 +28,7 @@ use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
+use tabs::{TabId, Tabs};
 use wake::{SignalOnDrop, Wake};
 
 const APP_ID: &str = "org.jwm.Files";
@@ -33,9 +36,8 @@ const APP_ID: &str = "org.jwm.Files";
 struct Browser {
     worker: ScanWorker,
     wake: Wake,
-    path: PathBuf,
+    tabs: Tabs,
     pending: Option<(ScanId, Destination)>,
-    navigation: Navigation,
     show_hidden: bool,
     entries: Rc<Vec<FileEntry>>,
     parent: Option<Arc<DirectoryHandle>>,
@@ -49,9 +51,13 @@ struct Browser {
 }
 
 impl Browser {
+    fn path(&self) -> &PathBuf {
+        &self.tabs.active().path
+    }
+
     fn requested_destination(&self) -> Destination {
         self.pending.as_ref().map_or_else(
-            || Destination::Visit(self.path.clone()),
+            || Destination::Visit(self.path().clone()),
             |(_, destination)| destination.clone(),
         )
     }
@@ -59,7 +65,7 @@ impl Browser {
     fn requested_path(&self) -> &Path {
         self.pending
             .as_ref()
-            .map_or(self.path.as_path(), |(_, target)| target.path())
+            .map_or(self.path().as_path(), |(_, target)| target.path())
     }
 }
 
@@ -263,7 +269,7 @@ fn show_name_dialog(
             activation.cancel.cancel();
         }
         browser.dialog_open = true;
-        (browser.path.clone(), parent)
+        (browser.path().clone(), parent)
     };
     let dialog = gtk::Dialog::builder()
         .title(mutation.title())
@@ -317,7 +323,7 @@ fn show_name_dialog(
         let mut browser = state.borrow_mut();
         if browser.mutation.is_some()
             || browser.pending.is_some()
-            || browser.path != path
+            || browser.path() != &path
             || browser
                 .parent
                 .as_ref()
@@ -475,6 +481,8 @@ fn open_window(
         header.append(widget);
     }
     layout.append(&header);
+    let tabs = Rc::new(tab_strip::TabStrip::new());
+    layout.append(&tabs.container);
 
     let places = gtk::ListBox::new();
     places.add_css_class("navigation-sidebar");
@@ -636,9 +644,8 @@ fn open_window(
     let state = Rc::new(RefCell::new(Browser {
         worker,
         wake,
-        path: initial.into(),
+        tabs: Tabs::new(initial.into()),
         pending: None,
-        navigation: Navigation::default(),
         show_hidden: false,
         entries: Rc::default(),
         parent: None,
@@ -652,10 +659,10 @@ fn open_window(
     }));
     preview_ui::install(&window, &state, &selection, &status);
     copy_ui::install(&window, &file_actions, &state, &selection, &copy_status);
-    let breadcrumb = breadcrumb::Breadcrumb::new({
+    let breadcrumb = Rc::new(breadcrumb::Breadcrumb::new({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
         move |path| start_scan(&state, path, &address, &status)
-    });
+    }));
     location_bar.add_named(&breadcrumb.container, Some("path"));
     location_bar.set_visible_child_name("path");
     #[cfg(target_os = "linux")]
@@ -677,7 +684,7 @@ fn open_window(
                 {
                     let (tree, root_path, state) = (tree.clone(), root_path.clone(), state.clone());
                     root_here.connect_clicked(move |_| {
-                        let path = state.borrow().path.clone();
+                        let path = state.borrow().path().clone();
                         *root_path.borrow_mut() = path.clone();
                         tree.set_root(path);
                     });
@@ -827,9 +834,9 @@ fn open_window(
             let target = {
                 let browser = state.borrow();
                 if is_back {
-                    browser.navigation.back()
+                    browser.tabs.active().navigation.back()
                 } else {
-                    browser.navigation.forward()
+                    browser.tabs.active().navigation.forward()
                 }
             };
             if let Some(target) = target {
@@ -886,6 +893,85 @@ fn open_window(
     app.set_accels_for_action("win.rename", &["F2"]);
 
     {
+        let (state, tabs, breadcrumb, weak_window) = (
+            state.clone(),
+            tabs.clone(),
+            breadcrumb.clone(),
+            window.downgrade(),
+        );
+        let (address, status, location_bar, views, model, selection) = (
+            address.clone(),
+            status.clone(),
+            location_bar.downgrade(),
+            views.downgrade(),
+            model.clone(),
+            selection.clone(),
+        );
+        let open_tab = move |action: &gio::SimpleAction, parameter: Option<&glib::Variant>| {
+            let Some(window) = weak_window.upgrade() else {
+                return;
+            };
+            let path = {
+                let mut browser = state.borrow_mut();
+                if browser.dialog_open {
+                    return;
+                }
+                let changed = match action.name().as_str() {
+                    "new-tab" => browser.tabs.new_next(),
+                    "close-tab" => browser.tabs.close_active(),
+                    "next-tab" => browser.tabs.cycle(false),
+                    "previous-tab" => browser.tabs.cycle(true),
+                    "activate-tab" => parameter
+                        .and_then(glib::Variant::get::<u64>)
+                        .map(TabId::from_action_parameter)
+                        .is_some_and(|id| browser.tabs.activate(id)),
+                    _ => false,
+                };
+                if !changed {
+                    if action.name().as_str() == "new-tab" {
+                        status.set_text("最多可打开 16 个标签页。");
+                    }
+                    return;
+                }
+                let path = browser.path().clone();
+                // A tab records navigation only, not stale rows, parent FDs,
+                // or a pending result. The one scanner cancels its prior
+                // generation before opening the newly active directory.
+                browser.parent = None;
+                browser.entries = Rc::default();
+                browser.active_scan = None;
+                browser.reload_due = None;
+                path
+            };
+            start_scan(&state, path.clone(), &address, &status);
+            tabs.sync(&state.borrow().tabs);
+            breadcrumb.show(&path);
+            window.set_title(Some("JWM Files · 正在读取"));
+            if let Some(location_bar) = location_bar.upgrade() {
+                location_bar.set_visible_child_name("path");
+            }
+            selection.set_selected(gtk::INVALID_LIST_POSITION);
+            model.replace(Rc::default());
+            focus_current_view(&views);
+        };
+        for (name, accel) in [
+            ("new-tab", "<Control>t"),
+            ("close-tab", "<Control>w"),
+            ("next-tab", "<Control>Page_Down"),
+            ("previous-tab", "<Control>Page_Up"),
+            ("activate-tab", ""),
+        ] {
+            let parameter = (name == "activate-tab").then_some(glib::VariantTy::UINT64);
+            let action = gio::SimpleAction::new(name, parameter);
+            action.connect_activate(open_tab.clone());
+            window.add_action(&action);
+            if !accel.is_empty() {
+                app.set_accels_for_action(&format!("win.{name}"), &[accel]);
+            }
+        }
+    }
+
+    {
         let state = state.clone();
         window.connect_close_request(move |_| {
             let mut state = state.borrow_mut();
@@ -899,9 +985,8 @@ fn open_window(
         });
     }
     start_scan(&state, initial.into(), &address, &status);
-    let mut breadcrumb_path = None::<PathBuf>;
     let weak_window = window.downgrade();
-    let mut process = move || {
+    let process = move || {
         let Some(window) = weak_window.upgrade() else {
             return glib::ControlFlow::Break;
         };
@@ -931,10 +1016,11 @@ fn open_window(
                     browser.active_scan = Some(id);
                     browser.reload_due = None;
                     let path = requested.path().to_path_buf();
-                    if !browser.navigation.accept(requested) {
+                    let tab = browser.tabs.active_mut();
+                    if !tab.navigation.accept(requested) {
                         return glib::ControlFlow::Continue;
                     }
-                    browser.path = path;
+                    tab.path = path;
                     browser.entries = Rc::new(snapshot.entries);
                     browser.parent = snapshot.local_parent;
                     replaced = true;
@@ -945,11 +1031,12 @@ fn open_window(
                         format!("{base} · {} 项读取失败", snapshot.skipped_entries)
                     };
                     status.set_text(&label);
-                    window.set_title(Some(&format!("JWM Files · {}", browser.path.display())));
+                    window.set_title(Some(&format!("JWM Files · {}", browser.path().display())));
                 }
                 Err(error) => {
-                    address.set_text(&browser.path.to_string_lossy());
+                    address.set_text(&browser.path().to_string_lossy());
                     status.set_text(&format!("无法读取目录：{error}"));
+                    window.set_title(Some(&format!("JWM Files · {}", browser.path().display())));
                 }
             }
         }
@@ -957,13 +1044,11 @@ fn open_window(
             // A reply and a notice/mutation may have shared one wake. Process
             // remaining results in a separate turn after replacing GTK rows.
             browser.wake.signal();
-            let path = browser.path.clone();
+            let path = browser.path().clone();
             let entries = browser.entries.clone();
+            tabs.sync(&browser.tabs);
             drop(browser);
-            if breadcrumb_path.as_ref() != Some(&path) {
-                breadcrumb.show(&path);
-                breadcrumb_path = Some(path);
-            }
+            breadcrumb.show(&path);
             selection.set_selected(gtk::INVALID_LIST_POSITION);
             model.replace(entries);
             if let Some((row, id)) = restore_row
@@ -990,7 +1075,7 @@ fn open_window(
             && let Some(work) = browser.mutation.take()
         {
             let should_refresh = browser.pending.is_none()
-                && browser.path == work.path
+                && browser.path() == &work.path
                 && browser
                     .parent
                     .as_ref()
@@ -1005,7 +1090,7 @@ fn open_window(
             if should_refresh {
                 match result {
                     Ok(()) => {
-                        let path = browser.path.clone();
+                        let path = browser.path().clone();
                         drop(browser);
                         start_scan(&state, path, &address, &status);
                         return glib::ControlFlow::Continue;
@@ -1049,7 +1134,7 @@ fn open_window(
             }
             if browser.reload_due.as_ref().is_some_and(|due| due.get()) {
                 browser.reload_due = None;
-                let path = browser.path.clone();
+                let path = browser.path().clone();
                 let id = browser.worker.submit(
                     Location::Local(path.clone()),
                     ListOptions {
@@ -1410,6 +1495,59 @@ mod wayland_acceptance {
         println!("GTK4 Wayland grid: moving the active directory cleared stale selection");
         println!("GTK4 Wayland wake: cancelling a dialog delivered deferred invalidation");
         println!("GTK4 Wayland smoke: native window mapped and navigation replaced the listing");
+
+        // Two tabs must not share history or accept a late scan for the
+        // directory that was requested in a tab we have left.
+        navigate(&conflict);
+        navigate(&start);
+        action("win.new-tab");
+        let at = |path: &Path, expected: &str| {
+            let title = format!("JWM Files · {}", path.display());
+            until(
+                || {
+                    window.title().as_deref() == Some(title.as_str())
+                        && first_label(&main_model).as_deref() == Some(expected)
+                },
+                "confirmed tab path and first row",
+            );
+        };
+        at(&start, "before.txt");
+        action("win.location");
+        address.set_text(target.to_str().unwrap());
+        address.emit_activate();
+        action("win.previous-tab");
+        assert_eq!(grid_selection.selected(), gtk::INVALID_LIST_POSITION);
+        at(&start, "before.txt");
+        action("win.next-tab");
+        at(&start, "before.txt");
+        navigate(&target);
+        at(&target, "after.txt");
+        action("win.previous-tab");
+        at(&start, "before.txt");
+        action("win.back");
+        at(&conflict, "after.txt");
+        action("win.next-tab");
+        at(&target, "after.txt");
+        action("win.back");
+        at(&start, "before.txt");
+        let conflict_tab = descendants(window.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                let button = widget.downcast::<gtk::Button>().ok()?;
+                let label = button.child().and_downcast::<gtk::Label>()?;
+                (button.is_mapped()
+                    && button.action_name().as_deref() == Some("win.activate-tab")
+                    && label.text().as_str() == "conflict")
+                    .then_some(button)
+            })
+            .unwrap();
+        conflict_tab.emit_clicked();
+        at(&conflict, "after.txt");
+        action("win.close-tab");
+        at(&start, "before.txt");
+        action("win.close-tab");
+        assert!(window.is_mapped());
+        println!("GTK4 Wayland tabs: separate history, cancelled scans and tab buttons verified");
         window.close();
     }
 }

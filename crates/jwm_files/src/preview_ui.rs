@@ -58,7 +58,7 @@ pub(super) fn install(
                 .and_then(|(handle, entry)| {
                     Some((
                         handle.clone(),
-                        browser.path.clone(),
+                        browser.path().clone(),
                         entry.name.clone(),
                         entry.identity?,
                     ))

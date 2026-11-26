@@ -45,3 +45,4 @@ grep -F 'GTK4 Wayland grid: moving the active directory cleared stale selection'
 grep -F 'GTK4 Wayland preview: selected file text shown in the quick preview' "$client_log"
 grep -F 'GTK4 Wayland wake: cancelling a dialog delivered deferred invalidation' "$client_log"
 grep -F 'GTK4 Wayland copy: delivered conflict status before a successful paste' "$client_log"
+grep -F 'GTK4 Wayland tabs: separate history, cancelled scans and tab buttons verified' "$client_log"
