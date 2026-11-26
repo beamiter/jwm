@@ -2139,7 +2139,10 @@ mod wayland_acceptance {
             || status_matches(&|text| text.starts_with("已复制为副本：")),
             "copy-as published an alternate name",
         );
-        assert_eq!(fs::read(conflict.join("after (copy 2).txt")).unwrap(), b"new");
+        assert_eq!(
+            fs::read(conflict.join("after (copy 2).txt")).unwrap(),
+            b"new"
+        );
         assert_eq!(fs::read(conflict.join("after.txt")).unwrap(), b"existing");
         assert_eq!(
             fs::read_link(conflict.join("after (copy).txt")).unwrap(),

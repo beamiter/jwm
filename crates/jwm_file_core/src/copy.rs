@@ -285,7 +285,9 @@ impl DirectoryHandle {
             cancel,
             expected,
         )
-        .map(|receipt| CopyReceipt { bytes: receipt.bytes })
+        .map(|receipt| CopyReceipt {
+            bytes: receipt.bytes,
+        })
     }
 
     fn copy_with_naming(
@@ -455,7 +457,10 @@ mod tests {
         assert_eq!(copy.name, sibling_copy_name(original, 3));
         assert_eq!(copy.bytes, 6);
         assert_eq!(std::fs::read(dir.join(copy.name)).unwrap(), b"source");
-        assert_eq!(std::fs::read_link(dir.join(first)).unwrap(), Path::new("missing"));
+        assert_eq!(
+            std::fs::read_link(dir.join(first)).unwrap(),
+            Path::new("missing")
+        );
         assert_eq!(std::fs::read(dir.join(second)).unwrap(), b"old bytes");
         for number in 4..=COPY_NAMES {
             std::fs::write(dir.join(sibling_copy_name(original, number)), b"old").unwrap();
@@ -464,7 +469,10 @@ mod tests {
             parent.copy_regular_keep_both(source(), &dir, &Cancellation::default()),
             Err(CopyError::SiblingNamesExhausted)
         ));
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), usize::from(COPY_NAMES) + 1);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            usize::from(COPY_NAMES) + 1
+        );
         assert_eq!(std::fs::read(dir.join(original)).unwrap(), b"source");
     }
 
