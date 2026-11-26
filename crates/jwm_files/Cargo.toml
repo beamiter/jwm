@@ -1,0 +1,17 @@
+[package]
+name = "jwm_files"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "jwm-files"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = "=0.11.4"
+jwm_file_core = { path = "../jwm_file_core" }
