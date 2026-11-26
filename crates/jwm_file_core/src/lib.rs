@@ -7,6 +7,8 @@ mod local;
 #[cfg(target_os = "linux")]
 mod mkdir;
 #[cfg(target_os = "linux")]
+mod preview;
+#[cfg(target_os = "linux")]
 mod rename;
 mod scan_worker;
 #[cfg(target_os = "linux")]
@@ -17,6 +19,8 @@ pub use copy::{CopyDestination, CopyError, CopyReceipt, CopySource};
 pub use local::LocalProvider;
 #[cfg(target_os = "linux")]
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};
+#[cfg(target_os = "linux")]
+pub use preview::{PreviewError, TEXT_PREVIEW_LIMIT, TextPreview};
 #[cfg(target_os = "linux")]
 pub use rename::RenameError;
 #[cfg(target_os = "linux")]

@@ -204,3 +204,14 @@ paint. It is an upper bound on first client paint because it requests a
 new paint for confirmation; it does not measure scanout or cold process
 startup. Explicitly record the renderer and whether the display was
 physical or virtual. No timings are asserted by these benchmarks.
+
+### Plain-text Quick Preview
+
+Choose **快速预览** from the operation menu, or press Space with the
+main list or icon view focused, to preview the first 128 KiB of a
+selected regular file. Escape or Space closes the preview.
+Reading happens off the UI thread through the selected directory and
+file identities, without opening links or special files. This preview
+displays UTF-8 as text, never executes files or interprets HTML, Markdown
+or JSX, and reports explicitly when showing a truncated prefix. Other
+media and formatted rendering are separate milestones.

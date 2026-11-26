@@ -394,3 +394,44 @@ fn staged_copy_refuses_moved_parent_and_replaced_source_link() {
     assert_eq!(fs::read_dir(&to).unwrap().count(), 0);
     assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
 }
+
+#[test]
+fn preview_uses_selected_raw_name_and_refuses_a_replacement_link() {
+    use jwm_file_core::{PreviewError, TEXT_PREVIEW_LIMIT};
+    use std::os::unix::{ffi::OsStrExt, fs::symlink};
+    let fixture = Fixture::new();
+    let name = OsStr::from_bytes(b"literal-\x80.tsx");
+    let text = "<button>你好 & hello</button>\n";
+    let original = fixture.0.join(name);
+    fs::write(&original, text).unwrap();
+    let listing = LocalProvider
+        .list(
+            &Location::Local(fixture.0.clone()),
+            ListOptions::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+    let identity = listing.entries[0].identity.unwrap();
+    let directory = listing.local_parent.unwrap();
+    let read =
+        |cancel: &Cancellation| directory.read_text_preview(&fixture.0, name, identity, cancel);
+
+    let result = read(&Cancellation::default()).unwrap();
+    assert_eq!(result.text, text);
+    assert!(!result.truncated);
+    fs::write(&original, "a".repeat(TEXT_PREVIEW_LIMIT + 400)).unwrap();
+    let result = read(&Cancellation::default()).unwrap();
+    assert!(result.truncated);
+    assert_eq!(result.text.len(), TEXT_PREVIEW_LIMIT);
+
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    assert!(matches!(read(&cancelled), Err(PreviewError::Cancelled)));
+    let moved = fixture.0.join("previous");
+    fs::rename(&original, &moved).unwrap();
+    symlink(&moved, &original).unwrap();
+    assert!(matches!(
+        read(&Cancellation::default()),
+        Err(PreviewError::NotRegular)
+    ));
+}

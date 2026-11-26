@@ -261,3 +261,22 @@ xdotool key --clearmodifiers Return
 [[ $(title_id '^JWM Files · .*/next$') == "$window" ]]
 [[ ! -e "$root/next/$copy_name" ]]
 printf 'GTK4 X11 copy: address editing retained normal text clipboard shortcuts\n'
+
+visit_path copy-from
+sleep 0.2
+xdotool mousemove --window "$window" 350 72 click 1
+xdotool key --clearmodifiers space
+preview=$(title_id '^JWM Files · Preview$')
+[[ "$preview" != "$window" ]]
+xdotool windowfocus --sync "$preview"
+xdotool key --clearmodifiers Escape
+for attempt in {1..20}; do
+  xdotool search --onlyvisible --name '^JWM Files · Preview$' >/dev/null 2>&1 || break
+  sleep 0.1
+done
+if xdotool search --onlyvisible --name '^JWM Files · Preview$' >/dev/null 2>&1; then
+  echo 'Quick preview remained visible after Escape' >&2
+  exit 1
+fi
+[[ $(title_id '^JWM Files · .*/copy-from$') == "$window" ]]
+printf 'GTK4 X11 preview: Space opened the selected text and Escape returned to browsing\n'

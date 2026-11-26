@@ -4,6 +4,7 @@ mod breadcrumb;
 mod copy_ui;
 mod grid;
 mod navigation;
+mod preview_ui;
 mod row_model;
 mod selection;
 #[cfg(target_os = "linux")]
@@ -511,6 +512,19 @@ fn open_window(
         let selection = selection.clone();
         let weak_view = view.downgrade();
         enter.connect_key_pressed(move |_, key, _, modifiers| {
+            if key == gtk::gdk::Key::space
+                && !modifiers.intersects(
+                    gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::ALT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK
+                        | gtk::gdk::ModifierType::SHIFT_MASK,
+                )
+                && let Some(view) = weak_view.upgrade()
+                && gtk::prelude::WidgetExt::activate_action(&view, "win.quick-preview", None)
+                    .is_ok()
+            {
+                return glib::Propagation::Stop;
+            }
             if !matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
                 || modifiers.intersects(
                     gtk::gdk::ModifierType::CONTROL_MASK
@@ -621,6 +635,7 @@ fn open_window(
         reload_at: None,
         dialog_open: false,
     }));
+    preview_ui::install(&window, &state, &selection, &status);
     copy_ui::install(&window, &file_actions, &state, &selection, &copy_status);
     let breadcrumb = breadcrumb::Breadcrumb::new({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
@@ -1247,6 +1262,37 @@ mod wayland_acceptance {
         until(|| !grid.is_mapped(), "return to list view");
         assert_eq!(grid_selection.selected(), 0);
         println!("GTK4 Wayland grid: list and icon modes kept the same selection");
+        gtk::prelude::WidgetExt::activate_action(&window, "win.quick-preview", None).unwrap();
+        let mut shown = None;
+        until(
+            || {
+                shown = app
+                    .windows()
+                    .into_iter()
+                    .find(|pane| pane.title().as_deref() == Some("JWM Files · Preview"));
+                shown.is_some()
+            },
+            "preview window",
+        );
+        let preview_window = shown.unwrap();
+        until(
+            || {
+                descendants(preview_window.upcast_ref())
+                    .iter()
+                    .any(|widget| {
+                        widget.downcast_ref::<gtk::TextView>().is_some_and(|text| {
+                            let buffer = text.buffer();
+                            buffer
+                                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                                .as_str()
+                                == "new"
+                        })
+                    })
+            },
+            "exact preview text",
+        );
+        preview_window.close();
+        println!("GTK4 Wayland preview: selected file text shown in the quick preview");
         fs::rename(&next, root.join("moved")).unwrap();
         until(
             || {
