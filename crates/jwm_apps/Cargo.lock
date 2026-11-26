@@ -1196,10 +1196,10 @@ dependencies = [
  "gio",
  "image",
  "jwm_ipc_client",
+ "jwm_markdown",
  "libc",
  "pango",
  "pangocairo",
- "pulldown-cmark",
  "serde_json",
  "softbuffer",
  "unicode-segmentation",
@@ -1222,6 +1222,13 @@ name = "jwm_ipc_transport"
 version = "0.1.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "jwm_markdown"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
 ]
 
 [[package]]

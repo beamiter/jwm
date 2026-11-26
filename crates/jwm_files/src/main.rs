@@ -1667,8 +1667,8 @@ mod wayland_acceptance {
         let project_b = root.join("project-b");
         fs::create_dir(&project_a).unwrap();
         fs::create_dir(&project_b).unwrap();
-        fs::write(project_a.join("README.md"), b"project A preview").unwrap();
-        fs::write(project_b.join("README.md"), b"project B preview").unwrap();
+        fs::write(project_a.join("README.md"), b"# project A preview").unwrap();
+        fs::write(project_b.join("README.md"), b"# project B preview").unwrap();
         navigate(&project_a);
         at(&project_a, "README.md");
         grid_selection.set_selected(0);
@@ -1701,7 +1701,7 @@ mod wayland_acceptance {
                             let buffer = text.buffer();
                             buffer
                                 .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                                .as_str()
+                                .trim()
                                 == expected
                         })
                     })
@@ -1721,6 +1721,40 @@ mod wayland_acceptance {
         println!(
             "GTK4 Wayland preview: an open preview followed the newly selected same-name file"
         );
+        let markdown_widgets = descendants(popup.upcast_ref());
+        let buffer = markdown_widgets
+            .iter()
+            .find_map(|widget| {
+                widget
+                    .downcast_ref::<gtk::TextView>()
+                    .map(|view| view.buffer())
+            })
+            .unwrap();
+        assert!(
+            buffer
+                .start_iter()
+                .tags()
+                .iter()
+                .any(|tag| tag.weight() >= 700)
+        );
+        let source_mode = markdown_widgets
+            .iter()
+            .find_map(|widget| {
+                let toggle = widget.clone().downcast::<gtk::ToggleButton>().ok()?;
+                (toggle.is_visible() && toggle.label().as_deref() == Some("查看源码"))
+                    .then_some(toggle)
+            })
+            .unwrap();
+        source_mode.set_active(true);
+        assert_eq!(
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .as_str(),
+            "# project B preview"
+        );
+        source_mode.set_active(false);
+        preview_at(&project_b, "project B preview");
+        println!("GTK4 Wayland Markdown: native heading style and exact source toggle verified");
         popup.close();
 
         let undo_folder = root.join("undo-fixture");

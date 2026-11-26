@@ -7,12 +7,14 @@ on:
       - '.github/workflows/file-workspace.yml'
       - 'crates/jwm_file_core/**'
       - 'crates/jwm_files/**'
+      - 'crates/jwm_markdown/**'
   push:
     branches: [master]
     paths:
       - '.github/workflows/file-workspace.yml'
       - 'crates/jwm_file_core/**'
       - 'crates/jwm_files/**'
+      - 'crates/jwm_markdown/**'
 
 permissions:
   contents: read
@@ -51,6 +53,12 @@ jobs:
         with:
           toolchain: '1.92.0'
           components: rustfmt, clippy
+      - name: Check the shared Markdown renderer
+        working-directory: crates/jwm_markdown
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
       - name: Install GTK4 and private X11 test dependencies
         run: bash scripts/ci-install-deps.sh libgtk-4-dev xvfb xauth xdotool
       - name: Build and drive the native browser

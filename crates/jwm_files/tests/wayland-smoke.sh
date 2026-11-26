@@ -49,3 +49,4 @@ grep -F 'GTK4 Wayland tabs: separate history, cancelled scans and tab buttons ve
 grep -F 'GTK4 Wayland tabs: matching folder names disambiguated and accessible selection changed' "$client_log"
 grep -F 'GTK4 Wayland preview: an open preview followed the newly selected same-name file' "$client_log"
 grep -F 'GTK4 Wayland undo: directory-bound rename conflicts were non-destructive' "$client_log"
+grep -F 'GTK4 Wayland Markdown: native heading style and exact source toggle verified' "$client_log"

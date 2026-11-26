@@ -228,7 +228,7 @@ new paint for confirmation; it does not measure scanout or cold process
 startup. Explicitly record the renderer and whether the display was
 physical or virtual. No timings are asserted by these benchmarks.
 
-### Plain-text Quick Preview
+### Text and Markdown Quick Preview
 
 Choose **快速预览** from the operation menu, or press Space with the
 main list or icon view focused, to preview the first 128 KiB of a
@@ -238,7 +238,10 @@ explicit preview request switches it to the newly selected file. An older
 read finishing later cannot overwrite the new view.
 
 Reading happens off the UI thread through the selected directory and
-file identities, without opening links or special files. This preview
-displays UTF-8 as text, never executes files or interprets HTML, Markdown
-or JSX, and reports explicitly when showing a truncated prefix. Other
-media and formatted rendering are separate milestones.
+file identities, without opening links or special files. UTF-8 files
+ending in `.md` or `.markdown` use the same inert Markdown formatting
+as JWM Notes, and **查看源码** switches to the exact source prefix.
+HTML is escaped; links and images never load external resources. Other
+UTF-8 files, including TSX, remain plain text. The preview does not
+execute any file and reports when only a truncated prefix is shown.
+Images, audio and video are separate milestones.
