@@ -7,6 +7,7 @@ mod file_manager_bus;
 mod grid;
 mod navigation;
 mod preview_ui;
+mod properties_ui;
 mod row_model;
 mod selection;
 mod tab_strip;
@@ -814,6 +815,7 @@ fn open_window_with_reveal(
     );
     app.set_accels_for_action("win.comparison-pane", &["F3"]);
     preview_ui::install(&window, &state, &selection, &status);
+    properties_ui::install(&window, &state, &selection, &status);
     trash_ui::install(&window);
     copy_ui::install(
         &window,
@@ -2652,6 +2654,41 @@ mod wayland_acceptance {
         );
         reveal_window.close();
         println!("GTK4 Wayland reveal: exact native item selected and scrolled into view");
+        let dangling = root.join(std::ffi::OsStr::from_bytes(b"properties-%\x80"));
+        std::os::unix::fs::symlink("missing-properties-target", &dangling).unwrap();
+        assert!(properties_ui::show(&app, Some(&window), &dangling, None));
+        let property_panel = app
+            .windows()
+            .into_iter()
+            .find(|candidate| candidate.title().as_deref() == Some("JWM Files · Properties"))
+            .unwrap();
+        until(
+            || {
+                property_panel.is_mapped()
+                    && descendants(property_panel.upcast_ref())
+                        .iter()
+                        .any(|widget| {
+                            widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                                label.text().contains("类型：符号链接")
+                                    && label.text().contains("链接指向：missing-properties-target")
+                            })
+                        })
+            },
+            "dangling link metadata was visible without opening the target",
+        );
+        assert!(
+            descendants(property_panel.upcast_ref())
+                .iter()
+                .any(|widget| {
+                    widget
+                        .downcast_ref::<gtk::Label>()
+                        .is_some_and(|label| label.text().contains(r"properties-%\x80"))
+                })
+        );
+        property_panel.close();
+        println!(
+            "GTK4 Wayland properties: dangling link metadata and exact raw path shown without follow"
+        );
         window.close();
     }
 }

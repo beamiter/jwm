@@ -14,7 +14,7 @@ const MAX_URI_BYTES: usize = 4096;
 const MAX_STARTUP_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize =
     (MAX_URI_BYTES + 16) * crate::WINDOW_LIMIT + MAX_STARTUP_BYTES + 32;
-const XML: &str = "<node><interface name='org.freedesktop.FileManager1'> <method name='ShowFolders'><arg type='as' name='URIs' direction='in'/> <arg type='s' name='StartupId' direction='in'/></method> <method name='ShowItems'><arg type='as' name='URIs' direction='in'/><arg type='s' name='StartupId' direction='in'/></method></interface></node>";
+const XML: &str = "<node><interface name='org.freedesktop.FileManager1'> <method name='ShowFolders'><arg type='as' name='URIs' direction='in'/> <arg type='s' name='StartupId' direction='in'/></method> <method name='ShowItems'><arg type='as' name='URIs' direction='in'/><arg type='s' name='StartupId' direction='in'/></method> <method name='ShowItemProperties'><arg type='as' name='URIs' direction='in'/><arg type='s' name='StartupId' direction='in'/></method></interface></node>";
 
 fn native_folders(values: &[String]) -> Result<Vec<PathBuf>, &'static str> {
     if values.is_empty() || values.len() > crate::WINDOW_LIMIT {
@@ -137,6 +137,27 @@ pub(super) fn install(
                             return;
                         }
                     };
+                    if method == "ShowItemProperties" {
+                        if paths.len() != 1 {
+                            invocation.return_dbus_error(
+                                "org.freedesktop.DBus.Error.InvalidArgs",
+                                "ShowItemProperties requires one distinct native item",
+                            );
+                            return;
+                        }
+                        let parent = app
+                            .active_window()
+                            .filter(|window| window.is::<gtk::ApplicationWindow>());
+                        if !crate::properties_ui::show(&app, parent.as_ref(), &paths[0], None) {
+                            invocation.return_dbus_error(
+                                "org.freedesktop.DBus.Error.LimitsExceeded",
+                                "Too many properties windows",
+                            );
+                            return;
+                        }
+                        invocation.return_value(Some(&().to_variant()));
+                        return;
+                    }
                     let items = method == "ShowItems";
                     if items && (paths.len() != 1 || paths[0].file_name().is_none()) {
                         invocation.return_dbus_error(

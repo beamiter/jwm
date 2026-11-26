@@ -74,7 +74,7 @@ Remove that desktop entry to remove the launcher. The launcher does not start th
 ### Opt-in FileManager1 folder requests
 
 For manual integration testing, run `jwm-files --file-manager-service`.
-This process tries to offer `ShowFolders` and `ShowItems` on the existing session bus
+This process tries to offer `ShowFolders`, `ShowItems` and `ShowItemProperties` on the existing session bus
 using the [freedesktop FileManager1 interface](https://wiki.freedesktop.org/Specifications/file-manager-interface/).
 It never replaces an existing owner, queues for the name, changes desktop
 settings, or installs a bus-activation service. Ordinary JWM Files launches
@@ -82,12 +82,25 @@ do not register this name.
 
 `ShowFolders` opens only local `file://` folders, with up to eight
 browser windows per process. `ShowItems` accepts one distinct local item
-and reveals it in its parent without activating the item. Its D-Bus reply
-waits for exact selection and scroll submission; missing items return an
-error rather than reporting success. The whole request is rejected if any URI is invalid
-or remote. The startup ID is not used for focus negotiation yet. The item
-properties method, GVFS volumes, and default handler migration remain
-outside this slice.
+and reveals it in its parent without activating the item. It returns
+success only after the exact selected row is visible in the list; a
+missing item returns an error. A request is rejected in full if any URI
+is invalid or remote. The startup ID is not used for focus negotiation
+yet. Remote GVFS locations, automatic activation and default-handler
+migration remain outside this slice.
+
+### Read-only file properties
+
+Select a main-pane item and choose **属性** or **Alt+Enter**. The native
+panel queries the exact item's available type, size, modification time,
+permissions, and numeric owner and group off the UI thread. Symbolic
+links show their recorded target without following it. A replaced
+selection is rejected. This does not calculate recursive directory size,
+change permissions, or execute/open the item.
+
+The optional FileManager1 `ShowItemProperties` call also opens this
+panel for one distinct native item. Up to four properties panels can be
+open per process.
 
 ### Already-mounted locations
 
