@@ -1,104 +1,218 @@
 use super::Shared;
+use futures_channel::oneshot;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
-use jwm_file_core::{Cancellation, FileKind, PreviewError};
+use jwm_file_core::{
+    Cancellation, DirectoryHandle, FileIdentity, FileKind, PreviewError, TextPreview,
+};
 use std::{
     cell::{Cell, RefCell},
+    ffi::OsString,
+    path::PathBuf,
     rc::Rc,
-    sync::mpsc,
+    sync::Arc,
     thread,
-    time::Duration,
 };
+
+struct Target {
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+    name: OsString,
+    identity: FileIdentity,
+}
+
+struct Request {
+    id: u64,
+    target: Target,
+}
+
+#[derive(Default)]
+struct Generation {
+    latest: Cell<u64>,
+    requested: Cell<Option<u64>>,
+}
+
+impl Generation {
+    fn next(&self) -> u64 {
+        let next = self
+            .latest
+            .get()
+            .checked_add(1)
+            .expect("preview generation exhausted");
+        self.latest.set(next);
+        self.requested.set(Some(next));
+        next
+    }
+
+    fn accepts(&self, id: u64) -> bool {
+        self.requested.get() == Some(id)
+    }
+
+    fn clear(&self) {
+        self.requested.set(None);
+    }
+}
+
+#[derive(Clone)]
+struct View {
+    window: glib::WeakRef<gtk::Window>,
+    heading: glib::WeakRef<gtk::Label>,
+    notice: glib::WeakRef<gtk::Label>,
+    text: glib::WeakRef<gtk::TextView>,
+}
 
 #[derive(Default)]
 struct PreviewState {
-    busy: Cell<bool>,
-    open: RefCell<Option<glib::WeakRef<gtk::Window>>>,
+    generation: Generation,
+    current: RefCell<Option<View>>,
+    running: RefCell<Option<Cancellation>>,
+    pending: RefCell<Option<Request>>,
 }
 
-pub(super) fn install(
-    parent: &gtk::ApplicationWindow,
-    state: &Shared,
-    selection: &gtk::SingleSelection,
-    status: &gtk::Label,
-) {
-    let action = gio::SimpleAction::new("quick-preview", None);
-    let weak_parent = parent.downgrade();
-    let (state, selection, status) = (state.clone(), selection.clone(), status.clone());
-    let preview = Rc::new(PreviewState::default());
-    action.connect_activate(move |_, _| {
-        let Some(parent) = weak_parent.upgrade() else {
-            return;
-        };
-        if let Some(window) = preview
-            .open
+impl PreviewState {
+    fn cancel_window(&self, window: &gtk::Window) {
+        let same = self
+            .current
             .borrow()
             .as_ref()
-            .and_then(glib::WeakRef::upgrade)
-            && window.is_visible()
-        {
-            window.present();
+            .and_then(|view| view.window.upgrade())
+            .as_ref()
+            == Some(window);
+        if same {
+            self.reset();
+        }
+    }
+
+    fn reset(&self) {
+        self.current.take();
+        self.generation.clear();
+        self.pending.take();
+        if let Some(cancel) = self.running.borrow().as_ref() {
+            cancel.cancel();
+        }
+    }
+
+    fn show(self: &Rc<Self>, parent: &gtk::ApplicationWindow, target: Target) {
+        let view = self.current.borrow().clone();
+        let (view, window) = match view.and_then(|view| {
+            let window = view.window.upgrade()?;
+            window.is_visible().then_some((view, window))
+        }) {
+            Some(current) => current,
+            None => self.build_view(parent),
+        };
+        let id = self.generation.next();
+        if let Some(cancel) = self.running.borrow().as_ref() {
+            cancel.cancel();
+        }
+        let source = target
+            .path
+            .join(&target.name)
+            .to_string_lossy()
+            .escape_debug()
+            .to_string();
+        if let Some(heading) = view.heading.upgrade() {
+            heading.set_text(&source);
+            heading.set_tooltip_text(Some(&source));
+        }
+        if let Some(notice) = view.notice.upgrade() {
+            notice.set_text("正在读取预览…");
+        }
+        if let Some(text) = view.text.upgrade() {
+            text.buffer().set_text("");
+        }
+        self.pending.replace(Some(Request { id, target }));
+        window.present();
+        self.start_pending();
+    }
+
+    fn start_pending(self: &Rc<Self>) {
+        if self.running.borrow().is_some() {
             return;
         }
-        if preview.busy.get() {
-            status.set_text("上一项预览仍在停止，请稍候。");
-            return;
-        }
-        let target = {
-            let browser = state.borrow();
-            if browser.pending.is_some() {
-                return;
-            }
-            browser
-                .parent
-                .as_ref()
-                .zip(browser.entries.get(selection.selected() as usize))
-                .filter(|(_, entry)| entry.kind == FileKind::Regular)
-                .and_then(|(handle, entry)| {
-                    Some((
-                        handle.clone(),
-                        browser.path().clone(),
-                        entry.name.clone(),
-                        entry.identity?,
-                    ))
-                })
-        };
-        let Some((handle, path, name, identity)) = target else {
-            status.set_text("请选择一个可预览的普通文件。");
+        let Some(Request { id, target }) = self.pending.take() else {
             return;
         };
-        let title = name.to_string_lossy().escape_debug().to_string();
         let cancel = Cancellation::default();
         let worker_cancel = cancel.clone();
-        let (send, receive) = mpsc::sync_channel(1);
+        let (send, receive) = oneshot::channel();
         if let Err(error) = thread::Builder::new()
             .name("jwm-files-preview".into())
             .spawn(move || {
-                let _ = send.send(handle.read_text_preview(&path, &name, identity, &worker_cancel));
+                let result = target.parent.read_text_preview(
+                    &target.path,
+                    &target.name,
+                    target.identity,
+                    &worker_cancel,
+                );
+                let _ = send.send(result);
             })
         {
-            status.set_text(&format!("无法启动预览：{error}"));
+            self.finish(id, Err(PreviewError::Io(error)));
             return;
         }
-        preview.busy.set(true);
+        self.running.replace(Some(cancel));
+        let state = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let result = receive.await.unwrap_or_else(|_| {
+                Err(PreviewError::Io(std::io::Error::other(
+                    "preview worker exited",
+                )))
+            });
+            state.running.take();
+            state.finish(id, result);
+            state.start_pending();
+        });
+    }
+
+    fn finish(&self, id: u64, result: Result<TextPreview, PreviewError>) {
+        // Completion may belong to a closed window or to an earlier selection.
+        // It can release the worker slot but must not touch the current view.
+        if !self.generation.accepts(id) {
+            return;
+        }
+        let Some(view) = self.current.borrow().clone() else {
+            return;
+        };
+        let (Some(notice), Some(text)) = (view.notice.upgrade(), view.text.upgrade()) else {
+            return;
+        };
+        match result {
+            Ok(result) => {
+                notice.set_text(if result.truncated {
+                    "大文件，仅显示开头（最多 128 KiB）。"
+                } else {
+                    "纯文本预览"
+                });
+                text.buffer().set_text(&result.text);
+            }
+            Err(PreviewError::NotText | PreviewError::NotRegular) => {
+                notice.set_text("此文件不支持纯文本预览。");
+            }
+            Err(error) => notice.set_text(&format!("无法预览：{error}")),
+        }
+    }
+
+    fn build_view(self: &Rc<Self>, parent: &gtk::ApplicationWindow) -> (View, gtk::Window) {
         let window = gtk::Window::builder()
             .title("JWM Files · Preview")
-            .transient_for(&parent)
+            .transient_for(parent)
             .destroy_with_parent(true)
             .default_width(680)
             .default_height(440)
             .build();
         window.set_application(parent.application().as_ref());
         let layout = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let heading = gtk::Label::new(Some(&title));
+        let heading = gtk::Label::new(None);
         heading.set_xalign(0.0);
         heading.set_selectable(true);
-        heading.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        heading.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
         heading.set_margin_start(12);
+        heading.set_margin_end(12);
         heading.set_margin_top(8);
         layout.append(&heading);
-        let notice = gtk::Label::new(Some("正在读取预览…"));
+        let notice = gtk::Label::new(None);
         notice.set_xalign(0.0);
         notice.set_margin_start(12);
         notice.set_wrap(true);
@@ -119,12 +233,15 @@ pub(super) fn install(
         layout.append(&scroll);
         window.set_child(Some(&layout));
         window.connect_destroy({
-            let cancel = cancel.clone();
-            move |_| cancel.cancel()
+            let state = self.clone();
+            move |window| state.cancel_window(window)
         });
-        window.connect_close_request(move |_| {
-            cancel.cancel();
-            glib::Propagation::Proceed
+        window.connect_close_request({
+            let state = self.clone();
+            move |window| {
+                state.cancel_window(window);
+                glib::Propagation::Proceed
+            }
         });
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -142,37 +259,79 @@ pub(super) fn install(
             glib::Propagation::Proceed
         });
         window.add_controller(keys);
-        *preview.open.borrow_mut() = Some(window.downgrade());
+        let view = View {
+            window: window.downgrade(),
+            heading: heading.downgrade(),
+            notice: notice.downgrade(),
+            text: text.downgrade(),
+        };
+        self.current.replace(Some(view.clone()));
+        (view, window)
+    }
+}
+
+pub(super) fn install(
+    parent: &gtk::ApplicationWindow,
+    state: &Shared,
+    selection: &gtk::SingleSelection,
+    status: &gtk::Label,
+) {
+    let action = gio::SimpleAction::new("quick-preview", None);
+    let weak_parent = parent.downgrade();
+    let (state, selection, status) = (state.clone(), selection.clone(), status.clone());
+    let preview = Rc::new(PreviewState::default());
+    parent.connect_destroy({
         let preview = preview.clone();
-        let (weak_notice, weak_text) = (notice.downgrade(), text.downgrade());
-        glib::timeout_add_local(Duration::from_millis(16), move || {
-            let result = match receive.try_recv() {
-                Ok(result) => result,
-                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => Err(PreviewError::Io(
-                    std::io::Error::other("preview worker exited"),
-                )),
-            };
-            preview.busy.set(false);
-            if let (Some(notice), Some(text)) = (weak_notice.upgrade(), weak_text.upgrade()) {
-                match result {
-                    Ok(result) => {
-                        notice.set_text(if result.truncated {
-                            "大文件，仅显示开头（最多 128 KiB）。"
-                        } else {
-                            "纯文本预览"
-                        });
-                        text.buffer().set_text(&result.text);
-                    }
-                    Err(PreviewError::NotText | PreviewError::NotRegular) => {
-                        notice.set_text("此文件不支持纯文本预览。")
-                    }
-                    Err(error) => notice.set_text(&format!("无法预览：{error}")),
-                }
+        move |_| preview.reset()
+    });
+    action.connect_activate(move |_, _| {
+        let Some(parent) = weak_parent.upgrade() else {
+            return;
+        };
+        let target = {
+            let browser = state.borrow();
+            if browser.pending.is_some() {
+                return;
             }
-            glib::ControlFlow::Break
-        });
-        window.present();
+            browser
+                .parent
+                .as_ref()
+                .zip(browser.entries.get(selection.selected() as usize))
+                .filter(|(_, entry)| entry.kind == FileKind::Regular)
+                .and_then(|(handle, entry)| {
+                    Some(Target {
+                        parent: handle.clone(),
+                        path: browser.path().clone(),
+                        name: entry.name.clone(),
+                        identity: entry.identity?,
+                    })
+                })
+        };
+        let Some(target) = target else {
+            status.set_text("请选择一个可预览的普通文件。");
+            return;
+        };
+        preview.show(&parent, target);
     });
     parent.add_action(&action);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_generation_rejects_superseded_and_closed_requests() {
+        let generation = Generation::default();
+        let old = generation.next();
+        assert!(generation.accepts(old));
+        let latest = generation.next();
+        assert!(!generation.accepts(old));
+        assert!(generation.accepts(latest));
+        generation.clear();
+        assert!(!generation.accepts(latest));
+        let reopened = generation.next();
+        assert!(!generation.accepts(latest));
+        assert!(generation.accepts(reopened));
+    }
 }

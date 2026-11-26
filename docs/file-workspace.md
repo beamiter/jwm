@@ -224,6 +224,10 @@ physical or virtual. No timings are asserted by these benchmarks.
 Choose **快速预览** from the operation menu, or press Space with the
 main list or icon view focused, to preview the first 128 KiB of a
 selected regular file. Escape or Space closes the preview.
+The dialog shows the full source path. When it is already open, another
+explicit preview request switches it to the newly selected file. An older
+read finishing later cannot overwrite the new view.
+
 Reading happens off the UI thread through the selected directory and
 file identities, without opening links or special files. This preview
 displays UTF-8 as text, never executes files or interprets HTML, Markdown
