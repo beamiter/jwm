@@ -5,9 +5,14 @@ binary=$1
 root=$(mktemp -d)
 child=
 desktop_child=
+session_child=
 cleanup() {
   if [[ -n "$desktop_child" && $(readlink "/proc/$desktop_child/exe" || true) == "$binary" ]]; then
     kill "$desktop_child" 2>/dev/null || true
+  fi
+  if [[ -n "$session_child" ]]; then
+    kill "$session_child" 2>/dev/null || true
+    wait "$session_child" 2>/dev/null || true
   fi
   if [[ -n "$child" ]]; then
     kill "$child" 2>/dev/null || true
@@ -21,6 +26,8 @@ mkdir -p "$root/start" "$root/next"
 printf 'test note\n' > "$root/next/test.txt"
 
 export XDG_DATA_HOME="$root/xdg-data" XDG_CONFIG_HOME="$root/xdg-config"
+export XDG_STATE_HOME="$root/xdg-state"
+mkdir -m700 "$XDG_STATE_HOME"
 mkdir -p "$XDG_DATA_HOME/applications" "$XDG_CONFIG_HOME"
 mkdir -p "$root/open-doc" "$root/open-link" "$root/open-broken" "$root/link-target"
 printf 'original\n' > "$root/open-doc/"$'report space%\x80.txt'
@@ -399,6 +406,73 @@ xdotool key --clearmodifiers alt+Left
 xdotool key --clearmodifiers ctrl+w
 [[ $(title_id '^JWM Files · .*/tab-branch-b$') == "$window" ]]
 printf 'GTK4 X11 tabs: Ctrl+Shift+T restored the exact closed tab and its forward history\n'
+
+# Explicit session state is private, and a new Files process never consumes
+# it unless the user asks. Keep the X server and fixture paths disposable.
+session_raw="$root/"$'session-raw-%20-\x80'
+session_lookalike="$root/"$'session-raw-%20-\xef\xbf\xbd'
+session_record="$XDG_STATE_HOME/jwm-files/tabs-v1"
+mkdir "$root/session-a" "$root/session-launch" "$session_raw" "$session_lookalike"
+[[ ! -e "$XDG_STATE_HOME/jwm-files" ]]
+GDK_BACKEND=x11 GSK_RENDERER=cairo "$binary" "$root/session-a" &
+session_child=$!
+session_window=$(title_id '^JWM Files · .*/session-a$')
+[[ $(xdotool getwindowpid "$session_window") == "$session_child" ]]
+xdotool windowfocus --sync "$session_window"
+xdotool key --clearmodifiers ctrl+t
+sleep 0.15
+[[ $(title_id '^JWM Files · .*/session-a$') == "$session_window" ]]
+xdotool key --clearmodifiers ctrl+l ctrl+a BackSpace
+session_uri=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$session_raw")
+xdotool type --clearmodifiers "$session_uri"
+xdotool key --clearmodifiers Return
+[[ $(title_id '^JWM Files · .*/session-raw-%20-.*$') == "$session_window" ]]
+xdotool key --clearmodifiers ctrl+alt+s
+for _ in {1..50}; do [[ ! -s "$session_record" ]] || break; sleep 0.1; done
+[[ $(stat -c '%a' "$session_record") == 600 ]]
+python3 - "$session_record" "$root/session-a" "$session_raw" <<'PYSESSION'
+import os, pathlib, sys
+buf = pathlib.Path(sys.argv[1]).read_bytes()
+assert buf[:10] == b'JWMFILE1\x02\x01'
+pos = 10
+for arg in sys.argv[2:]:
+    size = int.from_bytes(buf[pos:pos+2], 'little')
+    pos += 2
+    assert buf[pos:pos+size] == os.fsencode(arg)
+    pos += size
+assert pos == len(buf)
+PYSESSION
+old_state=$(sha256sum "$session_record")
+kill "$session_child"
+wait "$session_child" 2>/dev/null || true
+session_child=
+GDK_BACKEND=x11 GSK_RENDERER=cairo "$binary" "$root/session-launch" &
+session_child=$!
+fresh_session_window=$(title_id '^JWM Files · .*/session-launch$')
+[[ $(xdotool getwindowpid "$fresh_session_window") == "$session_child" ]]
+! xdotool search --onlyvisible --name '^JWM Files · .*/session-raw-%20-.*$'
+[[ $(sha256sum "$session_record") == "$old_state" ]]
+xdotool windowfocus --sync "$fresh_session_window"
+xdotool key --clearmodifiers ctrl+alt+r
+restored_session=$(title_id '^JWM Files · .*/session-raw-%20-.*$')
+[[ "$restored_session" != "$fresh_session_window" &&
+   $(xdotool getwindowpid "$restored_session") == "$session_child" ]]
+xdotool windowfocus --sync "$restored_session"
+xdotool key --clearmodifiers ctrl+shift+n
+session_dialog=$(title_id '^JWM Files · New Folder$')
+xdotool windowfocus --sync "$session_dialog"
+xdotool type --clearmodifiers 'restored-exact-proof'
+xdotool key --clearmodifiers Return
+for _ in {1..35}; do [[ ! -d "$session_raw/restored-exact-proof" ]] || break; sleep 0.1; done
+[[ -d "$session_raw/restored-exact-proof" && ! -e "$session_lookalike/restored-exact-proof" ]]
+xdotool windowfocus --sync "$restored_session"
+xdotool key --clearmodifiers ctrl+Page_Up
+[[ $(title_id '^JWM Files · .*/session-a$') == "$restored_session" ]]
+[[ $(sha256sum "$session_record") == "$old_state" ]]
+kill "$session_child"
+wait "$session_child" 2>/dev/null || true
+session_child=
+printf 'GTK4 X11 session: explicit restore reopened ordered tabs and exact native bytes after restart\n'
 
 # Launch through the shipped desktop entry in a disposable XDG profile.
 desktop_entry="$(dirname "$0")/../data/org.jwm.Files.desktop"

@@ -11,7 +11,9 @@ mod navigation;
 mod preview_ui;
 mod properties_ui;
 mod row_model;
+mod saved_session;
 mod selection;
+mod session_ui;
 mod tab_strip;
 mod tabs;
 mod trash_ui;
@@ -562,6 +564,18 @@ fn open_window_with_reveal(
     copy_buffer: &copy_ui::CopyBuffer,
     reveal: Option<RevealRequest>,
 ) {
+    open_window_with_tabs(app, Tabs::new(initial.into()), home, special, copy_buffer, reveal);
+}
+
+fn open_window_with_tabs(
+    app: &gtk::Application,
+    initial_tabs: Tabs,
+    home: &Path,
+    special: &[(glib::UserDirectory, Option<PathBuf>)],
+    copy_buffer: &copy_ui::CopyBuffer,
+    reveal: Option<RevealRequest>,
+) {
+    let initial = initial_tabs.active().path.clone();
     let initial_show_hidden = reveal
         .as_ref()
         .is_some_and(|request| request.name.as_encoded_bytes().first() == Some(&b'.'));
@@ -789,7 +803,7 @@ fn open_window_with_reveal(
     let state = Rc::new(RefCell::new(Browser {
         worker,
         wake,
-        tabs: Tabs::new(initial.into()),
+        tabs: initial_tabs,
         pending: None,
         show_hidden: initial_show_hidden,
         entries: Arc::default(),
@@ -802,6 +816,7 @@ fn open_window_with_reveal(
         reload_due: None,
         dialog_open: false,
     }));
+    tabs.sync(&state.borrow().tabs);
     let mounts = volumes::install({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
         move |mount| start_scan(&state, mount, &address, &status)
@@ -827,6 +842,7 @@ fn open_window_with_reveal(
     app.set_accels_for_action("win.comparison-pane", &["F3"]);
     preview_ui::install(&window, &state, &selection, &status);
     properties_ui::install(&window, &state, &selection, &status);
+    session_ui::install(app, &window, &state, &status, home, special, copy_buffer);
     trash_ui::install(&window);
     copy_ui::install(
         &window,
@@ -1210,7 +1226,7 @@ fn open_window_with_reveal(
             glib::Propagation::Proceed
         });
     }
-    start_scan(&state, initial.into(), &address, &status);
+    start_scan(&state, initial, &address, &status);
     let weak_window = window.downgrade();
     let reveal_list = list.downgrade();
     // Associate the incoming item only with the initial scan. User navigation

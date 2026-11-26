@@ -142,6 +142,21 @@ If a search hasn't finished when you press Enter, Files remembers one
 explicit step for that query. Editing the query, changing directories, or
 closing search discards that request.
 
+### Save and restore tabs (opt-in)
+
+Use **操作 → 保存此窗口标签页** (**Ctrl+Alt+S**) to save the current
+window's open directory tabs and active tab. In a later Files window, use
+**操作 → 恢复已保存标签页** (**Ctrl+Alt+R**) to open them in a separate
+window. A normal launch and exit neither read nor update the saved state.
+This does not save selection, closed tabs, clipboard, navigation history,
+or other windows. If a saved directory is unavailable, its tab remains
+listed with the usual directory error and you can navigate to another.
+
+Files stores one private, atomically replaced record under
+`$XDG_STATE_HOME/jwm-files`, or `$HOME/.local/state/jwm-files`. A
+configured absolute state root must already exist and be privately owned
+and must not pass through a symlink. No default applications are changed.
+
 ### New Folder
 
 The toolbar action or Ctrl+Shift+N creates one named folder in the currently
