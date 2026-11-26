@@ -14,6 +14,7 @@ cleanup() {
   local code=$?
   if (( code != 0 )); then
     tail -n 60 "$root/files.log" "$root/adapter.log" 2>/dev/null || true
+    xwininfo -root -tree >&2 || true
   fi
   if [[ -n "$files" ]]; then
     kill "$files" 2>/dev/null || true
@@ -24,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 export HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_CONFIG_HOME="$root/config" XDG_CACHE_HOME="$root/cache"
-export GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none XDG_CURRENT_DESKTOP=JwmFilesTest
+export XDG_CURRENT_DESKTOP=JwmFilesTest LC_ALL=C.UTF-8
 export JWM_FILES_TERMINAL_FIXTURE="$root"
 export JWM_FILES_TERMINAL_CHOSEN="$root/"$'folder-%20-\x80'
 export SHELL="$root/expected-shell"
@@ -68,13 +69,27 @@ cp "$XDG_DATA_HOME/applications/org.jwm.FilesTerminalTest.desktop" \
 printf '%s\n' org.jwm.FilesTerminalTest.desktop > "$XDG_CONFIG_HOME/xdg-terminals.list"
 expected=$(stat -c '%d:%i' "$JWM_FILES_TERMINAL_CHOSEN")
 mkdir "$root/start"
-"$binary" -- "$root/start" >"$root/files.log" 2>&1 & files=$!
-id=$(timeout 10s xdotool search --sync --onlyvisible --pid "$files" | sed -n '1p')
-[[ $(xdotool getwindowpid "$id") == "$files" ]]
+xdotool getdisplaygeometry >/dev/null
+# Match the ASCII starting folder with the same invocation and title query
+# as the general X11 smoke on this private, otherwise empty display.
+GDK_BACKEND=x11 GSK_RENDERER=cairo "$binary" "$root/start" >"$root/files.log" 2>&1 & files=$!
+id=''
+for _ in {1..75}; do
+  id=$(xdotool search --onlyvisible --name '^JWM Files · .*/start$' | sed -n '1p' || true)
+  [[ -z "$id" ]] || break
+  kill -0 "$files"
+  sleep 0.2
+done
+if [[ -z "$id" ]]; then
+  echo 'Files did not map the fixture starting folder' >&2
+  exit 1
+fi
+owner=$(xdotool getwindowpid "$id" 2>/dev/null || true)
+[[ -z "$owner" || "$owner" == "$files" ]]
 printf 'Files fixture window before navigation: %s\n' "$(xdotool getwindowname "$id")"
 xdotool windowfocus --sync "$id"
 uri=$(python3 -c 'import os,pathlib; print(pathlib.Path(os.environ["JWM_FILES_TERMINAL_CHOSEN"]).as_uri())')
-xdotool key --clearmodifiers ctrl+l
+xdotool key --clearmodifiers ctrl+l ctrl+a BackSpace
 xdotool type --clearmodifiers "$uri"
 xdotool key --clearmodifiers Return
 title=''
