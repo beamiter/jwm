@@ -50,4 +50,5 @@ grep -F 'GTK4 Wayland tabs: matching folder names disambiguated and accessible s
 grep -F 'GTK4 Wayland preview: an open preview followed the newly selected same-name file' "$client_log"
 grep -F 'GTK4 Wayland undo: directory-bound rename conflicts were non-destructive' "$client_log"
 grep -F 'GTK4 Wayland Markdown: native heading style and exact source toggle verified' "$client_log"
-grep -F 'GTK4 Wayland Trash: same-path entries remained distinct in the read-only home view' "$client_log"
+grep -F 'GTK4 Wayland Trash: same-path entries remained distinct in the home view' "$client_log"
+grep -F 'GTK4 Wayland Trash: selected the exact revision and kept both entries on recovery' "$client_log"
