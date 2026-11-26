@@ -65,3 +65,10 @@ and rejects a path that no longer points to that directory. It also rejects
 multiple path components and never replaces an existing item. The UI refreshes
 the directory on success when it is still current. Copy, move, rename,
 Trash, and crash recovery are not included in this operation slice.
+
+### Directory history
+
+The Back and Forward toolbar controls and Alt+Left/Alt+Right revisit
+successfully loaded directories. Failed or cancelled loads leave the current
+directory and history intact, and refresh preserves the forward branch.
+History is in memory and bounded to 128 entries.

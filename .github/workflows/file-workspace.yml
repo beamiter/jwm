@@ -58,6 +58,7 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
           cargo build --locked
           xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp -noreset' \
             bash tests/x11-smoke.sh "$PWD/target/debug/jwm-files"
