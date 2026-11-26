@@ -1,5 +1,7 @@
 mod navigation;
 mod selection;
+#[cfg(target_os = "linux")]
+mod tree;
 
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -486,7 +488,9 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         .child(&list)
         .build();
     let panes = gtk::Paned::new(gtk::Orientation::Horizontal);
-    panes.set_start_child(Some(&places));
+    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    sidebar.append(&places);
+    panes.set_start_child(Some(&sidebar));
     panes.set_end_child(Some(&scroll));
     panes.set_position(180);
     panes.set_resize_start_child(false);
@@ -524,6 +528,42 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         reload_at: None,
         dialog_open: false,
     }));
+    #[cfg(target_os = "linux")]
+    {
+        let tree_hidden = Rc::new(Cell::new(hidden.is_active()));
+        let (tree_state, tree_address, tree_status) =
+            (state.clone(), address.clone(), status.clone());
+        match tree::TreeSidebar::new(tree_hidden.clone(), move |path| {
+            start_scan(&tree_state, path, &tree_address, &tree_status);
+        }) {
+            Ok(tree) => {
+                tree.set_root(initial.to_path_buf());
+                let root_here = gtk::Button::with_label("以当前目录为树根");
+                root_here.set_tooltip_text(Some("将已打开的目录设为侧栏目录树的根"));
+                sidebar.append(&root_here);
+                sidebar.append(&tree.view);
+                let tree = Rc::new(tree);
+                let root_path = Rc::new(RefCell::new(initial.to_path_buf()));
+                {
+                    let (tree, root_path, state) = (tree.clone(), root_path.clone(), state.clone());
+                    root_here.connect_clicked(move |_| {
+                        let path = state.borrow().path.clone();
+                        *root_path.borrow_mut() = path.clone();
+                        tree.set_root(path);
+                    });
+                }
+                hidden.connect_toggled(move |toggle| {
+                    tree_hidden.set(toggle.is_active());
+                    tree.set_root(root_path.borrow().clone());
+                });
+            }
+            Err(err) => {
+                let unavailable = gtk::Label::new(Some("目录树不可用"));
+                unavailable.set_tooltip_text(Some(&err.to_string()));
+                sidebar.append(&unavailable);
+            }
+        }
+    }
     {
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
         places.connect_row_activated(move |_, row| {

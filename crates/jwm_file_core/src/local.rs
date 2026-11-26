@@ -17,7 +17,7 @@ impl FileProvider for LocalProvider {
         cancellation: &Cancellation,
     ) -> Result<DirectorySnapshot, ListError> {
         cancellation.check()?;
-        list_local(location, options, cancellation, false)
+        list_local(location, options, cancellation, ScanMode::Plain)
     }
 
     fn list_with_watch(
@@ -27,7 +27,31 @@ impl FileProvider for LocalProvider {
         cancellation: &Cancellation,
     ) -> Result<DirectorySnapshot, ListError> {
         cancellation.check()?;
-        list_local(location, options, cancellation, true)
+        list_local(location, options, cancellation, ScanMode::Watched)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScanMode {
+    Plain,
+    Watched,
+    #[cfg(target_os = "linux")]
+    Tree(Option<FileIdentity>),
+}
+
+#[cfg(target_os = "linux")]
+impl LocalProvider {
+    /// Enumerate only real directory children, on a worker. A child branch
+    /// must still be the directory observed when reading its parent.
+    pub fn list_tree_children(
+        &self,
+        location: &Location,
+        expected: Option<FileIdentity>,
+        options: ListOptions,
+        cancellation: &Cancellation,
+    ) -> Result<DirectorySnapshot, ListError> {
+        cancellation.check()?;
+        list_local(location, options, cancellation, ScanMode::Tree(expected))
     }
 }
 
@@ -36,7 +60,7 @@ fn list_local(
     location: &Location,
     options: ListOptions,
     cancellation: &Cancellation,
-    _watch: bool,
+    _mode: ScanMode,
 ) -> Result<DirectorySnapshot, ListError> {
     let Location::Local(path) = location;
     let read_dir = fs::read_dir(path).map_err(|source| ListError::ReadDirectory {
@@ -115,7 +139,7 @@ fn list_local(
     location: &Location,
     options: ListOptions,
     cancellation: &Cancellation,
-    watch: bool,
+    mode: ScanMode,
 ) -> Result<DirectorySnapshot, ListError> {
     use crate::{DirectoryHandle, DirectoryWatch};
     use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags};
@@ -128,8 +152,20 @@ fn list_local(
         path: path.clone(),
         source,
     };
-    let parent = DirectoryHandle::open(path).map_err(open_error)?;
-    let local_watch = watch.then(|| DirectoryWatch::new(&parent).ok()).flatten();
+    let parent = match mode {
+        ScanMode::Tree(Some(expected)) => {
+            let handle = DirectoryHandle::open_tree_node(path).map_err(open_error)?;
+            if handle.identity() != expected {
+                return Err(open_error(std::io::Error::other("tree directory changed")));
+            }
+            handle
+        }
+        _ => DirectoryHandle::open(path).map_err(open_error)?,
+    };
+    let tree = matches!(mode, ScanMode::Tree(_));
+    let local_watch = matches!(mode, ScanMode::Watched)
+        .then(|| DirectoryWatch::new(&parent).ok())
+        .flatten();
     let fd = fs::openat(
         &parent.fd,
         ".",
@@ -151,6 +187,9 @@ fn list_local(
         if bytes == b"." || bytes == b".." || (!options.show_hidden && bytes.starts_with(b".")) {
             continue;
         }
+        if tree && !matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
+            continue;
+        }
         let Ok(stat) = fs::statat(&parent.fd, raw_name, AtFlags::SYMLINK_NOFOLLOW) else {
             skipped_entries += 1;
             continue;
@@ -161,6 +200,9 @@ fn list_local(
             FileType::Symlink => FileKind::Symlink,
             _ => FileKind::Other,
         };
+        if tree && kind != FileKind::Directory {
+            continue;
+        }
         let name = OsStr::from_bytes(bytes);
         entries.push(FileEntry {
             location: Location::Local(path.join(name)),

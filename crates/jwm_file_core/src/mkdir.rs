@@ -44,9 +44,17 @@ impl DirectoryHandle {
     /// Open the directory on a worker. If path is a symlink, this pins its
     /// current target; later changes to the link do not redirect the handle.
     pub fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_flags(path, OFlags::empty())
+    }
+
+    pub(crate) fn open_tree_node(path: &Path) -> io::Result<Self> {
+        Self::open_with_flags(path, OFlags::NOFOLLOW)
+    }
+
+    fn open_with_flags(path: &Path, extra: OFlags) -> io::Result<Self> {
         let fd = fs::open(
             path,
-            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | extra,
             Mode::empty(),
         )?;
         let metadata = fs::fstat(&fd)?;

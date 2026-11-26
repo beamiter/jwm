@@ -221,3 +221,67 @@ fn scan_worker_reports_changes_only_for_its_installed_directory_watch() {
     let notice = wait(|| worker.take_directory_change());
     assert_eq!((notice.id, notice.change), (b, DirectoryChange::Dirty));
 }
+
+#[test]
+fn tree_returns_native_directories_without_following_child_links() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let native = OsStr::from_bytes(b"raw\x80");
+    let directory = fixture.0.join(native);
+    fs::create_dir(&directory).unwrap();
+    fs::create_dir(fixture.0.join(".hidden")).unwrap();
+    fs::write(fixture.0.join("document"), b"text").unwrap();
+    symlink(&fixture.0, fixture.0.join("cycle")).unwrap();
+    fs::create_dir(directory.join("nested")).unwrap();
+    let root = Location::Local(fixture.0.clone());
+    let cancel = Cancellation::default();
+    let snapshot = LocalProvider
+        .list_tree_children(&root, None, ListOptions::default(), &cancel)
+        .unwrap();
+    assert_eq!(snapshot.entries.len(), 1);
+    let entry = &snapshot.entries[0];
+    assert_eq!(entry.name, native);
+    assert_eq!(entry.location, Location::Local(directory.clone()));
+    let nested = LocalProvider
+        .list_tree_children(
+            &entry.location,
+            entry.identity,
+            ListOptions::default(),
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(nested.entries[0].name, "nested");
+    let shown = LocalProvider
+        .list_tree_children(&root, None, ListOptions { show_hidden: true }, &cancel)
+        .unwrap();
+    assert_eq!(shown.entries.len(), 2);
+    // Replace the entry with a link to the original inode: even though its
+    // target identity matches, expansion must not follow it.
+    let moved = fixture.0.join("moved");
+    fs::rename(&directory, &moved).unwrap();
+    symlink(&moved, &directory).unwrap();
+    assert!(
+        LocalProvider
+            .list_tree_children(
+                &entry.location,
+                entry.identity,
+                ListOptions::default(),
+                &cancel
+            )
+            .is_err()
+    );
+    fs::remove_file(&directory).unwrap();
+    fs::create_dir(&directory).unwrap();
+    assert!(
+        LocalProvider
+            .list_tree_children(
+                &entry.location,
+                entry.identity,
+                ListOptions::default(),
+                &cancel
+            )
+            .is_err()
+    );
+}

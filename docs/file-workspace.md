@@ -99,3 +99,15 @@ its path and physical identity still match; deletion and replacement leave
 selection empty. Moving or unmounting the current directory invalidates old
 actions until the directory is reopened. Manual refresh is still available
 when a filesystem cannot supply notifications.
+
+### Folder tree
+
+On Linux, the sidebar's folder tree starts at the launch directory, with
+**以当前目录为树根** to make the already-open folder its root. Expand an
+arrow to load just that branch; double-click a folder or activate it with
+the keyboard to open it in the main list. The separate bounded worker
+allows other branches and the main list to remain independent. Only real
+directories appear, and symlink children and repeated directory identities
+are not expanded. Collapsing and reopening refreshes a branch. The hidden
+items toggle rebuilds the tree from its selected root. File lists and their
+watchers remain independent; expanded tree branches are not live-watched.
