@@ -7,13 +7,19 @@ mod mkdir;
 #[cfg(target_os = "linux")]
 mod rename;
 mod scan_worker;
+#[cfg(target_os = "linux")]
+mod watch;
 
 pub use local::LocalProvider;
 #[cfg(target_os = "linux")]
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};
 #[cfg(target_os = "linux")]
 pub use rename::RenameError;
+#[cfg(target_os = "linux")]
+pub use scan_worker::WatchNotice;
 pub use scan_worker::{ScanId, ScanReply, ScanWorker};
+#[cfg(target_os = "linux")]
+pub use watch::{DirectoryChange, DirectoryWatch};
 
 use std::ffi::OsString;
 use std::fmt;
@@ -71,6 +77,9 @@ pub struct DirectorySnapshot {
     /// Linux local provider only: the exact directory actually enumerated.
     #[cfg(target_os = "linux")]
     pub local_parent: Option<Arc<DirectoryHandle>>,
+    /// Optional worker-owned watch installed before enumerating the snapshot.
+    #[cfg(target_os = "linux")]
+    pub local_watch: Option<DirectoryWatch>,
 }
 
 #[derive(Debug)]
@@ -123,4 +132,14 @@ pub trait FileProvider: Send + Sync {
         options: ListOptions,
         cancellation: &Cancellation,
     ) -> Result<DirectorySnapshot, ListError>;
+
+    /// Providers that can watch may arm a watch before reading a snapshot.
+    fn list_with_watch(
+        &self,
+        location: &Location,
+        options: ListOptions,
+        cancellation: &Cancellation,
+    ) -> Result<DirectorySnapshot, ListError> {
+        self.list(location, options, cancellation)
+    }
 }

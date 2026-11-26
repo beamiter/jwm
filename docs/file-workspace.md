@@ -89,3 +89,13 @@ no-replace rename. An existing destination is never overwritten. Selection
 and filesystem changes are not one atomic action across processes, so the
 source check rejects changes it observes rather than promising exclusive
 access to a directory.
+
+### Live directory refresh
+
+Linux watches only the displayed local directory, non-recursively. The scan
+worker coalesces notifications and rescans after a short delay; GTK does no
+directory I/O. A same-directory refresh restores the selected item only if
+its path and physical identity still match; deletion and replacement leave
+selection empty. Moving or unmounting the current directory invalidates old
+actions until the directory is reopened. Manual refresh is still available
+when a filesystem cannot supply notifications.
