@@ -74,17 +74,20 @@ Remove that desktop entry to remove the launcher. The launcher does not start th
 ### Opt-in FileManager1 folder requests
 
 For manual integration testing, run `jwm-files --file-manager-service`.
-This process tries to offer `ShowFolders` on the existing session bus
+This process tries to offer `ShowFolders` and `ShowItems` on the existing session bus
 using the [freedesktop FileManager1 interface](https://wiki.freedesktop.org/Specifications/file-manager-interface/).
 It never replaces an existing owner, queues for the name, changes desktop
 settings, or installs a bus-activation service. Ordinary JWM Files launches
 do not register this name.
 
-Only local `file://` folders are accepted, with up to eight browser
-windows per process. The whole request is rejected if any URI is invalid
-or remote. The startup ID is not used for focus negotiation yet. Item
-selection and item properties methods, GVFS volumes, and default handler
-migration are outside this slice.
+`ShowFolders` opens only local `file://` folders, with up to eight
+browser windows per process. `ShowItems` accepts one distinct local item
+and reveals it in its parent without activating the item. Its D-Bus reply
+waits for exact selection and scroll submission; missing items return an
+error rather than reporting success. The whole request is rejected if any URI is invalid
+or remote. The startup ID is not used for focus negotiation yet. The item
+properties method, GVFS volumes, and default handler migration remain
+outside this slice.
 
 ### Already-mounted locations
 

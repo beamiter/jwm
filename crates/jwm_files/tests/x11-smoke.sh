@@ -428,4 +428,38 @@ opened=$(timeout 10s xdotool search --sync --onlyvisible --name '^JWM Files · .
 [[ $(xdotool getwindowname "$opened") == "JWM Files · $opened_path" ]]
 [[ $(xdotool getwindowpid "$opened") == "$first" ]]
 printf 'GTK4 X11 FileManager1: opt-in folder request opened exact native folder and preserved existing owner\n'
+missing_path="$root/bus-missing"
+mkdir "$missing_path"
+missing_uri=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$missing_path/does-not-exist")
+if gdbus call --session --dest "$name" --object-path /org/freedesktop/FileManager1 \
+  --method org.freedesktop.FileManager1.ShowItems "['$missing_uri']" "" > "$root/reveal-missing.log" 2>&1; then
+  echo 'ShowItems returned success without selecting an item' >&2
+  exit 1
+fi
+grep -Fq 'The requested native item was not found in its parent folder' "$root/reveal-missing.log"
+printf 'GTK4 X11 FileManager1: ShowItems refused to acknowledge a missing item\n'
+reveal_path="$root/bus-reveal"
+paste_path="$root/bus-copy"
+mkdir "$reveal_path" "$paste_path"
+reveal_file="$reveal_path/zz exact % 你好.txt"
+printf 'selected over native D-Bus\n' > "$reveal_file"
+for i in {1..90}; do touch "$reveal_path/a-$i.txt"; done
+item_uri=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$reveal_file")
+gdbus call --session --dest "$name" --object-path /org/freedesktop/FileManager1 \
+  --method org.freedesktop.FileManager1.ShowItems "['$item_uri']" ""
+reveal_window=$(timeout 10s xdotool search --sync --onlyvisible --name '^JWM Files · .*/bus-reveal$' | sed -n '1p')
+[[ $(xdotool getwindowpid "$reveal_window") == "$first" ]]
+xdotool windowfocus --sync "$reveal_window"
+xdotool key --clearmodifiers ctrl+c ctrl+l
+xdotool type --clearmodifiers "$paste_path"
+xdotool key Return
+[[ $(timeout 10s xdotool search --sync --onlyvisible --name '^JWM Files · .*/bus-copy$' | sed -n '1p') == "$reveal_window" ]]
+xdotool key --clearmodifiers ctrl+v
+for n in {1..50}; do
+  [[ ! -f "$paste_path/${reveal_file##*/}" ]] || break
+  sleep 0.1
+done
+cmp "$reveal_file" "$paste_path/${reveal_file##*/}"
+printf 'GTK4 X11 FileManager1: ShowItems selected the requested file rather than an adjacent row\n'
+
 BUS

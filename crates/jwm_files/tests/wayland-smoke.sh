@@ -61,3 +61,4 @@ grep -F 'GTK4 Wayland JPEG: native texture honored the selected photo orientatio
 grep -F 'GTK4 Wayland Trash: same-path entries remained distinct in the home view' "$client_log"
 grep -F 'GTK4 Wayland Trash: selected the exact revision and kept both entries on recovery' "$client_log"
 grep -F 'GTK4 Wayland Trash pages: next page reached the exact omitted newest entry' "$client_log"
+grep -F 'GTK4 Wayland reveal: exact native item selected and scrolled into view' "$client_log"
