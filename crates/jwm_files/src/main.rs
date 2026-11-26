@@ -9,6 +9,7 @@ mod row_model;
 mod selection;
 #[cfg(target_os = "linux")]
 mod tree;
+mod wake;
 
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -24,12 +25,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use wake::{SignalOnDrop, Wake};
 
 const APP_ID: &str = "org.jwm.Files";
 
 struct Browser {
     worker: ScanWorker,
+    wake: Wake,
     path: PathBuf,
     pending: Option<(ScanId, Destination)>,
     navigation: Navigation,
@@ -41,7 +44,7 @@ struct Browser {
     activation: Option<Activation>,
     active_scan: Option<ScanId>,
     automatic_scan: Option<ScanId>,
-    reload_at: Option<Instant>,
+    reload_due: Option<Rc<Cell<bool>>>,
     dialog_open: bool,
 }
 
@@ -79,7 +82,9 @@ fn finish_activation(state: &Shared, cancel: &gio::Cancellable) -> bool {
     if !current_activation(state, cancel) {
         return false;
     }
-    state.borrow_mut().activation = None;
+    let mut browser = state.borrow_mut();
+    browser.activation = None;
+    browser.wake.signal();
     true
 }
 
@@ -301,7 +306,11 @@ fn show_name_dialog(
     dialog.connect_response(move |dialog, decision| {
         let value = OsString::from(name_for_response.text().as_str());
         dialog.destroy();
-        state.borrow_mut().dialog_open = false;
+        {
+            let mut browser = state.borrow_mut();
+            browser.dialog_open = false;
+            browser.wake.signal();
+        }
         if decision != gtk::ResponseType::Accept {
             return;
         }
@@ -322,9 +331,12 @@ fn show_name_dialog(
         let original_path = path.clone();
         let action = mutation.clone();
         let operation = mutation.operation();
+        let wake = browser.wake.clone();
         match thread::Builder::new()
             .name("jwm-file-mutation".into())
             .spawn(move || {
+                let _notify = SignalOnDrop(wake);
+                let send = send;
                 let _ = send.send(action.apply(&target, &original_path, &value));
             }) {
             Ok(_) => {
@@ -611,7 +623,9 @@ fn open_window(
     copy_status.set_visible(false);
     layout.append(&copy_status);
     window.set_child(Some(&layout));
-    let worker = match ScanWorker::start(LocalProvider) {
+    let (wake, mut notifications) = Wake::channel();
+    let scan_wake = wake.clone();
+    let worker = match ScanWorker::start_notifying(LocalProvider, move || scan_wake.signal()) {
         Ok(worker) => worker,
         Err(e) => {
             status.set_text(&format!("无法启动目录读取：{e}"));
@@ -621,6 +635,7 @@ fn open_window(
     };
     let state = Rc::new(RefCell::new(Browser {
         worker,
+        wake,
         path: initial.into(),
         pending: None,
         navigation: Navigation::default(),
@@ -632,7 +647,7 @@ fn open_window(
         activation: None,
         active_scan: None,
         automatic_scan: None,
-        reload_at: None,
+        reload_due: None,
         dialog_open: false,
     }));
     preview_ui::install(&window, &state, &selection, &status);
@@ -886,7 +901,7 @@ fn open_window(
     start_scan(&state, initial.into(), &address, &status);
     let mut breadcrumb_path = None::<PathBuf>;
     let weak_window = window.downgrade();
-    glib::timeout_add_local(Duration::from_millis(16), move || {
+    let mut process = move || {
         let Some(window) = weak_window.upgrade() else {
             return glib::ControlFlow::Break;
         };
@@ -914,7 +929,7 @@ fn open_window(
                             .map(|row| (row, id));
                     }
                     browser.active_scan = Some(id);
-                    browser.reload_at = None;
+                    browser.reload_due = None;
                     let path = requested.path().to_path_buf();
                     if !browser.navigation.accept(requested) {
                         return glib::ControlFlow::Continue;
@@ -939,6 +954,9 @@ fn open_window(
             }
         }
         if replaced {
+            // A reply and a notice/mutation may have shared one wake. Process
+            // remaining results in a separate turn after replacing GTK rows.
+            browser.wake.signal();
             let path = browser.path.clone();
             let entries = browser.entries.clone();
             drop(browser);
@@ -1009,12 +1027,18 @@ fn open_window(
             {
                 match notice.change {
                     DirectoryChange::Dirty => {
-                        browser
-                            .reload_at
-                            .get_or_insert_with(|| Instant::now() + Duration::from_millis(150));
+                        if browser.reload_due.is_none() {
+                            let due = Rc::new(Cell::new(false));
+                            browser.reload_due = Some(due.clone());
+                            let wake = browser.wake.clone();
+                            glib::timeout_add_local_once(Duration::from_millis(150), move || {
+                                due.set(true);
+                                wake.signal();
+                            });
+                        }
                     }
                     DirectoryChange::Invalidated => {
-                        browser.reload_at = None;
+                        browser.reload_due = None;
                         browser.parent = None;
                         browser.active_scan = None;
                         selection.set_selected(gtk::INVALID_LIST_POSITION);
@@ -1023,8 +1047,8 @@ fn open_window(
                     DirectoryChange::Unchanged => {}
                 }
             }
-            if browser.reload_at.is_some_and(|when| Instant::now() >= when) {
-                browser.reload_at = None;
+            if browser.reload_due.as_ref().is_some_and(|due| due.get()) {
+                browser.reload_due = None;
                 let path = browser.path.clone();
                 let id = browser.worker.submit(
                     Location::Local(path.clone()),
@@ -1038,7 +1062,15 @@ fn open_window(
         }
 
         glib::ControlFlow::Continue
+    };
+    let pump = glib::MainContext::default().spawn_local(async move {
+        while notifications.recv().await.is_ok() {
+            if process() == glib::ControlFlow::Break {
+                break;
+            }
+        }
     });
+    window.connect_destroy(move |_| pump.abort());
     window.present();
 }
 
@@ -1144,7 +1176,7 @@ mod activation_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod wayland_acceptance {
     use super::*;
-    use std::fs;
+    use std::{fs, time::Instant};
 
     fn descendants(widget: &gtk::Widget) -> Vec<gtk::Widget> {
         let mut result = vec![widget.clone()];
@@ -1293,7 +1325,27 @@ mod wayland_acceptance {
         );
         preview_window.close();
         println!("GTK4 Wayland preview: selected file text shown in the quick preview");
+
+        // The scanner can publish while a mutation dialog is open. The
+        // pending invalidation must survive until GTK handles Cancel.
+        gtk::prelude::WidgetExt::activate_action(&window, "win.new-folder", None).unwrap();
+        let dialog = gtk::Window::list_toplevels()
+            .into_iter()
+            .find_map(|pane| {
+                let pane = pane.downcast::<gtk::Dialog>().ok()?;
+                (pane.title().as_deref() == Some("JWM Files · New Folder")
+                    && pane.transient_for().as_ref() == Some(&window))
+                .then_some(pane)
+            })
+            .unwrap();
         fs::rename(&next, root.join("moved")).unwrap();
+        let allow_watch_signal = Instant::now() + Duration::from_millis(420);
+        until(
+            || Instant::now() >= allow_watch_signal,
+            "watch while dialog is open",
+        );
+        assert_eq!(grid_selection.selected(), 0);
+        dialog.response(gtk::ResponseType::Cancel);
         until(
             || {
                 grid_selection.selected() == gtk::INVALID_LIST_POSITION
@@ -1306,6 +1358,7 @@ mod wayland_acceptance {
             "active directory invalidation",
         );
         println!("GTK4 Wayland grid: moving the active directory cleared stale selection");
+        println!("GTK4 Wayland wake: cancelling a dialog delivered deferred invalidation");
         println!("GTK4 Wayland smoke: native window mapped and navigation replaced the listing");
         window.close();
     }
