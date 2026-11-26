@@ -169,3 +169,38 @@ does not modify the system clipboard, and does not intercept normal
 text-field copy/paste. At most one filesystem mutation runs per
 window. Use the menu to request cancellation before publication.
 The operation status remains visible while you browse elsewhere.
+
+### Measuring local provider latency
+
+Run this separately from CI acceptance, using a disposable filesystem with
+room for 100,000 empty files (override `TMPDIR` to choose the filesystem):
+
+```sh
+cargo run --locked --release --manifest-path crates/jwm_file_core/Cargo.toml \
+  --example directory_latency -- 20
+```
+
+The benchmark constructs 100, 1,000, 10,000, and 100,000-entry directories;
+it validates complete reads and reports nearest-rank P50/P95 and maximum.
+It fully scans once before recording samples to exercise the warm metadata
+case. Fixture creation, cleanup, GTK layout, and cold filesystem cache are
+not part of these numbers. Record the CPU, filesystem, OS, and build
+profile before comparing results across environments.
+
+For the GUI slice, run the opt-in release benchmark on a private X11
+display (or set `GDK_BACKEND=wayland` under an appropriate Wayland fixture):
+
+```sh
+GDK_BACKEND=x11 GSK_RENDERER=cairo JWM_FILE_BENCH_SAMPLES=20 \
+  xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+  cargo test --locked --release --manifest-path crates/jwm_files/Cargo.toml \
+    native_listing_benchmark -- --ignored --nocapture
+```
+
+It switches a warm window between an empty directory and the test
+directory. It requires a real mapped row and a client paint afterward.
+The timer includes navigation, directory scan, layout, and the confirmed
+paint. It is an upper bound on first client paint because it requests a
+new paint for confirmation; it does not measure scanout or cold process
+startup. Explicitly record the renderer and whether the display was
+physical or virtual. No timings are asserted by these benchmarks.

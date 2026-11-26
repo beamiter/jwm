@@ -1,3 +1,5 @@
+#[cfg(all(test, target_os = "linux"))]
+mod bench_ui;
 mod breadcrumb;
 mod copy_ui;
 mod grid;
