@@ -1124,6 +1124,7 @@ fn open_window_with_reveal(
                 let changed = match action.name().as_str() {
                     "new-tab" => browser.tabs.new_next(),
                     "close-tab" => browser.tabs.close_active(),
+                    "reopen-tab" => browser.tabs.reopen_latest(),
                     "next-tab" => browser.tabs.cycle(false),
                     "previous-tab" => browser.tabs.cycle(true),
                     "activate-tab" => parameter
@@ -1133,8 +1134,13 @@ fn open_window_with_reveal(
                     _ => false,
                 };
                 if !changed {
-                    if action.name().as_str() == "new-tab" {
-                        status.set_text("最多可打开 16 个标签页。");
+                    match action.name().as_str() {
+                        "new-tab" => status.set_text("最多可打开 16 个标签页。"),
+                        "reopen-tab" if browser.tabs.is_full() => {
+                            status.set_text("最多可打开 16 个标签页。");
+                        }
+                        "reopen-tab" => status.set_text("此窗口没有可恢复的标签页。"),
+                        _ => {}
                     }
                     return;
                 }
@@ -1162,6 +1168,7 @@ fn open_window_with_reveal(
         for (name, accel) in [
             ("new-tab", "<Control>t"),
             ("close-tab", "<Control>w"),
+            ("reopen-tab", "<Control><Shift>t"),
             ("next-tab", "<Control>Page_Down"),
             ("previous-tab", "<Control>Page_Up"),
             ("activate-tab", ""),
@@ -2163,6 +2170,15 @@ mod wayland_acceptance {
         action("win.close-tab");
         assert!(window.is_mapped());
         println!("GTK4 Wayland tabs: separate history, cancelled scans and tab buttons verified");
+        action("win.reopen-tab");
+        at(&conflict, "after.txt");
+        action("win.forward");
+        at(&start, "before.txt");
+        action("win.back");
+        at(&conflict, "after.txt");
+        action("win.close-tab");
+        at(&start, "before.txt");
+        println!("GTK4 Wayland tabs: reopening restored the closed tab and its forward history");
 
         let jwm_source = root.join("jwm/src");
         let companion_source = root.join("companion/src");

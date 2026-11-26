@@ -325,6 +325,16 @@ xdotool key --clearmodifiers ctrl+w
 visit_path tab-branch-b
 printf 'GTK4 X11 tabs: real shortcuts kept both histories and left the final tab open\n'
 
+xdotool key --clearmodifiers ctrl+shift+t
+[[ $(title_id '^JWM Files · .*/tab-branch-a$') == "$window" ]]
+xdotool key --clearmodifiers alt+Right
+[[ $(title_id '^JWM Files · .*/tab-branch-b$') == "$window" ]]
+xdotool key --clearmodifiers alt+Left
+[[ $(title_id '^JWM Files · .*/tab-branch-a$') == "$window" ]]
+xdotool key --clearmodifiers ctrl+w
+[[ $(title_id '^JWM Files · .*/tab-branch-b$') == "$window" ]]
+printf 'GTK4 X11 tabs: Ctrl+Shift+T restored the exact closed tab and its forward history\n'
+
 # Launch through the shipped desktop entry in a disposable XDG profile.
 desktop_entry="$(dirname "$0")/../data/org.jwm.Files.desktop"
 desktop_folder="$root/desktop fixture % 你好"
