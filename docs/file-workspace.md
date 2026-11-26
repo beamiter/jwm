@@ -80,3 +80,12 @@ to the existing system MIME handler, using a URI constructed from its exact
 native path rather than the visible label. Broken links report an error;
 special files and desktop launchers are not run. The app does not change MIME
 associations. Moving to another directory cancels an unresolved activation.
+
+### Rename
+
+F2 renames the selected item in place on Linux. The worker validates the
+directory and the selected item's observed identity and uses atomic
+no-replace rename. An existing destination is never overwritten. Selection
+and filesystem changes are not one atomic action across processes, so the
+source check rejects changes it observes rather than promising exclusive
+access to a directory.

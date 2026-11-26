@@ -102,3 +102,63 @@ fn replacing_the_parent_path_does_not_redirect_the_operation() {
     assert!(moved.join("album").is_dir());
     assert!(!chosen.join("album").exists());
 }
+
+fn scanned_child(
+    root: &Fixture,
+    name: &OsStr,
+) -> (std::sync::Arc<DirectoryHandle>, jwm_file_core::FileIdentity) {
+    let snapshot = LocalProvider
+        .list(
+            &Location::Local(root.0.clone()),
+            ListOptions::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+    let identity = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .unwrap()
+        .identity
+        .unwrap();
+    (snapshot.local_parent.unwrap(), identity)
+}
+
+#[test]
+fn rename_keeps_exact_bytes_and_refuses_existing_destination() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = Fixture::new();
+    let name = OsString::from_vec(b"source-\xff".to_vec());
+    fs::write(root.0.join(&name), b"source").unwrap();
+    fs::write(root.0.join("already"), b"destination").unwrap();
+    let (parent, identity) = scanned_child(&root, &name);
+    assert!(matches!(
+        parent.rename_child_no_replace(&root.0, &name, identity, OsStr::new("already")),
+        Err(jwm_file_core::RenameError::Io(error)) if error.kind() == ErrorKind::AlreadyExists
+    ));
+    assert_eq!(fs::read(root.0.join("already")).unwrap(), b"destination");
+    assert_eq!(fs::read(root.0.join(&name)).unwrap(), b"source");
+    parent
+        .rename_child_no_replace(&root.0, &name, identity, OsStr::new("新名"))
+        .unwrap();
+    assert!(!root.0.join(name).exists());
+    assert_eq!(fs::read(root.0.join("新名")).unwrap(), b"source");
+}
+
+#[test]
+fn rename_refuses_an_item_replaced_since_selection() {
+    let root = Fixture::new();
+    let name = OsStr::new("selected");
+    fs::write(root.0.join(name), b"original").unwrap();
+    let (parent, identity) = scanned_child(&root, name);
+    fs::rename(root.0.join(name), root.0.join("retired")).unwrap();
+    fs::write(root.0.join(name), b"replacement").unwrap();
+    assert!(matches!(
+        parent.rename_child_no_replace(&root.0, name, identity, OsStr::new("new")),
+        Err(jwm_file_core::RenameError::SourceChanged)
+    ));
+    assert_eq!(fs::read(root.0.join(name)).unwrap(), b"replacement");
+    assert!(!root.0.join("new").exists());
+}

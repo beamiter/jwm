@@ -4,11 +4,15 @@
 mod local;
 #[cfg(target_os = "linux")]
 mod mkdir;
+#[cfg(target_os = "linux")]
+mod rename;
 mod scan_worker;
 
 pub use local::LocalProvider;
 #[cfg(target_os = "linux")]
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};
+#[cfg(target_os = "linux")]
+pub use rename::RenameError;
 pub use scan_worker::{ScanId, ScanReply, ScanWorker};
 
 use std::ffi::OsString;

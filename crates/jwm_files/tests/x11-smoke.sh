@@ -124,3 +124,33 @@ sleep 0.3
 [[ $(xdotool getwindowname "$window") == "JWM Files · $root/open-broken" ]]
 cmp "$root/expected.receipt" "$root/launch.receipt"
 printf 'GTK4 X11 smoke: directory links stayed in the browser and broken links did not launch\n'
+
+mkdir -p "$root/rename-fixture"
+printf 'source\n' > "$root/rename-fixture/a-source.txt"
+printf 'destination\n' > "$root/rename-fixture/z-existing.txt"
+visit_path rename-fixture
+rename_first_row() {
+  sleep 0.2
+  xdotool mousemove --window "$window" 350 72 click 1
+  xdotool key --clearmodifiers F2
+  local dialog
+  dialog=$(title_id '^JWM Files · Rename$')
+  xdotool windowfocus --sync "$dialog"
+  xdotool key --clearmodifiers ctrl+a
+  xdotool type --clearmodifiers "$1"
+  xdotool key Return
+}
+rename_first_row z-existing.txt
+sleep 0.5
+[[ $(cat "$root/rename-fixture/a-source.txt") == 'source' ]]
+[[ $(cat "$root/rename-fixture/z-existing.txt") == 'destination' ]]
+xdotool windowfocus --sync "$window"
+rename_first_row renamed.txt
+for attempt in {1..30}; do
+  [[ ! -f "$root/rename-fixture/renamed.txt" ]] || break
+  sleep 0.1
+done
+[[ ! -e "$root/rename-fixture/a-source.txt" ]]
+[[ $(cat "$root/rename-fixture/renamed.txt") == 'source' ]]
+[[ $(cat "$root/rename-fixture/z-existing.txt") == 'destination' ]]
+printf 'GTK4 X11 smoke: F2 renamed the selected item without replacing a conflict\n'
