@@ -1,6 +1,8 @@
 //! Provider-neutral directory snapshots for the JWM file workspace.
 //! Providers may block; front ends must invoke them off the UI thread.
 
+#[cfg(target_os = "linux")]
+mod copy;
 mod local;
 #[cfg(target_os = "linux")]
 mod mkdir;
@@ -10,6 +12,8 @@ mod scan_worker;
 #[cfg(target_os = "linux")]
 mod watch;
 
+#[cfg(target_os = "linux")]
+pub use copy::{CopyDestination, CopyError, CopyReceipt, CopySource};
 pub use local::LocalProvider;
 #[cfg(target_os = "linux")]
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};

@@ -147,3 +147,25 @@ views share the same selected item and exact action paths. Folders,
 documents, symbolic links and other file kinds have distinct generic
 icons. Icon mode does not request thumbnails; previews are a later
 milestone.
+
+### Staged regular-file copy primitive
+
+The Linux core can copy one observed regular file from a pinned source
+directory into a pinned destination without replacing any existing name.
+It stages bytes in an anonymous inode, checks cancellation and revalidates
+the observed source before publication. The destination needs Linux
+anonymous staging (`O_TMPFILE`). Some removable-volume filesystem drivers
+do not provide it, including [VFAT](https://github.com/torvalds/linux/blob/v6.18/fs/fat/namei_vfat.c#L1105-L1115)
+and [exFAT](https://github.com/torvalds/linux/blob/v6.18/fs/exfat/namei.c#L1233-L1242)
+in Linux 6.18. The copy reports an unsupported destination instead of
+falling back to a visible partial file. This primitive
+does not delete the source, preserve file metadata, copy directories, or
+provide a crash-durable completion receipt.
+
+The **操作** menu also exposes this primitive in the file browser.
+Select a regular file and press Ctrl+C, then browse to a different
+directory and press Ctrl+V. The browser remembers only that source,
+does not modify the system clipboard, and does not intercept normal
+text-field copy/paste. At most one filesystem mutation runs per
+window. Use the menu to request cancellation before publication.
+The operation status remains visible while you browse elsewhere.

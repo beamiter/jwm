@@ -228,3 +228,36 @@ done
 xdotool windowfocus --sync "$window"
 xdotool key --clearmodifiers ctrl+1
 printf 'GTK4 X11 grid: switching modes preserved the selected rename target\n'
+
+mkdir -p "$root/copy-from" "$root/copy-to" "$root/copy-conflict"
+copy_name=$'file space%\x80.txt'
+printf 'copy me exactly\n' > "$root/copy-from/$copy_name"
+printf 'existing\n' > "$root/copy-conflict/$copy_name"
+visit_path copy-from
+sleep 0.2
+xdotool mousemove --window "$window" 350 72 click 1
+xdotool key --clearmodifiers ctrl+c
+visit_path copy-conflict
+xdotool key --clearmodifiers ctrl+v
+sleep 0.55
+[[ $(cat "$root/copy-conflict/$copy_name") == 'existing' ]]
+visit_path copy-to
+xdotool key --clearmodifiers ctrl+v
+for attempt in {1..40}; do
+  [[ ! -f "$root/copy-to/$copy_name" ]] || break
+  sleep 0.1
+done
+cmp "$root/copy-from/$copy_name" "$root/copy-to/$copy_name"
+[[ $(find "$root/copy-to" -mindepth 1 -maxdepth 1 -type f | wc -l) == 1 ]]
+[[ $(cat "$root/copy-conflict/$copy_name") == 'existing' ]]
+printf 'GTK4 X11 copy: exact native bytes were copied without overwriting a conflict\n'
+
+xdotool key --clearmodifiers ctrl+l
+xdotool type --clearmodifiers "$root/next"
+xdotool key --clearmodifiers ctrl+a ctrl+c
+xdotool key --clearmodifiers BackSpace ctrl+v
+sleep 0.25
+xdotool key --clearmodifiers Return
+[[ $(title_id '^JWM Files · .*/next$') == "$window" ]]
+[[ ! -e "$root/next/$copy_name" ]]
+printf 'GTK4 X11 copy: address editing retained normal text clipboard shortcuts\n'
