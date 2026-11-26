@@ -1440,20 +1440,22 @@ mod wayland_acceptance {
         app.register(None::<&gio::Cancellable>).unwrap();
         open_window(&app, &start, &root, &[], &copy_ui::CopyBuffer::default());
         let window = app.active_window().unwrap();
-        let main_model = descendants(window.upcast_ref())
+        let (source_selection, main_model) = descendants(window.upcast_ref())
             .into_iter()
             .find_map(|widget| {
-                widget
+                let selection = widget
                     .downcast::<gtk::ListView>()
                     .ok()?
                     .model()?
                     .downcast::<gtk::SingleSelection>()
-                    .ok()?
+                    .ok()?;
+                let model = selection
                     .model()?
                     .downcast::<row_model::FileRowModel>()
-                    .ok()
+                    .ok()?;
+                Some((selection, model))
             })
-            .unwrap();
+            .expect("file-pane selection, not the sidebar tree");
         let first_title = format!("JWM Files · {}", start.display());
         until(
             || {
@@ -1496,16 +1498,21 @@ mod wayland_acceptance {
             })
             .unwrap();
         assert_ne!(main_model, sibling_model);
-        let source_view = descendants(window.upcast_ref())
-            .into_iter()
-            .find_map(|widget| widget.downcast::<gtk::ListView>().ok())
-            .unwrap();
-        let source_selection = source_view
-            .model()
-            .and_downcast::<gtk::SingleSelection>()
-            .unwrap();
         source_selection.set_selected(0);
         gtk::prelude::WidgetExt::activate_action(&window, "win.copy-file", None).unwrap();
+        let label_text = |root: &gtk::Window| {
+            descendants(root.upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                .map(|label| label.text().to_string())
+                .collect::<Vec<_>>()
+        };
+        let labels = label_text(&window);
+        let expected = format!("已选定复制：{}", start.join("before.txt").display());
+        assert!(
+            labels.contains(&expected),
+            "copy source was not staged: {labels:?}"
+        );
         until(
             || {
                 sibling.surface().is_some_and(|surface| surface.is_mapped())
@@ -1531,11 +1538,9 @@ mod wayland_acceptance {
         fs::write(&copied, b"destination must stay").unwrap();
         until(|| sibling_model.n_items() == 2, "the conflict was listed");
         let sibling_status = |needle: &str| {
-            descendants(sibling.upcast_ref()).iter().any(|widget| {
-                widget
-                    .downcast_ref::<gtk::Label>()
-                    .is_some_and(|label| label.text().contains(needle))
-            })
+            label_text(&sibling)
+                .iter()
+                .any(|label| label.contains(needle))
         };
         let paste_in_sibling =
             || gtk::prelude::WidgetExt::activate_action(&sibling, "win.paste-file", None).unwrap();
