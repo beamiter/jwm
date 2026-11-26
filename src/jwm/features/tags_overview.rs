@@ -137,6 +137,17 @@ impl TagsOverviewState {
             sticky_windows,
             cols,
             selected,
+            ..Self::empty()
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            cells: Vec::new(),
+            window_ids: Vec::new(),
+            sticky_windows: Vec::new(),
+            cols: 1,
+            selected: 0,
             selection_explicit: false,
             pending: None,
             monitor: None,
@@ -816,12 +827,14 @@ impl Jwm {
     /// The panel's contents for one monitor: the current tags snapshot in
     /// grid form.
     fn tags_overview_state(&self, mon_key: MonitorKey) -> TagsOverviewState {
-        let mut desktop = self.tags_overview_monitor_state(mon_key);
-        desktop.cells.clear();
-        desktop.window_ids.clear();
-        desktop.sticky_windows.clear();
+        let tags_length = CONFIG.load().tags_length();
+        let mut desktop = TagsOverviewState {
+            monitor: Some(mon_key),
+            ..TagsOverviewState::empty()
+        };
+        let mut has_selected_output = false;
         for &monitor in &self.state.monitor_order {
-            let local = self.tags_overview_monitor_state(monitor);
+            let local = self.tags_overview_monitor_state(monitor, tags_length);
             let offset = desktop.cells.len();
             let number = self.state.monitors.get(monitor).map(|monitor| monitor.num);
             if let Some(output) = self.state.monitors.get(monitor) {
@@ -843,14 +856,22 @@ impl Jwm {
             desktop.sticky_windows.extend(local.sticky_windows);
             desktop
                 .targets
-                .extend((0..CONFIG.load().tags_length()).map(|tag| (monitor, tag)));
+                .extend((0..tags_length).map(|tag| (monitor, tag)));
             if monitor == mon_key {
+                has_selected_output = true;
+                desktop.cols = local.cols;
                 desktop.selected = offset + local.selected;
             }
         }
+        if !has_selected_output {
+            // Preserve the opening selection if output order is being rebuilt.
+            let local = self.tags_overview_monitor_state(mon_key, tags_length);
+            desktop.cols = local.cols;
+            desktop.selected = local.selected;
+        }
         if self.state.monitor_order.len() > 1 {
             // One output per row makes the grouping and screen/tag labels explicit.
-            desktop.cols = CONFIG.load().tags_length().max(1) as u32;
+            desktop.cols = tags_length.max(1) as u32;
         }
         desktop.client_keys = self
             .state
@@ -861,8 +882,11 @@ impl Jwm {
         desktop
     }
 
-    fn tags_overview_monitor_state(&self, mon_key: MonitorKey) -> TagsOverviewState {
-        let tags_length = CONFIG.load().tags_length();
+    fn tags_overview_monitor_state(
+        &self,
+        mon_key: MonitorKey,
+        tags_length: usize,
+    ) -> TagsOverviewState {
         let (active_tags, work) = self
             .state
             .monitors
@@ -985,6 +1009,13 @@ mod tests {
         jwm.jump_tags_overview(&mut backend, tags + 1).unwrap();
         assert_eq!(jwm.state.sel_mon, Some(right));
         assert_eq!(jwm.state.monitors[right].get_active_tags(), 2);
+        let rebuilt = jwm.tags_overview_state(right);
+        assert_eq!(rebuilt.monitor, Some(right));
+        assert_eq!(rebuilt.selected, tags + 1);
+        assert_eq!(rebuilt.targets[rebuilt.selected], (right, 1));
+        assert_eq!(rebuilt.cells.len(), tags * 2);
+        assert_eq!(rebuilt.cols, tags as u32);
+        assert_eq!(live_cells(&rebuilt).len(), 2);
     }
 
     #[test]
