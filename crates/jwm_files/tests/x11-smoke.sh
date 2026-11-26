@@ -334,6 +334,25 @@ sleep 0.25
 xdotool key --clearmodifiers Escape
 printf 'GTK4 X11 location: rejected a remote URI and kept literal percent path semantics\n'
 
+mkdir -p "$root/find-in-folder/zz intended target"
+for i in {1..90}; do mkdir "$root/find-in-folder/a-$i"; done
+visit_path find-in-folder
+xdotool key --clearmodifiers ctrl+f
+sleep 0.25
+xdotool type --clearmodifiers 'INTENDED TARGET'
+# Searching and stepping must not activate the directory until we paste
+# the copied selection into the address bar.
+for attempt in {1..6}; do
+  xdotool key --clearmodifiers Return
+  sleep 0.12
+done
+[[ $(xdotool getwindowname "$window") == "JWM Files · $root/find-in-folder" ]]
+xdotool key --clearmodifiers Escape ctrl+shift+c ctrl+l ctrl+a BackSpace ctrl+v
+sleep 0.2
+xdotool key --clearmodifiers Return
+[[ $(title_id '^JWM Files · .*/find-in-folder/zz intended target$') == "$window" ]]
+printf 'GTK4 X11 find: Ctrl+F selected the offscreen literal filename without activating it\n'
+
 visit_path copy-from
 sleep 0.2
 xdotool mousemove --window "$window" 350 72 click 1

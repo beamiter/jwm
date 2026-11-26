@@ -131,6 +131,14 @@ including native names that cannot be shown as UTF-8. Explicit local URIs
 decode percent escapes; ordinary path text keeps percent signs literally.
 Remote file URIs are rejected without changing the current view.
 
+### Find in the current directory
+
+**Ctrl+F** searches the current loaded directory by a literal, case-insensitive
+filename substring. Press Enter or **下一个** to select the next match, and
+**上一个** to go back. The search never opens a file or walks other folders.
+It does no filesystem I/O or indexing and stores no search history on disk.
+A result from a previous directory or an older snapshot is never applied.
+
 ### New Folder
 
 The toolbar action or Ctrl+Shift+N creates one named folder in the currently

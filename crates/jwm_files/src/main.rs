@@ -4,6 +4,7 @@ mod breadcrumb;
 mod comparison;
 mod copy_ui;
 mod file_manager_bus;
+mod find_in_folder;
 mod grid;
 mod native_path;
 mod navigation;
@@ -46,7 +47,7 @@ struct Browser {
     tabs: Tabs,
     pending: Option<(ScanId, Destination)>,
     show_hidden: bool,
-    entries: Rc<Vec<FileEntry>>,
+    entries: Arc<Vec<FileEntry>>,
     parent: Option<Arc<DirectoryHandle>>,
     mutation: Option<MutationWork>,
     rename_undo: Option<Arc<RenameReceipt>>,
@@ -791,7 +792,7 @@ fn open_window_with_reveal(
         tabs: Tabs::new(initial.into()),
         pending: None,
         show_hidden: initial_show_hidden,
-        entries: Rc::default(),
+        entries: Arc::default(),
         parent: None,
         mutation: None,
         rename_undo: None,
@@ -806,6 +807,15 @@ fn open_window_with_reveal(
         move |mount| start_scan(&state, mount, &address, &status)
     });
     sidebar.append(&mounts);
+    let finder = find_in_folder::install(
+        app,
+        &window,
+        &layout,
+        &state,
+        &selection,
+        list.upcast_ref(),
+        grid.upcast_ref(),
+    );
     comparison::install(
         &window,
         &comparison_split,
@@ -1153,7 +1163,7 @@ fn open_window_with_reveal(
                 // or a pending result. The one scanner cancels its prior
                 // generation before opening the newly active directory.
                 browser.parent = None;
-                browser.entries = Rc::default();
+                browser.entries = Arc::default();
                 browser.active_scan = None;
                 browser.reload_due = None;
                 path
@@ -1166,7 +1176,7 @@ fn open_window_with_reveal(
                 location_bar.set_visible_child_name("path");
             }
             selection.set_selected(gtk::INVALID_LIST_POSITION);
-            model.replace(Rc::default());
+            model.replace(Arc::default());
             focus_current_view(&views);
         };
         for (name, accel) in [
@@ -1253,7 +1263,7 @@ fn open_window_with_reveal(
                         return glib::ControlFlow::Continue;
                     }
                     tab.path = path;
-                    browser.entries = Rc::new(snapshot.entries);
+                    browser.entries = Arc::new(snapshot.entries);
                     browser.parent = snapshot.local_parent;
                     replaced = true;
                     let base = format!("{} 项", browser.entries.len());
@@ -1304,6 +1314,7 @@ fn open_window_with_reveal(
                 reveal.item.set(None);
             }
             model.replace(entries);
+            finder.snapshot_changed();
             if let Some((row, id)) = restore_row
                 && let Ok(row) = u32::try_from(row)
                 && {
@@ -2759,6 +2770,52 @@ mod wayland_acceptance {
         until(rejected, "rejected remote file URI");
         at(&raw_location, "exact.txt");
         println!("GTK4 Wayland location: raw bytes round-tripped through the editable URI");
+
+        let find_path = root.join("finder-native");
+        let other_path = root.join("finder-unrelated");
+        fs::create_dir(&find_path).unwrap();
+        fs::create_dir(&other_path).unwrap();
+        for i in 0..120 {
+            fs::write(find_path.join(format!("a-{i:03}.txt")), b"decoy").unwrap();
+        }
+        fs::write(find_path.join("z target.txt"), b"the intended row").unwrap();
+        fs::write(other_path.join("other.txt"), b"unrelated").unwrap();
+        navigate(&find_path);
+        at(&find_path, "a-000.txt");
+        action("win.find-in-folder");
+        let finder = descendants(window.upcast_ref())
+            .into_iter()
+            .find(|widget| widget.widget_name() == "jwm-files-folder-find-input")
+            .unwrap()
+            .downcast::<gtk::SearchEntry>()
+            .unwrap();
+        until(|| finder.is_mapped(), "native folder search field");
+        finder.set_text("a-");
+        finder.set_text("TARGET");
+        until(
+            || copy_noticed("1 个匹配项"),
+            "latest name query had the exact one match",
+        );
+        finder.emit_activate();
+        assert_eq!(source_selection.selected(), 120);
+        let selected = source_selection
+            .selected_item()
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        let selected = selected.borrow::<row_model::RowPresentation>();
+        assert_eq!(selected.name, "z target.txt");
+        drop(selected);
+
+        navigate(&other_path);
+        at(&other_path, "other.txt");
+        finder.emit_activate();
+        until(
+            || copy_noticed("0 个匹配项"),
+            "old name-search result was not applied after navigation",
+        );
+        assert_eq!(source_selection.selected(), gtk::INVALID_LIST_POSITION);
+        finder.emit_stop_search();
+        println!("GTK4 Wayland find: exact selected row and stale snapshot rejection verified");
         window.close();
     }
 }

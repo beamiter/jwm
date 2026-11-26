@@ -22,7 +22,7 @@ struct State {
     pending: Option<(ScanId, Destination)>,
     path: PathBuf,
     navigation: Navigation,
-    entries: Rc<Vec<FileEntry>>,
+    entries: Arc<Vec<FileEntry>>,
     parent: Option<Arc<DirectoryHandle>>,
     watched: Option<ScanId>,
 }
@@ -50,7 +50,7 @@ fn browse_widgets(
         pending: None,
         path: initial.clone(),
         navigation: Navigation::default(),
-        entries: Rc::default(),
+        entries: Arc::default(),
         parent: None,
         watched: None,
     }));
@@ -236,7 +236,7 @@ fn browse_widgets(
                             state.request(target);
                         }
                         paste.set_sensitive(state.parent.is_some() && state.pending.is_none());
-                        state.entries = Rc::new(snapshot.entries);
+                        state.entries = Arc::new(snapshot.entries);
                         let unreadable = snapshot.skipped_entries;
                         Ok((
                             state.path.clone(),
