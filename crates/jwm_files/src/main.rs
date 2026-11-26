@@ -704,7 +704,7 @@ fn open_window(
     let drop_zone = gtk::Label::builder()
         .label("拖放到当前目录（复制）")
         .tooltip_text("从同一 JWM Files 进程中的文件列表拖放一个普通文件")
-        .height_request(28)
+        .height_request(56)
         .build();
     drop_zone.add_css_class("dim-label");
     layout.append(&drop_zone);

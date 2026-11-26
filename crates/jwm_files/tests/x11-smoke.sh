@@ -55,7 +55,7 @@ for attempt in 1 2 3 4 5; do
 done
 xdotool getdisplaygeometry >/dev/null
 
-GDK_BACKEND=x11 GSK_RENDERER=cairo "$binary" "$root/start" &
+GDK_BACKEND=x11 GSK_RENDERER=cairo JWM_FILES_TRACE_DRAG=1 "$binary" "$root/start" &
 child=$!
 window=$(title_id '^JWM Files · .*/start$')
 xdotool windowfocus --sync "$window"
@@ -348,8 +348,11 @@ sleep 0.3
 xdotool mousemove --window "$window" 350 72 mousedown 1
 xdotool mousemove --window "$window" 395 79
 sleep 0.2
-xdotool mousemove --window "$drag_window" 295 "$((drag_height - 14))"
+xdotool mousemove --window "$drag_window" 295 "$((drag_height - 55))"
+sleep 0.25
+xdotool mousemove --window "$drag_window" 310 "$((drag_height - 39))"
 sleep 0.45
+xdotool getmouselocation
 xdotool mouseup 1
 for attempt in {1..50}; do
   [[ ! -f "$root/drag-target/$drag_name" ]] || break

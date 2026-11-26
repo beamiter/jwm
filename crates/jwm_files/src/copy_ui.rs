@@ -73,6 +73,12 @@ fn copy_source(browser: &Browser, selected: u32) -> Option<StashedCopy> {
         })
 }
 
+fn drag_trace(message: impl std::fmt::Display) {
+    if std::env::var_os("JWM_FILES_TRACE_DRAG").is_some() {
+        eprintln!("JWM Files drag: {message}");
+    }
+}
+
 #[derive(Clone, glib::Boxed)]
 #[boxed_type(name = "JwmFilesLocalDragCopy")]
 struct DragCopy(StashedCopy);
@@ -100,9 +106,15 @@ impl RowDrags {
                 return None;
             }
             let file = copy_source(&browser, item.position())?;
+            drag_trace("prepared a regular row");
             Some(gtk::gdk::ContentProvider::for_value(
                 &DragCopy(file).to_value(),
             ))
+        });
+        source.connect_drag_begin(|_, _| drag_trace("started"));
+        source.connect_drag_cancel(|_, _, reason| {
+            drag_trace(format_args!("cancelled {reason:?}"));
+            false
         });
         widget.add_controller(source);
     }
@@ -111,15 +123,22 @@ impl RowDrags {
 pub(super) fn install_drop_zone(zone: &gtk::Label, state: &Shared, status: &gtk::Label) {
     let target = gtk::DropTarget::new(DragCopy::static_type(), gtk::gdk::DragAction::COPY);
     target.connect_accept(|_, drop| {
-        drop.drag().is_some()
-            && drop.actions().contains(gtk::gdk::DragAction::COPY)
-            && drop.formats().contains_type(DragCopy::static_type())
+        let local = drop.drag().is_some();
+        let copy = drop.actions().contains(gtk::gdk::DragAction::COPY);
+        let typed = drop.formats().contains_type(DragCopy::static_type());
+        drag_trace(format_args!(
+            "entered target: local={local} copy={copy} typed={typed}"
+        ));
+        local && copy && typed
     });
     let (state, status) = (state.clone(), status.clone());
     target.connect_drop(move |_, data, _, _| {
         if let Ok(DragCopy(source)) = data.get::<DragCopy>() {
-            queue_copy(&state, source, &status)
+            let queued = queue_copy(&state, source, &status);
+            drag_trace(format_args!("drop queued={queued}"));
+            queued
         } else {
+            drag_trace("drop had an unexpected type");
             false
         }
     });
