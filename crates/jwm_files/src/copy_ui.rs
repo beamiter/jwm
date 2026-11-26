@@ -93,6 +93,30 @@ fn copy_error_message(error: CopyError) -> String {
 }
 
 fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label) {
+    let destination = {
+        let browser = state.borrow();
+        browser
+            .parent
+            .clone()
+            .filter(|_| browser.pending.is_none())
+            .map(|parent| (parent, browser.path().clone()))
+    };
+    let Some((parent, path)) = destination else {
+        notice(status, "请先打开目标目录。");
+        return;
+    };
+    paste_into(state, buffer, status, parent, path);
+}
+
+/// The destination is the clicked pane's committed directory, never the
+/// currently focused path at a later point in the worker.
+pub(super) fn paste_into(
+    state: &Shared,
+    buffer: &CopyBuffer,
+    status: &gtk::Label,
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+) {
     let mut browser = state.borrow_mut();
     if browser.mutation.is_some() || browser.dialog_open {
         notice(status, "有文件操作正在进行，请稍候。");
@@ -102,15 +126,10 @@ fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label) {
         notice(status, "请先选择要复制的普通文件。");
         return;
     };
-    let Some(parent) = browser.parent.clone().filter(|_| browser.pending.is_none()) else {
-        notice(status, "请先打开目标目录。");
-        return;
-    };
     if parent.identity() == source.parent.identity() {
         notice(status, "请选择不同的目标目录。同名项目不会被覆盖。");
         return;
     }
-    let path = browser.path().clone();
     let (target, target_path) = (parent.clone(), path.clone());
     let cancellation = Cancellation::default();
     let on_worker = cancellation.clone();
