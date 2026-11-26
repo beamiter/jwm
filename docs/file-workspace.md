@@ -41,7 +41,7 @@ from path identity, keys results by request generation, and reports partial
 snapshots. Default-handler migration is gated on P2 rather than performed at
 install time.
 
-## Read-only GTK4 browser
+## GTK4 browser
 
 On a system with GTK4 development libraries, open a directory with:
 
@@ -54,5 +54,14 @@ address field; the refresh and hidden-items controls rescan. GTK virtualizes
 row widgets, and the model is populated in bounded batches. A single scan
 worker cancels and replaces obsolete requests, and does not publish stale
 results even if the old provider call ignores cancellation. File activation
-currently shows a path; opening documents and all file changes remain out of
-scope for this slice.
+currently shows a path; opening documents remains a follow-on.
+
+
+### New Folder
+
+The toolbar action or Ctrl+Shift+N creates one named folder in the currently
+opened Linux directory. A worker uses the same directory handle as the scan,
+and rejects a path that no longer points to that directory. It also rejects
+multiple path components and never replaces an existing item. The UI refreshes
+the directory on success when it is still current. Copy, move, rename,
+Trash, and crash recovery are not included in this operation slice.

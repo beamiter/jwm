@@ -38,3 +38,18 @@ xdotool key Return
 next=$(title_id '^JWM Files · .*/next$')
 [[ "$next" == "$window" ]]
 printf 'GTK4 X11 smoke: keyboard navigation opened the new directory in the same window\n'
+
+xdotool windowfocus --sync "$window"
+xdotool key --clearmodifiers ctrl+shift+n
+dialog=$(title_id '^JWM Files · New Folder$')
+xdotool windowfocus --sync "$dialog"
+xdotool type --clearmodifiers 'smoke-child'
+xdotool key Return
+for attempt in {1..30}; do
+  [[ ! -d "$root/next/smoke-child" ]] || break
+  sleep 0.1
+done
+[[ -d "$root/next/smoke-child" ]]
+[[ ! -e "$root/start/smoke-child" ]]
+[[ $(cat "$root/next/test.txt") == 'test note' ]]
+printf 'GTK4 X11 smoke: New Folder wrote only into the selected directory\n'

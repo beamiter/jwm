@@ -2,9 +2,13 @@
 //! Providers may block; front ends must invoke them off the UI thread.
 
 mod local;
+#[cfg(target_os = "linux")]
+mod mkdir;
 mod scan_worker;
 
 pub use local::LocalProvider;
+#[cfg(target_os = "linux")]
+pub use mkdir::{DirectoryHandle, MakeDirectoryError};
 pub use scan_worker::{ScanId, ScanReply, ScanWorker};
 
 use std::ffi::OsString;
@@ -60,6 +64,9 @@ pub struct DirectorySnapshot {
     pub location: Location,
     pub entries: Vec<FileEntry>,
     pub skipped_entries: usize,
+    /// Linux local provider only: the exact directory actually enumerated.
+    #[cfg(target_os = "linux")]
+    pub local_parent: Option<Arc<DirectoryHandle>>,
 }
 
 #[derive(Debug)]
