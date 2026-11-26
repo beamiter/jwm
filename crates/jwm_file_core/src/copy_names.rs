@@ -7,6 +7,7 @@ use std::{
 
 const NAME_CAP: usize = 255;
 pub(super) const COPY_NAMES: u8 = 32;
+const TAR_COMPRESSIONS: &[u8] = b"gz bz bz2 bz3 xz zst z lz lzma lrz lz4 lzo";
 
 fn prefix_within(bytes: &[u8], cap: usize) -> &[u8] {
     if bytes.len() <= cap {
@@ -32,17 +33,28 @@ pub(super) fn sibling_copy_name(original: &OsStr, attempt: u8) -> OsString {
         format!(" (copy {attempt})")
     };
     let raw = original.as_bytes();
-    let extension = Path::new(original)
+    let ext = Path::new(original)
         .extension()
-        .filter(|value| !value.is_empty());
-    // Very long extensions are part of the stem so that adding a suffix
-    // never increases the total beyond the conservative component cap.
-    let (stem, tail) = match extension {
-        Some(ext) if ext.len() < NAME_CAP - suffix.len() - 4 => {
-            raw.split_at(raw.len() - ext.len() - 1)
+        .map_or(&[][..], OsStrExt::as_bytes);
+    // Keep known compressed-tar endings intact: MIME matching can use the
+    // complete suffix even when the file bytes have not yet been sniffed.
+    let mut tail_len = 0;
+    if !ext.is_empty() && ext.len() < NAME_CAP - suffix.len() - 4 {
+        tail_len = ext.len() + 1;
+        let before = &raw[..raw.len() - tail_len];
+        if before.len() >= 4
+            && before[before.len() - 4..].eq_ignore_ascii_case(b".tar")
+            && TAR_COMPRESSIONS
+                .split(|byte| *byte == b' ')
+                .any(|compression| ext.eq_ignore_ascii_case(compression))
+        {
+            tail_len += 4;
         }
-        _ => (raw, &[][..]),
-    };
+    }
+    let (stem, tail) = raw.split_at(raw.len() - tail_len);
+    // If the complete archive name is itself hidden (e.g. .tar.gz), retain
+    // the leading dot while keeping its recognized compound suffix intact.
+    let stem = if stem.is_empty() { b"." } else { stem };
     let mut out = prefix_within(stem, NAME_CAP - suffix.len() - tail.len()).to_vec();
     out.extend_from_slice(suffix.as_bytes());
     out.extend_from_slice(tail);
@@ -59,7 +71,17 @@ mod tests {
         assert_eq!(f("report.txt", 1), "report (copy).txt");
         assert_eq!(f("report.txt", 2), "report (copy 2).txt");
         assert_eq!(f(".hidden", COPY_NAMES), ".hidden (copy 32)");
-        assert_eq!(f("archive.tar.gz", 1), "archive.tar (copy).gz");
+        assert_eq!(f("archive.tar.gz", 1), "archive (copy).tar.gz");
+        assert_eq!(f("archive.TAR.Z", 3), "archive (copy 3).TAR.Z");
+        assert_eq!(f("archive.tar.xz", 2), "archive (copy 2).tar.xz");
+        assert_eq!(f("archive.tar.zst", 1), "archive (copy).tar.zst");
+        assert_eq!(f(".tar.gz", 1), ". (copy).tar.gz");
+        assert_eq!(f("archive.tar.unknown", 1), "archive.tar (copy).unknown");
+        let raw_archive = OsStr::from_bytes(b"archive-%20-\x80.tar.gz");
+        assert_eq!(
+            sibling_copy_name(raw_archive, 2).as_bytes(),
+            b"archive-%20-\x80 (copy 2).tar.gz"
+        );
         let raw = OsStr::from_bytes(b"literal-%20-\x80.txt");
         assert_eq!(
             sibling_copy_name(raw, 3).as_bytes(),

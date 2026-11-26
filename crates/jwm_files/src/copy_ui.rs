@@ -359,6 +359,16 @@ mod tests {
     }
 
     #[test]
+    fn compound_archive_sibling_retains_native_filename_mime_type() {
+        let mime = |name: &str| gio::content_type_guess(Some(name), None::<&[u8]>).0;
+        let original = mime("archive.tar.gz");
+        assert_eq!(original, "application/x-compressed-tar");
+        assert_ne!(mime("archive.tar (copy).gz"), original);
+        assert_eq!(mime("archive (copy).tar.gz"), original);
+        assert_eq!(mime("archive (copy 2).TAR.XZ"), mime("archive.TAR.XZ"));
+    }
+
+    #[test]
     fn copy_errors_distinguish_unsupported_storage_permissions_and_cancellation() {
         let unsupported =
             copy_error_message(CopyError::StagingUnavailable(ErrorKind::Unsupported.into()));
