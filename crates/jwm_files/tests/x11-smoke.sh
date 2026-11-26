@@ -342,4 +342,20 @@ desktop_child=$(xdotool getwindowpid "$desktop_window")
 [[ $(xdotool getwindowname "$desktop_window") == "JWM Files · $desktop_folder" ]]
 [[ "$before_mime" == "$(sha256sum "$XDG_CONFIG_HOME/mimeapps.list")" ]]
 [[ "$before_default" == "$(gio mime inode/directory | sed -n '1p')" ]]
+# In a clean profile where no default exists, the launcher must not become
+# a fallback handler after the desktop cache is rebuilt.
+! grep -q '^MimeType=' "$desktop_entry"
+clean_root="$root/no-folder-handler"
+mkdir -p "$clean_root/data/applications" "$clean_root/config" "$clean_root/sys" "$clean_root/etc"
+clean_mime() {
+  XDG_DATA_HOME="$clean_root/data" XDG_CONFIG_HOME="$clean_root/config" \
+    XDG_DATA_DIRS="$clean_root/sys" XDG_CONFIG_DIRS="$clean_root/etc" gio mime inode/directory
+}
+clean_before=$(clean_mime)
+install -m644 "$desktop_entry" "$clean_root/data/applications/org.jwm.Files.desktop"
+if command -v update-desktop-database >/dev/null; then
+  update-desktop-database "$clean_root/data/applications"
+fi
+[[ "$clean_before" == "$(clean_mime)" ]]
+printf 'GTK4 X11 launcher: menu-only entry preserved an empty folder resolution\n'
 printf 'GTK4 X11 launcher: shipped desktop entry opened the exact local folder without changing defaults\n'

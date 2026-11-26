@@ -67,8 +67,8 @@ install -Dm644 crates/jwm_files/data/org.jwm.Files.desktop \
   "${XDG_DATA_HOME:-$HOME/.local/share}/applications/org.jwm.Files.desktop"
 ```
 
-This makes JWM Files available from the application menu and as a folder
-handler; it does not set it as the default or change MIME associations.
+This adds a menu launcher only. It does not advertise a folder MIME
+association or change an existing or inferred default handler.
 Remove that desktop entry to remove the launcher. The FileManager1 D-Bus
 interface, GVFS volumes, and default handler migration remain separate.
 
