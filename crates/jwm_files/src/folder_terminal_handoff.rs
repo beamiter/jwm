@@ -33,7 +33,10 @@ fn pick_launcher(configured_path: &OsStr) -> io::Result<Launcher> {
         .collect();
     let candidates = [("xdg-terminal-exec", false), ("x-terminal-emulator", true)];
     for (name, needs_execute_flag) in candidates {
-        let program = dirs.iter().map(|dir| dir.join(name)).find(|p| executable(p));
+        let program = dirs
+            .iter()
+            .map(|dir| dir.join(name))
+            .find(|p| executable(p));
         if let Some(program) = program {
             return Ok(Launcher {
                 program,
@@ -72,7 +75,10 @@ fn spawn_launcher(launcher: &Launcher, helper: &Path, pin: &TerminalHandoff) -> 
 }
 
 fn bad_request() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, "invalid terminal child arguments")
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid terminal child arguments",
+    )
 }
 
 fn field<T: std::str::FromStr>(value: &OsStr) -> io::Result<T> {

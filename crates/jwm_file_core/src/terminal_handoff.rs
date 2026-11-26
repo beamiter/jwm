@@ -38,11 +38,17 @@ impl TerminalHandoff {
     /// Bound to the current view's expected directory before any launcher runs.
     pub fn new(path: &Path, expected: FileIdentity) -> io::Result<Self> {
         if !path.is_absolute() {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "expected absolute directory"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "expected absolute directory",
+            ));
         }
         let directory = DirectoryHandle::open(path)?;
         if directory.identity() != expected {
-            return Err(io::Error::new(ErrorKind::NotFound, "the directory has changed"));
+            return Err(io::Error::new(
+                ErrorKind::NotFound,
+                "the directory has changed",
+            ));
         }
         let (read, write) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK)?;
         Ok(Self {
@@ -75,7 +81,9 @@ impl TerminalHandoff {
                 Ok(n) => {
                     filled += n;
                     if filled > expected.len() || buffer[..filled] != expected[..filled] {
-                        return Err(io::Error::other("terminal helper could not execute the shell"));
+                        return Err(io::Error::other(
+                            "terminal helper could not execute the shell",
+                        ));
                     }
                     if filled == expected.len() {
                         // The helper acquired its own CLOEXEC writer. Drop
@@ -88,7 +96,10 @@ impl TerminalHandoff {
             }
             let remaining = timeout.saturating_sub(start.elapsed());
             if remaining.is_zero() {
-                return Err(io::Error::new(ErrorKind::TimedOut, "terminal did not reply"));
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "terminal did not reply",
+                ));
             }
             std::thread::sleep(remaining.min(Duration::from_millis(8)));
         }
@@ -105,14 +116,20 @@ impl TerminalChildSetup {
     /// Both descriptors must still exist in the owner's process.
     pub fn reopen(locator: TerminalLocator) -> io::Result<Self> {
         if locator.owner <= 1 || locator.directory < 3 || locator.reply < 3 {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "invalid terminal locator"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "invalid terminal locator",
+            ));
         }
         let directory = DirectoryHandle::open(Path::new(&format!(
             "/proc/{}/fd/{}",
             locator.owner, locator.directory,
         )))?;
         if directory.identity() != locator.expected {
-            return Err(io::Error::new(ErrorKind::InvalidData, "terminal directory changed"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "terminal directory changed",
+            ));
         }
         let pinned = fs::open(
             format!("/proc/{}/fd/{}", locator.owner, locator.reply),
@@ -120,7 +137,10 @@ impl TerminalChildSetup {
             Mode::empty(),
         )?;
         if FileType::from_raw_mode(fs::fstat(&pinned)?.st_mode) != FileType::Fifo {
-            return Err(io::Error::new(ErrorKind::InvalidData, "terminal reply is not a pipe"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "terminal reply is not a pipe",
+            ));
         }
         let write = fs::open(
             format!("/proc/self/fd/{}", pinned.as_raw_fd()),
@@ -139,7 +159,10 @@ impl TerminalChildSetup {
     pub fn prepared(&self) -> io::Result<()> {
         let data = receipt(self.directory.identity());
         if rio::write(&self.write, &data)? != data.len() {
-            return Err(io::Error::new(ErrorKind::WriteZero, "partial terminal receipt"));
+            return Err(io::Error::new(
+                ErrorKind::WriteZero,
+                "partial terminal receipt",
+            ));
         }
         Ok(())
     }
@@ -159,7 +182,9 @@ mod tests {
         let current = std::env::current_dir().unwrap();
         let id = DirectoryHandle::open(&current).unwrap().identity();
         let unused = TerminalHandoff::new(&current, id).unwrap();
-        let error = unused.wait_for_child(Duration::from_millis(20)).unwrap_err();
+        let error = unused
+            .wait_for_child(Duration::from_millis(20))
+            .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::TimedOut);
 
         let handoff = TerminalHandoff::new(&current, id).unwrap();
