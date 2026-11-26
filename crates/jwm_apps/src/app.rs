@@ -2013,7 +2013,9 @@ mod tests {
     fn picker_wheel_browsing_keeps_the_keyboard_target() {
         let mut app = App::new(false, Vec::new()).unwrap();
         app.picker(PickerMode::Notes);
-        let paths: Vec<PathBuf> = (0..20).map(|i| format!("wheel-{i:02}.txt").into()).collect();
+        let paths: Vec<PathBuf> = (0..20)
+            .map(|i| format!("wheel-{i:02}.txt").into())
+            .collect();
         let Some(Dialog::Picker(picker)) = &mut app.dialog else {
             panic!("expected picker");
         };
