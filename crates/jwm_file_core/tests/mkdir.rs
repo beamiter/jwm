@@ -285,3 +285,112 @@ fn tree_returns_native_directories_without_following_child_links() {
             .is_err()
     );
 }
+
+#[test]
+fn staged_copy_publishes_exact_bytes_without_replacing_destination() {
+    use jwm_file_core::{CopyDestination, CopyError, CopySource};
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = Fixture::new();
+    let from = fixture.0.join("from");
+    let to = fixture.0.join("to");
+    fs::create_dir(&from).unwrap();
+    fs::create_dir(&to).unwrap();
+    let source = OsStr::from_bytes(b"report-\x80");
+    let destination = OsStr::from_bytes(b"copy-\x81");
+    let bytes: Vec<_> = (0..440_000).map(|index| (index % 251) as u8).collect();
+    fs::write(from.join(source), &bytes).unwrap();
+    let local = LocalProvider
+        .list(
+            &Location::Local(from.clone()),
+            ListOptions::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+    let from_handle = local.local_parent.unwrap();
+    let identity = local.entries[0].identity.unwrap();
+    let to_handle = DirectoryHandle::open(&to).unwrap();
+    let run = |cancel: &Cancellation| {
+        to_handle.copy_regular_no_replace(
+            CopySource {
+                parent: &from_handle,
+                displayed_parent: &from,
+                name: source,
+                expected_file: identity,
+            },
+            CopyDestination {
+                displayed_parent: &to,
+                name: destination,
+            },
+            cancel,
+        )
+    };
+
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    assert!(matches!(run(&cancelled), Err(CopyError::Cancelled)));
+    assert_eq!(fs::read_dir(&to).unwrap().count(), 0);
+    fs::write(to.join(destination), b"keep").unwrap();
+    assert!(matches!(
+        run(&Cancellation::default()),
+        Err(CopyError::DestinationExists)
+    ));
+    assert_eq!(fs::read(to.join(destination)).unwrap(), b"keep");
+    fs::remove_file(to.join(destination)).unwrap();
+    let receipt = run(&Cancellation::default()).unwrap();
+    assert_eq!(receipt.bytes, bytes.len() as u64);
+    assert_eq!(fs::read(to.join(destination)).unwrap(), bytes);
+    assert_eq!(fs::read(from.join(source)).unwrap(), bytes);
+    assert_eq!(fs::read_dir(&to).unwrap().count(), 1);
+}
+
+#[test]
+fn staged_copy_refuses_moved_parent_and_replaced_source_link() {
+    use jwm_file_core::{CopyDestination, CopyError, CopySource};
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let from = fixture.0.join("from");
+    let to = fixture.0.join("to");
+    fs::create_dir(&from).unwrap();
+    fs::create_dir(&to).unwrap();
+    fs::write(from.join("original"), b"keep").unwrap();
+    let snapshot = LocalProvider
+        .list(
+            &Location::Local(from.clone()),
+            ListOptions::default(),
+            &Cancellation::default(),
+        )
+        .unwrap();
+    let from_handle = snapshot.local_parent.unwrap();
+    let identity = snapshot.entries[0].identity.unwrap();
+    let to_handle = DirectoryHandle::open(&to).unwrap();
+    let run = || {
+        to_handle.copy_regular_no_replace(
+            CopySource {
+                parent: &from_handle,
+                displayed_parent: &from,
+                name: OsStr::new("original"),
+                expected_file: identity,
+            },
+            CopyDestination {
+                displayed_parent: &to,
+                name: OsStr::new("output"),
+            },
+            &Cancellation::default(),
+        )
+    };
+    let elsewhere = from.join("elsewhere");
+    fs::rename(from.join("original"), &elsewhere).unwrap();
+    symlink(&elsewhere, from.join("original")).unwrap();
+    assert!(matches!(run(), Err(CopyError::NotRegular)));
+    assert_eq!(fs::read_dir(&to).unwrap().count(), 0);
+    fs::remove_file(from.join("original")).unwrap();
+    fs::rename(elsewhere, from.join("original")).unwrap();
+    let moved = fixture.0.join("moved");
+    fs::rename(&to, &moved).unwrap();
+    fs::create_dir(&to).unwrap();
+    assert!(matches!(run(), Err(CopyError::ParentChanged)));
+    assert_eq!(fs::read_dir(&to).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
+}

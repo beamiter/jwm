@@ -1,4 +1,5 @@
 mod breadcrumb;
+mod copy_ui;
 mod grid;
 mod navigation;
 mod row_model;
@@ -33,6 +34,7 @@ struct Browser {
     entries: Rc<Vec<FileEntry>>,
     parent: Option<Arc<DirectoryHandle>>,
     mutation: Option<MutationWork>,
+    copy_item: Option<copy_ui::StashedCopy>,
     activation: Option<Activation>,
     active_scan: Option<ScanId>,
     automatic_scan: Option<ScanId>,
@@ -189,6 +191,7 @@ struct MutationWork {
     path: PathBuf,
     operation: &'static str,
     reply: mpsc::Receiver<Result<(), String>>,
+    copy: Option<(jwm_file_core::Cancellation, String)>,
 }
 
 #[derive(Clone)]
@@ -327,6 +330,7 @@ fn show_name_dialog(
                     path: path.clone(),
                     operation,
                     reply,
+                    copy: None,
                 });
                 status.set_text(&format!("正在{operation}…"));
             }
@@ -439,6 +443,7 @@ fn open_window(
     location_bar.set_vhomogeneous(true);
     location_bar.add_named(&address, Some("entry"));
     let hidden = gtk::ToggleButton::with_label("隐藏项");
+    let file_actions = gtk::MenuButton::builder().label("操作").build();
     let view_toggle = gtk::ToggleButton::with_label("图标");
     view_toggle.set_tooltip_text(Some("图标（Ctrl+2）／列表（Ctrl+1）"));
     for widget in [
@@ -450,6 +455,7 @@ fn open_window(
         location_bar.upcast_ref(),
         hidden.upcast_ref(),
         view_toggle.upcast_ref(),
+        file_actions.upcast_ref(),
     ] {
         header.append(widget);
     }
@@ -581,6 +587,13 @@ fn open_window(
     status.set_margin_bottom(6);
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     layout.append(&status);
+    let copy_status = gtk::Label::new(None);
+    copy_status.set_xalign(0.0);
+    copy_status.set_margin_start(12);
+    copy_status.set_margin_bottom(6);
+    copy_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    copy_status.set_visible(false);
+    layout.append(&copy_status);
     window.set_child(Some(&layout));
     let worker = match ScanWorker::start(LocalProvider) {
         Ok(worker) => worker,
@@ -599,12 +612,14 @@ fn open_window(
         entries: Rc::default(),
         parent: None,
         mutation: None,
+        copy_item: None,
         activation: None,
         active_scan: None,
         automatic_scan: None,
         reload_at: None,
         dialog_open: false,
     }));
+    copy_ui::install(&window, &file_actions, &state, &selection, &copy_status);
     let breadcrumb = breadcrumb::Breadcrumb::new({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
         move |path| start_scan(&state, path, &address, &status)
@@ -841,8 +856,12 @@ fn open_window(
     {
         let state = state.clone();
         window.connect_close_request(move |_| {
-            if let Some(active) = state.borrow_mut().activation.take() {
+            let mut state = state.borrow_mut();
+            if let Some(active) = state.activation.take() {
                 active.cancel.cancel();
+            }
+            if let Some((cancel, _)) = state.mutation.as_ref().and_then(|work| work.copy.as_ref()) {
+                cancel.cancel();
             }
             glib::Propagation::Proceed
         });
@@ -934,21 +953,33 @@ fn open_window(
             });
         if let Some(result) = completed
             && let Some(work) = browser.mutation.take()
-            && browser.pending.is_none()
-            && browser.path == work.path
-            && browser
-                .parent
-                .as_ref()
-                .is_some_and(|current| current.identity() == work.parent.identity())
         {
-            match result {
-                Ok(()) => {
-                    let path = browser.path.clone();
-                    drop(browser);
-                    start_scan(&state, path, &address, &status);
-                    return glib::ControlFlow::Continue;
+            let should_refresh = browser.pending.is_none()
+                && browser.path == work.path
+                && browser
+                    .parent
+                    .as_ref()
+                    .is_some_and(|p| p.identity() == work.parent.identity());
+            if let Some((_, detail)) = &work.copy {
+                let text = match &result {
+                    Ok(()) => format!("已复制：{detail}"),
+                    Err(error) => error.to_string(),
+                };
+                copy_ui::notice(&copy_status, &text);
+            }
+            if should_refresh {
+                match result {
+                    Ok(()) => {
+                        let path = browser.path.clone();
+                        drop(browser);
+                        start_scan(&state, path, &address, &status);
+                        return glib::ControlFlow::Continue;
+                    }
+                    Err(error) if work.copy.is_none() => {
+                        status.set_text(&format!("无法{}：{error}", work.operation));
+                    }
+                    Err(_) => {}
                 }
-                Err(error) => status.set_text(&format!("无法{}：{error}", work.operation)),
             }
         }
         if browser.pending.is_none()
