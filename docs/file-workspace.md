@@ -36,7 +36,23 @@ Run from the repository root:
 cargo test --locked --manifest-path crates/jwm_file_core/Cargo.toml
 ```
 
-Next slice: GTK4 shell backed by a bounded background scan worker. Keep the
-selected path as bytes, separate display labels from path identity, key results
-by request generation, and mark snapshots partial when entries disappear.
-Default-handler migration is gated on P2 rather than performed at install time.
+The GTK4 shell keeps the selected path as bytes, separates display labels
+from path identity, keys results by request generation, and reports partial
+snapshots. Default-handler migration is gated on P2 rather than performed at
+install time.
+
+## Read-only GTK4 browser
+
+On a system with GTK4 development libraries, open a directory with:
+
+```sh
+cargo run --locked --manifest-path crates/jwm_files/Cargo.toml -- /path/to/directory
+```
+
+The sidebar and path entry navigate local directories. Ctrl+L focuses the
+address field; the refresh and hidden-items controls rescan. GTK virtualizes
+row widgets, and the model is populated in bounded batches. A single scan
+worker cancels and replaces obsolete requests, and does not publish stale
+results even if the old provider call ignores cancellation. File activation
+currently shows a path; opening documents and all file changes remain out of
+scope for this slice.

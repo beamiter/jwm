@@ -2,8 +2,10 @@
 //! Providers may block; front ends must invoke them off the UI thread.
 
 mod local;
+mod scan_worker;
 
 pub use local::LocalProvider;
+pub use scan_worker::{ScanId, ScanReply, ScanWorker};
 
 use std::ffi::OsString;
 use std::fmt;
