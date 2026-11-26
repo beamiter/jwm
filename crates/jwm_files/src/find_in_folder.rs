@@ -114,7 +114,9 @@ impl Finder {
             }
             requests.cancel = None;
             let current = finder.committed_entries();
-            let same = current.as_ref().is_some_and(|now| Arc::ptr_eq(now, &entries));
+            let same = current
+                .as_ref()
+                .is_some_and(|now| Arc::ptr_eq(now, &entries));
             if !same {
                 finder.info.set_text("目录已更新。按回车重新查找。");
                 return;
