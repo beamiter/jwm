@@ -623,8 +623,7 @@ impl Jwm {
     /// swallows it — a press never reaches the desktop underneath.
     pub(crate) fn press_tags_overview(&mut self, backend: &mut dyn Backend, x: f64, y: f64) {
         match self.tags_overview_press_target(x, y) {
-            Some(TagsOverviewPress::Cell(index)) => {
-                let window = self.tags_overview_window_at(index, x, y);
+            Some((TagsOverviewPress::Cell(index), window)) => {
                 if let Some(overview) = self.features.system_ui.tags_overview_mut() {
                     overview.pending = Some(PendingCellPress {
                         cell: index,
@@ -633,8 +632,8 @@ impl Jwm {
                     });
                 }
             }
-            Some(TagsOverviewPress::Cancel) => self.cancel_tags_overview(backend),
-            Some(TagsOverviewPress::Keep) | None => {}
+            Some((TagsOverviewPress::Cancel, _)) => self.cancel_tags_overview(backend),
+            Some((TagsOverviewPress::Keep, _)) | None => {}
         }
     }
 
@@ -730,28 +729,13 @@ impl Jwm {
         tags_grid::cell_at(&geometry, Some(overview.selected), x as f32, y as f32)
     }
 
-    /// The window whose wireframe a point inside `cell_index` lands on, if
-    /// any: the drawn topmost outline under the point, resolved to its raw
-    /// id through the snapshot's parallel [`TagsOverviewState::window_ids`]
-    /// — minus the outlines a drag must not arm on
-    /// ([`TagsOverviewState::drag_source`]).
-    fn tags_overview_window_at(&self, cell_index: usize, x: f64, y: f64) -> Option<u64> {
-        let overview = self.features.system_ui.tags_overview()?;
-        let geometry = tags_grid::grid_geometry(
-            self.system_ui_viewport().rect(),
-            overview.cells.len(),
-            overview.cols,
-        );
-        let grid_cell = geometry.cells.get(cell_index)?;
-        let (_, frame) = tags_grid::presented_cell(grid_cell, cell_index == overview.selected);
-        let outlines = &overview.cells.get(cell_index)?.windows;
-        let hit = tags_grid::frame_window_at(frame, outlines, x as f32, y as f32)?;
-        overview.drag_source(cell_index, hit)
-    }
-
-    /// A press's full hit-test: the cell under the point and whether the
-    /// panel card contains it, resolved in one pass of the drawn geometry.
-    fn tags_overview_press_target(&self, x: f64, y: f64) -> Option<TagsOverviewPress> {
+    /// Resolve the panel, cell and wireframe under a press against a single
+    /// grid snapshot, including the lift applied to the selected cell.
+    fn tags_overview_press_target(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> Option<(TagsOverviewPress, Option<u64>)> {
         let overview = self.features.system_ui.tags_overview()?;
         let geometry = tags_grid::grid_geometry(
             self.system_ui_viewport().rect(),
@@ -759,9 +743,17 @@ impl Jwm {
             overview.cols,
         );
         let (x, y) = (x as f32, y as f32);
-        Some(plan_press(
-            tags_grid::cell_at(&geometry, Some(overview.selected), x, y),
-            tags_grid::panel_contains(&geometry, x, y),
+        let hit = tags_grid::cell_at(&geometry, Some(overview.selected), x, y);
+        let window = hit.and_then(|index| {
+            let cell = geometry.cells.get(index)?;
+            let (_, frame) = tags_grid::presented_cell(cell, index == overview.selected);
+            let outlines = &overview.cells.get(index)?.windows;
+            let outline = tags_grid::frame_window_at(frame, outlines, x, y)?;
+            overview.drag_source(index, outline)
+        });
+        Some((
+            plan_press(hit, tags_grid::panel_contains(&geometry, x, y)),
+            window,
         ))
     }
 
@@ -1049,8 +1041,17 @@ mod tests {
         let start =
             center(crate::backend::compositor_common::layout_strip::window_rect(frame, outline));
         let away = center(grid.cells[0].cell);
+        let empty = center(grid.cells[source - 1].cell);
         let back = center(grid.cells[source].cell);
 
+        assert_eq!(
+            jwm.tags_overview_press_target(start.0, start.1),
+            Some((TagsOverviewPress::Cell(source), Some(win.raw())))
+        );
+        assert_eq!(
+            jwm.tags_overview_press_target(empty.0, empty.1),
+            Some((TagsOverviewPress::Cell(source - 1), None))
+        );
         jwm.press_tags_overview(&mut backend, start.0, start.1);
         let pending = jwm.features.system_ui.tags_overview().unwrap().pending;
         assert_eq!(pending.map(|press| press.window), Some(Some(win.raw())));
