@@ -84,6 +84,12 @@ jobs:
           test -x "$broker"
           xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp -noreset' \
             bash tests/portal-smoke.sh "$PWD/target/debug/jwm-files" "$broker"
+      - name: Install the private terminal launch test dependencies
+        run: bash scripts/ci-install-deps.sh xterm xdg-terminal-exec
+      - name: Verify the final shell through a real desktop terminal
+        working-directory: crates/jwm_files
+        timeout-minutes: 3
+        run: bash tests/terminal-smoke.sh "$PWD/target/debug/jwm-files"
       - name: Install the headless Wayland reference compositor
         run: bash scripts/ci-install-deps.sh weston
       - name: Verify native Wayland mapping and navigation

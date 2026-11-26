@@ -227,6 +227,7 @@ pub(super) fn install(
     let reopen_label = "恢复关闭的标签页（Ctrl+Shift+T）";
     menu.append(Some(reopen_label), Some("win.reopen-tab"));
     menu.append(Some("在当前目录查找（Ctrl+F）"), Some("win.find-in-folder"));
+    menu.append(Some("在此处打开终端"), Some("win.folder-terminal"));
     menu.append(Some("目录对照栏（F3）"), Some("win.comparison-pane"));
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
     menu.append(Some("属性（Alt+Enter）"), Some("win.item-properties"));
