@@ -567,17 +567,22 @@ fn open_window(
     let selection = gtk::SingleSelection::new(Some(model.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
+    let row_drags = copy_ui::RowDrags::default();
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, object| {
-        if let Ok(item) = object.clone().downcast::<gtk::ListItem>() {
-            let label = gtk::Label::new(None);
-            label.set_xalign(0.0);
-            label.set_margin_start(8);
-            label.set_margin_end(8);
-            label.set_margin_top(5);
-            label.set_margin_bottom(5);
-            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            item.set_child(Some(&label));
+    factory.connect_setup({
+        let row_drags = row_drags.clone();
+        move |_, object| {
+            if let Ok(item) = object.clone().downcast::<gtk::ListItem>() {
+                let label = gtk::Label::new(None);
+                label.set_xalign(0.0);
+                label.set_margin_start(8);
+                label.set_margin_end(8);
+                label.set_margin_top(5);
+                label.set_margin_bottom(5);
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                row_drags.attach(&item, &label);
+                item.set_child(Some(&label));
+            }
         }
     });
     factory.connect_bind(|_, object| {
@@ -591,7 +596,7 @@ fn open_window(
         }
     });
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
-    let grid = grid::new(&selection);
+    let grid = grid::new(&selection, &row_drags);
     for view in [list.upcast_ref::<gtk::Widget>(), grid.upcast_ref()] {
         let enter = gtk::EventControllerKey::new();
         enter.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -696,6 +701,15 @@ fn open_window(
     copy_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     copy_status.set_visible(false);
     layout.append(&copy_status);
+    let drop_zone = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    drop_zone.set_height_request(56);
+    drop_zone.set_tooltip_text(Some("从同一 JWM Files 进程中的文件列表拖放一个普通文件"));
+    drop_zone.add_css_class("frame");
+    let drop_caption = gtk::Label::new(Some("拖放到当前目录（复制）"));
+    drop_caption.set_hexpand(true);
+    drop_caption.set_can_target(false);
+    drop_zone.append(&drop_caption);
+    layout.append(&drop_zone);
     window.set_child(Some(&layout));
     let (wake, mut notifications) = Wake::channel();
     let scan_wake = wake.clone();
@@ -723,6 +737,8 @@ fn open_window(
         reload_due: None,
         dialog_open: false,
     }));
+    row_drags.bind_browser(&state);
+    copy_ui::install_drop_zone(&drop_zone, &state, &copy_status);
     preview_ui::install(&window, &state, &selection, &status);
     trash_ui::install(&window);
     copy_ui::install(

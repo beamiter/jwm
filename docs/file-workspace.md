@@ -202,6 +202,16 @@ text-field copy/paste. At most one filesystem mutation runs per
 window. Use the menu to request cancellation before publication.
 The operation status remains visible while you browse elsewhere.
 
+### Drag to copy between windows
+
+Open the source and destination folders in two windows of the same JWM
+Files process. Drag one ordinary file from a list row or icon onto
+**拖放到当前目录（复制）** at the bottom of the destination window. The
+drop queues the same anchored, non-overwriting copy as Paste; the
+operation status reports completion or failure. The source is never
+removed. This is not an external file drag, clipboard change, move, or
+drop into a folder row.
+
 ### Measuring local provider latency
 
 Run this separately from CI acceptance, using a disposable filesystem with

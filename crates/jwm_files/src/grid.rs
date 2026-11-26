@@ -1,4 +1,4 @@
-use crate::row_model::RowPresentation;
+use crate::{copy_ui::RowDrags, row_model::RowPresentation};
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::glib;
@@ -13,24 +13,28 @@ fn icon(kind: FileKind) -> &'static str {
     }
 }
 
-pub(crate) fn new(selection: &gtk::SingleSelection) -> gtk::GridView {
+pub(crate) fn new(selection: &gtk::SingleSelection, row_drags: &RowDrags) -> gtk::GridView {
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let tile = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        tile.set_size_request(84, 70);
-        tile.set_margin_top(6);
-        tile.set_margin_bottom(6);
-        let image = gtk::Image::new();
-        image.set_pixel_size(34);
-        tile.append(&image);
-        let label = gtk::Label::new(None);
-        label.set_max_width_chars(16);
-        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        tile.append(&label);
-        item.set_child(Some(&tile));
+    factory.connect_setup({
+        let row_drags = row_drags.clone();
+        move |_, object| {
+            let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let tile = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            tile.set_size_request(84, 70);
+            tile.set_margin_top(6);
+            tile.set_margin_bottom(6);
+            let image = gtk::Image::new();
+            image.set_pixel_size(34);
+            tile.append(&image);
+            let label = gtk::Label::new(None);
+            label.set_max_width_chars(16);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            tile.append(&label);
+            row_drags.attach(item, &tile);
+            item.set_child(Some(&tile));
+        }
     });
     factory.connect_bind(|_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
