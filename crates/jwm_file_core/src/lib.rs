@@ -34,8 +34,8 @@ pub use scan_worker::{ScanId, ScanReply, ScanWorker};
 pub use trash_info::{HomeTrashInfo, TRASH_INFO_LIMIT, parse_home_trash_info};
 #[cfg(target_os = "linux")]
 pub use trash_snapshot::{
-    HOME_TRASH_INSPECT_LIMIT, HomeTrashEntry, HomeTrashSnapshot, RecoverCopyError, list_home_trash,
-    recover_home_trash_copy,
+    HOME_TRASH_INSPECT_LIMIT, HomeTrashCursor, HomeTrashEntry, HomeTrashSnapshot, RecoverCopyError,
+    list_home_trash, recover_home_trash_copy,
 };
 #[cfg(target_os = "linux")]
 pub use watch::{DirectoryChange, DirectoryWatch};

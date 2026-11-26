@@ -6,7 +6,7 @@ use crate::{
 };
 use rustix::{
     fd::{AsRawFd, OwnedFd},
-    fs::{self, AtFlags, Dir, FileType, Mode, OFlags},
+    fs::{self, AtFlags, Dir, DirEntry, FileType, Mode, OFlags},
     io::Errno,
 };
 use std::{
@@ -15,7 +15,7 @@ use std::{
     fs::File,
     io::{self, Read},
     os::unix::ffi::OsStrExt,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub const HOME_TRASH_INSPECT_LIMIT: usize = 4096;
@@ -141,63 +141,158 @@ fn open_home_trash(data_home: &Path) -> io::Result<Option<(OwnedFd, OwnedFd)>> {
     Ok(Some((files, info_dir)))
 }
 
+struct TrashDirectories {
+    files: OwnedFd,
+    info: OwnedFd,
+}
+
+fn directory_observation(directory: &OwnedFd) -> io::Result<(FileIdentity, [i128; 5])> {
+    let st = fs::fstat(directory)?;
+    Ok((
+        FileIdentity {
+            device: st.st_dev,
+            inode: st.st_ino,
+        },
+        content_observation(&st),
+    ))
+}
+
+/// An unfinished scan. Pages are bounded and are sorted only within their
+/// batch. Keep this object between worker requests; do not resume by skipping
+/// directory offsets in a new iterator.
+pub struct HomeTrashCursor {
+    data_home: PathBuf,
+    directories: TrashDirectories,
+    files_at_start: (FileIdentity, [i128; 5]),
+    info_at_start: (FileIdentity, [i128; 5]),
+    iterate: Dir,
+    lookahead: Option<DirEntry>,
+    valid: bool,
+}
+
+impl HomeTrashCursor {
+    pub fn open(data_home: &Path, cancel: &Cancellation) -> io::Result<Option<Self>> {
+        check(cancel)?;
+        let Some((files, info)) = open_home_trash(data_home)? else {
+            return Ok(None);
+        };
+        let files_at_start = directory_observation(&files)?;
+        let info_at_start = directory_observation(&info)?;
+        let iterate = Dir::read_from(&files)?;
+        Ok(Some(Self {
+            data_home: data_home.to_path_buf(),
+            directories: TrashDirectories { files, info },
+            files_at_start,
+            info_at_start,
+            iterate,
+            lookahead: None,
+            valid: true,
+        }))
+    }
+
+    fn check_dirs(&self) -> io::Result<()> {
+        let Some((files, info)) = open_home_trash(&self.data_home)? else {
+            return Err(io::Error::other("home Trash changed; refresh to continue"));
+        };
+        if directory_observation(&files)? != self.files_at_start
+            || directory_observation(&info)? != self.info_at_start
+            || directory_observation(&self.directories.files)? != self.files_at_start
+            || directory_observation(&self.directories.info)? != self.info_at_start
+        {
+            return Err(io::Error::other("home Trash changed; refresh to continue"));
+        }
+        Ok(())
+    }
+
+    fn next_item(&mut self, cancel: &Cancellation) -> io::Result<Option<DirEntry>> {
+        if let Some(item) = self.lookahead.take() {
+            return Ok(Some(item));
+        }
+        loop {
+            check(cancel)?;
+            let Some(item) = self.iterate.next().transpose()? else {
+                return Ok(None);
+            };
+            if !matches!(item.file_name().to_bytes(), b"." | b"..") {
+                return Ok(Some(item));
+            }
+        }
+    }
+
+    /// Once invalid or cancelled, discard the session and refresh instead
+    /// of presenting unverified continuation results to the user.
+    pub fn next_page(&mut self, cancel: &Cancellation) -> io::Result<HomeTrashSnapshot> {
+        if !self.valid {
+            return Err(io::Error::other(
+                "home Trash scan expired; refresh to continue",
+            ));
+        }
+        let result = self.page(cancel);
+        if result.is_err() {
+            self.valid = false;
+        }
+        result
+    }
+
+    fn page(&mut self, cancel: &Cancellation) -> io::Result<HomeTrashSnapshot> {
+        check(cancel)?;
+        self.check_dirs()?;
+        let mut snapshot = HomeTrashSnapshot::default();
+        let mut inspected = 0;
+        while let Some(item) = self.next_item(cancel)? {
+            if inspected == HOME_TRASH_INSPECT_LIMIT {
+                self.lookahead = Some(item);
+                snapshot.incomplete = true;
+                break;
+            }
+            inspected += 1;
+            let name = OsStr::from_bytes(item.file_name().to_bytes());
+            let observed =
+                match fs::statat(&self.directories.files, name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(observed) => observed,
+                    Err(_) => {
+                        snapshot.unreadable_entries += 1;
+                        continue;
+                    }
+                };
+            let kind = match FileType::from_raw_mode(observed.st_mode) {
+                FileType::Directory => FileKind::Directory,
+                FileType::RegularFile => FileKind::Regular,
+                FileType::Symlink => FileKind::Symlink,
+                _ => FileKind::Other,
+            };
+            let info = read_info(&self.directories.info, name, &self.data_home);
+            snapshot.entries.push(HomeTrashEntry {
+                name: name.to_owned(),
+                file: FileIdentity {
+                    device: observed.st_dev,
+                    inode: observed.st_ino,
+                },
+                kind,
+                info,
+                version: content_observation(&observed),
+            });
+        }
+        let date = |row: &HomeTrashEntry| {
+            row.info
+                .as_ref()
+                .map_or("", |info| info.deletion_date.as_str())
+                .to_owned()
+        };
+        snapshot
+            .entries
+            .sort_by_cached_key(|row| (std::cmp::Reverse(date(row)), row.name.clone()));
+        check(cancel)?;
+        self.check_dirs()?;
+        Ok(snapshot)
+    }
+}
+
 pub fn list_home_trash(data_home: &Path, cancel: &Cancellation) -> io::Result<HomeTrashSnapshot> {
-    check(cancel)?;
-    let Some((files, info_dir)) = open_home_trash(data_home)? else {
+    let Some(mut cursor) = HomeTrashCursor::open(data_home, cancel)? else {
         return Ok(HomeTrashSnapshot::default());
     };
-    let iterate = Dir::read_from(&files)?;
-    let mut snapshot = HomeTrashSnapshot::default();
-    let mut inspected = 0;
-    for item in iterate {
-        check(cancel)?;
-        let item = item?;
-        let raw = item.file_name().to_bytes();
-        if raw == b"." || raw == b".." {
-            continue;
-        }
-        if inspected == HOME_TRASH_INSPECT_LIMIT {
-            snapshot.incomplete = true;
-            break;
-        }
-        inspected += 1;
-        let name = OsStr::from_bytes(raw);
-        let observed = match fs::statat(&files, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(observed) => observed,
-            Err(_) => {
-                snapshot.unreadable_entries += 1;
-                continue;
-            }
-        };
-        let kind = match FileType::from_raw_mode(observed.st_mode) {
-            FileType::Directory => FileKind::Directory,
-            FileType::RegularFile => FileKind::Regular,
-            FileType::Symlink => FileKind::Symlink,
-            _ => FileKind::Other,
-        };
-        let info = read_info(&info_dir, name, data_home);
-        snapshot.entries.push(HomeTrashEntry {
-            name: name.to_owned(),
-            file: FileIdentity {
-                device: observed.st_dev,
-                inode: observed.st_ino,
-            },
-            kind,
-            info,
-            version: content_observation(&observed),
-        });
-    }
-    let date = |row: &HomeTrashEntry| {
-        row.info
-            .as_ref()
-            .map_or("", |info| info.deletion_date.as_str())
-            .to_owned()
-    };
-    snapshot
-        .entries
-        .sort_by_cached_key(|row| (std::cmp::Reverse(date(row)), row.name.clone()));
-    check(cancel)?;
-    Ok(snapshot)
+    cursor.next_page(cancel)
 }
 
 #[derive(Debug)]

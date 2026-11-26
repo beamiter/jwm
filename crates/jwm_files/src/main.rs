@@ -1859,7 +1859,7 @@ mod wayland_acceptance {
         until(|| model.n_items() == 3, "home Trash snapshot published");
         for (i, slot) in ["slot-A", "slot-B"].into_iter().enumerate() {
             let actual = model.string(i as u32).unwrap();
-            assert!(actual.contains("note%"));
+            assert!(actual.contains(r"note%\x80.txt"));
             assert!(actual.contains("2026-11-26T12:26:00"));
             assert!(actual.ends_with(slot));
         }
@@ -1896,7 +1896,9 @@ mod wayland_acceptance {
                 .unwrap();
             assert!(descendants(dialog.upcast_ref()).iter().any(|widget| {
                 widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
-                    label.text().contains("项目：slot-B") && label.text().contains("保留回收站原件")
+                    label.text().contains("项目：slot-B")
+                        && label.text().contains(r"note%\x80.txt")
+                        && label.text().contains("保留回收站原件")
                 })
             }));
             dialog.response(response);
@@ -1929,6 +1931,66 @@ mod wayland_acceptance {
         println!(
             "GTK4 Wayland Trash: selected the exact revision and kept both entries on recovery"
         );
+
+        let limit = jwm_file_core::HOME_TRASH_INSPECT_LIMIT;
+        for index in 3..=limit {
+            fs::File::create_new(trash.join("files").join(format!("extra-{index:05}"))).unwrap();
+        }
+        let mut scan = jwm_file_core::HomeTrashCursor::open(
+            &glib::user_data_dir(),
+            &jwm_file_core::Cancellation::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let first = scan
+            .next_page(&jwm_file_core::Cancellation::default())
+            .unwrap();
+        assert!(first.incomplete);
+        let last = scan
+            .next_page(&jwm_file_core::Cancellation::default())
+            .unwrap();
+        assert_eq!(last.entries.len(), 1);
+        let omitted = &last.entries[0].name;
+        let mut info_name = omitted.clone();
+        info_name.push(".trashinfo");
+        fs::write(
+            trash.join("info").join(info_name),
+            b"[Trash Info]\nPath=tests/only-newest.txt\nDeletionDate=2026-11-26T13:30:00",
+        )
+        .unwrap();
+        let button = |label: &str| {
+            descendants(panel.upcast_ref())
+                .into_iter()
+                .find_map(|widget| {
+                    let button = widget.downcast::<gtk::Button>().ok()?;
+                    (button.label().as_deref() == Some(label)).then_some(button)
+                })
+                .unwrap()
+        };
+        let next_page = button("下一批");
+        button("刷新").emit_clicked();
+        until(
+            || model.n_items() as usize == limit && next_page.is_sensitive(),
+            "bounded first Trash page",
+        );
+        assert_eq!(trash_selection.selected(), gtk::INVALID_LIST_POSITION);
+        assert!(
+            (0..model.n_items()).all(|i| !model.string(i).unwrap().contains("only-newest.txt"))
+        );
+        next_page.emit_clicked();
+        until(
+            || {
+                model.n_items() == 1
+                    && model
+                        .string(0)
+                        .unwrap_or_default()
+                        .contains("only-newest.txt")
+            },
+            "newest item outside the first Trash page",
+        );
+        assert!(!next_page.is_sensitive());
+        assert_eq!(trash_selection.selected(), gtk::INVALID_LIST_POSITION);
+        println!("GTK4 Wayland Trash pages: next page reached the exact omitted newest entry");
         panel.close();
         window.close();
     }

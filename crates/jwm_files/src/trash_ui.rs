@@ -2,11 +2,14 @@ use futures_channel::oneshot;
 use gtk::{gio, glib, prelude::*};
 use gtk4 as gtk;
 use jwm_file_core::{
-    Cancellation, CopyError, FileKind, HomeTrashEntry, HomeTrashSnapshot, RecoverCopyError,
-    list_home_trash, recover_home_trash_copy,
+    Cancellation, CopyError, FileKind, HomeTrashCursor, HomeTrashEntry, HomeTrashSnapshot,
+    RecoverCopyError, recover_home_trash_copy,
 };
 use std::{
     cell::{Cell, RefCell},
+    ffi::OsStr,
+    fmt::Write as _,
+    os::unix::ffi::OsStrExt,
     path::PathBuf,
     rc::Rc,
     sync::Arc,
@@ -15,19 +18,40 @@ use std::{
 
 const TITLE: &str = "JWM Files · Home Trash";
 
+/// Keep ordinary Unicode readable, but distinguish raw Unix bytes from a
+/// literal replacement character or a filename containing escape notation.
+fn display_path(path: &OsStr) -> String {
+    let mut display = String::new();
+    for chunk in path.as_bytes().utf8_chunks() {
+        for ch in chunk.valid().chars() {
+            display.extend(ch.escape_debug());
+        }
+        for byte in chunk.invalid() {
+            let _ = write!(display, "\\x{byte:02X}");
+        }
+    }
+    display
+}
+
 struct Rows {
     labels: Vec<String>,
     entries: Vec<Arc<HomeTrashEntry>>,
     status: String,
 }
 
-fn present_rows(snapshot: HomeTrashSnapshot) -> Rows {
+fn present_rows(snapshot: HomeTrashSnapshot, page: usize) -> Rows {
     let missing = snapshot
         .entries
         .iter()
         .filter(|row| row.info.is_none())
         .count();
-    let mut status = format!("主目录回收站：{} 项", snapshot.entries.len());
+    let mut status = format!(
+        "主目录回收站 · 第 {page} 批 · {} 项",
+        snapshot.entries.len()
+    );
+    if page > 1 || snapshot.incomplete {
+        status.push_str(" · 仅按本批删除时间排序");
+    }
     if missing > 0 {
         status.push_str(&format!(" · {missing} 项原路径未知"));
     }
@@ -35,13 +59,13 @@ fn present_rows(snapshot: HomeTrashSnapshot) -> Rows {
         status.push_str(&format!(" · {} 项读取失败", snapshot.unreadable_entries));
     }
     if snapshot.incomplete {
-        status.push_str(" · 已达到读取上限，列表不完整");
+        status.push_str(" · 还有未读取的项目");
     }
     let labels = snapshot
         .entries
         .iter()
         .map(|row| {
-            let storage = row.name.to_string_lossy().escape_debug().to_string();
+            let storage = display_path(&row.name);
             let kind = match row.kind {
                 FileKind::Directory => "文件夹",
                 FileKind::Regular => "文件",
@@ -49,7 +73,7 @@ fn present_rows(snapshot: HomeTrashSnapshot) -> Rows {
                 FileKind::Other => "其他",
             };
             if let Some(info) = &row.info {
-                let original = info.original.to_string_lossy().escape_debug().to_string();
+                let original = display_path(info.original.as_os_str());
                 format!("{} · {original} · {kind} · {storage}", info.deletion_date)
             } else {
                 format!("原路径未知 · {kind} · {storage}")
@@ -67,6 +91,9 @@ struct View {
     rows: glib::WeakRef<gtk::StringList>,
     selection: glib::WeakRef<gtk::SingleSelection>,
     recover: glib::WeakRef<gtk::Button>,
+    next: glib::WeakRef<gtk::Button>,
+    cursor: RefCell<Option<HomeTrashCursor>>,
+    page: Cell<usize>,
     status: glib::WeakRef<gtk::Label>,
     entries: RefCell<Vec<Arc<HomeTrashEntry>>>,
     confirming: Cell<bool>,
@@ -85,11 +112,13 @@ impl View {
             .cloned()
     }
 
-    fn update_recover(&self) {
+    fn update_controls(&self) {
+        let available = !self.busy.get() && !self.confirming.get();
         if let Some(button) = self.recover.upgrade() {
-            button.set_sensitive(
-                !self.busy.get() && !self.confirming.get() && self.selected().is_some(),
-            );
+            button.set_sensitive(available && self.selected().is_some());
+        }
+        if let Some(button) = self.next.upgrade() {
+            button.set_sensitive(available && self.cursor.borrow().is_some());
         }
     }
 
@@ -103,10 +132,10 @@ impl View {
         let Some(info) = &entry.info else {
             return;
         };
-        let original = info.original.to_string_lossy().escape_debug().to_string();
-        let slot = entry.name.to_string_lossy().escape_debug().to_string();
+        let original = display_path(info.original.as_os_str());
+        let slot = display_path(&entry.name);
         self.confirming.set(true);
-        self.update_recover();
+        self.update_controls();
         let dialog = gtk::Dialog::builder()
             .title("JWM Files · Recover Copy")
             .transient_for(panel)
@@ -130,7 +159,7 @@ impl View {
             let view = self.clone();
             move |_| {
                 view.confirming.set(false);
-                view.update_recover();
+                view.update_controls();
             }
         });
         dialog.connect_response({
@@ -146,7 +175,7 @@ impl View {
                 {
                     view.recover_copy(entry.clone());
                 }
-                view.update_recover();
+                view.update_controls();
             }
         });
         dialog.present();
@@ -174,7 +203,7 @@ impl View {
         }
         self.busy.set(true);
         self.running.replace(Some(cancel));
-        self.update_recover();
+        self.update_controls();
         status.set_text("正在恢复副本…");
         let view = self.clone();
         glib::MainContext::default().spawn_local(async move {
@@ -187,7 +216,7 @@ impl View {
             {
                 return;
             }
-            view.update_recover();
+            view.update_controls();
             let Some(status) = view.status.upgrade() else {
                 return;
             };
@@ -202,7 +231,7 @@ impl View {
         });
     }
 
-    fn refresh(self: &Rc<Self>) {
+    fn read_page(self: &Rc<Self>, next: bool) {
         let Some(status) = self.status.upgrade() else {
             return;
         };
@@ -216,21 +245,46 @@ impl View {
             return;
         }
         let data_home = self.data_home.clone();
+        let previous = self.cursor.take();
+        if next && previous.is_none() {
+            return;
+        }
+        let page = if next {
+            self.page.get().saturating_add(1)
+        } else {
+            1
+        };
         let cancel = Cancellation::default();
         let worker_cancel = cancel.clone();
         let (send, receive) = oneshot::channel();
         if let Err(error) = thread::Builder::new()
             .name("jwm-files-home-trash".into())
             .spawn(move || {
-                let _ = send.send(list_home_trash(&data_home, &worker_cancel).map(present_rows));
+                let result = (|| {
+                    let mut cursor = if next {
+                        previous
+                    } else {
+                        HomeTrashCursor::open(&data_home, &worker_cancel)?
+                    };
+                    let snapshot = cursor.as_mut().map_or_else(
+                        || Ok(HomeTrashSnapshot::default()),
+                        |scan| scan.next_page(&worker_cancel),
+                    )?;
+                    if !snapshot.incomplete {
+                        cursor = None;
+                    }
+                    Ok::<_, std::io::Error>((present_rows(snapshot, page), cursor))
+                })();
+                let _ = send.send(result);
             })
         {
             status.set_text(&format!("无法启动回收站读取：{error}"));
+            self.update_controls();
             return;
         }
         self.busy.set(true);
         self.running.replace(Some(cancel));
-        self.update_recover();
+        self.update_controls();
         status.set_text("正在读取主目录回收站…");
         let view = self.clone();
         glib::MainContext::default().spawn_local(async move {
@@ -247,7 +301,9 @@ impl View {
                 return;
             };
             match result {
-                Ok(Ok(result)) => {
+                Ok(Ok((result, cursor))) => {
+                    view.cursor.replace(cursor);
+                    view.page.set(page);
                     if let Some(selection) = view.selection.upgrade() {
                         selection.set_selected(gtk::INVALID_LIST_POSITION);
                     }
@@ -256,10 +312,10 @@ impl View {
                     rows.splice(0, rows.n_items(), &refs);
                     status.set_text(&result.status);
                 }
-                Ok(Err(error)) => status.set_text(&format!("无法读取主目录回收站：{error}")),
+                Ok(Err(error)) => status.set_text(&format!("无法继续读取，请刷新：{error}")),
                 Err(_) => status.set_text("回收站读取未返回结果。"),
             }
-            view.update_recover();
+            view.update_controls();
         });
     }
 }
@@ -298,7 +354,11 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         let recover = gtk::Button::with_label("恢复副本");
         recover.set_sensitive(false);
         toolbar.append(&recover);
+        let next = gtk::Button::with_label("下一批");
+        next.set_sensitive(false);
+        toolbar.append(&next);
         let refresh = gtk::Button::with_label("刷新");
+        refresh.set_tooltip_text(Some("从第一批重新读取"));
         toolbar.append(&refresh);
         layout.append(&toolbar);
 
@@ -345,6 +405,9 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
             rows: rows.downgrade(),
             selection: model.downgrade(),
             recover: recover.downgrade(),
+            next: next.downgrade(),
+            cursor: RefCell::new(None),
+            page: Cell::new(0),
             status: status.downgrade(),
             entries: RefCell::new(Vec::new()),
             confirming: Cell::new(false),
@@ -354,7 +417,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         });
         model.connect_selected_notify({
             let view = view.clone();
-            move |_| view.update_recover()
+            move |_| view.update_controls()
         });
         recover.connect_clicked({
             let (view, panel) = (view.clone(), window.downgrade());
@@ -366,7 +429,11 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         });
         refresh.connect_clicked({
             let view = view.clone();
-            move |_| view.refresh()
+            move |_| view.read_page(false)
+        });
+        next.connect_clicked({
+            let view = view.clone();
+            move |_| view.read_page(true)
         });
         window.connect_close_request({
             let view = view.clone();
@@ -387,7 +454,23 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         });
         popup.set(Some(&window));
         window.present();
-        view.refresh();
+        view.read_page(false);
     });
     parent.add_action(&action);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trash_display_distinguishes_raw_bytes_replacement_and_literal_escape() {
+        let show = |bytes| display_path(OsStr::from_bytes(bytes));
+        assert_eq!(show(b"test\x80"), r"test\x80");
+        assert_eq!(show(b"test\x81"), r"test\x81");
+        assert_eq!(show("test�".as_bytes()), "test�");
+        assert_eq!(show(br"test\x80"), r"test\\x80");
+        assert_eq!(show("测试\n\u{202E}txt".as_bytes()), r"测试\n\u{202e}txt");
+        assert_eq!(show(b"\xf0\x9fASCII\xff"), r"\xF0\x9FASCII\xFF");
+    }
 }

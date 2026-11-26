@@ -206,3 +206,68 @@ fn recovery_refuses_changed_slot_or_symlinked_destination_parent() {
     ));
     assert!(!data.0.join("outside/file").exists());
 }
+
+#[test]
+fn continuation_reaches_exact_unseen_entry_and_does_not_claim_global_sort() {
+    use jwm_file_core::{HOME_TRASH_INSPECT_LIMIT, HomeTrashCursor};
+    use std::collections::HashSet;
+    fn needs_send<T: Send>() {}
+    needs_send::<HomeTrashCursor>();
+
+    let data = Fixture::new();
+    data.populate();
+    let names: Vec<_> = (0..=HOME_TRASH_INSPECT_LIMIT)
+        .map(|n| format!("slot-{n:05}"))
+        .collect();
+    for name in &names {
+        fs::File::create_new(data.0.join("Trash/files").join(name)).unwrap();
+    }
+    let cancel = Cancellation::default();
+    let sample = list_home_trash(&data.0, &cancel).unwrap();
+    let seen: HashSet<_> = sample
+        .entries
+        .iter()
+        .map(|item| item.name.to_str().unwrap())
+        .collect();
+    let omitted = names
+        .iter()
+        .find(|name| !seen.contains(name.as_str()))
+        .unwrap();
+    // Pick the omitted record after observing this filesystem's order.
+    fs::write(
+        data.0
+            .join("Trash/info")
+            .join(format!("{omitted}.trashinfo")),
+        b"[Trash Info]\nPath=/chosen-latest\nDeletionDate=2026-11-26T13:26:36",
+    )
+    .unwrap();
+    let mut cursor = HomeTrashCursor::open(&data.0, &cancel).unwrap().unwrap();
+    let page = cursor.next_page(&cancel).unwrap();
+    assert!(page.incomplete);
+    assert!(page.entries.iter().all(|e| e.name != omitted.as_str()));
+    let last = cursor.next_page(&cancel).unwrap();
+    assert!(!last.incomplete);
+    assert_eq!(last.entries.len(), 1);
+    assert_eq!(last.entries[0].name, omitted.as_str());
+    assert_eq!(
+        last.entries[0].info.as_ref().unwrap().original.to_str(),
+        Some("/chosen-latest")
+    );
+}
+
+#[test]
+fn changed_or_cancelled_trash_walk_cannot_be_resumed() {
+    use jwm_file_core::HomeTrashCursor;
+    let data = Fixture::new();
+    data.populate();
+    let cancel = Cancellation::default();
+    let mut cursor = HomeTrashCursor::open(&data.0, &cancel).unwrap().unwrap();
+    fs::write(data.0.join("Trash/files/new"), b"other").unwrap();
+    assert!(cursor.next_page(&cancel).is_err());
+    assert!(cursor.next_page(&cancel).is_err());
+    let mut cursor = HomeTrashCursor::open(&data.0, &cancel).unwrap().unwrap();
+    let cancelled = Cancellation::default();
+    cancelled.cancel();
+    assert!(cursor.next_page(&cancelled).is_err());
+    assert!(cursor.next_page(&cancel).is_err());
+}
