@@ -413,6 +413,7 @@ dependencies = [
 name = "jwm_files"
 version = "0.1.0"
 dependencies = [
+ "futures-channel",
  "gtk4",
  "jwm_file_core",
 ]

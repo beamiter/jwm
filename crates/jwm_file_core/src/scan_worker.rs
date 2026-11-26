@@ -47,11 +47,20 @@ pub struct ScanWorker {
 
 impl ScanWorker {
     pub fn start(provider: impl FileProvider + 'static) -> io::Result<Self> {
+        Self::start_notifying(provider, || {})
+    }
+
+    /// Call a nonblocking notification hook after publishing a new reply or
+    /// watch notice. The hook runs off the consumer thread, outside the lock.
+    pub fn start_notifying(
+        provider: impl FileProvider + 'static,
+        notify: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
         let inner = Arc::clone(&shared);
         thread::Builder::new()
             .name("jwm-file-scan".into())
-            .spawn(move || run(&inner, provider))?;
+            .spawn(move || run(&inner, provider, notify))?;
         Ok(Self { shared })
     }
 
@@ -111,7 +120,7 @@ impl Drop for ScanWorker {
     }
 }
 
-fn run(shared: &(Mutex<State>, Condvar), provider: impl FileProvider) {
+fn run(shared: &(Mutex<State>, Condvar), provider: impl FileProvider, notify: impl Fn()) {
     let (mailbox, wake) = shared;
     #[cfg(target_os = "linux")]
     let mut watch = None::<(ScanId, DirectoryWatch)>;
@@ -153,6 +162,8 @@ fn run(shared: &(Mutex<State>, Condvar), provider: impl FileProvider) {
                         .is_some_and(|n| n.change == DirectoryChange::Invalidated)
                     {
                         state.notice = Some(WatchNotice { id: *id, change });
+                        drop(state);
+                        notify();
                     }
                     if change == DirectoryChange::Invalidated {
                         watch = None;
@@ -177,6 +188,8 @@ fn run(shared: &(Mutex<State>, Condvar), provider: impl FileProvider) {
                 id: request.id,
                 result,
             });
+            drop(state);
+            notify();
         }
     }
 }
@@ -218,6 +231,31 @@ mod tests {
                 local_watch: None,
             })
         }
+    }
+
+    #[test]
+    fn ready_hook_follows_reply_publication_and_ignores_superseded_scans() {
+        let (started, watching) = mpsc::channel();
+        let (release, unblock_first) = mpsc::channel();
+        let (signal, readable) = mpsc::channel();
+        let worker = ScanWorker::start_notifying(
+            Controlled {
+                started,
+                unblock_first: Mutex::new(unblock_first),
+            },
+            move || {
+                let _ = signal.send(());
+            },
+        )
+        .unwrap();
+        worker.submit(Location::Local("first".into()), ListOptions::default());
+        watching.recv_timeout(Duration::from_secs(3)).unwrap();
+        let id = worker.submit(Location::Local("second".into()), ListOptions::default());
+        assert!(readable.try_recv().is_err());
+        release.send(()).unwrap();
+        readable.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(worker.take_reply().unwrap().id, id);
+        assert!(readable.try_recv().is_err());
     }
 
     #[test]

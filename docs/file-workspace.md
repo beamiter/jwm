@@ -94,9 +94,11 @@ access to a directory.
 
 Linux watches only the displayed local directory, non-recursively. The scan
 worker coalesces notifications and rescans after a short delay; GTK does no
-directory I/O. A same-directory refresh restores the selected item only if
-its path and physical identity still match; deletion and replacement leave
-selection empty. Moving or unmounting the current directory invalidates old
+directory I/O. The main browser waits for a bounded wake from its workers
+instead of polling at 16 ms, and uses a one-shot timer to debounce refresh.
+The separate watcher and tree workers keep their existing behavior. A
+same-directory refresh restores the selected item only if its path and
+physical identity still match; deletion and replacement leave selection empty. Moving or unmounting the current directory invalidates old
 actions until the directory is reopened. Manual refresh is still available
 when a filesystem cannot supply notifications.
 

@@ -1,4 +1,4 @@
-use super::{MutationWork, Shared};
+use super::{MutationWork, Shared, SignalOnDrop};
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
@@ -111,9 +111,12 @@ fn paste(state: &Shared, status: &gtk::Label) {
         path.to_string_lossy().escape_debug()
     );
     let (send, reply) = mpsc::sync_channel(1);
+    let wake = browser.wake.clone();
     match thread::Builder::new()
         .name("jwm-files-copy".into())
         .spawn(move || {
+            let _notify = SignalOnDrop(wake);
+            let send = send;
             let result = target
                 .copy_regular_no_replace(
                     CopySource {

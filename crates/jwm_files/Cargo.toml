@@ -13,5 +13,6 @@ name = "jwm-files"
 path = "src/main.rs"
 
 [dependencies]
+futures-channel = "=0.3.34"
 gtk4 = "=0.11.4"
 jwm_file_core = { path = "../jwm_file_core" }

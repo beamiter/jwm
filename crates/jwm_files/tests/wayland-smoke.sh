@@ -43,3 +43,4 @@ printf 'GTK4 Wayland smoke: compositor configured a native surface and the clien
 grep -F 'GTK4 Wayland grid: list and icon modes kept the same selection' "$client_log"
 grep -F 'GTK4 Wayland grid: moving the active directory cleared stale selection' "$client_log"
 grep -F 'GTK4 Wayland preview: selected file text shown in the quick preview' "$client_log"
+grep -F 'GTK4 Wayland wake: cancelling a dialog delivered deferred invalidation' "$client_log"
