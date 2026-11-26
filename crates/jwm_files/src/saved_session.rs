@@ -34,8 +34,7 @@ fn validate_path(path: &Path) -> io::Result<&[u8]> {
 
 impl SavedTabs {
     pub(super) fn encode(&self) -> io::Result<Vec<u8>> {
-        if self.paths.is_empty() || self.paths.len() > MAX_TABS || self.active >= self.paths.len()
-        {
+        if self.paths.is_empty() || self.paths.len() > MAX_TABS || self.active >= self.paths.len() {
             return Err(invalid());
         }
         let mut output = MAGIC.to_vec();

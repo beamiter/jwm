@@ -57,7 +57,8 @@ impl Tabs {
     }
 
     pub(super) fn from_saved(saved: SavedTabs) -> Option<Self> {
-        if saved.paths.is_empty() || saved.paths.len() > LIMIT || saved.active >= saved.paths.len() {
+        if saved.paths.is_empty() || saved.paths.len() > LIMIT || saved.active >= saved.paths.len()
+        {
             return None;
         }
         let records: Vec<_> = saved

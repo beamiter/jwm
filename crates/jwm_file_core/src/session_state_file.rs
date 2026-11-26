@@ -20,7 +20,10 @@ pub const FILES_TAB_STATE_CAP: usize = 8 + 2 + 16 * (2 + 4096);
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 fn unsafe_state() -> io::Error {
-    io::Error::new(ErrorKind::PermissionDenied, "Files session state is not private")
+    io::Error::new(
+        ErrorKind::PermissionDenied,
+        "Files session state is not private",
+    )
 }
 
 fn owned_state_parent(dir: DirectoryHandle) -> io::Result<DirectoryHandle> {
@@ -121,7 +124,10 @@ pub fn read_files_tab_state(base: &DirectoryHandle) -> io::Result<Vec<u8>> {
         .take(FILES_TAB_STATE_CAP as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > FILES_TAB_STATE_CAP {
-        return Err(io::Error::new(ErrorKind::InvalidData, "Files session state is too large"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Files session state is too large",
+        ));
     }
     Ok(bytes)
 }
@@ -144,7 +150,10 @@ impl Drop for TempFile<'_> {
 /// durability is uncertain; callers should not say the former file survived.
 pub fn write_files_tab_state(base: &DirectoryHandle, bytes: &[u8]) -> io::Result<()> {
     if bytes.is_empty() || bytes.len() > FILES_TAB_STATE_CAP {
-        return Err(io::Error::new(ErrorKind::InvalidInput, "invalid Files session state size"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "invalid Files session state size",
+        ));
     }
     let dir = open_private(base, true)?;
     match validate_record(&dir) {
@@ -152,8 +161,15 @@ pub fn write_files_tab_state(base: &DirectoryHandle, bytes: &[u8]) -> io::Result
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let name = format!(".tabs-{}-{now}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = format!(
+        ".tabs-{}-{now}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
     let fd = fs::openat(
         &dir,
         name.as_str(),
@@ -191,8 +207,12 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!("jwm-file-session-{}-{stamp}", std::process::id()));
-            std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            let path = std::env::temp_dir()
+                .join(format!("jwm-file-session-{}-{stamp}", std::process::id()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
             Self(path)
         }
 
@@ -213,7 +233,12 @@ mod tests {
         assert!(open_files_state_root(Some(&root.0), None, false).is_err());
         assert!(!root.0.join(".local").exists());
         let pinned = open_files_state_root(Some(&root.0), None, true).unwrap();
-        assert_eq!(pinned.identity(), DirectoryHandle::open(&root.0.join(".local/state")).unwrap().identity());
+        assert_eq!(
+            pinned.identity(),
+            DirectoryHandle::open(&root.0.join(".local/state"))
+                .unwrap()
+                .identity()
+        );
         let configured = root.0.join("unexpected");
         assert!(open_files_state_root(Some(&root.0), Some(&configured), true).is_err());
         assert!(!configured.exists());
@@ -223,14 +248,23 @@ mod tests {
     fn does_not_create_state_on_read_and_replaces_only_a_private_file() {
         let root = Fixture::new();
         let base = root.base();
-        assert_eq!(read_files_tab_state(&base).unwrap_err().kind(), ErrorKind::NotFound);
+        assert_eq!(
+            read_files_tab_state(&base).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
         assert!(!root.0.join(DIRECTORY).exists());
         write_files_tab_state(&base, b"first contents").unwrap();
         let path = root.0.join(DIRECTORY).join(RECORD);
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         write_files_tab_state(&base, b"second").unwrap();
         assert_eq!(read_files_tab_state(&base).unwrap(), b"second");
-        assert_eq!(std::fs::read_dir(root.0.join(DIRECTORY)).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(root.0.join(DIRECTORY)).unwrap().count(),
+            1
+        );
         assert!(write_files_tab_state(&base, &vec![b'x'; FILES_TAB_STATE_CAP + 1]).is_err());
         assert_eq!(read_files_tab_state(&base).unwrap(), b"second");
     }
@@ -245,9 +279,22 @@ mod tests {
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
         let record = dir.join(RECORD);
         symlink(&sentinel, &record).unwrap();
-        assert_eq!(read_files_tab_state(&base).unwrap_err().kind(), ErrorKind::PermissionDenied);
-        assert_eq!(write_files_tab_state(&base, b"not allowed").unwrap_err().kind(), ErrorKind::PermissionDenied);
-        assert!(std::fs::symlink_metadata(record).unwrap().file_type().is_symlink());
+        assert_eq!(
+            read_files_tab_state(&base).unwrap_err().kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            write_files_tab_state(&base, b"not allowed")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert!(
+            std::fs::symlink_metadata(record)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read(sentinel).unwrap(), b"foreign");
     }
 
@@ -259,7 +306,15 @@ mod tests {
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
         let fd = open_private(&base, false).unwrap();
         fs::mknodat(&fd, RECORD, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
-        assert_eq!(read_files_tab_state(&base).unwrap_err().kind(), ErrorKind::PermissionDenied);
-        assert_eq!(write_files_tab_state(&base, b"not allowed").unwrap_err().kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            read_files_tab_state(&base).unwrap_err().kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            write_files_tab_state(&base, b"not allowed")
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
     }
 }

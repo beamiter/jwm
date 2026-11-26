@@ -100,7 +100,8 @@ pub(super) fn install(
                 let _keep_app_alive_during_save = save_hold;
                 let result = receive.await;
                 BUSY.with(|flag| flag.set(false));
-                let Some((window, status)) = weak_window.upgrade().zip(weak_status.upgrade()) else {
+                let Some((window, status)) = weak_window.upgrade().zip(weak_status.upgrade())
+                else {
                     return;
                 };
                 match result {
@@ -117,7 +118,9 @@ pub(super) fn install(
                             open_window_with_tabs(&app, tabs, &home, &special, &copy_buffer, None);
                         }
                     }
-                    Ok(Err(error)) if save => status.set_text(&format!("未确认保存标签页：{error}")),
+                    Ok(Err(error)) if save => {
+                        status.set_text(&format!("未确认保存标签页：{error}"))
+                    }
                     Ok(Err(error)) if error.kind() == io::ErrorKind::NotFound => {
                         status.set_text("没有可恢复的已保存标签页。");
                     }

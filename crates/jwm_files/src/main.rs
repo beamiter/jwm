@@ -564,7 +564,14 @@ fn open_window_with_reveal(
     copy_buffer: &copy_ui::CopyBuffer,
     reveal: Option<RevealRequest>,
 ) {
-    open_window_with_tabs(app, Tabs::new(initial.into()), home, special, copy_buffer, reveal);
+    open_window_with_tabs(
+        app,
+        Tabs::new(initial.into()),
+        home,
+        special,
+        copy_buffer,
+        reveal,
+    );
 }
 
 fn open_window_with_tabs(
@@ -2866,6 +2873,67 @@ mod wayland_acceptance {
         assert_eq!(source_selection.selected(), gtk::INVALID_LIST_POSITION);
         finder.emit_stop_search();
         println!("GTK4 Wayland find: exact selected row and stale snapshot rejection verified");
+
+        let unavailable = root.join("session-original");
+        let remaining = root.join("session-available");
+        fs::create_dir(&unavailable).unwrap();
+        fs::create_dir(&remaining).unwrap();
+        fs::write(remaining.join("still-available.txt"), b"visible").unwrap();
+        let encoded = saved_session::SavedTabs {
+            paths: vec![remaining.clone(), unavailable.clone()],
+            active: 1,
+        }
+        .encode()
+        .unwrap();
+        fs::rename(&unavailable, root.join("session-moved")).unwrap();
+        let restored_tabs = Tabs::from_saved(saved_session::SavedTabs::decode(&encoded).unwrap())
+            .expect("saved tabs decode");
+        let existing = app.windows();
+        open_window_with_tabs(
+            &app,
+            restored_tabs,
+            &root,
+            &[],
+            &copy_ui::CopyBuffer::default(),
+            None,
+        );
+        let restored = app
+            .windows()
+            .into_iter()
+            .find(|window| !existing.contains(window))
+            .expect("new restored Files window");
+        let restored_model = descendants(restored.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                let list = widget.downcast::<gtk::ListView>().ok()?;
+                let selection = list.model()?.downcast::<gtk::SingleSelection>().ok()?;
+                selection.model()?.downcast::<row_model::FileRowModel>().ok()
+            })
+            .expect("restored file pane");
+        let unavailable_title = format!("JWM Files · {}", unavailable.display());
+        let remaining_title = format!("JWM Files · {}", remaining.display());
+        let unavailable_view = || {
+            restored.title().as_deref() == Some(unavailable_title.as_str())
+                && restored_model.n_items() == 0
+                && descendants(restored.upcast_ref()).iter().any(|widget| {
+                    widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                        label.is_mapped() && label.text().starts_with("无法读取目录：")
+                    })
+                })
+        };
+        until(unavailable_view, "restored missing tab reports a visible error");
+        gtk::prelude::WidgetExt::activate_action(&restored, "win.previous-tab", None).unwrap();
+        until(
+            || {
+                restored.title().as_deref() == Some(remaining_title.as_str())
+                    && first_label(&restored_model).as_deref() == Some("still-available.txt")
+            },
+            "available sibling of a missing saved tab",
+        );
+        gtk::prelude::WidgetExt::activate_action(&restored, "win.next-tab", None).unwrap();
+        until(unavailable_view, "revisited missing tab clears its sibling rows");
+        restored.close();
+        println!("GTK4 Wayland session: missing tab remained with an error and no stale rows");
         window.close();
     }
 }
