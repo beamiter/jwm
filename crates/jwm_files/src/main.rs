@@ -1326,6 +1326,56 @@ mod wayland_acceptance {
         preview_window.close();
         println!("GTK4 Wayland preview: selected file text shown in the quick preview");
 
+        // An unchanged destination alone cannot distinguish a no-op or a
+        // still-running copy from an actual no-replace decision.
+        let conflict = root.join("conflict");
+        let target = root.join("copy-target");
+        fs::create_dir(&conflict).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(conflict.join("after.txt"), b"existing").unwrap();
+        let action = |name| {
+            gtk::prelude::WidgetExt::activate_action(&window, name, None).unwrap();
+        };
+        let navigate = |path: &Path| {
+            action("win.location");
+            address.set_text(path.to_str().unwrap());
+            address.emit_activate();
+            let title = format!("JWM Files · {}", path.display());
+            until(
+                || window.title().as_deref() == Some(title.as_str()),
+                "copy fixture directory",
+            );
+        };
+        let status_matches = |check: &dyn Fn(&str) -> bool| {
+            descendants(window.upcast_ref()).iter().any(|widget| {
+                widget
+                    .downcast_ref::<gtk::Label>()
+                    .is_some_and(|label| label.is_visible() && check(label.text().as_str()))
+            })
+        };
+        action("win.copy-file");
+        assert!(status_matches(&|text| text.starts_with("已选定复制：")));
+        navigate(&conflict);
+        action("win.paste-file");
+        until(
+            || status_matches(&|text| text == "目标已有同名项目，未覆盖。"),
+            "copy rejected a named conflict",
+        );
+        assert_eq!(fs::read(conflict.join("after.txt")).unwrap(), b"existing");
+        navigate(&target);
+        action("win.paste-file");
+        until(
+            || status_matches(&|text| text.starts_with("已复制：")),
+            "copy confirmed after conflict",
+        );
+        assert_eq!(fs::read(target.join("after.txt")).unwrap(), b"new");
+        assert_eq!(fs::read(next.join("after.txt")).unwrap(), b"new");
+        assert_eq!(fs::read(conflict.join("after.txt")).unwrap(), b"existing");
+        println!("GTK4 Wayland copy: delivered conflict status before a successful paste");
+        navigate(&next);
+        assert_eq!(first_label(&main_model).as_deref(), Some("after.txt"));
+        grid_selection.set_selected(0);
+
         // The scanner can publish while a mutation dialog is open. The
         // pending invalidation must survive until GTK handles Cancel.
         gtk::prelude::WidgetExt::activate_action(&window, "win.new-folder", None).unwrap();
