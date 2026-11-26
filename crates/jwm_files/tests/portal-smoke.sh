@@ -50,33 +50,58 @@ cleanup() {
     tail -n 60 "$root/portal.log" "$root/files.log" >&2 || true
   fi
   for pid in "$service" "$portal"; do
-    if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
   done
+  # Document portal is a package service on this private bus. Release only
+  # its disposable mount before the outer trap removes the fixture.
+  if mountpoint -q -- "$root/run/doc"; then
+    timeout 3s fusermount3 -u -- "$root/run/doc" ||
+      timeout 3s fusermount3 -uz -- "$root/run/doc" || code=1
+  fi
+  exit "$code"
 }
 trap cleanup EXIT
 mkdir -p "$root/start" "$root/portal hidden" "$root/portal regular" "$root/paste-hidden" "$root/paste-regular"
-"$broker" --verbose > "$root/portal.log" 2>&1 & portal=$!
-"$binary" --file-manager-service -- "$root/start" > "$root/files.log" 2>&1 & service=$!
 owner_pid() {
-  gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+  timeout 2s gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
     --method org.freedesktop.DBus.GetConnectionUnixProcessID "$1" 2>/dev/null || true
 }
-interfaces_ready() {
-  [[ $(owner_pid org.freedesktop.portal.Desktop) == "(uint32 $portal,)" &&
-     $(owner_pid org.freedesktop.FileManager1) == "(uint32 $service,)" ]] || return 1
-  local portal_version files_api
+broker_ready() {
+  [[ $(owner_pid org.freedesktop.portal.Desktop) == "(uint32 $portal,)" ]] || return 1
+  local portal_version
   portal_version=$(timeout 2s gdbus call --session --dest org.freedesktop.portal.Desktop \
     --object-path /org/freedesktop/portal/desktop --method org.freedesktop.DBus.Properties.Get \
     org.freedesktop.portal.OpenURI version 2>/dev/null) || return 1
+  [[ "$portal_version" =~ ^\(\<uint32\ [0-9]+\>\,\)$ ]]
+}
+files_ready() {
+  [[ $(owner_pid org.freedesktop.FileManager1) == "(uint32 $service,)" ]] || return 1
+  local files_api
   files_api=$(timeout 2s gdbus introspect --session --dest org.freedesktop.FileManager1 \
     --object-path /org/freedesktop/FileManager1 2>/dev/null) || return 1
-  [[ "$portal_version" =~ ^\(\<uint32\ [0-9]+\>\,\)$ && "$files_api" == *ShowItems* ]]
+  [[ "$files_api" == *ShowItems* ]]
 }
-for i in {1..60}; do
-  if interfaces_ready; then break; fi
-  sleep 0.1
-done
-interfaces_ready
+wait_ready() {
+  local predicate=$1 failure=$2 deadline=$((SECONDS + 12))
+  until "$predicate"; do
+    if (( SECONDS >= deadline )); then
+      echo "$failure" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+# GTK can autoactivate a competing broker before the manual broker obtains
+# its name. Wait for the chosen broker's exported interface before GTK starts.
+"$broker" --verbose > "$root/portal.log" 2>&1 & portal=$!
+wait_ready broker_ready 'the selected portal PID did not export OpenURI'
+"$binary" --file-manager-service -- "$root/start" > "$root/files.log" 2>&1 & service=$!
+wait_ready files_ready 'the selected JWM Files PID did not export FileManager1.ShowItems'
+broker_ready
 wait_window() {
   timeout 8s xdotool search --sync --onlyvisible --name "$1" | sed -n '1p'
 }
