@@ -6,8 +6,10 @@ use jwm_file_core::{
     Cancellation, CopyDestination, CopyError, CopySource, DirectoryHandle, FileIdentity, FileKind,
 };
 use std::{
+    cell::RefCell,
     ffi::OsString,
     path::PathBuf,
+    rc::Rc,
     sync::{Arc, mpsc},
     thread,
 };
@@ -20,13 +22,16 @@ pub(super) struct StashedCopy {
     identity: FileIdentity,
 }
 
+/// One file source shared by this application instance, never the text clipboard.
+pub(super) type CopyBuffer = Rc<RefCell<Option<StashedCopy>>>;
+
 pub(super) fn notice(label: &gtk::Label, text: &str) {
     label.set_text(text);
     label.set_visible(!text.is_empty());
 }
 
-fn stash(state: &Shared, selected: u32, status: &gtk::Label) {
-    let mut browser = state.borrow_mut();
+fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label) {
+    let browser = state.borrow();
     if browser.mutation.is_some() || browser.dialog_open {
         return;
     }
@@ -46,7 +51,7 @@ fn stash(state: &Shared, selected: u32, status: &gtk::Label) {
         });
     let Some(candidate) = candidate else {
         // Refuse to leave an earlier, hidden choice armed after a failed copy.
-        browser.copy_item = None;
+        buffer.replace(None);
         notice(status, "请选择一个可复制的普通文件。");
         return;
     };
@@ -54,10 +59,14 @@ fn stash(state: &Shared, selected: u32, status: &gtk::Label) {
         status,
         &format!(
             "已选定复制：{}",
-            candidate.name.to_string_lossy().escape_debug()
+            candidate
+                .path
+                .join(&candidate.name)
+                .to_string_lossy()
+                .escape_debug()
         ),
     );
-    browser.copy_item = Some(candidate);
+    buffer.replace(Some(candidate));
 }
 
 fn copy_error_message(error: CopyError) -> String {
@@ -83,13 +92,13 @@ fn copy_error_message(error: CopyError) -> String {
     }
 }
 
-fn paste(state: &Shared, status: &gtk::Label) {
+fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label) {
     let mut browser = state.borrow_mut();
     if browser.mutation.is_some() || browser.dialog_open {
         notice(status, "有文件操作正在进行，请稍候。");
         return;
     }
-    let Some(source) = browser.copy_item.clone() else {
+    let Some(source) = buffer.borrow().clone() else {
         notice(status, "请先选择要复制的普通文件。");
         return;
     };
@@ -107,7 +116,11 @@ fn paste(state: &Shared, status: &gtk::Label) {
     let on_worker = cancellation.clone();
     let label = format!(
         "{} → {}",
-        source.name.to_string_lossy().escape_debug(),
+        source
+            .path
+            .join(&source.name)
+            .to_string_lossy()
+            .escape_debug(),
         path.to_string_lossy().escape_debug()
     );
     let (send, reply) = mpsc::sync_channel(1);
@@ -153,10 +166,12 @@ pub(super) fn install(
     window: &gtk::ApplicationWindow,
     menu_button: &gtk::MenuButton,
     state: &Shared,
+    buffer: &CopyBuffer,
     selection: &gtk::SingleSelection,
     status: &gtk::Label,
 ) {
     let menu = gio::Menu::new();
+    menu.append(Some("新建窗口"), Some("win.new-window"));
     menu.append(Some("新建标签页（Ctrl+T）"), Some("win.new-tab"));
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
     menu.append(Some("主目录回收站"), Some("win.home-trash"));
@@ -167,10 +182,15 @@ pub(super) fn install(
         ("cancel-file-copy", "取消正在进行的复制"),
     ] {
         let action = gio::SimpleAction::new(name, None);
-        let (state, selection, status) = (state.clone(), selection.clone(), status.clone());
+        let (state, buffer, selection, status) = (
+            state.clone(),
+            buffer.clone(),
+            selection.clone(),
+            status.clone(),
+        );
         action.connect_activate(move |action, _| match action.name().as_str() {
-            "copy-file" => stash(&state, selection.selected(), &status),
-            "paste-file" => paste(&state, &status),
+            "copy-file" => stash(&state, &buffer, selection.selected(), &status),
+            "paste-file" => paste(&state, &buffer, &status),
             _ => {
                 if let Some((cancel, _)) = state
                     .borrow()

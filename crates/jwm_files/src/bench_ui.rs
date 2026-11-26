@@ -76,7 +76,13 @@ fn native_listing_benchmark() {
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.register(None::<&gio::Cancellable>).unwrap();
-    open_window(&app, &base, &fixture.0, &[]);
+    open_window(
+        &app,
+        &base,
+        &fixture.0,
+        &[],
+        &copy_ui::CopyBuffer::default(),
+    );
     let window = app.active_window().unwrap();
     until(|| window.is_mapped() && window.frame_clock().is_some());
     let clock = window.frame_clock().unwrap();
