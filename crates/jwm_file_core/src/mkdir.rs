@@ -82,13 +82,15 @@ impl DirectoryHandle {
     /// or recursively create missing parents. The process umask still applies.
     /// If the parent is renamed, the operation remains bound to this handle.
     pub fn create_directory(&self, name: &OsStr) -> Result<(), MakeDirectoryError> {
-        let path = Path::new(name);
-        if !matches!(path.components().next(), Some(Component::Normal(part)) if part == name)
-            || name.as_encoded_bytes().contains(&0)
-        {
+        if !single_name(name) {
             return Err(MakeDirectoryError::InvalidName);
         }
         fs::mkdirat(&self.fd, name, Mode::RWXU | Mode::RWXG | Mode::RWXO)
             .map_err(|e| MakeDirectoryError::Io(e.into()))
     }
+}
+
+pub(crate) fn single_name(name: &OsStr) -> bool {
+    matches!(Path::new(name).components().next(), Some(Component::Normal(part)) if part == name)
+        && !name.as_encoded_bytes().contains(&0)
 }
