@@ -287,6 +287,72 @@ fn tree_returns_native_directories_without_following_child_links() {
 }
 
 #[test]
+fn rename_undo_restores_native_name_without_replacing_a_conflict() {
+    use jwm_file_core::{FileIdentity, RenameError};
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    let fixture = Fixture::new();
+    let old = OsStr::from_bytes(b"source-\x80");
+    let renamed = OsStr::new("new name");
+    fs::write(fixture.0.join(old), b"original").unwrap();
+    let original = fs::metadata(fixture.0.join(old)).unwrap();
+    let id = FileIdentity {
+        device: original.dev(),
+        inode: original.ino(),
+    };
+    let folder = DirectoryHandle::open(&fixture.0).unwrap();
+    let receipt = folder
+        .rename_child_recorded(&fixture.0, old, id, renamed)
+        .unwrap()
+        .unwrap();
+    fs::write(fixture.0.join(old), b"conflict").unwrap();
+    assert!(matches!(
+        receipt.undo(&folder, &fixture.0),
+        Err(RenameError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists
+    ));
+    assert_eq!(fs::read(fixture.0.join(old)).unwrap(), b"conflict");
+    assert_eq!(fs::read(fixture.0.join(renamed)).unwrap(), b"original");
+    fs::remove_file(fixture.0.join(old)).unwrap();
+    receipt.undo(&folder, &fixture.0).unwrap();
+    assert_eq!(fs::read(fixture.0.join(old)).unwrap(), b"original");
+    assert!(!fixture.0.join(renamed).exists());
+}
+
+#[test]
+fn rename_undo_refuses_a_different_parent_or_replacement_inode() {
+    use jwm_file_core::{FileIdentity, RenameError};
+    use std::os::unix::fs::MetadataExt;
+    let fixture = Fixture::new();
+    let old = OsStr::new("previous");
+    let renamed = OsStr::new("current");
+    let other = fixture.0.join("other");
+    fs::create_dir(&other).unwrap();
+    fs::write(fixture.0.join(old), b"original").unwrap();
+    let original = fs::metadata(fixture.0.join(old)).unwrap();
+    let id = FileIdentity {
+        device: original.dev(),
+        inode: original.ino(),
+    };
+    let folder = DirectoryHandle::open(&fixture.0).unwrap();
+    let receipt = folder
+        .rename_child_recorded(&fixture.0, old, id, renamed)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        receipt.undo(&DirectoryHandle::open(&other).unwrap(), &other),
+        Err(RenameError::ParentChanged)
+    ));
+    fs::remove_file(fixture.0.join(renamed)).unwrap();
+    // The receipt still pins the original inode despite the removal.
+    fs::write(fixture.0.join(renamed), b"replacement").unwrap();
+    assert!(matches!(
+        receipt.undo(&folder, &fixture.0),
+        Err(RenameError::SourceChanged)
+    ));
+    assert!(!fixture.0.join(old).exists());
+    assert_eq!(fs::read(fixture.0.join(renamed)).unwrap(), b"replacement");
+}
+
+#[test]
 fn staged_copy_publishes_exact_bytes_without_replacing_destination() {
     use jwm_file_core::{CopyDestination, CopyError, CopySource};
     use std::os::unix::ffi::OsStrExt;

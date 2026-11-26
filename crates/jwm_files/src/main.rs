@@ -16,7 +16,7 @@ mod wake;
 use gtk::prelude::*;
 use gtk::{gio, glib};
 use gtk4 as gtk;
-use jwm_file_core::{DirectoryChange, DirectoryHandle, FileIdentity};
+use jwm_file_core::{DirectoryChange, DirectoryHandle, FileIdentity, RenameError, RenameReceipt};
 use jwm_file_core::{
     FileEntry, FileKind, ListOptions, LocalProvider, Location, ScanId, ScanWorker,
 };
@@ -42,6 +42,7 @@ struct Browser {
     entries: Rc<Vec<FileEntry>>,
     parent: Option<Arc<DirectoryHandle>>,
     mutation: Option<MutationWork>,
+    rename_undo: Option<Arc<RenameReceipt>>,
     copy_item: Option<copy_ui::StashedCopy>,
     activation: Option<Activation>,
     active_scan: Option<ScanId>,
@@ -204,8 +205,14 @@ struct MutationWork {
     parent: Arc<DirectoryHandle>,
     path: PathBuf,
     operation: &'static str,
-    reply: mpsc::Receiver<Result<(), String>>,
+    reply: mpsc::Receiver<Result<MutationOutcome, String>>,
     copy: Option<(jwm_file_core::Cancellation, String)>,
+}
+
+enum MutationOutcome {
+    FileOperation,
+    Rename(Option<RenameReceipt>),
+    RenameUndone,
 }
 
 #[derive(Clone)]
@@ -237,15 +244,76 @@ impl Mutation {
         parent: &DirectoryHandle,
         path: &Path,
         name: &std::ffi::OsStr,
-    ) -> Result<(), String> {
+    ) -> Result<MutationOutcome, String> {
         match self {
             Self::NewFolder => parent
                 .create_directory_at(path, name)
+                .map(|_| MutationOutcome::FileOperation)
                 .map_err(|e| e.to_string()),
             Self::Rename { source, identity } => parent
-                .rename_child_no_replace(path, source, *identity, name)
+                .rename_child_recorded(path, source, *identity, name)
+                .map(MutationOutcome::Rename)
                 .map_err(|e| e.to_string()),
         }
+    }
+}
+
+fn start_undo_rename(state: &Shared, status: &gtk::Label) {
+    let mut browser = state.borrow_mut();
+    if browser.mutation.is_some() || browser.dialog_open {
+        status.set_text("有文件操作正在进行，请稍候。");
+        return;
+    }
+    let Some(receipt) = browser.rename_undo.clone() else {
+        status.set_text("没有可撤销的重命名。");
+        return;
+    };
+    let Some(parent) = browser.parent.clone().filter(|_| browser.pending.is_none()) else {
+        status.set_text("请等目录加载完成再撤销。");
+        return;
+    };
+    if parent.identity() != receipt.directory_identity() {
+        status.set_text("请回到执行重命名的目录再撤销。");
+        return;
+    }
+
+    let path = browser.path().clone();
+    let (target, target_path) = (parent.clone(), path.clone());
+    let wake = browser.wake.clone();
+    let (send, reply) = mpsc::sync_channel(1);
+    let operation = "撤销重命名";
+    match thread::Builder::new()
+        .name("jwm-file-undo-rename".into())
+        .spawn(move || {
+            let _notify = SignalOnDrop(wake);
+            let send = send;
+            let result = receipt
+                .undo(&target, &target_path)
+                .map(|_| MutationOutcome::RenameUndone)
+                .map_err(|err| match err {
+                    RenameError::Io(ref inner)
+                        if inner.kind() == std::io::ErrorKind::AlreadyExists =>
+                    {
+                        "原名称已被占用，未覆盖任何文件。".to_string()
+                    }
+                    RenameError::ParentChanged | RenameError::SourceChanged => {
+                        "原目录或项目已变化，未执行。".to_string()
+                    }
+                    other => other.to_string(),
+                });
+            let _ = send.send(result);
+        }) {
+        Ok(_) => {
+            browser.mutation = Some(MutationWork {
+                parent,
+                path,
+                operation,
+                reply,
+                copy: None,
+            });
+            status.set_text("正在撤销重命名…");
+        }
+        Err(error) => status.set_text(&format!("无法启动{operation}：{error}")),
     }
 }
 
@@ -650,6 +718,7 @@ fn open_window(
         entries: Rc::default(),
         parent: None,
         mutation: None,
+        rename_undo: None,
         copy_item: None,
         activation: None,
         active_scan: None,
@@ -892,6 +961,13 @@ fn open_window(
     window.add_action(&rename);
     app.set_accels_for_action("win.rename", &["F2"]);
 
+    let undo = gio::SimpleAction::new("undo-rename", None);
+    undo.connect_activate({
+        let (state, status) = (state.clone(), status.clone());
+        move |_, _| start_undo_rename(&state, &status)
+    });
+    window.add_action(&undo);
+
     {
         let (state, tabs, breadcrumb, weak_window) = (
             state.clone(),
@@ -1074,6 +1150,11 @@ fn open_window(
         if let Some(result) = completed
             && let Some(work) = browser.mutation.take()
         {
+            let result = result.map(|outcome| match outcome {
+                MutationOutcome::Rename(receipt) => browser.rename_undo = receipt.map(Arc::new),
+                MutationOutcome::RenameUndone => browser.rename_undo = None,
+                MutationOutcome::FileOperation => {}
+            });
             let should_refresh = browser.pending.is_none()
                 && browser.path() == &work.path
                 && browser
@@ -1641,6 +1722,64 @@ mod wayland_acceptance {
             "GTK4 Wayland preview: an open preview followed the newly selected same-name file"
         );
         popup.close();
+
+        let undo_folder = root.join("undo-fixture");
+        fs::create_dir(&undo_folder).unwrap();
+        let original = undo_folder.join("initial.txt");
+        let renamed = undo_folder.join("renamed.txt");
+        fs::write(&original, b"exact original").unwrap();
+        navigate(&undo_folder);
+        at(&undo_folder, "initial.txt");
+        grid_selection.set_selected(0);
+        action("win.rename");
+        let dialog = gtk::Window::list_toplevels()
+            .into_iter()
+            .find_map(|pane| {
+                let pane = pane.downcast::<gtk::Dialog>().ok()?;
+                (pane.title().as_deref() == Some("JWM Files · Rename")
+                    && pane.transient_for().as_ref() == Some(&window))
+                .then_some(pane)
+            })
+            .unwrap();
+        let rename_input = descendants(dialog.upcast_ref())
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::Entry>().ok())
+            .unwrap();
+        rename_input.set_text("renamed.txt");
+        dialog.response(gtk::ResponseType::Accept);
+        at(&undo_folder, "renamed.txt");
+
+        navigate(&project_b);
+        at(&project_b, "README.md");
+        action("win.undo-rename");
+        assert!(status_matches(
+            &|text| text == "请回到执行重命名的目录再撤销。"
+        ));
+        assert_eq!(fs::read(&renamed).unwrap(), b"exact original");
+        navigate(&undo_folder);
+        at(&undo_folder, "renamed.txt");
+        fs::write(&original, b"keep conflict").unwrap();
+        action("win.undo-rename");
+        until(
+            || status_matches(&|text| text.contains("原名称已被占用，未覆盖任何文件。")),
+            "undo conflict result",
+        );
+        assert_eq!(fs::read(&original).unwrap(), b"keep conflict");
+        assert_eq!(fs::read(&renamed).unwrap(), b"exact original");
+        fs::remove_file(&original).unwrap();
+        action("win.undo-rename");
+        until(
+            || {
+                fs::read(&original).is_ok_and(|bytes| bytes == b"exact original")
+                    && !renamed.exists()
+                    && first_label(&main_model).as_deref() == Some("initial.txt")
+                    && status_matches(&|text| text == "1 项")
+            },
+            "successful undo and completed directory refresh",
+        );
+        action("win.undo-rename");
+        assert!(status_matches(&|text| text == "没有可撤销的重命名。"));
+        println!("GTK4 Wayland undo: directory-bound rename conflicts were non-destructive");
         window.close();
     }
 }

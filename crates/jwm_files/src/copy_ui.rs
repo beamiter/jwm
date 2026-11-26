@@ -1,4 +1,4 @@
-use super::{MutationWork, Shared, SignalOnDrop};
+use super::{MutationOutcome, MutationWork, Shared, SignalOnDrop};
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
@@ -131,7 +131,7 @@ fn paste(state: &Shared, status: &gtk::Label) {
                     },
                     &on_worker,
                 )
-                .map(|_| ())
+                .map(|_| MutationOutcome::FileOperation)
                 .map_err(copy_error_message);
             let _ = send.send(result);
         }) {
@@ -159,6 +159,7 @@ pub(super) fn install(
     let menu = gio::Menu::new();
     menu.append(Some("新建标签页（Ctrl+T）"), Some("win.new-tab"));
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
+    menu.append(Some("撤销重命名（Ctrl+Z）"), Some("win.undo-rename"));
     for (name, label) in [
         ("copy-file", "复制选中文件（Ctrl+C）"),
         ("paste-file", "粘贴到当前目录（Ctrl+V）"),
@@ -201,6 +202,7 @@ pub(super) fn install(
         let action = match key {
             Key::c => "win.copy-file",
             Key::v => "win.paste-file",
+            Key::z => "win.undo-rename",
             _ => return glib::Propagation::Proceed,
         };
         let Some(window) = weak_window.upgrade() else {

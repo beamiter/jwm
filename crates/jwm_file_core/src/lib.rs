@@ -22,7 +22,7 @@ pub use mkdir::{DirectoryHandle, MakeDirectoryError};
 #[cfg(target_os = "linux")]
 pub use preview::{PreviewError, TEXT_PREVIEW_LIMIT, TextPreview};
 #[cfg(target_os = "linux")]
-pub use rename::RenameError;
+pub use rename::{RenameError, RenameReceipt};
 #[cfg(target_os = "linux")]
 pub use scan_worker::WatchNotice;
 pub use scan_worker::{ScanId, ScanReply, ScanWorker};
