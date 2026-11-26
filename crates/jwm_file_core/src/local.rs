@@ -17,7 +17,17 @@ impl FileProvider for LocalProvider {
         cancellation: &Cancellation,
     ) -> Result<DirectorySnapshot, ListError> {
         cancellation.check()?;
-        list_local(location, options, cancellation)
+        list_local(location, options, cancellation, false)
+    }
+
+    fn list_with_watch(
+        &self,
+        location: &Location,
+        options: ListOptions,
+        cancellation: &Cancellation,
+    ) -> Result<DirectorySnapshot, ListError> {
+        cancellation.check()?;
+        list_local(location, options, cancellation, true)
     }
 }
 
@@ -26,6 +36,7 @@ fn list_local(
     location: &Location,
     options: ListOptions,
     cancellation: &Cancellation,
+    _watch: bool,
 ) -> Result<DirectorySnapshot, ListError> {
     let Location::Local(path) = location;
     let read_dir = fs::read_dir(path).map_err(|source| ListError::ReadDirectory {
@@ -104,8 +115,9 @@ fn list_local(
     location: &Location,
     options: ListOptions,
     cancellation: &Cancellation,
+    watch: bool,
 ) -> Result<DirectorySnapshot, ListError> {
-    use crate::DirectoryHandle;
+    use crate::{DirectoryHandle, DirectoryWatch};
     use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
@@ -117,6 +129,7 @@ fn list_local(
         source,
     };
     let parent = DirectoryHandle::open(path).map_err(open_error)?;
+    let local_watch = watch.then(|| DirectoryWatch::new(&parent).ok()).flatten();
     let fd = fs::openat(
         &parent.fd,
         ".",
@@ -171,6 +184,7 @@ fn list_local(
         entries,
         skipped_entries,
         local_parent: Some(Arc::new(parent)),
+        local_watch,
     })
 }
 

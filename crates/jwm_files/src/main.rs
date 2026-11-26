@@ -1,20 +1,21 @@
 mod navigation;
+mod selection;
 
 use gtk::prelude::*;
 use gtk::{gio, glib};
 use gtk4 as gtk;
-use jwm_file_core::{DirectoryHandle, FileIdentity};
+use jwm_file_core::{DirectoryChange, DirectoryHandle, FileIdentity};
 use jwm_file_core::{
     FileEntry, FileKind, ListOptions, LocalProvider, Location, ScanId, ScanWorker,
 };
 use navigation::{Destination, Navigation};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const APP_ID: &str = "org.jwm.Files";
 const ROW_BATCH: usize = 768;
@@ -30,6 +31,10 @@ struct Browser {
     parent: Option<Arc<DirectoryHandle>>,
     mutation: Option<MutationWork>,
     activation: Option<Activation>,
+    active_scan: Option<ScanId>,
+    automatic_scan: Option<ScanId>,
+    reload_at: Option<Instant>,
+    dialog_open: bool,
 }
 
 impl Browser {
@@ -93,6 +98,7 @@ fn activate_entry(
     let cancel = {
         let mut browser = state.borrow_mut();
         if browser.pending.is_some()
+            || browser.parent.is_none()
             || browser
                 .activation
                 .as_ref()
@@ -231,7 +237,7 @@ fn show_name_dialog(
 ) {
     let (path, parent) = {
         let mut browser = state.borrow_mut();
-        if browser.mutation.is_some() {
+        if browser.mutation.is_some() || browser.dialog_open {
             status.set_text("正在处理文件，请稍候。");
             return;
         }
@@ -242,6 +248,7 @@ fn show_name_dialog(
         if let Some(activation) = browser.activation.take() {
             activation.cancel.cancel();
         }
+        browser.dialog_open = true;
         (browser.path.clone(), parent)
     };
     let dialog = gtk::Dialog::builder()
@@ -285,6 +292,7 @@ fn show_name_dialog(
     dialog.connect_response(move |dialog, decision| {
         let value = OsString::from(name_for_response.text().as_str());
         dialog.destroy();
+        state.borrow_mut().dialog_open = false;
         if decision != gtk::ResponseType::Accept {
             return;
         }
@@ -345,6 +353,7 @@ fn request_scan(state: &Shared, target: Destination, address: &gtk::Entry, statu
             activation.cancel.cancel();
         }
         browser.pending = Some((id, target));
+        browser.automatic_scan = None;
     }
     address.set_text(&path.to_string_lossy());
     status.set_text("正在读取目录…");
@@ -440,6 +449,36 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         }
     });
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
+    let epoch = Rc::new(Cell::new(0u64));
+    {
+        let epoch = epoch.clone();
+        selection.connect_selected_notify(move |_| epoch.set(epoch.get().wrapping_add(1)));
+    }
+    let enter = gtk::EventControllerKey::new();
+    enter.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let selection = selection.clone();
+        let weak_list = list.downgrade();
+        enter.connect_key_pressed(move |_, key, _, modifiers| {
+            if !matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
+                || modifiers.intersects(
+                    gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::ALT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK,
+                )
+            {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(list) = weak_list.upgrade()
+                && selection.selected() != gtk::INVALID_LIST_POSITION
+            {
+                list.emit_by_name::<()>("activate", &[&selection.selected()]);
+            }
+            glib::Propagation::Stop
+        });
+    }
+    list.add_controller(enter);
+
     list.set_single_click_activate(false);
     let scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
@@ -480,6 +519,10 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         parent: None,
         mutation: None,
         activation: None,
+        active_scan: None,
+        automatic_scan: None,
+        reload_at: None,
+        dialog_open: false,
     }));
     {
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
@@ -610,6 +653,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     let rename = gtk::gio::SimpleAction::new("rename", None);
     let weak_window = window.downgrade();
     let (rename_state, rename_status) = (state.clone(), status.clone());
+    let rename_selection = selection.clone();
     rename.connect_activate(move |_, _| {
         let Some(window) = weak_window.upgrade() else {
             return;
@@ -621,7 +665,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
             }
             browser
                 .entries
-                .get(selection.selected() as usize)
+                .get(rename_selection.selected() as usize)
                 .and_then(|entry| Some((entry.name.clone(), entry.identity?)))
         };
         if let Some((source, identity)) = target {
@@ -648,6 +692,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         });
     }
     start_scan(&state, initial.into(), &address, &status);
+    let mut restore = None::<(usize, u64, ScanId)>;
     let weak_window = window.downgrade();
     glib::timeout_add_local(Duration::from_millis(16), move || {
         let Some(window) = weak_window.upgrade() else {
@@ -655,12 +700,29 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         };
         let mut browser = state.borrow_mut();
         let mut replaced = false;
+        let mut restore_row = None;
         if let Some(reply) = browser.worker.take_reply()
             && let Some((id, requested)) = browser.pending.take()
             && id == reply.id
         {
+            let automatic = browser.automatic_scan.take() == Some(id);
             match reply.result {
                 Ok(snapshot) => {
+                    if automatic
+                        && browser
+                            .parent
+                            .as_ref()
+                            .zip(snapshot.local_parent.as_ref())
+                            .is_some_and(|(old, new)| old.identity() == new.identity())
+                    {
+                        restore_row = browser
+                            .entries
+                            .get(selection.selected() as usize)
+                            .and_then(|old| selection::find_restorable_row(old, &snapshot.entries))
+                            .map(|row| (row, id));
+                    }
+                    browser.active_scan = Some(id);
+                    browser.reload_at = None;
                     let path = requested.path().to_path_buf();
                     if !browser.navigation.accept(requested) {
                         return glib::ControlFlow::Continue;
@@ -688,6 +750,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         if replaced {
             drop(browser);
             model.splice(0, model.n_items(), &[]);
+            restore = restore_row.map(|(row, id)| (row, epoch.get(), id));
             return glib::ControlFlow::Continue;
         }
         let completed = browser
@@ -717,6 +780,44 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
                 Err(error) => status.set_text(&format!("无法{}：{error}", work.operation)),
             }
         }
+        if browser.pending.is_none()
+            && browser.mutation.is_none()
+            && !browser.dialog_open
+            && browser.activation.is_none()
+            && browser.visible_count == browser.entries.len()
+        {
+            if let Some(notice) = browser.worker.take_directory_change()
+                && browser.active_scan == Some(notice.id)
+            {
+                match notice.change {
+                    DirectoryChange::Dirty => {
+                        browser
+                            .reload_at
+                            .get_or_insert_with(|| Instant::now() + Duration::from_millis(150));
+                    }
+                    DirectoryChange::Invalidated => {
+                        browser.reload_at = None;
+                        browser.parent = None;
+                        browser.active_scan = None;
+                        selection.set_selected(gtk::INVALID_LIST_POSITION);
+                        status.set_text("目录已移动或不可用，请刷新或重新打开。");
+                    }
+                    DirectoryChange::Unchanged => {}
+                }
+            }
+            if browser.reload_at.is_some_and(|when| Instant::now() >= when) {
+                browser.reload_at = None;
+                let path = browser.path.clone();
+                let id = browser.worker.submit(
+                    Location::Local(path.clone()),
+                    ListOptions {
+                        show_hidden: browser.show_hidden,
+                    },
+                );
+                browser.automatic_scan = Some(id);
+                browser.pending = Some((id, Destination::Visit(path)));
+            }
+        }
         if browser.visible_count < browser.entries.len() {
             let start = browser.visible_count;
             let limit = (start + ROW_BATCH).min(browser.entries.len());
@@ -732,9 +833,24 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
                 })
                 .collect();
             browser.visible_count = limit;
+            let active = browser
+                .pending
+                .is_none()
+                .then_some(browser.active_scan)
+                .flatten();
             drop(browser);
             let strings: Vec<_> = labels.iter().map(String::as_str).collect();
             model.splice(start as u32, 0, &strings);
+            if let Some((row, initial_epoch, id)) = restore {
+                if active != Some(id) || epoch.get() != initial_epoch {
+                    restore = None;
+                } else if row < limit {
+                    restore = None;
+                    if selection.selected() == gtk::INVALID_LIST_POSITION {
+                        selection.set_selected(row as u32);
+                    }
+                }
+            }
         }
         glib::ControlFlow::Continue
     });

@@ -162,3 +162,62 @@ fn rename_refuses_an_item_replaced_since_selection() {
     assert_eq!(fs::read(root.0.join(name)).unwrap(), b"replacement");
     assert!(!root.0.join("new").exists());
 }
+
+#[test]
+fn directory_watch_coalesces_changes_and_reports_moved_parent() {
+    use jwm_file_core::{DirectoryChange, DirectoryWatch};
+
+    let root = Fixture::new();
+    let child = root.0.join("origin");
+    fs::create_dir(&child).unwrap();
+    let parent = DirectoryHandle::open(&child).unwrap();
+    let watcher = DirectoryWatch::new(&parent).unwrap();
+    assert_eq!(watcher.read_change().unwrap(), DirectoryChange::Unchanged);
+    fs::write(child.join("new"), b"new").unwrap();
+    fs::rename(child.join("new"), child.join("renamed")).unwrap();
+    assert_eq!(watcher.read_change().unwrap(), DirectoryChange::Dirty);
+    assert_eq!(watcher.read_change().unwrap(), DirectoryChange::Unchanged);
+    fs::rename(&child, root.0.join("moved")).unwrap();
+    fs::create_dir(&child).unwrap();
+    assert_eq!(watcher.read_change().unwrap(), DirectoryChange::Invalidated);
+}
+
+#[test]
+fn scan_worker_reports_changes_only_for_its_installed_directory_watch() {
+    use jwm_file_core::{DirectoryChange, ScanWorker};
+    use std::time::{Duration, Instant};
+
+    fn wait<T>(mut get: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(value) = get() {
+                return value;
+            }
+            assert!(Instant::now() < deadline, "watch worker response timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let root = Fixture::new();
+    let first = root.0.join("first");
+    let second = root.0.join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    let worker = ScanWorker::start(LocalProvider).unwrap();
+    let a = worker.submit(Location::Local(first.clone()), ListOptions::default());
+    let reply = wait(|| worker.take_reply());
+    assert_eq!(reply.id, a);
+    assert!(reply.result.is_ok());
+    fs::write(first.join("a"), b"one").unwrap();
+    let notice = wait(|| worker.take_directory_change());
+    assert_eq!((notice.id, notice.change), (a, DirectoryChange::Dirty));
+
+    let b = worker.submit(Location::Local(second.clone()), ListOptions::default());
+    let reply = wait(|| worker.take_reply());
+    assert_eq!(reply.id, b);
+    assert!(reply.result.is_ok());
+    fs::write(first.join("retired"), b"ignore").unwrap();
+    fs::write(second.join("b"), b"two").unwrap();
+    let notice = wait(|| worker.take_directory_change());
+    assert_eq!((notice.id, notice.change), (b, DirectoryChange::Dirty));
+}

@@ -1,4 +1,6 @@
 use crate::{Cancellation, DirectorySnapshot, FileProvider, ListError, ListOptions, Location};
+#[cfg(target_os = "linux")]
+use crate::{DirectoryChange, DirectoryWatch};
 use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -9,6 +11,13 @@ pub struct ScanId(u64);
 pub struct ScanReply {
     pub id: ScanId,
     pub result: Result<DirectorySnapshot, ListError>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WatchNotice {
+    pub id: ScanId,
+    pub change: DirectoryChange,
 }
 
 struct Request {
@@ -24,6 +33,8 @@ struct State {
     pending: Option<Request>,
     active: Option<Cancellation>,
     ready: Option<ScanReply>,
+    #[cfg(target_os = "linux")]
+    notice: Option<WatchNotice>,
     stopping: bool,
 }
 
@@ -66,6 +77,16 @@ impl ScanWorker {
         id
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn take_directory_change(&self) -> Option<WatchNotice> {
+        self.shared
+            .0
+            .lock()
+            .expect("scan mailbox poisoned")
+            .notice
+            .take()
+    }
+
     pub fn take_reply(&self) -> Option<ScanReply> {
         self.shared
             .0
@@ -92,23 +113,66 @@ impl Drop for ScanWorker {
 
 fn run(shared: &(Mutex<State>, Condvar), provider: impl FileProvider) {
     let (mailbox, wake) = shared;
+    #[cfg(target_os = "linux")]
+    let mut watch = None::<(ScanId, DirectoryWatch)>;
     loop {
         let request = {
             let state = mailbox.lock().expect("scan mailbox poisoned");
-            let mut state = wake
-                .wait_while(state, |s| s.pending.is_none() && !s.stopping)
-                .expect("scan mailbox poisoned");
+            #[cfg(target_os = "linux")]
+            let watched = watch.is_some();
+            #[cfg(not(target_os = "linux"))]
+            let watched = false;
+            let mut state = if watched {
+                wake.wait_timeout_while(state, std::time::Duration::from_millis(120), |s| {
+                    s.pending.is_none() && !s.stopping
+                })
+                .expect("scan mailbox poisoned")
+                .0
+            } else {
+                wake.wait_while(state, |s| s.pending.is_none() && !s.stopping)
+                    .expect("scan mailbox poisoned")
+            };
             if state.stopping {
                 return;
             }
-            let request = state.pending.take().expect("a pending scan must exist");
-            state.active = Some(request.cancel.clone());
+            let request = state.pending.take();
+            state.active = request.as_ref().map(|req| req.cancel.clone());
             request
         };
-        let result = provider.list(&request.location, request.options, &request.cancel);
+        let Some(request) = request else {
+            #[cfg(target_os = "linux")]
+            if let Some((id, directory_watch)) = &watch {
+                let change = directory_watch
+                    .read_change()
+                    .unwrap_or(DirectoryChange::Invalidated);
+                if change != DirectoryChange::Unchanged {
+                    let mut state = mailbox.lock().expect("scan mailbox poisoned");
+                    // Keep invalidation if several notifications arrive before GTK drains them.
+                    if !state
+                        .notice
+                        .is_some_and(|n| n.change == DirectoryChange::Invalidated)
+                    {
+                        state.notice = Some(WatchNotice { id: *id, change });
+                    }
+                    if change == DirectoryChange::Invalidated {
+                        watch = None;
+                    }
+                }
+            }
+            continue;
+        };
+        let result = provider.list_with_watch(&request.location, request.options, &request.cancel);
         let mut state = mailbox.lock().expect("scan mailbox poisoned");
         state.active = None;
         if !state.stopping && request.id.0 == state.latest {
+            #[cfg(target_os = "linux")]
+            let result = result.map(|mut snapshot| {
+                // The watch was armed before the scan and captures events that
+                // happened during enumeration or while GTK applies row batches.
+                watch = snapshot.local_watch.take().map(|watch| (request.id, watch));
+                state.notice = None;
+                snapshot
+            });
             state.ready = Some(ScanReply {
                 id: request.id,
                 result,
@@ -150,6 +214,8 @@ mod tests {
                 skipped_entries: 0,
                 #[cfg(target_os = "linux")]
                 local_parent: None,
+                #[cfg(target_os = "linux")]
+                local_watch: None,
             })
         }
     }

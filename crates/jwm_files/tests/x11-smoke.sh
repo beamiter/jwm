@@ -154,3 +154,44 @@ done
 [[ $(cat "$root/rename-fixture/renamed.txt") == 'source' ]]
 [[ $(cat "$root/rename-fixture/z-existing.txt") == 'destination' ]]
 printf 'GTK4 X11 smoke: F2 renamed the selected item without replacing a conflict\n'
+
+mkdir -p "$root/watch-fixture"
+printf 'first\n' > "$root/watch-fixture/a-first.txt"
+printf 'target\n' > "$root/watch-fixture/m-middle.txt"
+printf 'last\n' > "$root/watch-fixture/z-last.txt"
+visit_path watch-fixture
+sleep 0.2
+xdotool mousemove --window "$window" 350 72 click 1
+xdotool key --clearmodifiers Down
+printf 'ahead\n' > "$root/watch-fixture/0-ahead.txt"
+sleep 0.65
+xdotool key --clearmodifiers F2
+dialog=$(title_id '^JWM Files · Rename$')
+xdotool windowfocus --sync "$dialog"
+xdotool key --clearmodifiers ctrl+a
+xdotool type --clearmodifiers 'n-kept-selection.txt'
+xdotool key Return
+for attempt in {1..30}; do
+  [[ ! -f "$root/watch-fixture/n-kept-selection.txt" ]] || break
+  sleep 0.1
+done
+[[ $(cat "$root/watch-fixture/n-kept-selection.txt") == 'target' ]]
+[[ $(cat "$root/watch-fixture/a-first.txt") == 'first' ]]
+[[ $(cat "$root/watch-fixture/0-ahead.txt") == 'ahead' ]]
+sleep 0.65
+xdotool windowfocus --sync "$window"
+xdotool mousemove --window "$window" 350 72 click 1
+xdotool key --clearmodifiers F2
+dialog=$(title_id '^JWM Files · Rename$')
+xdotool windowfocus --sync "$dialog"
+xdotool key Escape
+xdotool windowfocus --sync "$window"
+rm "$root/watch-fixture/0-ahead.txt"
+sleep 0.65
+xdotool key --clearmodifiers F2
+sleep 0.15
+if xdotool search --onlyvisible --name '^JWM Files · Rename$' >/dev/null 2>&1; then
+  echo 'Deletion left a substitute selected' >&2
+  exit 1
+fi
+printf 'GTK4 X11 smoke: watcher refresh kept an unchanged selection and cleared a deleted one\n'
