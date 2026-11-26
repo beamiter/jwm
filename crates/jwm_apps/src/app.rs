@@ -751,21 +751,33 @@ impl App {
         ((height - 170.) / 32.).max(0.) as usize
     }
 
-    fn draw_dialog(&mut self, cr: &cairo::Context) {
-        self.hits.clear();
-        cr.set_source_rgba(0., 0., 0., 0.65);
-        let _ = cr.paint();
+    fn dialog_rect(&self) -> Rect {
         let w = (self.size.0 - 48.).min(640.);
         let h = if matches!(self.dialog, Some(Dialog::Picker(_))) {
             (self.size.1 - 48.).min(480.)
         } else {
             300_f64.min(self.size.1 - 32.)
         };
-        let r = Rect::new((self.size.0 - w) / 2., (self.size.1 - h) / 2., w, h);
+        Rect::new((self.size.0 - w) / 2., (self.size.1 - h) / 2., w, h)
+    }
+
+    fn picker_list_rect(&self, rows: usize) -> Rect {
+        let r = self.dialog_rect();
+        Rect::new(r.x + 24., r.y + 102., r.w - 48., rows as f64 * 32.)
+    }
+
+    fn draw_dialog(&mut self, cr: &cairo::Context) {
+        self.hits.clear();
+        cr.set_source_rgba(0., 0., 0., 0.65);
+        let _ = cr.paint();
+        let r = self.dialog_rect();
+        let rows = self.picker_rows();
+        let list = self.picker_list_rect(rows);
         ui::rounded(cr, r, ui::panel());
         let dialog = self.dialog.take().unwrap();
         match dialog {
             Dialog::Picker(mut picker) => {
+                picker.offset = picker.offset.min(picker.entries.len().saturating_sub(rows));
                 let title = match picker.mode {
                     PickerMode::Notes => "打开 UTF-8 文本文件",
                     PickerMode::Images => "打开图片",
@@ -792,11 +804,7 @@ impl App {
                     self.caret,
                     false,
                 );
-                let rows = self.picker_rows();
                 let list_focused = self.dialog_focus == Some(PICKER_LIST_FOCUS);
-                if list_focused && rows > 0 && !picker.entries.is_empty() {
-                    picker.reveal(picker.selected.unwrap_or(picker.offset), rows);
-                }
                 for (i, path) in picker
                     .entries
                     .iter()
@@ -804,7 +812,7 @@ impl App {
                     .take(rows)
                     .enumerate()
                 {
-                    let rect = Rect::new(r.x + 24., r.y + 102. + i as f64 * 32., r.w - 48., 30.);
+                    let rect = Rect::new(list.x, list.y + i as f64 * 32., list.w, 30.);
                     if rect.contains(self.pointer.0, self.pointer.1) {
                         ui::rounded(cr, rect, ui::hover());
                     }
@@ -1328,17 +1336,24 @@ impl App {
         }
     }
     pub fn scroll(&mut self, (dx, dy): (f64, f64), mods: ModifiersState) {
-        let rows = self.picker_rows();
-        let list_focused = self.dialog_focus == Some(PICKER_LIST_FOCUS);
-        if let Some(Dialog::Picker(p)) = &mut self.dialog {
-            if dy.is_finite() && dy != 0. {
-                p.offset = (p.offset as isize + if dy > 0. { -3 } else { 3 })
-                    .clamp(0, p.entries.len().saturating_sub(1) as isize)
-                    as usize;
-                if list_focused && rows > 0 && !p.entries.is_empty() {
-                    let last = (p.offset + rows - 1).min(p.entries.len() - 1);
-                    p.selected = Some(p.selected.unwrap_or(p.offset).clamp(p.offset, last));
+        if matches!(self.dialog, Some(Dialog::Picker(_))) {
+            let rows = self.picker_rows();
+            let inside_list = self
+                .picker_list_rect(rows)
+                .contains(self.pointer.0, self.pointer.1);
+            if rows > 0
+                && inside_list
+                && dy.is_finite()
+                && dy != 0.
+                && let Some(Dialog::Picker(p)) = &mut self.dialog
+            {
+                let max_offset = p.entries.len().saturating_sub(rows);
+                p.offset = if dy > 0. {
+                    p.offset.saturating_sub(3)
+                } else {
+                    p.offset.saturating_add(3)
                 }
+                .min(max_offset);
             }
             return;
         }
@@ -1565,7 +1580,8 @@ impl App {
         if !self.picker_list_focused() {
             return false;
         }
-        let rows = self.picker_rows().max(1);
+        let visible_rows = self.picker_rows();
+        let rows = visible_rows.max(1);
         let Some(Dialog::Picker(p)) = &mut self.dialog else {
             return false;
         };
@@ -1574,6 +1590,14 @@ impl App {
             Key::Named(NamedKey::ArrowUp) => p.reveal(current.saturating_sub(1), rows),
             Key::Named(NamedKey::ArrowDown) => p.reveal(current + 1, rows),
             Key::Named(NamedKey::Enter) if !repeat => {
+                // Browsing must not let Enter activate a row the user cannot see.
+                if visible_rows == 0 {
+                    return true;
+                }
+                if current < p.offset || current >= p.offset.saturating_add(visible_rows) {
+                    p.reveal(current, rows);
+                    return true;
+                }
                 if let Some(path) = p.entries.get(current).cloned() {
                     p.set_path(path);
                     self.action(Action::Accept);
@@ -1986,6 +2010,65 @@ mod tests {
     }
 
     #[test]
+    fn picker_wheel_browsing_keeps_the_keyboard_target() {
+        let mut app = App::new(false, Vec::new()).unwrap();
+        app.picker(PickerMode::Notes);
+        let paths: Vec<PathBuf> = (0..20)
+            .map(|i| format!("wheel-{i:02}.txt").into())
+            .collect();
+        let Some(Dialog::Picker(picker)) = &mut app.dialog else {
+            panic!("expected picker");
+        };
+        picker.entries.clone_from(&paths);
+        picker.reveal(1, 9);
+        app.dialog_focus = Some(PICKER_LIST_FOCUS);
+        let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 900, 600).unwrap();
+        let cr = cairo::Context::new(&surface).unwrap();
+        app.draw(&cr, 900., 600., false);
+
+        let field = app
+            .hits
+            .iter()
+            .find(|hit| hit.action == Action::PickerPath)
+            .unwrap()
+            .rect;
+        app.motion(field.x + 1., field.y + 1.);
+        app.scroll((0., -1.), ModifiersState::empty());
+        assert!(matches!(
+            &app.dialog,
+            Some(Dialog::Picker(p)) if p.offset == 0 && p.selected == Some(1)
+        ));
+
+        let list = app.picker_list_rect(app.picker_rows());
+        app.motion(list.x + 1., list.y + 1.);
+        app.scroll((0., -1.), ModifiersState::empty());
+        app.draw(&cr, 900., 600., false);
+        assert!(matches!(
+            &app.dialog,
+            Some(Dialog::Picker(p)) if p.offset == 3 && p.selected == Some(1)
+        ));
+        let enter = Key::Named(NamedKey::Enter);
+        assert!(app.picker_list_key(&enter, false));
+        assert!(app.effects.is_empty());
+        assert!(matches!(
+            &app.dialog,
+            Some(Dialog::Picker(p)) if p.offset == 1 && p.selected == Some(1)
+        ));
+
+        app.scroll((0., -1.), ModifiersState::empty());
+        assert!(app.picker_list_key(&Key::Named(NamedKey::ArrowDown), false));
+        assert!(matches!(
+            &app.dialog,
+            Some(Dialog::Picker(p)) if p.offset == 2 && p.selected == Some(2)
+        ));
+        assert!(app.picker_list_key(&enter, false));
+        assert!(matches!(
+            app.effects.as_slice(),
+            [Effect::OpenNote(path)] if path == &paths[2]
+        ));
+    }
+
+    #[test]
     fn picker_uses_exact_selected_path_until_the_field_is_edited() {
         let dir = std::env::temp_dir().join(format!("jwm-picker-exact-{}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
@@ -2096,10 +2179,12 @@ mod tests {
             mode: PickerMode::Images,
             path: Editor::new(String::new()),
             exact_path: None,
-            entries: vec![PathBuf::new(); 10],
+            entries: vec![PathBuf::new(); 20],
             offset: 2,
             selected: None,
         })));
+        let list = app.picker_list_rect(app.picker_rows());
+        app.motion(list.x + 1., list.y + 1.);
         app.scroll((-3., 0.), ModifiersState::empty());
         assert!(matches!(&app.dialog, Some(Dialog::Picker(p)) if p.offset == 2));
         app.scroll((-3., -1.), ModifiersState::empty());
