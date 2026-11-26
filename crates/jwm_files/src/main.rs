@@ -1657,12 +1657,14 @@ mod wayland_acceptance {
 
     fn text_clipboard(display: &gtk::gdk::Display) -> String {
         let received = Rc::new(RefCell::new(None));
-        display.clipboard().read_text_async(None::<&gio::Cancellable>, {
-            let received = received.clone();
-            move |result| {
-                received.replace(Some(result.unwrap().unwrap().to_string()));
-            }
-        });
+        display
+            .clipboard()
+            .read_text_async(None::<&gio::Cancellable>, {
+                let received = received.clone();
+                move |result| {
+                    received.replace(Some(result.unwrap().unwrap().to_string()));
+                }
+            });
         until(|| received.borrow().is_some(), "native text clipboard");
         received.take().unwrap()
     }
