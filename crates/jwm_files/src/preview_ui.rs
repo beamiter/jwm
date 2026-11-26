@@ -9,7 +9,7 @@ use jwm_file_core::{
 use std::{
     cell::{Cell, RefCell},
     ffi::OsString,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
     thread,
@@ -25,6 +25,44 @@ struct Target {
 struct Request {
     id: u64,
     target: Target,
+}
+
+struct PreviewBody {
+    source: TextPreview,
+    rendered: Option<String>,
+    markdown: bool,
+}
+
+impl PreviewBody {
+    fn from_text(source: TextPreview, name: &Path) -> Self {
+        let markdown = name.extension().is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+        });
+        let rendered = markdown
+            .then(|| jwm_markdown::pango_markup(&source.text, jwm_file_core::TEXT_PREVIEW_LIMIT))
+            .flatten()
+            .filter(|markup| gtk::pango::parse_markup(markup, '\0').is_ok());
+        Self {
+            source,
+            rendered,
+            markdown,
+        }
+    }
+
+    fn label(&self, raw: bool) -> &'static str {
+        match (
+            self.markdown,
+            self.rendered.is_some(),
+            raw,
+            self.source.truncated,
+        ) {
+            (_, _, _, true) => "大文件，仅显示开头（最多 128 KiB）。",
+            (true, true, false, false) => "Markdown 预览",
+            (true, true, true, false) => "Markdown 源码",
+            (true, false, _, false) => "无法渲染 Markdown，显示源码。",
+            (false, _, _, false) => "纯文本预览",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -60,6 +98,29 @@ struct View {
     heading: glib::WeakRef<gtk::Label>,
     notice: glib::WeakRef<gtk::Label>,
     text: glib::WeakRef<gtk::TextView>,
+    source_toggle: glib::WeakRef<gtk::ToggleButton>,
+    body: Rc<RefCell<Option<PreviewBody>>>,
+}
+
+impl View {
+    fn paint_body(&self, show_source: bool) {
+        let body = self.body.borrow();
+        let (Some(body), Some(notice), Some(text)) =
+            (body.as_ref(), self.notice.upgrade(), self.text.upgrade())
+        else {
+            return;
+        };
+        let markup = body.rendered.as_deref().filter(|_| !show_source);
+        let buffer = text.buffer();
+        text.set_monospace(markup.is_none());
+        notice.set_text(body.label(show_source));
+        if let Some(markup) = markup {
+            buffer.set_text("");
+            buffer.insert_markup(&mut buffer.start_iter(), markup);
+        } else {
+            buffer.set_text(&body.source.text);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -116,6 +177,11 @@ impl PreviewState {
             heading.set_text(&source);
             heading.set_tooltip_text(Some(&source));
         }
+        view.body.take();
+        if let Some(toggle) = view.source_toggle.upgrade() {
+            toggle.set_visible(false);
+            toggle.set_active(false);
+        }
         if let Some(notice) = view.notice.upgrade() {
             notice.set_text("正在读取预览…");
         }
@@ -146,6 +212,8 @@ impl PreviewState {
                     target.identity,
                     &worker_cancel,
                 );
+                let result =
+                    result.map(|source| PreviewBody::from_text(source, Path::new(&target.name)));
                 let _ = send.send(result);
             })
         {
@@ -166,7 +234,7 @@ impl PreviewState {
         });
     }
 
-    fn finish(&self, id: u64, result: Result<TextPreview, PreviewError>) {
+    fn finish(&self, id: u64, result: Result<PreviewBody, PreviewError>) {
         // Completion may belong to a closed window or to an earlier selection.
         // It can release the worker slot but must not touch the current view.
         if !self.generation.accepts(id) {
@@ -175,17 +243,16 @@ impl PreviewState {
         let Some(view) = self.current.borrow().clone() else {
             return;
         };
-        let (Some(notice), Some(text)) = (view.notice.upgrade(), view.text.upgrade()) else {
+        let Some(notice) = view.notice.upgrade() else {
             return;
         };
         match result {
             Ok(result) => {
-                notice.set_text(if result.truncated {
-                    "大文件，仅显示开头（最多 128 KiB）。"
-                } else {
-                    "纯文本预览"
-                });
-                text.buffer().set_text(&result.text);
+                if let Some(toggle) = view.source_toggle.upgrade() {
+                    toggle.set_visible(result.rendered.is_some());
+                }
+                view.body.replace(Some(result));
+                view.paint_body(false);
             }
             Err(PreviewError::NotText | PreviewError::NotRegular) => {
                 notice.set_text("此文件不支持纯文本预览。");
@@ -217,6 +284,11 @@ impl PreviewState {
         notice.set_margin_start(12);
         notice.set_wrap(true);
         layout.append(&notice);
+        let source_toggle = gtk::ToggleButton::with_label("查看源码");
+        source_toggle.set_halign(gtk::Align::Start);
+        source_toggle.set_margin_start(12);
+        source_toggle.set_visible(false);
+        layout.append(&source_toggle);
         let text = gtk::TextView::builder()
             .monospace(true)
             .editable(false)
@@ -264,7 +336,13 @@ impl PreviewState {
             heading: heading.downgrade(),
             notice: notice.downgrade(),
             text: text.downgrade(),
+            source_toggle: source_toggle.downgrade(),
+            body: Rc::default(),
         };
+        source_toggle.connect_toggled({
+            let view = view.clone();
+            move |button| view.paint_body(button.is_active())
+        });
         self.current.replace(Some(view.clone()));
         (view, window)
     }
@@ -319,6 +397,25 @@ pub(super) fn install(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_preview_formats_only_markdown_and_keeps_raw_source() {
+        let raw = "# 标题\n\n**粗体** [link](https://invalid.example)";
+        let source = || TextPreview {
+            text: raw.to_owned(),
+            truncated: false,
+        };
+        let markdown = PreviewBody::from_text(source(), Path::new("README.MD"));
+        let markup = markdown.rendered.as_deref().unwrap();
+        assert!(markup.contains("<b>粗体</b>"));
+        assert!(!markup.contains("https://"));
+        assert_eq!(markdown.source.text, raw);
+        assert_eq!(markdown.label(false), "Markdown 预览");
+        assert_eq!(markdown.label(true), "Markdown 源码");
+        let tsx = PreviewBody::from_text(source(), Path::new("example.tsx"));
+        assert!(tsx.rendered.is_none());
+        assert_eq!(tsx.source.text, raw);
+    }
 
     #[test]
     fn preview_generation_rejects_superseded_and_closed_requests() {

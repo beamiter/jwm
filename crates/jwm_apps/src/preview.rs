@@ -1,81 +1,11 @@
 //! Inert, bounded Markdown rendering: no HTML, script, file or network execution.
 use crate::ui::{self, Rect};
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 const MAX_PREVIEW_BYTES: usize = 256 * 1024;
 
 pub(crate) fn markup(source: &str) -> String {
-    if source.len() > MAX_PREVIEW_BYTES {
-        return "预览限于 256 KiB；源文件仍可编辑和保存。".into();
-    }
-    let mut output = String::new();
-    let mut lists: Vec<Option<u64>> = Vec::new();
-    let options =
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
-    for event in Parser::new_ext(source, options) {
-        match event {
-            Event::Start(tag) => match tag {
-                Tag::Heading { level, .. } => {
-                    let size = match level {
-                        pulldown_cmark::HeadingLevel::H1 => "xx-large",
-                        pulldown_cmark::HeadingLevel::H2 => "x-large",
-                        _ => "large",
-                    };
-                    output.push_str(&format!("<span weight=\"bold\" size=\"{size}\">"));
-                }
-                Tag::Strong => output.push_str("<b>"),
-                Tag::Emphasis => output.push_str("<i>"),
-                Tag::Strikethrough => output.push_str("<s>"),
-                Tag::CodeBlock(_) => output.push_str("<tt>"),
-                Tag::Link { .. } => output.push_str("<u>"),
-                Tag::Image { .. } => output.push_str("[图片："),
-                Tag::List(start) => lists.push(start),
-                Tag::Item => {
-                    output.push_str(&"  ".repeat(lists.len().saturating_sub(1).min(32)));
-                    if let Some(Some(number)) = lists.last_mut() {
-                        output.push_str(&format!("{number}. "));
-                        *number = number.saturating_add(1);
-                    } else {
-                        output.push_str("• ");
-                    }
-                }
-                Tag::BlockQuote(_) => output.push_str("│ "),
-                _ => (),
-            },
-            Event::End(tag) => match tag {
-                TagEnd::Heading(_) => output.push_str("</span>\n\n"),
-                TagEnd::Strong => output.push_str("</b>"),
-                TagEnd::Emphasis => output.push_str("</i>"),
-                TagEnd::Strikethrough => output.push_str("</s>"),
-                TagEnd::CodeBlock => output.push_str("</tt>\n"),
-                TagEnd::Link => output.push_str("</u>"),
-                TagEnd::Image => output.push(']'),
-                TagEnd::List(_) => {
-                    lists.pop();
-                }
-                TagEnd::Paragraph | TagEnd::BlockQuote(_) | TagEnd::Table => {
-                    output.push_str("\n\n")
-                }
-                TagEnd::Item | TagEnd::TableRow | TagEnd::TableHead => output.push('\n'),
-                TagEnd::TableCell => output.push_str("  │  "),
-                _ => (),
-            },
-            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
-                output.push_str(&gio::glib::markup_escape_text(&text));
-            }
-            Event::Code(text) => {
-                output.push_str("<tt>");
-                output.push_str(&gio::glib::markup_escape_text(&text));
-                output.push_str("</tt>");
-            }
-            Event::SoftBreak => output.push(' '),
-            Event::HardBreak => output.push('\n'),
-            Event::Rule => output.push_str("\n────────────────\n"),
-            Event::TaskListMarker(done) => output.push_str(if done { "☑ " } else { "☐ " }),
-            _ => (),
-        }
-    }
-    output
+    jwm_markdown::pango_markup(source, MAX_PREVIEW_BYTES)
+        .unwrap_or_else(|| "预览限于 256 KiB；源文件仍可编辑和保存。".into())
 }
 
 struct ParsedMarkup {
