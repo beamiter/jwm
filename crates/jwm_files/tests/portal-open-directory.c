@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define PORTAL "org.freedesktop.portal.Desktop"
@@ -60,9 +61,17 @@ main(int argc, char **argv)
     g_autofree gchar *expected = g_strdup_printf(ROOT "/request/%s/%s", sender, token);
 
     g_autoptr(GUnixFDList) fds = g_unix_fd_list_new();
-    int fd = open(argv[1], O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    /* Use a readable descriptor, as browser callers do. Portal 1.18
+     * explicitly rejects the O_PATH | O_NOFOLLOW flag combination. */
+    int fd = open(argv[1], O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         g_printerr("cannot hold fixture descriptor: %s\n", g_strerror(errno));
+        return 1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        g_printerr("OpenDirectory smoke expects a regular fixture file\n");
         return 1;
     }
     int index = g_unix_fd_list_append(fds, fd, &error);
