@@ -6,6 +6,7 @@ mod copy;
 mod local;
 #[cfg(target_os = "linux")]
 mod mkdir;
+mod name_find;
 #[cfg(target_os = "linux")]
 mod preview;
 #[cfg(target_os = "linux")]
@@ -23,6 +24,7 @@ pub use copy::{CopyDestination, CopyError, CopyReceipt, CopySource};
 pub use local::LocalProvider;
 #[cfg(target_os = "linux")]
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};
+pub use name_find::NameQuery;
 #[cfg(target_os = "linux")]
 pub use preview::{
     IMAGE_PREVIEW_BYTE_LIMIT, ImagePreview, PreviewError, TEXT_PREVIEW_LIMIT, TextPreview,

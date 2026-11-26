@@ -2,7 +2,7 @@
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use jwm_file_core::{FileEntry, FileKind};
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 pub(crate) struct RowPresentation {
     pub(crate) name: String,
@@ -22,7 +22,7 @@ impl RowPresentation {
 
 #[derive(Default)]
 struct Rows {
-    entries: Rc<Vec<FileEntry>>,
+    entries: Arc<Vec<FileEntry>>,
     live: HashMap<u32, glib::WeakRef<glib::BoxedAnyObject>>,
     sweep_at: usize,
 }
@@ -90,7 +90,7 @@ impl FileRowModel {
         glib::Object::new()
     }
 
-    pub(crate) fn replace(&self, entries: Rc<Vec<FileEntry>>) {
+    pub(crate) fn replace(&self, entries: Arc<Vec<FileEntry>>) {
         use glib::subclass::prelude::ObjectSubclassIsExt;
 
         let old_count = self.n_items();
@@ -112,7 +112,7 @@ mod tests {
     use super::*;
     use glib::subclass::prelude::ObjectSubclassIsExt;
     use jwm_file_core::Location;
-    use std::{cell::Cell, path::PathBuf};
+    use std::{cell::Cell, path::PathBuf, rc::Rc};
 
     fn entry(name: String, kind: FileKind) -> FileEntry {
         FileEntry {
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn snapshot_has_full_large_count_without_prebuilding_row_objects() {
         let model = FileRowModel::new();
-        let entries = Rc::new(
+        let entries = Arc::new(
             (0..100_000)
                 .map(|i| entry(format!("entry-{i}"), FileKind::Regular))
                 .collect(),
@@ -162,14 +162,14 @@ mod tests {
     #[test]
     fn presentation_kind_is_not_inferred_from_filename_and_snapshot_drops_old_cache() {
         let model = FileRowModel::new();
-        model.replace(Rc::new(vec![entry("▸ 文件".into(), FileKind::Regular)]));
+        model.replace(Arc::new(vec![entry("▸ 文件".into(), FileKind::Regular)]));
         let old = model
             .item(0)
             .and_downcast::<glib::BoxedAnyObject>()
             .unwrap();
         assert_eq!(old.borrow::<RowPresentation>().kind, FileKind::Regular);
         assert_eq!(old.borrow::<RowPresentation>().list_label(), "▸ 文件");
-        model.replace(Rc::new(vec![entry("文件".into(), FileKind::Directory)]));
+        model.replace(Arc::new(vec![entry("文件".into(), FileKind::Directory)]));
         let next = model
             .item(0)
             .and_downcast::<glib::BoxedAnyObject>()
