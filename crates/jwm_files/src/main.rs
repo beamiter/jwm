@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tabs::{TabId, Tabs};
 use wake::{SignalOnDrop, Wake};
 
@@ -535,6 +535,22 @@ impl Drop for RevealRequest {
     }
 }
 
+#[derive(Default)]
+struct RevealWidget {
+    position: Cell<Option<u32>>,
+    item: glib::WeakRef<gtk::ListItem>,
+}
+
+fn visible_in_file_list(label: &gtk::Widget, list: &gtk::ListView) -> bool {
+    label.is_mapped()
+        && list.height() > 0
+        && label.compute_bounds(list).is_some_and(|bounds| {
+            bounds.height() > 0.0
+                && bounds.y() >= 0.0
+                && bounds.y() + bounds.height() <= list.height() as f32
+        })
+}
+
 fn open_window_with_reveal(
     app: &gtk::Application,
     initial: &Path,
@@ -614,6 +630,9 @@ fn open_window_with_reveal(
     let selection = gtk::SingleSelection::new(Some(model.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
+    // A reveal can outlive the first map tick. Track only its target's
+    // realized list item so an action submission is never mistaken for visibility.
+    let reveal_widget = reveal.as_ref().map(|_| Rc::new(RevealWidget::default()));
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, object| {
         if let Ok(item) = object.clone().downcast::<gtk::ListItem>() {
@@ -627,14 +646,22 @@ fn open_window_with_reveal(
             item.set_child(Some(&label));
         }
     });
-    factory.connect_bind(|_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let row = item.item().and_downcast::<glib::BoxedAnyObject>();
-        let label = item.child().and_downcast::<gtk::Label>();
-        if let (Some(row), Some(label)) = (row, label) {
-            label.set_text(&row.borrow::<row_model::RowPresentation>().list_label());
+    factory.connect_bind({
+        let reveal_widget = reveal_widget.clone();
+        move |_, object| {
+            let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let row = item.item().and_downcast::<glib::BoxedAnyObject>();
+            let label = item.child().and_downcast::<gtk::Label>();
+            if let (Some(row), Some(label)) = (row, label) {
+                label.set_text(&row.borrow::<row_model::RowPresentation>().list_label());
+            }
+            if let Some(reveal) = &reveal_widget
+                && reveal.position.get() == Some(item.position())
+            {
+                reveal.item.set(Some(item));
+            }
         }
     });
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
@@ -1254,6 +1281,15 @@ fn open_window_with_reveal(
             drop(browser);
             breadcrumb.show(&path);
             selection.set_selected(gtk::INVALID_LIST_POSITION);
+            if let Some(reveal) = &reveal_widget {
+                let position = if reveal_reply.is_some() {
+                    restore_row.and_then(|(row, _)| u32::try_from(row).ok())
+                } else {
+                    None
+                };
+                reveal.position.set(position);
+                reveal.item.set(None);
+            }
             model.replace(entries);
             if let Some((row, id)) = restore_row
                 && let Ok(row) = u32::try_from(row)
@@ -1266,31 +1302,50 @@ fn open_window_with_reveal(
                 selection.set_selected(row);
                 if let Some(request) = reveal_reply
                     && let Some(list) = reveal_list.upgrade()
+                    && let Some(reveal) = reveal_widget.clone()
                 {
                     let (state, selection) = (Rc::downgrade(&state), selection.downgrade());
                     let request = RefCell::new(Some(request));
-                    let scroll_submitted = Cell::new(false);
+                    let deadline = Instant::now() + Duration::from_secs(4);
+                    let last_scroll = Cell::new(None);
                     list.add_tick_callback(move |list, _| {
-                        let ready = state.upgrade().zip(selection.upgrade()).is_some_and(
+                        let valid = state.upgrade().zip(selection.upgrade()).filter(
                             |(state, selection)| {
-                                let still_active = {
-                                    let state = state.borrow();
-                                    state.active_scan == Some(id) && state.pending.is_none()
-                                };
-                                still_active && selection.selected() == row && list.is_mapped()
+                                let state = state.borrow();
+                                state.active_scan == Some(id)
+                                    && state.pending.is_none()
+                                    && selection.selected() == row
                             },
                         );
-                        if ready
-                            && !scroll_submitted.get()
-                            && list
-                                .activate_action("list.scroll-to-item", Some(&row.to_variant()))
-                                .is_ok()
-                        {
-                            scroll_submitted.set(true);
+                        let visible = valid.as_ref().is_some_and(|(_, selection)| {
+                            reveal.item.upgrade().is_some_and(|item| {
+                                item.position() == row
+                                    && item.item() == selection.selected_item()
+                                    && item
+                                        .child()
+                                        .is_some_and(|child| visible_in_file_list(&child, list))
+                            })
+                        });
+                        let now = Instant::now();
+                        if !visible && valid.is_some() && now < deadline {
+                            // Mapping can precede the first layout; GTK can accept
+                            // the action with no row allocation and do nothing.
+                            if list.is_mapped()
+                                && list.vadjustment().is_some_and(|a| a.page_size() > 0.0)
+                                && last_scroll.get().is_none_or(|last| {
+                                    now.duration_since(last) >= Duration::from_millis(80)
+                                })
+                            {
+                                let _ = list.activate_action(
+                                    "list.scroll-to-item",
+                                    Some(&row.to_variant()),
+                                );
+                                last_scroll.set(Some(now));
+                            }
                             return glib::ControlFlow::Continue;
                         }
                         if let Some(request) = request.take() {
-                            request.reply(if ready && scroll_submitted.get() {
+                            request.reply(if visible {
                                 Ok(())
                             } else {
                                 Err("The requested item could not be shown in the active list")
@@ -2576,6 +2631,13 @@ mod wayland_acceptance {
                     && reveal_list
                         .vadjustment()
                         .is_some_and(|adjustment| adjustment.value() > 0.0)
+                    && reveal_reply.borrow().as_ref().is_some_and(Result::is_ok)
+                    && descendants(reveal_list.upcast_ref()).iter().any(|widget| {
+                        widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                            label.text().starts_with("z wanted%")
+                                && visible_in_file_list(widget, &reveal_list)
+                        })
+                    })
             },
             "ShowItems initial selection scrolled to the off-screen exact item",
         );
