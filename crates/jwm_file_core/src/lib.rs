@@ -12,6 +12,10 @@ mod preview;
 mod rename;
 mod scan_worker;
 #[cfg(target_os = "linux")]
+mod trash_info;
+#[cfg(target_os = "linux")]
+mod trash_snapshot;
+#[cfg(target_os = "linux")]
 mod watch;
 
 #[cfg(target_os = "linux")]
@@ -26,6 +30,12 @@ pub use rename::{RenameError, RenameReceipt};
 #[cfg(target_os = "linux")]
 pub use scan_worker::WatchNotice;
 pub use scan_worker::{ScanId, ScanReply, ScanWorker};
+#[cfg(target_os = "linux")]
+pub use trash_info::{HomeTrashInfo, TRASH_INFO_LIMIT, parse_home_trash_info};
+#[cfg(target_os = "linux")]
+pub use trash_snapshot::{
+    HOME_TRASH_INSPECT_LIMIT, HomeTrashEntry, HomeTrashSnapshot, list_home_trash,
+};
 #[cfg(target_os = "linux")]
 pub use watch::{DirectoryChange, DirectoryWatch};
 

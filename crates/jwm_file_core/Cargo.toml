@@ -10,4 +10,4 @@ publish = false
 [workspace]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "=1.1.5", features = ["fs"] }
+rustix = { version = "=1.1.5", features = ["fs", "process"] }

@@ -159,6 +159,7 @@ pub(super) fn install(
     let menu = gio::Menu::new();
     menu.append(Some("新建标签页（Ctrl+T）"), Some("win.new-tab"));
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
+    menu.append(Some("主目录回收站（只读）"), Some("win.home-trash"));
     menu.append(Some("撤销重命名（Ctrl+Z）"), Some("win.undo-rename"));
     for (name, label) in [
         ("copy-file", "复制选中文件（Ctrl+C）"),

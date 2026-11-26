@@ -9,6 +9,7 @@ mod row_model;
 mod selection;
 mod tab_strip;
 mod tabs;
+mod trash_ui;
 #[cfg(target_os = "linux")]
 mod tree;
 mod wake;
@@ -727,6 +728,7 @@ fn open_window(
         dialog_open: false,
     }));
     preview_ui::install(&window, &state, &selection, &status);
+    trash_ui::install(&window);
     copy_ui::install(&window, &file_actions, &state, &selection, &copy_status);
     let breadcrumb = Rc::new(breadcrumb::Breadcrumb::new({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
@@ -1814,6 +1816,61 @@ mod wayland_acceptance {
         action("win.undo-rename");
         assert!(status_matches(&|text| text == "没有可撤销的重命名。"));
         println!("GTK4 Wayland undo: directory-bound rename conflicts were non-destructive");
+
+        let trash = glib::user_data_dir().join("Trash");
+        fs::create_dir_all(trash.join("files")).unwrap();
+        fs::create_dir_all(trash.join("info")).unwrap();
+        let metadata = b"[Trash Info]\nPath=tests/note%25%80.txt\nDeletionDate=2026-11-26T12:26:00";
+        for (slot, content) in [("slot-A", b"old"), ("slot-B", b"new")] {
+            fs::write(trash.join("files").join(slot), content).unwrap();
+            fs::write(
+                trash.join("info").join(format!("{slot}.trashinfo")),
+                metadata,
+            )
+            .unwrap();
+        }
+        fs::write(trash.join("files/orphan"), b"stay").unwrap();
+        action("win.home-trash");
+        let mut panel = None;
+        until(
+            || {
+                panel = app
+                    .windows()
+                    .into_iter()
+                    .find(|window| window.title().as_deref() == Some("JWM Files · Home Trash"));
+                panel.is_some()
+            },
+            "read-only home Trash panel",
+        );
+        let panel = panel.unwrap();
+        let model = descendants(panel.upcast_ref())
+            .into_iter()
+            .find_map(|widget| {
+                widget
+                    .downcast::<gtk::ListView>()
+                    .ok()?
+                    .model()?
+                    .downcast::<gtk::NoSelection>()
+                    .ok()?
+                    .model()?
+                    .downcast::<gtk::StringList>()
+                    .ok()
+            })
+            .unwrap();
+        until(|| model.n_items() == 3, "home Trash snapshot published");
+        for (i, slot) in ["slot-A", "slot-B"].into_iter().enumerate() {
+            let actual = model.string(i as u32).unwrap();
+            assert!(actual.contains("note%"));
+            assert!(actual.contains("2026-11-26T12:26:00"));
+            assert!(actual.ends_with(slot));
+        }
+        assert!(model.string(2).unwrap().starts_with("原路径未知"));
+        assert_eq!(fs::read(trash.join("files/slot-A")).unwrap(), b"old");
+        assert_eq!(fs::read(trash.join("files/slot-B")).unwrap(), b"new");
+        println!(
+            "GTK4 Wayland Trash: same-path entries remained distinct in the read-only home view"
+        );
+        panel.close();
         window.close();
     }
 }
