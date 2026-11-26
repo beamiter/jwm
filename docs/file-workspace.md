@@ -163,7 +163,10 @@ milestone.
 
 The Linux core can copy one observed regular file from a pinned source
 directory into a pinned destination without replacing any existing name.
-It stages bytes in an anonymous inode, checks cancellation and revalidates
+It stages bytes in an anonymous inode. When the source filesystem reports
+sparse extents, it writes only the reported data ranges and keeps the
+logical length, including any trailing hole. Filesystems without extent
+support use an ordinary byte copy. It checks cancellation and revalidates
 the observed source before publication. The destination needs Linux
 anonymous staging (`O_TMPFILE`). Some removable-volume filesystem drivers
 do not provide it, including [VFAT](https://github.com/torvalds/linux/blob/v6.18/fs/fat/namei_vfat.c#L1105-L1115)

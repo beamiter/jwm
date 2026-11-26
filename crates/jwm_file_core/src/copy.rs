@@ -2,7 +2,7 @@
 use crate::{Cancellation, DirectoryHandle, FileIdentity};
 use rustix::{
     fd::AsRawFd,
-    fs::{self, AtFlags, CWD, FileType, Mode, OFlags, Stat},
+    fs::{self, AtFlags, CWD, FileType, Mode, OFlags, SeekFrom, Stat},
     io::Errno,
 };
 use std::{
@@ -148,12 +148,88 @@ fn copy_chunks(
     }
 }
 
+fn sparse_seek_unsupported(error: Errno) -> bool {
+    matches!(error, Errno::INVAL | Errno::OPNOTSUPP | Errno::NOSYS)
+}
+
+fn copy_reported_extents(
+    input: &File,
+    output: &File,
+    size: u64,
+    cancel: &Cancellation,
+) -> Result<bool, CopyError> {
+    let mut cursor = 0;
+    let mut buffer = vec![0u8; 128 * 1024];
+    while cursor < size {
+        check(cancel)?;
+        let data = match fs::seek(input, SeekFrom::Data(cursor)) {
+            Ok(data) if (cursor..size).contains(&data) => data,
+            Ok(_) => return Err(CopyError::SourceChanged),
+            Err(Errno::NXIO) => break, // Remaining bytes are a reported hole.
+            Err(error) if sparse_seek_unsupported(error) => return Ok(false),
+            Err(error) => return Err(io_error(error)),
+        };
+        let end = match fs::seek(input, SeekFrom::Hole(data)) {
+            Ok(end) if (data + 1..=size).contains(&end) => end,
+            Ok(_) | Err(Errno::NXIO) => return Err(CopyError::SourceChanged),
+            Err(error) if sparse_seek_unsupported(error) => return Ok(false),
+            Err(error) => return Err(io_error(error)),
+        };
+        fs::seek(input, SeekFrom::Start(data)).map_err(io_error)?;
+        fs::seek(output, SeekFrom::Start(data)).map_err(io_error)?;
+        let mut left = end - data;
+        let mut input = input;
+        let mut output = output;
+        while left != 0 {
+            check(cancel)?;
+            let count = usize::try_from(left.min(buffer.len() as u64)).unwrap();
+            let read = match input.read(&mut buffer[..count]) {
+                Ok(0) => return Err(CopyError::SourceChanged),
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(CopyError::Io(error)),
+            };
+            output.write_all(&buffer[..read]).map_err(CopyError::Io)?;
+            left -= read as u64;
+        }
+        cursor = end;
+    }
+    check(cancel)?;
+    // This creates any trailing hole and handles a completely sparse file.
+    output.set_len(size).map_err(CopyError::Io)?;
+    Ok(true)
+}
+
+fn copy_payload(
+    input: &File,
+    output: &File,
+    size: u64,
+    cancel: &Cancellation,
+) -> Result<u64, CopyError> {
+    if size == 0 {
+        // Some virtual files report zero bytes but produce data. Keep the
+        // existing exact-size check instead of claiming an empty copy.
+        return copy_chunks(input, output, size, cancel);
+    }
+    if copy_reported_extents(input, output, size, cancel)? {
+        return Ok(size);
+    }
+    check(cancel)?;
+    // Some providers cannot enumerate extents. Reset private staging before
+    // repeating the ordinary capped copy, including on a late unsupported seek.
+    output.set_len(0).map_err(CopyError::Io)?;
+    fs::seek(input, SeekFrom::Start(0)).map_err(io_error)?;
+    fs::seek(output, SeekFrom::Start(0)).map_err(io_error)?;
+    copy_chunks(input, output, size, cancel)
+}
+
 impl DirectoryHandle {
     /// Copy one observed regular source file into this destination directory.
     /// Data is staged in an anonymous inode. Publication is one no-replace
     /// link, after the bytes are synced and source observations still match.
-    /// No source deletion, metadata preservation, or crash-durable directory
-    /// receipt is implied. Cancellation is cooperative until publication.
+    /// Reported sparse holes are not written. No source deletion, permission
+    /// preservation, or crash-durable directory receipt is implied.
+    /// Cancellation is cooperative until publication.
     pub fn copy_regular_no_replace(
         &self,
         source: CopySource<'_>,
@@ -200,7 +276,7 @@ impl DirectoryHandle {
             .map_err(|e| CopyError::StagingUnavailable(e.into()))?,
         );
         let size = u64::try_from(before.st_size).map_err(|_| CopyError::SourceChanged)?;
-        let bytes = copy_chunks(&input, &output, size, cancel)?;
+        let bytes = copy_payload(&input, &output, size, cancel)?;
         check(cancel)?;
         output.sync_all().map_err(CopyError::Io)?;
         let after = fs::fstat(&pin).map_err(io_error)?;
