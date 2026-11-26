@@ -4,7 +4,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
-    Cancellation, DirectoryHandle, FileIdentity, FileKind, PngPreview, PreviewError, TextPreview,
+    Cancellation, DirectoryHandle, FileIdentity, FileKind, ImagePreview, PreviewError, TextPreview,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -29,7 +29,7 @@ struct Request {
 
 enum PreviewPayload {
     Text(PreviewBody),
-    Png(PngPreview),
+    Image(ImagePreview, &'static str),
 }
 
 struct PreviewBody {
@@ -221,10 +221,8 @@ impl PreviewState {
             .name("jwm-files-preview".into())
             .spawn(move || {
                 let path = Path::new(&target.name);
-                let result = if path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
-                {
+                let ext = path.extension();
+                let result = if ext.is_some_and(|ext| ext.eq_ignore_ascii_case("png")) {
                     target
                         .parent
                         .read_png_preview(
@@ -233,7 +231,19 @@ impl PreviewState {
                             target.identity,
                             &worker_cancel,
                         )
-                        .map(PreviewPayload::Png)
+                        .map(|image| PreviewPayload::Image(image, "PNG"))
+                } else if ext.is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg")
+                }) {
+                    target
+                        .parent
+                        .read_jpeg_preview(
+                            &target.path,
+                            &target.name,
+                            target.identity,
+                            &worker_cancel,
+                        )
+                        .map(|image| PreviewPayload::Image(image, "JPEG"))
                 } else {
                     target
                         .parent
@@ -285,11 +295,12 @@ impl PreviewState {
                 view.body.replace(Some(result));
                 view.paint_body(false);
             }
-            Ok(PreviewPayload::Png(image)) => {
+            Ok(PreviewPayload::Image(image, format_name)) => {
                 if let (Some(picture), Some(scroll)) =
                     (view.picture.upgrade(), view.text_scroll.upgrade())
                 {
-                    let description = format!("PNG 图片 · {} × {}", image.width, image.height);
+                    let description =
+                        format!("{format_name} 图片 · {} × {}", image.width, image.height);
                     let texture = gtk::gdk::MemoryTexture::new(
                         image.width as i32,
                         image.height as i32,
@@ -305,7 +316,8 @@ impl PreviewState {
                 }
             }
             Err(PreviewError::NotStaticPng) => notice.set_text("不是有效的静态 PNG，无法预览。"),
-            Err(PreviewError::ImageLimit) => notice.set_text("PNG 图片超过快速预览的大小限制。"),
+            Err(PreviewError::NotJpeg) => notice.set_text("不是受支持的 JPEG，无法预览。"),
+            Err(PreviewError::ImageLimit) => notice.set_text("图片超过快速预览的大小限制。"),
             Err(PreviewError::NotText | PreviewError::NotRegular) => {
                 notice.set_text("此文件不支持纯文本预览。");
             }
