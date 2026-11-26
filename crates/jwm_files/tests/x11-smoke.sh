@@ -53,3 +53,12 @@ done
 [[ ! -e "$root/start/smoke-child" ]]
 [[ $(cat "$root/next/test.txt") == 'test note' ]]
 printf 'GTK4 X11 smoke: New Folder wrote only into the selected directory\n'
+
+xdotool windowfocus --sync "$window"
+xdotool key --clearmodifiers alt+Left
+back=$(title_id '^JWM Files · .*/start$')
+[[ "$back" == "$window" ]]
+xdotool key --clearmodifiers alt+Right
+forward=$(title_id '^JWM Files · .*/next$')
+[[ "$forward" == "$window" ]]
+printf 'GTK4 X11 smoke: Back and Forward revisited both directories in the same window\n'

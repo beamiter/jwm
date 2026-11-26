@@ -1,3 +1,5 @@
+mod navigation;
+
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -5,6 +7,7 @@ use jwm_file_core::{DirectoryHandle, MakeDirectoryError};
 use jwm_file_core::{
     FileEntry, FileKind, ListOptions, LocalProvider, Location, ScanId, ScanWorker,
 };
+use navigation::{Destination, Navigation};
 use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -19,7 +22,8 @@ const ROW_BATCH: usize = 768;
 struct Browser {
     worker: ScanWorker,
     path: PathBuf,
-    pending: Option<(ScanId, PathBuf)>,
+    pending: Option<(ScanId, Destination)>,
+    navigation: Navigation,
     show_hidden: bool,
     entries: Vec<FileEntry>,
     visible_count: usize,
@@ -28,10 +32,17 @@ struct Browser {
 }
 
 impl Browser {
+    fn requested_destination(&self) -> Destination {
+        self.pending.as_ref().map_or_else(
+            || Destination::Visit(self.path.clone()),
+            |(_, destination)| destination.clone(),
+        )
+    }
+
     fn requested_path(&self) -> &Path {
         self.pending
             .as_ref()
-            .map_or(self.path.as_path(), |(_, path)| path.as_path())
+            .map_or(self.path.as_path(), |(_, target)| target.path())
     }
 }
 
@@ -50,7 +61,7 @@ fn show_new_folder(window: &gtk::ApplicationWindow, state: &Shared, status: &gtk
             status.set_text("正在创建文件夹，请稍候。");
             return;
         }
-        let Some(parent) = browser.parent.clone() else {
+        let Some(parent) = browser.parent.clone().filter(|_| browser.pending.is_none()) else {
             status.set_text("请先打开一个可读目录。");
             return;
         };
@@ -89,6 +100,7 @@ fn show_new_folder(window: &gtk::ApplicationWindow, state: &Shared, status: &gtk
         }
         let mut browser = state.borrow_mut();
         if browser.mkdir.is_some()
+            || browser.pending.is_some()
             || browser.path != path
             || browser
                 .parent
@@ -122,13 +134,12 @@ fn show_new_folder(window: &gtk::ApplicationWindow, state: &Shared, status: &gtk
     name.grab_focus();
 }
 
-fn start_scan(
-    state: &Shared,
-    path: PathBuf,
-    model: &gtk::StringList,
-    address: &gtk::Entry,
-    status: &gtk::Label,
-) {
+fn start_scan(state: &Shared, path: PathBuf, address: &gtk::Entry, status: &gtk::Label) {
+    request_scan(state, Destination::Visit(path), address, status);
+}
+
+fn request_scan(state: &Shared, target: Destination, address: &gtk::Entry, status: &gtk::Label) {
+    let path = target.path().to_path_buf();
     {
         let mut browser = state.borrow_mut();
         let id = browser.worker.submit(
@@ -137,12 +148,8 @@ fn start_scan(
                 show_hidden: browser.show_hidden,
             },
         );
-        browser.pending = Some((id, path.clone()));
-        browser.entries.clear();
-        browser.visible_count = 0;
-        browser.parent = None;
+        browser.pending = Some((id, target));
     }
-    model.splice(0, model.n_items(), &[]);
     address.set_text(&path.to_string_lossy());
     status.set_text("正在读取目录…");
 }
@@ -168,6 +175,8 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
             _ => header.set_margin_end(value),
         }
     }
+    let back = gtk::Button::with_label("后退");
+    let forward = gtk::Button::with_label("前进");
     let up = gtk::Button::with_label("上一级");
     let refresh = gtk::Button::with_label("刷新");
     let new_folder = gtk::Button::with_label("新建文件夹");
@@ -177,7 +186,9 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         .build();
     let hidden = gtk::ToggleButton::with_label("隐藏项");
     for widget in [
-        up.upcast_ref::<gtk::Widget>(),
+        back.upcast_ref::<gtk::Widget>(),
+        forward.upcast_ref(),
+        up.upcast_ref(),
         refresh.upcast_ref(),
         new_folder.upcast_ref(),
         address.upcast_ref(),
@@ -266,6 +277,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         worker,
         path: initial.into(),
         pending: None,
+        navigation: Navigation::default(),
         show_hidden: false,
         entries: Vec::new(),
         visible_count: 0,
@@ -273,25 +285,15 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         mkdir: None,
     }));
     {
-        let (state, model, address, status) = (
-            state.clone(),
-            model.clone(),
-            address.clone(),
-            status.clone(),
-        );
+        let (state, address, status) = (state.clone(), address.clone(), status.clone());
         places.connect_row_activated(move |_, row| {
             if let Some((_, path)) = locations.get(row.index() as usize) {
-                start_scan(&state, path.clone(), &model, &address, &status);
+                start_scan(&state, path.clone(), &address, &status);
             }
         });
     }
     {
-        let (state, model, address, status) = (
-            state.clone(),
-            model.clone(),
-            address.clone(),
-            status.clone(),
-        );
+        let (state, address, status) = (state.clone(), address.clone(), status.clone());
         up.connect_clicked(move |_| {
             let path = state
                 .borrow()
@@ -299,79 +301,66 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
                 .parent()
                 .map(Path::to_path_buf);
             if let Some(path) = path {
-                start_scan(&state, path, &model, &address, &status);
+                start_scan(&state, path, &address, &status);
             }
         });
     }
     {
-        let (state, model, address, status) = (
-            state.clone(),
-            model.clone(),
-            address.clone(),
-            status.clone(),
-        );
+        let (state, address, status) = (state.clone(), address.clone(), status.clone());
         refresh.connect_clicked(move |_| {
-            let path = state.borrow().requested_path().to_path_buf();
-            start_scan(&state, path, &model, &address, &status);
+            let target = state.borrow().requested_destination();
+            request_scan(&state, target, &address, &status);
         });
     }
     {
-        let (state, model, address, status) = (
-            state.clone(),
-            model.clone(),
-            address.clone(),
-            status.clone(),
-        );
+        let (state, address, status) = (state.clone(), address.clone(), status.clone());
         hidden.connect_toggled(move |toggle| {
             let path = {
                 let mut browser = state.borrow_mut();
                 browser.show_hidden = toggle.is_active();
-                browser.requested_path().to_path_buf()
+                browser.requested_destination()
             };
-            start_scan(&state, path, &model, &address, &status);
+            request_scan(&state, path, &address, &status);
         });
     }
     {
-        let (state, model, status, home) = (
-            state.clone(),
-            model.clone(),
-            status.clone(),
-            home.to_path_buf(),
-        );
+        let (state, status, home) = (state.clone(), status.clone(), home.to_path_buf());
         address.connect_activate(move |entry| {
             let input = entry.text();
             if input.is_empty() {
                 return;
             }
-            let current = state.borrow().requested_path().to_path_buf();
-            let path = if input.as_str() == current.to_string_lossy() {
-                current
-            } else if input.as_str() == "~" {
+            let target = state.borrow().requested_destination();
+            if input.as_str() == target.path().to_string_lossy() {
+                request_scan(&state, target, entry, &status);
+                return;
+            }
+            let path = if input.as_str() == "~" {
                 home.clone()
             } else if let Some(tail) = input.strip_prefix("~/") {
                 home.join(tail)
             } else {
-                current.join(Path::new(input.as_str()))
+                target.path().join(Path::new(input.as_str()))
             };
-            start_scan(&state, path, &model, entry, &status);
+            start_scan(&state, path, entry, &status);
         });
     }
     {
-        let (state, model, address, status) = (
-            state.clone(),
-            model.clone(),
-            address.clone(),
-            status.clone(),
-        );
+        let (state, address, status) = (state.clone(), address.clone(), status.clone());
         list.connect_activate(move |_, index| {
-            let row = state
-                .borrow()
-                .entries
-                .get(index as usize)
-                .map(|e| (e.kind, e.location.clone()));
+            let row = {
+                let browser = state.borrow();
+                if browser.pending.is_some() {
+                    return;
+                }
+                browser
+                    .entries
+                    .get(index as usize)
+                    .map(|e| (e.kind, e.location.clone()))
+            };
             if let Some((kind, Location::Local(path))) = row {
                 if kind == FileKind::Directory {
-                    start_scan(&state, path, &model, &address, &status);
+                    start_scan(&state, path, &address, &status);
                 } else {
                     status.set_text(&path.to_string_lossy());
                 }
@@ -389,6 +378,31 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     window.add_action(&action);
     app.set_accels_for_action("win.location", &["<Control>l"]);
 
+    for (is_back, button, name, accel) in [
+        (true, &back, "back", "<Alt>Left"),
+        (false, &forward, "forward", "<Alt>Right"),
+    ] {
+        let action = gtk::gio::SimpleAction::new(name, None);
+        let (state, address, status) = (state.clone(), address.clone(), status.clone());
+        action.connect_activate(move |_, _| {
+            let target = {
+                let browser = state.borrow();
+                if is_back {
+                    browser.navigation.back()
+                } else {
+                    browser.navigation.forward()
+                }
+            };
+            if let Some(target) = target {
+                request_scan(&state, target, &address, &status);
+            }
+        });
+        window.add_action(&action);
+        let detailed = format!("win.{name}");
+        button.set_action_name(Some(&detailed));
+        app.set_accels_for_action(&detailed, &[accel]);
+    }
+
     let mkdir_action = gtk::gio::SimpleAction::new("new-folder", None);
     let weak_window = window.downgrade();
     let (mkdir_state, mkdir_status) = (state.clone(), status.clone());
@@ -401,22 +415,29 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     new_folder.set_action_name(Some("win.new-folder"));
     app.set_accels_for_action("win.new-folder", &["<Control><Shift>n"]);
 
-    start_scan(&state, initial.into(), &model, &address, &status);
+    start_scan(&state, initial.into(), &address, &status);
     let weak_window = window.downgrade();
     glib::timeout_add_local(Duration::from_millis(16), move || {
         let Some(window) = weak_window.upgrade() else {
             return glib::ControlFlow::Break;
         };
         let mut browser = state.borrow_mut();
+        let mut replaced = false;
         if let Some(reply) = browser.worker.take_reply()
             && let Some((id, requested)) = browser.pending.take()
             && id == reply.id
         {
             match reply.result {
                 Ok(snapshot) => {
-                    browser.path = requested;
+                    let path = requested.path().to_path_buf();
+                    if !browser.navigation.accept(requested) {
+                        return glib::ControlFlow::Continue;
+                    }
+                    browser.path = path;
                     browser.entries = snapshot.entries;
+                    browser.visible_count = 0;
                     browser.parent = snapshot.local_parent;
+                    replaced = true;
                     let base = format!("{} 项", browser.entries.len());
                     let label = if snapshot.skipped_entries == 0 {
                         base
@@ -426,8 +447,16 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
                     status.set_text(&label);
                     window.set_title(Some(&format!("JWM Files · {}", browser.path.display())));
                 }
-                Err(error) => status.set_text(&format!("无法读取目录：{error}")),
+                Err(error) => {
+                    address.set_text(&browser.path.to_string_lossy());
+                    status.set_text(&format!("无法读取目录：{error}"));
+                }
             }
+        }
+        if replaced {
+            drop(browser);
+            model.splice(0, model.n_items(), &[]);
+            return glib::ControlFlow::Continue;
         }
         let completed = browser
             .mkdir
@@ -441,6 +470,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
             });
         if let Some(result) = completed
             && let Some(work) = browser.mkdir.take()
+            && browser.pending.is_none()
             && browser.path == work.path
             && browser
                 .parent
@@ -451,7 +481,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
                 Ok(()) => {
                     let path = browser.path.clone();
                     drop(browser);
-                    start_scan(&state, path, &model, &address, &status);
+                    start_scan(&state, path, &address, &status);
                     return glib::ControlFlow::Continue;
                 }
                 Err(error) => status.set_text(&format!("没有创建文件夹：{error}")),
