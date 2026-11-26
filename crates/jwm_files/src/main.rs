@@ -2907,7 +2907,10 @@ mod wayland_acceptance {
             .find_map(|widget| {
                 let list = widget.downcast::<gtk::ListView>().ok()?;
                 let selection = list.model()?.downcast::<gtk::SingleSelection>().ok()?;
-                selection.model()?.downcast::<row_model::FileRowModel>().ok()
+                selection
+                    .model()?
+                    .downcast::<row_model::FileRowModel>()
+                    .ok()
             })
             .expect("restored file pane");
         let unavailable_title = format!("JWM Files · {}", unavailable.display());
@@ -2921,7 +2924,10 @@ mod wayland_acceptance {
                     })
                 })
         };
-        until(unavailable_view, "restored missing tab reports a visible error");
+        until(
+            unavailable_view,
+            "restored missing tab reports a visible error",
+        );
         gtk::prelude::WidgetExt::activate_action(&restored, "win.previous-tab", None).unwrap();
         until(
             || {
@@ -2931,7 +2937,10 @@ mod wayland_acceptance {
             "available sibling of a missing saved tab",
         );
         gtk::prelude::WidgetExt::activate_action(&restored, "win.next-tab", None).unwrap();
-        until(unavailable_view, "revisited missing tab clears its sibling rows");
+        until(
+            unavailable_view,
+            "revisited missing tab clears its sibling rows",
+        );
         restored.close();
         println!("GTK4 Wayland session: missing tab remained with an error and no stale rows");
         window.close();
