@@ -4,7 +4,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
-    Cancellation, DirectoryHandle, FileIdentity, FileKind, PreviewError, TextPreview,
+    Cancellation, DirectoryHandle, FileIdentity, FileKind, PngPreview, PreviewError, TextPreview,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -25,6 +25,11 @@ struct Target {
 struct Request {
     id: u64,
     target: Target,
+}
+
+enum PreviewPayload {
+    Text(PreviewBody),
+    Png(PngPreview),
 }
 
 struct PreviewBody {
@@ -98,6 +103,8 @@ struct View {
     heading: glib::WeakRef<gtk::Label>,
     notice: glib::WeakRef<gtk::Label>,
     text: glib::WeakRef<gtk::TextView>,
+    text_scroll: glib::WeakRef<gtk::ScrolledWindow>,
+    picture: glib::WeakRef<gtk::Picture>,
     source_toggle: glib::WeakRef<gtk::ToggleButton>,
     body: Rc<RefCell<Option<PreviewBody>>>,
 }
@@ -185,6 +192,13 @@ impl PreviewState {
         if let Some(notice) = view.notice.upgrade() {
             notice.set_text("正在读取预览…");
         }
+        if let Some(picture) = view.picture.upgrade() {
+            picture.set_paintable(None::<&gtk::gdk::Paintable>);
+            picture.set_visible(false);
+        }
+        if let Some(scroll) = view.text_scroll.upgrade() {
+            scroll.set_visible(true);
+        }
         if let Some(text) = view.text.upgrade() {
             text.buffer().set_text("");
         }
@@ -206,14 +220,31 @@ impl PreviewState {
         if let Err(error) = thread::Builder::new()
             .name("jwm-files-preview".into())
             .spawn(move || {
-                let result = target.parent.read_text_preview(
-                    &target.path,
-                    &target.name,
-                    target.identity,
-                    &worker_cancel,
-                );
-                let result =
-                    result.map(|source| PreviewBody::from_text(source, Path::new(&target.name)));
+                let path = Path::new(&target.name);
+                let result = if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+                {
+                    target
+                        .parent
+                        .read_png_preview(
+                            &target.path,
+                            &target.name,
+                            target.identity,
+                            &worker_cancel,
+                        )
+                        .map(PreviewPayload::Png)
+                } else {
+                    target
+                        .parent
+                        .read_text_preview(
+                            &target.path,
+                            &target.name,
+                            target.identity,
+                            &worker_cancel,
+                        )
+                        .map(|source| PreviewPayload::Text(PreviewBody::from_text(source, path)))
+                };
                 let _ = send.send(result);
             })
         {
@@ -234,7 +265,7 @@ impl PreviewState {
         });
     }
 
-    fn finish(&self, id: u64, result: Result<PreviewBody, PreviewError>) {
+    fn finish(&self, id: u64, result: Result<PreviewPayload, PreviewError>) {
         // Completion may belong to a closed window or to an earlier selection.
         // It can release the worker slot but must not touch the current view.
         if !self.generation.accepts(id) {
@@ -247,13 +278,34 @@ impl PreviewState {
             return;
         };
         match result {
-            Ok(result) => {
+            Ok(PreviewPayload::Text(result)) => {
                 if let Some(toggle) = view.source_toggle.upgrade() {
                     toggle.set_visible(result.rendered.is_some());
                 }
                 view.body.replace(Some(result));
                 view.paint_body(false);
             }
+            Ok(PreviewPayload::Png(image)) => {
+                if let (Some(picture), Some(scroll)) =
+                    (view.picture.upgrade(), view.text_scroll.upgrade())
+                {
+                    let description = format!("PNG 图片 · {} × {}", image.width, image.height);
+                    let texture = gtk::gdk::MemoryTexture::new(
+                        image.width as i32,
+                        image.height as i32,
+                        gtk::gdk::MemoryFormat::R8g8b8a8,
+                        &glib::Bytes::from_owned(image.rgba),
+                        image.width as usize * 4,
+                    );
+                    picture.set_paintable(Some(&texture));
+                    picture.set_alternative_text(Some(&description));
+                    notice.set_text(&description);
+                    scroll.set_visible(false);
+                    picture.set_visible(true);
+                }
+            }
+            Err(PreviewError::NotStaticPng) => notice.set_text("不是有效的静态 PNG，无法预览。"),
+            Err(PreviewError::ImageLimit) => notice.set_text("PNG 图片超过快速预览的大小限制。"),
             Err(PreviewError::NotText | PreviewError::NotRegular) => {
                 notice.set_text("此文件不支持纯文本预览。");
             }
@@ -303,6 +355,13 @@ impl PreviewState {
             .child(&text)
             .build();
         layout.append(&scroll);
+        let picture = gtk::Picture::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .can_shrink(true)
+            .visible(false)
+            .build();
+        layout.append(&picture);
         window.set_child(Some(&layout));
         window.connect_destroy({
             let state = self.clone();
@@ -336,6 +395,8 @@ impl PreviewState {
             heading: heading.downgrade(),
             notice: notice.downgrade(),
             text: text.downgrade(),
+            text_scroll: scroll.downgrade(),
+            picture: picture.downgrade(),
             source_toggle: source_toggle.downgrade(),
             body: Rc::default(),
         };

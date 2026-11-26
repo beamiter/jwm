@@ -578,3 +578,38 @@ fn preview_uses_selected_raw_name_and_refuses_a_replacement_link() {
         Err(PreviewError::NotRegular)
     ));
 }
+
+#[test]
+fn png_preview_keeps_native_filename_and_rejects_a_replacement_symlink() {
+    use jwm_file_core::PreviewError;
+    use std::os::unix::{ffi::OsStrExt, fs::symlink};
+    let fixture = Fixture::new();
+    let name = OsStr::from_bytes(b"image-\x80.PNG");
+    let path = fixture.0.join(name);
+    {
+        let file = fs::File::create(&path).unwrap();
+        let mut encoder = png::Encoder::new(file, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[1, 2, 3, 4]).unwrap();
+        writer.finish().unwrap();
+    }
+    let cancel = Cancellation::default();
+    let snapshot = LocalProvider
+        .list(
+            &Location::Local(fixture.0.clone()),
+            ListOptions::default(),
+            &cancel,
+        )
+        .unwrap();
+    let entry = &snapshot.entries[0];
+    assert_eq!(entry.name, name);
+    let identity = entry.identity.unwrap();
+    let parent = snapshot.local_parent.unwrap();
+    let read = || parent.read_png_preview(&fixture.0, name, identity, &cancel);
+    assert_eq!(read().unwrap().rgba, [1, 2, 3, 4]);
+    let moved = fixture.0.join("moved");
+    fs::rename(&path, &moved).unwrap();
+    symlink(&moved, &path).unwrap();
+    assert!(matches!(read(), Err(PreviewError::NotRegular)));
+}

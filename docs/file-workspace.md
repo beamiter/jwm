@@ -253,7 +253,16 @@ as JWM Notes, and **查看源码** switches to the exact source prefix.
 HTML is escaped; links and images never load external resources. Other
 UTF-8 files, including TSX, remain plain text. The preview does not
 execute any file and reports when only a truncated prefix is shown.
-Images, audio and video are separate milestones.
+Image previews use a separate format-specific path; audio and video are not yet supported.
+
+### Static PNG Quick Preview
+
+Select a regular `.png` file and use the same Quick Preview action. PNG
+decoding runs off the UI thread and accepts up to 8 MiB of input, 8,388,608
+pixels, and 8,192 pixels per axis. The window fits the image without
+changing the file. It rejects animated or invalid PNG data, never uses an
+external viewer and does not process embedded text or ICC profiles.
+Other image formats and icon-grid thumbnails are not included.
 
 ### Home Trash
 
