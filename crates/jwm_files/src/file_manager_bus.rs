@@ -1,19 +1,19 @@
 //! Opt-in FileManager1 local folder and item reveal requests; no bus activation or replacing an owner.
+use crate::native_path::{BUS_URI_LIMIT, local_file_uri};
 use gtk4 as gtk;
 use gtk4::{gio, glib, prelude::*};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeSet,
-    path::{Component, PathBuf},
+    path::PathBuf,
     rc::Rc,
 };
 
 const NAME: &str = "org.freedesktop.FileManager1";
 const PATH: &str = "/org/freedesktop/FileManager1";
-const MAX_URI_BYTES: usize = 4096;
 const MAX_STARTUP_BYTES: usize = 1024;
 const MAX_REQUEST_BYTES: usize =
-    (MAX_URI_BYTES + 16) * crate::WINDOW_LIMIT + MAX_STARTUP_BYTES + 32;
+    (BUS_URI_LIMIT + 16) * crate::WINDOW_LIMIT + MAX_STARTUP_BYTES + 32;
 const XML: &str = "<node><interface name='org.freedesktop.FileManager1'> <method name='ShowFolders'><arg type='as' name='URIs' direction='in'/> <arg type='s' name='StartupId' direction='in'/></method> <method name='ShowItems'><arg type='as' name='URIs' direction='in'/><arg type='s' name='StartupId' direction='in'/></method> <method name='ShowItemProperties'><arg type='as' name='URIs' direction='in'/><arg type='s' name='StartupId' direction='in'/></method></interface></node>";
 
 fn native_folders(values: &[String]) -> Result<Vec<PathBuf>, &'static str> {
@@ -23,21 +23,7 @@ fn native_folders(values: &[String]) -> Result<Vec<PathBuf>, &'static str> {
     let mut paths = Vec::new();
     let mut seen = BTreeSet::new();
     for value in values {
-        if value.len() > MAX_URI_BYTES
-            || !value.starts_with("file://")
-            || value.contains(['?', '#', '\0'])
-        {
-            return Err("expected a bounded native file URI without query or fragment");
-        }
-        let (path, host) = glib::filename_from_uri(value).map_err(|_| "invalid native file URI")?;
-        if host
-            .as_deref()
-            .is_some_and(|host| !host.eq_ignore_ascii_case("localhost"))
-            || !path.is_absolute()
-            || path.components().any(|part| part == Component::ParentDir)
-        {
-            return Err("remote or nonlocal folder URI is not supported");
-        }
+        let path = local_file_uri(value, BUS_URI_LIMIT)?;
         if seen.insert(path.clone()) {
             paths.push(path);
         }

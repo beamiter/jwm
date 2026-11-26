@@ -298,6 +298,42 @@ xdotool key --clearmodifiers Return
 [[ $(title_id '^JWM Files · .*/path-copy/target folder %$') == "$window" ]]
 printf 'GTK4 X11 clipboard: Ctrl+Shift+C pasted the exact path into the address bar\n'
 
+# The lossy lookalike has the same rendered name. Prove the reopened
+# directory's native identity via a write only to the disposable fixture.
+raw_dir="$root/uri-source/"$'a-raw-%20-\x80'
+lookalike="$root/uri-source/"$'a-raw-%20-\xef\xbf\xbd'
+mkdir -p "$raw_dir" "$lookalike" "$root/uri-away"
+visit_path uri-source
+sleep 0.2
+xdotool mousemove --window "$window" 350 72 click 1
+xdotool key --clearmodifiers ctrl+shift+c
+visit_path uri-away
+xdotool key --clearmodifiers ctrl+l ctrl+a BackSpace ctrl+v
+sleep 0.2
+xdotool key --clearmodifiers Return
+[[ $(title_id '^JWM Files · .*/uri-source/a-raw-%20-.*$') == "$window" ]]
+xdotool key --clearmodifiers ctrl+shift+n
+uri_dialog=$(title_id '^JWM Files · New Folder$')
+xdotool windowfocus --sync "$uri_dialog"
+xdotool type --clearmodifiers 'raw-uri-proof'
+xdotool key --clearmodifiers Return
+for attempt in {1..35}; do
+  [[ ! -d "$raw_dir/raw-uri-proof" ]] || break
+  sleep 0.1
+done
+[[ -d "$raw_dir/raw-uri-proof" && ! -e "$lookalike/raw-uri-proof" ]]
+printf 'GTK4 X11 location: copied raw file URI reopened the byte-exact directory\n'
+
+mkdir -p "$root/uri-away/literal%20" "$root/uri-away/literal "
+visit_path uri-away/literal%20
+xdotool key --clearmodifiers ctrl+l ctrl+a BackSpace
+xdotool type --clearmodifiers "file://outside.invalid$root/uri-away"
+xdotool key --clearmodifiers Return
+sleep 0.25
+[[ $(xdotool getwindowname "$window") == "JWM Files · $root/uri-away/literal%20" ]]
+xdotool key --clearmodifiers Escape
+printf 'GTK4 X11 location: rejected a remote URI and kept literal percent path semantics\n'
+
 visit_path copy-from
 sleep 0.2
 xdotool mousemove --window "$window" 350 72 click 1
