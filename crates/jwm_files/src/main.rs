@@ -3,6 +3,7 @@ mod bench_ui;
 mod breadcrumb;
 mod comparison;
 mod copy_ui;
+mod file_manager_bus;
 mod grid;
 mod navigation;
 mod preview_ui;
@@ -493,6 +494,13 @@ fn focus_current_view(views: &glib::WeakRef<gtk::Stack>) {
     {
         content.grab_focus();
     }
+}
+
+fn browser_window_count(app: &gtk::Application) -> usize {
+    app.windows()
+        .iter()
+        .filter(|window| window.is::<gtk::ApplicationWindow>())
+        .count()
 }
 
 fn open_window(
@@ -1005,13 +1013,7 @@ fn open_window(
             let Some(app) = window.upgrade().and_then(|window| window.application()) else {
                 return;
             };
-            if app
-                .windows()
-                .iter()
-                .filter(|window| window.is::<gtk::ApplicationWindow>())
-                .count()
-                >= WINDOW_LIMIT
-            {
+            if browser_window_count(&app) >= WINDOW_LIMIT {
                 status.set_text(&format!("最多可打开 {WINDOW_LIMIT} 个文件窗口。"));
                 return;
             }
@@ -1323,10 +1325,17 @@ fn main() -> glib::ExitCode {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.clone());
-    let initial = match launch_directory(&cwd, std::env::args_os().skip(1)) {
+    let mut arguments = std::env::args_os().skip(1).peekable();
+    let export_file_manager = arguments
+        .peek()
+        .is_some_and(|arg| arg == "--file-manager-service");
+    if export_file_manager {
+        arguments.next();
+    }
+    let initial = match launch_directory(&cwd, arguments) {
         Ok(initial) => initial,
         Err(error) => {
-            eprintln!("Usage: jwm-files [--] [directory]: {error}");
+            eprintln!("Usage: jwm-files [--file-manager-service] [--] [directory]: {error}");
             return glib::ExitCode::FAILURE;
         }
     };
@@ -1342,6 +1351,12 @@ fn main() -> glib::ExitCode {
     ]
     .map(|kind| (kind, glib::user_special_dir(kind)));
     let copy_buffer = copy_ui::CopyBuffer::default();
+    if export_file_manager {
+        let (copy_buffer, home, special) = (copy_buffer.clone(), home.clone(), special.clone());
+        app.connect_startup(move |app| {
+            file_manager_bus::install(app, copy_buffer.clone(), home.clone(), special.clone())
+        });
+    }
     app.connect_activate(move |app| {
         if let Some(window) = app.active_window() {
             window.present();
