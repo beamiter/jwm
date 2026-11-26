@@ -1,12 +1,16 @@
 use gtk::glib;
 use gtk::prelude::*;
 use gtk4 as gtk;
+use jwm_file_core::{DirectoryHandle, MakeDirectoryError};
 use jwm_file_core::{
     FileEntry, FileKind, ListOptions, LocalProvider, Location, ScanId, ScanWorker,
 };
 use std::cell::RefCell;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, mpsc};
+use std::thread;
 use std::time::Duration;
 
 const APP_ID: &str = "org.jwm.Files";
@@ -19,6 +23,8 @@ struct Browser {
     show_hidden: bool,
     entries: Vec<FileEntry>,
     visible_count: usize,
+    parent: Option<Arc<DirectoryHandle>>,
+    mkdir: Option<FolderOperation>,
 }
 
 impl Browser {
@@ -30,6 +36,91 @@ impl Browser {
 }
 
 type Shared = Rc<RefCell<Browser>>;
+
+struct FolderOperation {
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+    reply: mpsc::Receiver<Result<(), MakeDirectoryError>>,
+}
+
+fn show_new_folder(window: &gtk::ApplicationWindow, state: &Shared, status: &gtk::Label) {
+    let (path, parent) = {
+        let browser = state.borrow();
+        if browser.mkdir.is_some() {
+            status.set_text("正在创建文件夹，请稍候。");
+            return;
+        }
+        let Some(parent) = browser.parent.clone() else {
+            status.set_text("请先打开一个可读目录。");
+            return;
+        };
+        (browser.path.clone(), parent)
+    };
+    let dialog = gtk::Dialog::builder()
+        .title("JWM Files · New Folder")
+        .transient_for(window)
+        .modal(true)
+        .build();
+    dialog.add_button("取消", gtk::ResponseType::Cancel);
+    dialog.add_button("创建", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    let content = dialog.content_area();
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_spacing(8);
+    let where_label = gtk::Label::new(Some(&format!("位置：{}", path.display())));
+    where_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    where_label.set_xalign(0.0);
+    content.append(&where_label);
+    let name = gtk::Entry::builder()
+        .placeholder_text("文件夹名称")
+        .activates_default(true)
+        .build();
+    content.append(&name);
+    let (state, status) = (state.clone(), status.clone());
+    let name_for_response = name.clone();
+    dialog.connect_response(move |dialog, decision| {
+        let value = OsString::from(name_for_response.text().as_str());
+        dialog.destroy();
+        if decision != gtk::ResponseType::Accept {
+            return;
+        }
+        let mut browser = state.borrow_mut();
+        if browser.mkdir.is_some()
+            || browser.path != path
+            || browser
+                .parent
+                .as_ref()
+                .is_none_or(|current| !Arc::ptr_eq(current, &parent))
+        {
+            status.set_text("目录已变化，没有创建文件夹。");
+            return;
+        }
+        let (send, reply) = mpsc::sync_channel(1);
+        let target = parent.clone();
+        let original_path = path.clone();
+        match thread::Builder::new()
+            .name("jwm-file-mkdir".into())
+            .spawn(move || {
+                let result = target.create_directory_at(&original_path, &value);
+                let _ = send.send(result);
+            }) {
+            Ok(_) => {
+                browser.mkdir = Some(FolderOperation {
+                    parent: parent.clone(),
+                    path: path.clone(),
+                    reply,
+                });
+                status.set_text("正在创建文件夹…");
+            }
+            Err(error) => status.set_text(&format!("无法启动创建任务：{error}")),
+        }
+    });
+    dialog.present();
+    name.grab_focus();
+}
 
 fn start_scan(
     state: &Shared,
@@ -49,6 +140,7 @@ fn start_scan(
         browser.pending = Some((id, path.clone()));
         browser.entries.clear();
         browser.visible_count = 0;
+        browser.parent = None;
     }
     model.splice(0, model.n_items(), &[]);
     address.set_text(&path.to_string_lossy());
@@ -78,6 +170,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     }
     let up = gtk::Button::with_label("上一级");
     let refresh = gtk::Button::with_label("刷新");
+    let new_folder = gtk::Button::with_label("新建文件夹");
     let address = gtk::Entry::builder()
         .hexpand(true)
         .placeholder_text("输入目录路径")
@@ -86,6 +179,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     for widget in [
         up.upcast_ref::<gtk::Widget>(),
         refresh.upcast_ref(),
+        new_folder.upcast_ref(),
         address.upcast_ref(),
         hidden.upcast_ref(),
     ] {
@@ -175,6 +269,8 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
         show_hidden: false,
         entries: Vec::new(),
         visible_count: 0,
+        parent: None,
+        mkdir: None,
     }));
     {
         let (state, model, address, status) = (
@@ -293,6 +389,18 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
     window.add_action(&action);
     app.set_accels_for_action("win.location", &["<Control>l"]);
 
+    let mkdir_action = gtk::gio::SimpleAction::new("new-folder", None);
+    let weak_window = window.downgrade();
+    let (mkdir_state, mkdir_status) = (state.clone(), status.clone());
+    mkdir_action.connect_activate(move |_, _| {
+        if let Some(window) = weak_window.upgrade() {
+            show_new_folder(&window, &mkdir_state, &mkdir_status);
+        }
+    });
+    window.add_action(&mkdir_action);
+    new_folder.set_action_name(Some("win.new-folder"));
+    app.set_accels_for_action("win.new-folder", &["<Control><Shift>n"]);
+
     start_scan(&state, initial.into(), &model, &address, &status);
     let weak_window = window.downgrade();
     glib::timeout_add_local(Duration::from_millis(16), move || {
@@ -308,6 +416,7 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
                 Ok(snapshot) => {
                     browser.path = requested;
                     browser.entries = snapshot.entries;
+                    browser.parent = snapshot.local_parent;
                     let base = format!("{} 项", browser.entries.len());
                     let label = if snapshot.skipped_entries == 0 {
                         base
@@ -318,6 +427,34 @@ fn open_window(app: &gtk::Application, initial: &Path, home: &Path) {
                     window.set_title(Some(&format!("JWM Files · {}", browser.path.display())));
                 }
                 Err(error) => status.set_text(&format!("无法读取目录：{error}")),
+            }
+        }
+        let completed = browser
+            .mkdir
+            .as_ref()
+            .and_then(|work| match work.reply.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(MakeDirectoryError::Io(
+                    std::io::Error::other("folder worker ended without a result"),
+                ))),
+                Err(mpsc::TryRecvError::Empty) => None,
+            });
+        if let Some(result) = completed
+            && let Some(work) = browser.mkdir.take()
+            && browser.path == work.path
+            && browser
+                .parent
+                .as_ref()
+                .is_some_and(|current| current.identity() == work.parent.identity())
+        {
+            match result {
+                Ok(()) => {
+                    let path = browser.path.clone();
+                    drop(browser);
+                    start_scan(&state, path, &model, &address, &status);
+                    return glib::ControlFlow::Continue;
+                }
+                Err(error) => status.set_text(&format!("没有创建文件夹：{error}")),
             }
         }
         if browser.visible_count < browser.entries.len() {

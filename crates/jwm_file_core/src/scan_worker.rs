@@ -148,6 +148,8 @@ mod tests {
                 location: location.clone(),
                 entries: Vec::new(),
                 skipped_entries: 0,
+                #[cfg(target_os = "linux")]
+                local_parent: None,
             })
         }
     }
