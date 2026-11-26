@@ -1,0 +1,10 @@
+[package]
+name = "jwm_file_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+publish = false
+
+# Kept isolated from the compositor and from future GTK/GVFS bindings.
+[workspace]
