@@ -72,7 +72,9 @@ pub(crate) fn encode_home_trash_info(original: &Path, local_date: &str) -> Optio
         || original.file_name().is_none()
         || raw.contains(&0)
         || raw.ends_with(b"/")
-        || original.components().any(|part| part == Component::ParentDir)
+        || original
+            .components()
+            .any(|part| part == Component::ParentDir)
         || raw.split(|byte| *byte == b'/').any(|part| part == b".")
     {
         return None;
@@ -250,12 +252,23 @@ mod tests {
     #[test]
     fn trash_writer_rejects_unsafe_paths_bad_dates_and_encoded_oversize() {
         let date = "2024-02-29T12:26:00";
-        for raw in [b"relative".as_slice(), b"/", b"/a/../b", b"/a/./b", b"/a/", b"/x\0y"] {
+        for raw in [
+            b"relative".as_slice(),
+            b"/",
+            b"/a/../b",
+            b"/a/./b",
+            b"/a/",
+            b"/x\0y",
+        ] {
             assert!(encode_home_trash_info(Path::new(OsStr::from_bytes(raw)), date).is_none());
         }
         let path = Path::new("/home/test/file");
         assert!(encode_home_trash_info(path, "2025-02-29T01:02:03").is_none());
-        assert!(encode_home_trash_info(path, "20040831T22:32:08").unwrap().ends_with(b"2004-08-31T22:32:08\n"));
+        assert!(
+            encode_home_trash_info(path, "20040831T22:32:08")
+                .unwrap()
+                .ends_with(b"2004-08-31T22:32:08\n")
+        );
         let oversized = format!("/{}", "%".repeat(TRASH_INFO_LIMIT / 3));
         assert!(encode_home_trash_info(Path::new(&oversized), date).is_none());
     }

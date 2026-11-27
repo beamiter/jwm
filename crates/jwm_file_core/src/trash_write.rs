@@ -23,15 +23,22 @@ pub enum HomeTrashWriteError {
     Refused(io::Error),
     /// The source was not moved by this operation; its metadata reservation
     /// could not be safely cleared. Do not replay or delete the payload.
-    SidecarMayRemain { storage_key: OsString, cause: io::Error },
+    SidecarMayRemain {
+        storage_key: OsString,
+        cause: io::Error,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum HomeTrashWriteOutcome {
-    Moved { storage_key: OsString },
+    Moved {
+        storage_key: OsString,
+    },
     /// Rename succeeded, but the original identity and matching sidecar
     /// could not both be verified. Do not retry or automatically undo.
-    MovedUnverified { storage_key: OsString },
+    MovedUnverified {
+        storage_key: OsString,
+    },
 }
 
 /// Explicitly move one observed regular file into the Home Trash on the
@@ -72,9 +79,12 @@ fn trash_with(
     let data = DirectoryHandle::open_without_symlinks(data_home).map_err(refused)?;
     require_user_controlled(&data).map_err(refused)?;
     require_same_mount(&data, source.parent).map_err(refused)?;
-    let roots = TrashWriteRoots::initialize_existing_data_home(data_home, cancel).map_err(refused)?;
+    let roots =
+        TrashWriteRoots::initialize_existing_data_home(data_home, cancel).map_err(refused)?;
     if roots.data_home.identity() != data.identity() {
-        return Err(refused(io::Error::other("the displayed data directory changed")));
+        return Err(refused(io::Error::other(
+            "the displayed data directory changed",
+        )));
     }
     require_same_mount(&roots.data_home, &data).map_err(refused)?;
     require_same_mount(&roots.files, source.parent).map_err(refused)?;
@@ -103,7 +113,10 @@ fn trash_with(
         {
             return Err(refused(cause));
         }
-        return Err(HomeTrashWriteError::SidecarMayRemain { storage_key: key, cause });
+        return Err(HomeTrashWriteError::SidecarMayRemain {
+            storage_key: key,
+            cause,
+        });
     }
     let independently_verified = roots.revalidate(&Cancellation::default()).is_ok()
         && sidecar.verify(&roots).is_ok()
@@ -124,24 +137,33 @@ fn reserve_unique(
     cancel: &Cancellation,
 ) -> Result<(OsString, SidecarReservation), HomeTrashWriteError> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let clock = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| {
-        HomeTrashWriteError::Refused(io::Error::other(error))
-    })?;
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| HomeTrashWriteError::Refused(io::Error::other(error)))?;
     for _ in 0..16 {
         let counter = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let token = format!("{:x}{:08x}{:016x}", clock.as_nanos(), std::process::id(), counter);
-        let key = trash_storage_key(basename, &token).ok_or_else(|| {
-            HomeTrashWriteError::Refused(io::ErrorKind::InvalidInput.into())
-        })?;
+        let token = format!(
+            "{:x}{:08x}{:016x}",
+            clock.as_nanos(),
+            std::process::id(),
+            counter
+        );
+        let key = trash_storage_key(basename, &token)
+            .ok_or_else(|| HomeTrashWriteError::Refused(io::ErrorKind::InvalidInput.into()))?;
         match SidecarReservation::acquire(roots, &key, encoded.clone(), cancel) {
             Ok(sidecar) => return Ok((key, sidecar)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => {
-                return Err(HomeTrashWriteError::SidecarMayRemain { storage_key: key, cause: error });
+                return Err(HomeTrashWriteError::SidecarMayRemain {
+                    storage_key: key,
+                    cause: error,
+                });
             }
         }
     }
-    Err(HomeTrashWriteError::Refused(io::ErrorKind::AlreadyExists.into()))
+    Err(HomeTrashWriteError::Refused(
+        io::ErrorKind::AlreadyExists.into(),
+    ))
 }
 
 fn mount_id(handle: &DirectoryHandle) -> io::Result<u64> {
@@ -160,7 +182,10 @@ fn require_same_mount(a: &DirectoryHandle, b: &DirectoryHandle) -> io::Result<()
 }
 
 fn identity(stat: &fs::Stat) -> FileIdentity {
-    FileIdentity { device: stat.st_dev, inode: stat.st_ino }
+    FileIdentity {
+        device: stat.st_dev,
+        inode: stat.st_ino,
+    }
 }
 
 fn check_source_name(source: &RegularMoveSource<'_>) -> io::Result<()> {
@@ -208,7 +233,9 @@ impl TrashWriteRoots {
     pub(crate) fn open(data_home: &Path, cancel: &Cancellation) -> io::Result<Self> {
         cancel.check().map_err(|_| io::ErrorKind::Interrupted)?;
         if !data_home.is_absolute()
-            || data_home.components().any(|part| part == Component::ParentDir)
+            || data_home
+                .components()
+                .any(|part| part == Component::ParentDir)
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -243,7 +270,9 @@ impl TrashWriteRoots {
     ) -> io::Result<Self> {
         cancel.check().map_err(|_| io::ErrorKind::Interrupted)?;
         if !data_home.is_absolute()
-            || data_home.components().any(|part| part == Component::ParentDir)
+            || data_home
+                .components()
+                .any(|part| part == Component::ParentDir)
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -284,7 +313,9 @@ impl TrashWriteRoots {
             || self.files.identity() != current.files.identity()
             || self.info.identity() != current.info.identity()
         {
-            return Err(io::Error::other("the displayed Home Trash directories changed"));
+            return Err(io::Error::other(
+                "the displayed Home Trash directories changed",
+            ));
         }
         require_same_mount(&self.data_home, &current.data_home)?;
         require_same_mount(&self.trash, &current.trash)?;
@@ -383,7 +414,9 @@ impl SidecarReservation {
             || Mode::from_raw_mode(held.st_mode).intersects(Mode::WGRP | Mode::WOTH)
             || u64::try_from(held.st_size).ok() != Some(self.expected.len() as u64)
         {
-            return Err(io::Error::other("Home Trash sidecar identity or policy changed"));
+            return Err(io::Error::other(
+                "Home Trash sidecar identity or policy changed",
+            ));
         }
         let mut bytes = vec![0; self.expected.len()];
         self.fd.read_exact_at(&mut bytes, 0)?;
@@ -454,7 +487,10 @@ mod tests {
             parent,
             displayed_parent: path,
             name,
-            identity: FileIdentity { device: st.dev(), inode: st.ino() },
+            identity: FileIdentity {
+                device: st.dev(),
+                inode: st.ino(),
+            },
         }
     }
 
@@ -468,7 +504,12 @@ mod tests {
         files::create_dir(&origin).unwrap();
         files::create_dir(&data).unwrap();
         let cancel = Cancellation::default();
-        assert!(crate::list_home_trash(&data, &cancel).unwrap().entries.is_empty());
+        assert!(
+            crate::list_home_trash(&data, &cancel)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
         assert!(!data.join("Trash").exists());
         let held = DirectoryHandle::open_without_symlinks(&origin).unwrap();
         let name = OsStr::from_bytes(b"file%\n\x80");
@@ -480,11 +521,16 @@ mod tests {
             let original_identity = source.identity;
             let HomeTrashWriteOutcome::Moved { storage_key } =
                 trash_regular_at_home(source, &data, WHEN, &cancel).unwrap()
-            else { panic!("verified same-mount move required") };
+            else {
+                panic!("verified same-mount move required")
+            };
             assert!(!original.exists());
             let published = data.join("Trash/files").join(&storage_key);
             let meta = files::metadata(&published).unwrap();
-            assert_eq!((meta.dev(), meta.ino()), (original_identity.device, original_identity.inode));
+            assert_eq!(
+                (meta.dev(), meta.ino()),
+                (original_identity.device, original_identity.inode)
+            );
             assert_eq!(files::read(&published).unwrap(), bytes);
             keys.push(storage_key);
         }
@@ -528,13 +574,27 @@ mod tests {
         let name = OsStr::new("item");
         files::write(origin.join(name), b"saved").unwrap();
         let cancel = Cancellation::default();
-        let result = trash_with(selected(&held, &origin, name), &temp.0, WHEN, &cancel, || {
-            cancel.cancel();
-        });
-        assert!(matches!(result, Err(HomeTrashWriteError::Refused(e)) if e.kind() == io::ErrorKind::Interrupted));
+        let result = trash_with(
+            selected(&held, &origin, name),
+            &temp.0,
+            WHEN,
+            &cancel,
+            || {
+                cancel.cancel();
+            },
+        );
+        assert!(
+            matches!(result, Err(HomeTrashWriteError::Refused(e)) if e.kind() == io::ErrorKind::Interrupted)
+        );
         assert_eq!(files::read(origin.join(name)).unwrap(), b"saved");
-        assert_eq!(files::read_dir(temp.0.join("Trash/info")).unwrap().count(), 0);
-        assert_eq!(files::read_dir(temp.0.join("Trash/files")).unwrap().count(), 0);
+        assert_eq!(
+            files::read_dir(temp.0.join("Trash/info")).unwrap().count(),
+            0
+        );
+        assert_eq!(
+            files::read_dir(temp.0.join("Trash/files")).unwrap().count(),
+            0
+        );
     }
 
     #[test]
@@ -546,16 +606,39 @@ mod tests {
         let name = OsStr::new("item");
         files::write(origin.join(name), b"saved").unwrap();
         let cancel = Cancellation::default();
-        let result = trash_with(selected(&held, &origin, name), &temp.0, WHEN, &cancel, || {
-            let entry = files::read_dir(temp.0.join("Trash/info")).unwrap().next().unwrap().unwrap();
-            let metadata = entry.file_name();
-            let key = metadata.as_bytes().strip_suffix(b".trashinfo").unwrap();
-            files::write(temp.0.join("Trash/files").join(OsStr::from_bytes(key)), b"external sentinel").unwrap();
-        });
-        assert!(matches!(result, Err(HomeTrashWriteError::Refused(e)) if e.kind() == io::ErrorKind::AlreadyExists));
+        let result = trash_with(
+            selected(&held, &origin, name),
+            &temp.0,
+            WHEN,
+            &cancel,
+            || {
+                let entry = files::read_dir(temp.0.join("Trash/info"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap();
+                let metadata = entry.file_name();
+                let key = metadata.as_bytes().strip_suffix(b".trashinfo").unwrap();
+                files::write(
+                    temp.0.join("Trash/files").join(OsStr::from_bytes(key)),
+                    b"external sentinel",
+                )
+                .unwrap();
+            },
+        );
+        assert!(
+            matches!(result, Err(HomeTrashWriteError::Refused(e)) if e.kind() == io::ErrorKind::AlreadyExists)
+        );
         assert_eq!(files::read(origin.join(name)).unwrap(), b"saved");
-        assert_eq!(files::read_dir(temp.0.join("Trash/info")).unwrap().count(), 0);
-        let entry = files::read_dir(temp.0.join("Trash/files")).unwrap().next().unwrap().unwrap();
+        assert_eq!(
+            files::read_dir(temp.0.join("Trash/info")).unwrap().count(),
+            0
+        );
+        let entry = files::read_dir(temp.0.join("Trash/files"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
         assert_eq!(files::read(entry.path()).unwrap(), b"external sentinel");
     }
 
@@ -578,14 +661,13 @@ mod tests {
         );
         assert!(!info.join("collision.trashinfo").exists());
         assert_eq!(files::read_link(payload).unwrap(), Path::new("elsewhere"));
-        let first = SidecarReservation::acquire(
-            &roots,
-            OsStr::new("ordinary"),
-            encoded.to_vec(),
-            &cancel,
-        )
-        .unwrap();
-        assert_eq!(files::read(info.join("ordinary.trashinfo")).unwrap(), encoded);
+        let first =
+            SidecarReservation::acquire(&roots, OsStr::new("ordinary"), encoded.to_vec(), &cancel)
+                .unwrap();
+        assert_eq!(
+            files::read(info.join("ordinary.trashinfo")).unwrap(),
+            encoded
+        );
         assert!(!temp.0.join("Trash/files/ordinary").exists());
         assert_eq!(
             SidecarReservation::acquire(&roots, OsStr::new("ordinary"), encoded.to_vec(), &cancel)
@@ -598,7 +680,10 @@ mod tests {
         files::rename(info.join("ordinary.trashinfo"), info.join("original")).unwrap();
         files::write(info.join("ordinary.trashinfo"), encoded).unwrap();
         assert!(first.verify(&roots).is_err());
-        assert_eq!(files::read(info.join("ordinary.trashinfo")).unwrap(), encoded);
+        assert_eq!(
+            files::read(info.join("ordinary.trashinfo")).unwrap(),
+            encoded
+        );
     }
 
     #[test]
@@ -606,13 +691,19 @@ mod tests {
         let temp = Fixture::new();
         let cancel = Cancellation::default();
         assert_eq!(
-            TrashWriteRoots::open(&temp.0, &cancel).err().unwrap().kind(),
+            TrashWriteRoots::open(&temp.0, &cancel)
+                .err()
+                .unwrap()
+                .kind(),
             io::ErrorKind::NotFound,
         );
         assert!(!temp.0.join("Trash").exists());
         cancel.cancel();
         assert_eq!(
-            TrashWriteRoots::open(&temp.0, &cancel).err().unwrap().kind(),
+            TrashWriteRoots::open(&temp.0, &cancel)
+                .err()
+                .unwrap()
+                .kind(),
             io::ErrorKind::Interrupted,
         );
         assert!(!temp.0.join("Trash").exists());
@@ -628,7 +719,10 @@ mod tests {
         let dir = temp.0.join("Trash/info");
         files::set_permissions(&dir, files::Permissions::from_mode(0o775)).unwrap();
         assert_eq!(
-            TrashWriteRoots::open(&temp.0, &cancel).err().unwrap().kind(),
+            TrashWriteRoots::open(&temp.0, &cancel)
+                .err()
+                .unwrap()
+                .kind(),
             io::ErrorKind::PermissionDenied,
         );
         assert_eq!(files::read_dir(dir).unwrap().count(), 0);
@@ -652,7 +746,10 @@ mod tests {
             assert_eq!(first.files.identity(), again.files.identity());
             assert_eq!(first.info.identity(), again.info.identity());
             if partial {
-                assert_eq!(files::read(root.join("info/sentinel")).unwrap(), b"do not change");
+                assert_eq!(
+                    files::read(root.join("info/sentinel")).unwrap(),
+                    b"do not change"
+                );
             }
         }
     }
@@ -664,11 +761,10 @@ mod tests {
         files::create_dir(&root).unwrap();
         files::write(root.join("info"), b"unrelated").unwrap();
         files::write(temp.0.join("source"), b"saved").unwrap();
-        assert!(TrashWriteRoots::initialize_existing_data_home(
-            &temp.0,
-            &Cancellation::default(),
-        )
-        .is_err());
+        assert!(
+            TrashWriteRoots::initialize_existing_data_home(&temp.0, &Cancellation::default(),)
+                .is_err()
+        );
         assert!(!root.join("files").exists());
         assert_eq!(files::read(root.join("info")).unwrap(), b"unrelated");
         assert_eq!(files::read(temp.0.join("source")).unwrap(), b"saved");
@@ -688,7 +784,13 @@ mod tests {
         files::create_dir(&info).unwrap();
         files::write(info.join("second"), b"new information").unwrap();
         assert!(roots.revalidate(&cancel).is_err());
-        assert_eq!(files::read(elsewhere.join("first")).unwrap(), b"old information");
-        assert_eq!(files::read(info.join("second")).unwrap(), b"new information");
+        assert_eq!(
+            files::read(elsewhere.join("first")).unwrap(),
+            b"old information"
+        );
+        assert_eq!(
+            files::read(info.join("second")).unwrap(),
+            b"new information"
+        );
     }
 }
