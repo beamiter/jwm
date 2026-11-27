@@ -1,5 +1,7 @@
 //! Strict metadata-only preflight for a future atomic directory copy.
-use crate::{Cancellation, FileIdentity, FileKind, ListError, WalkOptions, visit_local_index};
+use crate::{
+    Cancellation, DirectoryHandle, FileIdentity, FileKind, ListError, WalkOptions, visit_local_index,
+};
 use std::path::{Path, PathBuf};
 
 const LIMIT: WalkOptions = WalkOptions {
@@ -44,6 +46,54 @@ pub fn plan_tree_copy(
     cancel: &Cancellation,
 ) -> Result<TreeCopyPlan, TreeCopyPlanError> {
     plan(root, identity, cancel, LIMIT, PATH_BYTES)
+}
+
+#[derive(Debug)]
+pub enum TreeCopyTargetError {
+    TargetUnavailable(std::io::Error),
+    TargetChanged,
+    TargetInsideSource,
+    SourceChanged,
+    Plan(TreeCopyPlanError),
+}
+
+/// Revalidate the current source topology and the held destination directory.
+/// This checks observations only and never permits a write by itself.
+pub fn check_tree_copy_target(
+    original: &TreeCopyPlan,
+    held_target: &DirectoryHandle,
+    displayed_target: &Path,
+    cancel: &Cancellation,
+) -> Result<(), TreeCopyTargetError> {
+    let target_id = held_target.identity();
+    let verify_target = || {
+        let current = DirectoryHandle::open_without_symlinks(displayed_target)
+            .map_err(TreeCopyTargetError::TargetUnavailable)?;
+        if current.identity() != target_id {
+            return Err(TreeCopyTargetError::TargetChanged);
+        }
+        Ok(())
+    };
+    verify_target()?;
+    if target_id == original.identity {
+        return Err(TreeCopyTargetError::TargetInsideSource);
+    }
+    let current = plan_tree_copy(&original.root, original.identity, cancel)
+        .map_err(TreeCopyTargetError::Plan)?;
+    if current
+        .entries
+        .iter()
+        .any(|entry| entry.kind == FileKind::Directory && entry.identity == target_id)
+    {
+        return Err(TreeCopyTargetError::TargetInsideSource);
+    }
+    if current.entries != original.entries {
+        return Err(TreeCopyTargetError::SourceChanged);
+    }
+    verify_target()?;
+    cancel
+        .check()
+        .map_err(|e| TreeCopyTargetError::Plan(TreeCopyPlanError::Walk(e)))
 }
 
 fn plan(
@@ -99,7 +149,6 @@ fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DirectoryHandle;
     use std::{
         ffi::OsStr,
         fs,
@@ -135,6 +184,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn tree_copy_target_rechecks_identity_and_rejects_same_or_descendant() {
+        let f = Fixture::new();
+        let source = f.0.join("source");
+        let inside = source.join("child");
+        let outside = f.0.join("outside");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let held_source = DirectoryHandle::open_without_symlinks(&source).unwrap();
+        let held_inside = DirectoryHandle::open_without_symlinks(&inside).unwrap();
+        let held_outside = DirectoryHandle::open_without_symlinks(&outside).unwrap();
+        let cancel = Cancellation::default();
+        let plan = plan_tree_copy(&source, held_source.identity(), &cancel).unwrap();
+        for (folder, held) in [(&source, &held_source), (&inside, &held_inside)] {
+            assert!(matches!(
+                check_tree_copy_target(&plan, held, folder, &cancel),
+                Err(TreeCopyTargetError::TargetInsideSource)
+            ));
+        }
+        assert!(check_tree_copy_target(&plan, &held_outside, &outside, &cancel).is_ok());
+        let moved = f.0.join("moved");
+        fs::rename(&outside, &moved).unwrap();
+        symlink(&inside, &outside).unwrap();
+        assert!(matches!(
+            check_tree_copy_target(&plan, &held_outside, &outside, &cancel),
+            Err(TreeCopyTargetError::TargetUnavailable(_))
+        ));
+        fs::remove_file(&outside).unwrap();
+        fs::create_dir(&outside).unwrap();
+        assert!(matches!(
+            check_tree_copy_target(&plan, &held_outside, &outside, &cancel),
+            Err(TreeCopyTargetError::TargetChanged)
+        ));
+        fs::write(source.join("changed"), b"new").unwrap();
+        assert!(matches!(
+            check_tree_copy_target(&plan, &held_outside, &moved, &cancel),
+            Err(TreeCopyTargetError::SourceChanged)
+        ));
     }
 
     #[test]
