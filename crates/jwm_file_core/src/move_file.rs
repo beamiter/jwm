@@ -193,8 +193,10 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let base = std::env::temp_dir()
-                .join(format!("jwm-private-file-move-{}-{time}", std::process::id()));
+            let base = std::env::temp_dir().join(format!(
+                "jwm-private-file-move-{}-{time}",
+                std::process::id()
+            ));
             files::DirBuilder::new().mode(0o700).create(&base).unwrap();
             files::create_dir(base.join("from")).unwrap();
             files::create_dir(base.join("to")).unwrap();
@@ -300,7 +302,10 @@ mod tests {
             move_regular_no_replace(observe(&from, &from_path, name), &to, &to_path, &cancel),
             Err(RegularMoveError::NotRegular)
         ));
-        assert_eq!(files::read_link(from_path.join(name)).unwrap(), Path::new("real"));
+        assert_eq!(
+            files::read_link(from_path.join(name)).unwrap(),
+            Path::new("real")
+        );
         assert!(!to_path.join(name).exists());
         files::rename(&to_path, fixture.0.join("old-target")).unwrap();
         files::create_dir(&to_path).unwrap();
@@ -325,12 +330,7 @@ mod tests {
         files::write(from_path.join(name), b"source").unwrap();
         let cancel = Cancellation::default();
         assert!(matches!(
-            move_regular_no_replace(
-                observe(&from, &from_path, name),
-                &from,
-                &from_path,
-                &cancel
-            ),
+            move_regular_no_replace(observe(&from, &from_path, name), &from, &from_path, &cancel),
             Err(RegularMoveError::SameDirectory)
         ));
         let result = move_regular_with(
