@@ -121,8 +121,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("jwm-copy-batch-{}-{stamp}", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("jwm-copy-batch-{}-{stamp}", std::process::id()));
             fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
             Self(path)
         }
