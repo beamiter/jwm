@@ -13,9 +13,10 @@ const OFFER: u64 = 1;
 pub(super) const SOURCE: &str = "拖拽复制所选文件";
 pub(super) const TARGET: &str = "拖到这里复制到当前目录";
 
-// Do not expose the drop controls on backends without physical-input acceptance.
 pub(super) fn available() -> bool {
-    gdk::Display::default().is_some_and(|display| display.type_().name() == "GdkX11Display")
+    gdk::Display::default().is_some_and(|display| {
+        matches!(display.type_().name(), "GdkX11Display" | "GdkWaylandDisplay")
+    })
 }
 
 struct Pending {

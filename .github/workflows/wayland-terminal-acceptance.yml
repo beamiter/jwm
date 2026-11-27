@@ -106,6 +106,24 @@ jobs:
         run: |
           python3 scripts/test-files-terminal-wayland.py --jwm target/release/jwm \
             --jwm-tool target/release/jwm-tool --files crates/jwm_files/target/debug/jwm-files
+      - name: Drive a physical Files drag between two nested Wayland windows
+        timeout-minutes: 7
+        run: |
+          set -o pipefail
+          fixture=$(cargo test --locked --manifest-path crates/jwm_files/Cargo.toml --bin jwm-files \
+            --no-run --message-format=json | python3 -c '
+          import json, sys
+          paths = []
+          for line in sys.stdin:
+              row = json.loads(line)
+              target = row.get("target", {})
+              if row.get("reason") == "compiler-artifact" and target.get("name") == "jwm-files" and row.get("profile", {}).get("test") and row.get("executable"):
+                  paths.append(row["executable"])
+          assert len(paths) == 1, paths
+          print(paths[0])')
+          test -x "$fixture"
+          python3 scripts/test-files-terminal-wayland.py --jwm target/release/jwm \
+            --jwm-tool target/release/jwm-tool --drag-test "$fixture"
       - name: Retain acceptance pixels, native input receipts and logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
