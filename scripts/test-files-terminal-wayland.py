@@ -269,7 +269,7 @@ def drag_pointer(root, tool, outer, host_display, window_pid, role, x, y):
 
     def rect(kind):
         title = f"JWM Files · {root / ('files-dnd-' + kind)}"
-        found = [row for row in rows if row.get("title") == title]
+        found = [row for row in rows if row.get("name") == title]
         assert len(found) == 1, rows
         row = found[0]
         return tuple(int(row[key]) for key in ("x", "y", "w", "h"))

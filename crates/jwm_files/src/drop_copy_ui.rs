@@ -32,7 +32,7 @@ struct Pending {
 
 impl Pending {
     fn capture(state: &Shared, selection: &gtk::SingleSelection) -> Option<Self> {
-        let browser = state.borrow();
+        let browser = state.try_borrow().ok()?;
         if browser.pending.is_some() || browser.dialog_open || browser.mutation.is_some() {
             return None;
         }
@@ -62,7 +62,9 @@ impl Pending {
         if Rc::ptr_eq(&view, target) || selection.selected() != self.index {
             return false;
         }
-        let browser = view.borrow();
+        let Ok(browser) = view.try_borrow() else {
+            return false;
+        };
         browser.pending.is_none()
             && !browser.dialog_open
             && browser.mutation.is_none()
@@ -179,7 +181,9 @@ pub(super) fn install(
                 return false;
             }
             let target = {
-                let browser = state.borrow();
+                let Ok(browser) = state.try_borrow() else {
+                    return false;
+                };
                 if browser.pending.is_some() || browser.dialog_open || browser.mutation.is_some() {
                     return false;
                 }
@@ -204,14 +208,16 @@ pub(super) fn install(
     });
     destination.add_controller(target);
 
-    let update = {
+    let update = Rc::new({
         let (handle, state, selection) = (
             source_handle.downgrade(),
-            state.clone(),
+            Rc::downgrade(state),
             selection.downgrade(),
         );
         move || {
-            if let (Some(handle), Some(selection)) = (handle.upgrade(), selection.upgrade()) {
+            if let (Some(handle), Some(state), Some(selection)) =
+                (handle.upgrade(), state.upgrade(), selection.upgrade())
+            {
                 let text = Pending::capture(&state, &selection).map_or_else(
                     || SOURCE.to_owned(),
                     |pending| format!("{SOURCE}：{}", trash_ui::display_path(&pending.source.name)),
@@ -219,7 +225,12 @@ pub(super) fn install(
                 handle.set_tooltip_text(Some(&text));
             }
         }
-    };
+    });
     update();
-    selection.connect_selected_notify(move |_| update());
+    selection.connect_selected_notify(move |_| {
+        // GTK notifies inline while the model refresh holds the browser mutably.
+        // Observe the committed source selection only after that refresh returns.
+        let update = update.clone();
+        glib::idle_add_local_once(move || update());
+    });
 }
