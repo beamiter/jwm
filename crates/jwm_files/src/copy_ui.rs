@@ -606,6 +606,10 @@ pub(super) fn install(
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
     menu.append(Some("属性（Alt+Enter）"), Some("win.item-properties"));
     menu.append(Some("主目录回收站"), Some("win.home-trash"));
+    menu.append(
+        Some(crate::trash_move_ui::OPERATION),
+        Some("win.move-to-home-trash"),
+    );
     menu.append(Some("撤销重命名（Ctrl+Z）"), Some("win.undo-rename"));
     menu.append(Some("选择多个文件复制"), Some("win.pick-batch-copy"));
     crate::batch_copy_picker::install(window, state, buffer, status);
@@ -655,7 +659,9 @@ pub(super) fn install(
                     && let Some((cancel, _)) = &work.copy
                 {
                     cancel.cancel();
-                    let text = if work.operation == MOVE_OPERATION {
+                    let text = if work.operation == MOVE_OPERATION
+                        || work.operation == crate::trash_move_ui::OPERATION
+                    {
                         "正在取消移动…"
                     } else {
                         "正在取消复制…"

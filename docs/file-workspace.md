@@ -543,10 +543,18 @@ file with an intact original path and choose **恢复副本** to preview the des
 The action creates a no-overwrite copy at the original path, leaving
 the Trash entry and metadata in place. It refuses a missing or
 symlinked parent. The application does not enumerate other mounts,
-send files to Trash, remove an original Trash entry, or offer Trash undo.
+remove an original Trash entry, or offer Trash undo.
 
-The Linux provider now has an explicit, core-only operation to move one
-observed regular file into Home Trash. It initializes private Trash children
+To move one ordinary file, select it in the primary pane and choose
+**操作 → 移到主目录回收站**. Review the exact path shown and confirm the
+move. Cancel is the default; this action has no global Delete shortcut.
+A successful move preserves the file in Home Trash. Use **恢复副本** to
+copy it back without replacing an existing file or deleting the Trash
+entry. If the Trash window was already open, use **刷新** to list the
+new entry. This action does not support directories, symlinks or batches.
+
+The Linux provider implements the explicit move for one observed
+regular file into Home Trash. It initializes private Trash children
 under an existing, user-controlled XDG data directory only on that explicit
 operation. Opening the listing remains read-only. The selected parent and
 Trash directories must be on the same mount; the operation refuses unsafe
@@ -555,4 +563,4 @@ original-path sidecar before a no-replace move, preserves the native file
 name in that metadata, and never falls back to permanently deleting the
 file. A failed sidecar cleanup or a completed move whose result cannot be
 verified is reported separately; neither is permission to replay or undo.
-This is not wired to the browser yet and is not a power-loss guarantee.
+This does not promise power-loss durability.

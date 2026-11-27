@@ -21,6 +21,7 @@ mod selection;
 mod session_ui;
 mod tab_strip;
 mod tabs;
+mod trash_move_ui;
 mod trash_ui;
 #[cfg(target_os = "linux")]
 mod tree;
@@ -228,6 +229,7 @@ enum MutationOutcome {
     FileOperation,
     CopyAsSibling(OsString),
     MoveUnverified,
+    TrashMove(Option<OsString>),
     TreeCopy(jwm_file_core::TreeCopyReceipt),
     BatchCopy(Vec<(OsString, jwm_file_core::CopyBatchItem)>),
     Rename(Option<RenameReceipt>),
@@ -878,6 +880,7 @@ fn open_window_with_tabs(
     app.set_accels_for_action("win.folder-terminal", &["<Control><Shift>Return"]);
     session_ui::install(app, &window, &state, &status, home, special, copy_buffer);
     trash_ui::install(&window);
+    trash_move_ui::install(&window, &state, &selection, &copy_status);
     copy_ui::install(
         &window,
         &file_actions,
@@ -1450,6 +1453,8 @@ fn open_window_with_tabs(
                 Err(mpsc::TryRecvError::Disconnected) => {
                     let message = if work.operation == copy_ui::MOVE_OPERATION {
                         "移动未返回结果。请检查源和目标，不要直接重试。"
+                    } else if work.operation == trash_move_ui::OPERATION {
+                        "移到回收站未返回结果。请检查源和回收站，不要直接重试。"
                     } else {
                         "文件操作未返回结果，无法确认哪些文件已写入。"
                     };
@@ -1463,6 +1468,7 @@ fn open_window_with_tabs(
             let mut batch = None;
             let mut tree = None;
             let mut move_unverified = false;
+            let mut trash_unverified = None;
             let result = result.map(|outcome| match outcome {
                 MutationOutcome::Rename(receipt) => {
                     browser.rename_undo = receipt.map(Arc::new);
@@ -1476,6 +1482,10 @@ fn open_window_with_tabs(
                 MutationOutcome::CopyAsSibling(name) => Some(name),
                 MutationOutcome::MoveUnverified => {
                     move_unverified = true;
+                    None
+                }
+                MutationOutcome::TrashMove(unverified) => {
+                    trash_unverified = unverified;
                     None
                 }
                 MutationOutcome::TreeCopy(receipt) => {
@@ -1508,6 +1518,22 @@ fn open_window_with_tabs(
                     text.push_str(" 临时目录可能保留：");
                     text.push_str(&trash_ui::display_path(work.path.join(residue).as_os_str()));
                 }
+                copy_ui::notice(&copy_status, &text);
+            } else if work.operation == trash_move_ui::OPERATION
+                && let Some((_, detail)) = &work.copy
+            {
+                let text = match &result {
+                    Ok(_) => match trash_unverified {
+                        Some(key) => {
+                            let key = trash_ui::display_path(&key);
+                            format!(
+                                "已执行移动，但无法核实回收站项目 {key}。请检查两处，不要重试：{detail}"
+                            )
+                        }
+                        None => format!("已移到主目录回收站：{detail}"),
+                    },
+                    Err(error) => format!("{error} 项目：{detail}"),
+                };
                 copy_ui::notice(&copy_status, &text);
             } else if work.operation == copy_ui::MOVE_OPERATION
                 && let Some((_, detail)) = &work.copy
@@ -2604,7 +2630,111 @@ mod wayland_acceptance {
         assert!(status_matches(&|text| text == "没有可撤销的重命名。"));
         println!("GTK4 Wayland undo: directory-bound rename conflicts were non-destructive");
 
-        let trash = glib::user_data_dir().join("Trash");
+        let xdg = glib::user_data_dir();
+        assert_eq!(xdg, root.parent().unwrap().join("data"));
+        let trash = xdg.join("Trash");
+        assert!(!trash.exists());
+        let home_trash_panel = || {
+            app.windows().into_iter().find(|window| {
+                window.is_visible() && window.title().as_deref() == Some("JWM Files · Home Trash")
+            })
+        };
+        action("win.home-trash");
+        until(
+            || {
+                home_trash_panel().is_some_and(|panel| {
+                    descendants(panel.upcast_ref()).iter().any(|widget| {
+                        widget
+                            .downcast_ref::<gtk::Label>()
+                            .is_some_and(|label| label.text().contains("第 1 批 · 0 项"))
+                    })
+                })
+            },
+            "read-only fresh home Trash panel finished loading",
+        );
+        assert!(!trash.exists());
+        home_trash_panel().unwrap().close();
+
+        let explicit_trash_source = root.join("explicit-trash");
+        fs::create_dir(&explicit_trash_source).unwrap();
+        let ordinary = std::ffi::OsStr::from_bytes(b"z-trash%\x80");
+        let saved = explicit_trash_source.join(ordinary);
+        fs::write(explicit_trash_source.join("a-keep"), b"sentinel").unwrap();
+        fs::write(&saved, b"exact trashed data").unwrap();
+        navigate(&explicit_trash_source);
+        at(&explicit_trash_source, "a-keep");
+        let prompt_trash = || {
+            source_selection.set_selected(1);
+            action("win.move-to-home-trash");
+            let confirm = gtk::Window::list_toplevels()
+                .into_iter()
+                .find_map(|window| {
+                    let dialog = window.downcast::<gtk::Dialog>().ok()?;
+                    (dialog.title().as_deref() == Some(trash_move_ui::TITLE)).then_some(dialog)
+                })
+                .unwrap();
+            assert!(descendants(confirm.upcast_ref()).iter().any(|widget| {
+                widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                    label.text().contains(r"z-trash%\x80") && label.text().contains("不会永久删除")
+                })
+            }));
+            until(|| confirm.is_mapped(), "native move to Trash confirmation");
+            confirm
+        };
+        let cancelled = prompt_trash();
+        let default_cancel = cancelled
+            .default_widget()
+            .and_downcast::<gtk::Button>()
+            .expect("confirmation has an explicit default button");
+        assert_eq!(default_cancel.label().as_deref(), Some("取消"));
+        // Exercise GTK's Enter action, not a direct Cancel response.
+        cancelled.emit_by_name::<()>("activate-default", &[]);
+        until(
+            || !cancelled.is_mapped(),
+            "default action cancelled the move",
+        );
+        assert!(!trash.exists());
+        assert_eq!(fs::read(&saved).unwrap(), b"exact trashed data");
+        println!("GTK4 Wayland move to Trash: default Enter action cancelled without any write");
+        prompt_trash().response(gtk::ResponseType::Accept);
+        until(
+            || status_matches(&|text| text.starts_with("已移到主目录回收站：")),
+            "explicit fresh Trash move result",
+        );
+        assert!(!saved.exists());
+        assert_eq!(
+            fs::read(explicit_trash_source.join("a-keep")).unwrap(),
+            b"sentinel"
+        );
+        let snapshot =
+            jwm_file_core::list_home_trash(&xdg, &jwm_file_core::Cancellation::default()).unwrap();
+        assert_eq!(snapshot.entries.len(), 1);
+        let row = &snapshot.entries[0];
+        assert_eq!(row.info.as_ref().unwrap().original, saved);
+        assert_eq!(
+            fs::read(trash.join("files").join(&row.name)).unwrap(),
+            b"exact trashed data"
+        );
+        action("win.home-trash");
+        until(
+            || {
+                home_trash_panel().is_some_and(|panel| {
+                    descendants(panel.upcast_ref()).iter().any(|widget| {
+                        widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                            label.text().contains(r"explicit-trash/z-trash%\x80")
+                        })
+                    })
+                })
+            },
+            "freshly trashed exact filename shown in browser",
+        );
+        home_trash_panel().unwrap().close();
+        // Keep the independent historical read/recovery fixture at its own baseline.
+        fs::rename(&trash, xdg.join("Trash-write-fixture-hold")).unwrap();
+        println!(
+            "GTK4 Wayland move to Trash: read and cancel unchanged, fresh write and exact readback"
+        );
+
         fs::create_dir_all(trash.join("files")).unwrap();
         fs::create_dir_all(trash.join("info")).unwrap();
         let metadata = b"[Trash Info]\nPath=tests/note%25%80.txt\nDeletionDate=2026-11-26T12:26:00";
