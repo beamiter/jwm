@@ -233,8 +233,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("jwm-copy-state-{}-{now}", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("jwm-copy-state-{}-{now}", std::process::id()));
             stdfs::DirBuilder::new().mode(0o700).create(&path).unwrap();
             Self(path)
         }
@@ -384,9 +384,15 @@ mod tests {
     fn persistent_copy_journal_reserves_at_most_the_fixed_slots() {
         let f = Fixture::new();
         let journal = f.0.join(JOURNAL);
-        stdfs::DirBuilder::new().mode(0o700).create(&journal).unwrap();
+        stdfs::DirBuilder::new()
+            .mode(0o700)
+            .create(&journal)
+            .unwrap();
         for slot in 0..COPY_JOURNAL_SLOTS {
-            stdfs::DirBuilder::new().mode(0o700).create(f.slot(slot)).unwrap();
+            stdfs::DirBuilder::new()
+                .mode(0o700)
+                .create(f.slot(slot))
+                .unwrap();
         }
         let fail = prepare_copy_journal(&f.open(), f.intent()).err().unwrap();
         assert_eq!(fail.kind(), ErrorKind::StorageFull);
