@@ -227,6 +227,7 @@ struct MutationWork {
 enum MutationOutcome {
     FileOperation,
     CopyAsSibling(OsString),
+    MoveUnverified,
     TreeCopy(jwm_file_core::TreeCopyReceipt),
     BatchCopy(Vec<(OsString, jwm_file_core::CopyBatchItem)>),
     Rename(Option<RenameReceipt>),
@@ -499,14 +500,23 @@ fn place_locations(
     locations
 }
 
+fn primary_has_focus(window: &gtk::ApplicationWindow, views: &gtk::Stack) -> bool {
+    gtk::prelude::GtkWindowExt::focus(window).is_some_and(|focus| {
+        focus == *views.upcast_ref::<gtk::Widget>() || focus.is_ancestor(views)
+    })
+}
+
 fn focus_current_view(views: &glib::WeakRef<gtk::Stack>) {
-    if let Some(content) = views
-        .upgrade()
-        .and_then(|views| views.visible_child())
-        .and_downcast::<gtk::ScrolledWindow>()
-        .and_then(|scroll| scroll.child())
+    if let Some(views) = views.upgrade()
+        && !views
+            .visible_child()
+            .and_downcast::<gtk::ScrolledWindow>()
+            .and_then(|scroll| scroll.child())
+            .is_some_and(|content| content.grab_focus())
     {
-        content.grab_focus();
+        // An empty list or grid may have no row to focus. Keep keyboard
+        // focus in the primary pane so Paste still targets this directory.
+        views.grab_focus();
     }
 }
 
@@ -738,7 +748,11 @@ fn open_window_with_tabs(
     }
 
     list.set_single_click_activate(false);
-    let views = gtk::Stack::builder().hexpand(true).vexpand(true).build();
+    let views = gtk::Stack::builder()
+        .focusable(true)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
     for (name, content) in [
         ("list", list.upcast_ref::<gtk::Widget>()),
         ("grid", grid.upcast_ref()),
@@ -871,6 +885,7 @@ fn open_window_with_tabs(
         copy_buffer,
         &selection,
         &copy_status,
+        &views,
     );
     let breadcrumb = Rc::new(breadcrumb::Breadcrumb::new({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
@@ -1249,6 +1264,7 @@ fn open_window_with_tabs(
     start_scan(&state, initial, &address, &status);
     let weak_window = window.downgrade();
     let reveal_list = list.downgrade();
+    let weak_primary = views.downgrade();
     // Associate the incoming item only with the initial scan. User navigation
     // can cancel it; the same folder revisited later must not revive it.
     let mut reveal_pending =
@@ -1338,6 +1354,9 @@ fn open_window_with_tabs(
             let entries = browser.entries.clone();
             tabs.sync(&browser.tabs);
             drop(browser);
+            let retain_primary = weak_primary
+                .upgrade()
+                .is_some_and(|views| primary_has_focus(&window, &views));
             breadcrumb.show(&path);
             selection.set_selected(gtk::INVALID_LIST_POSITION);
             if let Some(reveal) = &reveal_widget {
@@ -1351,6 +1370,12 @@ fn open_window_with_tabs(
             }
             model.replace(entries);
             finder.snapshot_changed();
+            if retain_primary
+                && let Some(views) = weak_primary.upgrade()
+                && !primary_has_focus(&window, &views)
+            {
+                focus_current_view(&weak_primary);
+            }
             if let Some((row, id)) = restore_row
                 && let Ok(row) = u32::try_from(row)
                 && {
@@ -1423,7 +1448,12 @@ fn open_window_with_tabs(
             .and_then(|work| match work.reply.try_recv() {
                 Ok(result) => Some(result),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("文件操作未返回结果，无法确认哪些文件已写入。".into()))
+                    let message = if work.operation == copy_ui::MOVE_OPERATION {
+                        "移动未返回结果。请检查源和目标，不要直接重试。"
+                    } else {
+                        "文件操作未返回结果，无法确认哪些文件已写入。"
+                    };
+                    Some(Err(message.into()))
                 }
                 Err(mpsc::TryRecvError::Empty) => None,
             });
@@ -1432,6 +1462,7 @@ fn open_window_with_tabs(
         {
             let mut batch = None;
             let mut tree = None;
+            let mut move_unverified = false;
             let result = result.map(|outcome| match outcome {
                 MutationOutcome::Rename(receipt) => {
                     browser.rename_undo = receipt.map(Arc::new);
@@ -1443,6 +1474,10 @@ fn open_window_with_tabs(
                 }
                 MutationOutcome::FileOperation => None,
                 MutationOutcome::CopyAsSibling(name) => Some(name),
+                MutationOutcome::MoveUnverified => {
+                    move_unverified = true;
+                    None
+                }
                 MutationOutcome::TreeCopy(receipt) => {
                     tree = Some(receipt);
                     None
@@ -1473,6 +1508,17 @@ fn open_window_with_tabs(
                     text.push_str(" 临时目录可能保留：");
                     text.push_str(&trash_ui::display_path(work.path.join(residue).as_os_str()));
                 }
+                copy_ui::notice(&copy_status, &text);
+            } else if work.operation == copy_ui::MOVE_OPERATION
+                && let Some((_, detail)) = &work.copy
+            {
+                let text = match &result {
+                    Ok(_) if move_unverified => {
+                        format!("移动已执行，但无法确认目标文件。请检查两处，不要重试：{detail}")
+                    }
+                    Ok(_) => format!("已移动：{detail}"),
+                    Err(error) => format!("{error} 操作路径：{detail}"),
+                };
                 copy_ui::notice(&copy_status, &text);
             } else if let Some((_, detail)) = &work.copy {
                 let text = match &result {
@@ -3198,6 +3244,133 @@ mod wayland_acceptance {
         assert_eq!(fs::read_dir(&tree_target).unwrap().count(), 2);
         println!(
             "GTK4 Wayland folder copy: raw leaf and empty directory, descendant and conflict refused"
+        );
+
+        use std::os::unix::fs::MetadataExt;
+        let move_source = root.join("move-source");
+        let move_target = root.join("move-target");
+        let move_other = root.join("move-elsewhere");
+        for dir in [&move_source, &move_target, &move_other] {
+            fs::create_dir(dir).unwrap();
+            fs::write(dir.join("a-guard.txt"), b"guard").unwrap();
+        }
+        let raw_move = std::ffi::OsStr::from_bytes(b"z-move%\x81");
+        let origin = move_source.join(raw_move);
+        let destination = move_target.join(raw_move);
+        fs::write(&origin, b"exact moved data").unwrap();
+        fs::write(&destination, b"keep existing").unwrap();
+        let observed = fs::metadata(&origin).unwrap();
+        let cut = || {
+            navigate(&move_source);
+            at(&move_source, "a-guard.txt");
+            until(
+                || source_selection.model().unwrap().n_items() == 2,
+                "move source listing",
+            );
+            source_selection.set_selected(1);
+            action("win.cut-file");
+            assert!(copy_noticed("粘贴后才会移动"));
+            assert_eq!(fs::metadata(&origin).unwrap().ino(), observed.ino());
+        };
+
+        display.clipboard().set_text("cut-clipboard-guard");
+        let controllers = window.observe_controllers();
+        let file_keys = (0..controllers.n_items())
+            .filter_map(|index| {
+                controllers
+                    .item(index)
+                    .and_downcast::<gtk::EventControllerKey>()
+            })
+            .find(|keys| {
+                keys.property::<Option<glib::GString>>("name").as_deref()
+                    == Some("jwm-files-file-shortcuts")
+            })
+            .unwrap();
+        let file_key = |key: gtk::gdk::Key| {
+            use glib::translate::IntoGlib;
+            file_keys.emit_by_name::<bool>(
+                "key-pressed",
+                &[
+                    &key.into_glib(),
+                    &0u32,
+                    &gtk::gdk::ModifierType::CONTROL_MASK,
+                ],
+            )
+        };
+        navigate(&move_source);
+        at(&move_source, "a-guard.txt");
+        source_selection.set_selected(1);
+        mounts.set_focusable(true);
+        assert!(mounts.grab_focus());
+        assert!(!file_key(gtk::gdk::Key::x));
+        assert!(!copy_noticed("粘贴后才会移动"));
+        assert!(source_list.grab_focus());
+        assert!(file_key(gtk::gdk::Key::x));
+        assert!(copy_noticed("粘贴后才会移动"));
+        assert!(origin.exists());
+        navigate(&move_target);
+        at(&move_target, "a-guard.txt");
+        assert!(mounts.grab_focus());
+        assert!(!file_key(gtk::gdk::Key::v));
+        assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
+        assert_eq!(fs::read(&destination).unwrap(), b"keep existing");
+        assert!(source_list.grab_focus());
+        action("win.paste-as-copy");
+        assert!(copy_noticed("不支持粘贴为副本"));
+        assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
+        assert!(file_key(gtk::gdk::Key::v));
+        until(
+            || copy_noticed("未覆盖，源文件未移动"),
+            "native move conflict",
+        );
+        println!("GTK4 Wayland cut focus: a focused sidebar could neither arm nor consume a cut");
+        assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
+        assert_eq!(fs::read(&destination).unwrap(), b"keep existing");
+        fs::remove_file(&destination).unwrap();
+
+        cut();
+        navigate(&move_target);
+        at(&move_target, "a-guard.txt");
+        let pause = copy_ui::MOVE_TEST_GATE.lock().unwrap();
+        action("win.paste-file");
+        action("win.cancel-file-copy");
+        drop(pause);
+        until(
+            || copy_noticed("已取消，源文件未移动"),
+            "native pre-rename cancellation",
+        );
+        assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
+        assert!(!destination.exists());
+
+        cut();
+        navigate(&move_target);
+        at(&move_target, "a-guard.txt");
+        let pause = copy_ui::MOVE_TEST_GATE.lock().unwrap();
+        action("win.paste-file");
+        navigate(&move_other);
+        at(&move_other, "a-guard.txt");
+        assert!(origin.exists());
+        assert!(!destination.exists());
+        drop(pause);
+        let held_target = trash_ui::display_path(destination.as_os_str());
+        until(
+            || status_matches(&|text| text.starts_with("已移动：") && text.ends_with(&held_target)),
+            "native move completion named the held destination",
+        );
+        assert!(!origin.exists());
+        assert!(!move_other.join(raw_move).exists());
+        let published = fs::metadata(&destination).unwrap();
+        assert_eq!(
+            (published.dev(), published.ino()),
+            (observed.dev(), observed.ino())
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"exact moved data");
+        action("win.paste-file");
+        assert!(copy_noticed("请先复制或剪切"));
+        assert!(!move_other.join(raw_move).exists());
+        assert_eq!(text_clipboard(&display), "cut-clipboard-guard");
+        println!(
+            "GTK4 Wayland cut and paste: native identity retained, no overwrite, cancel, no replay"
         );
 
         let find_path = root.join("finder-native");
