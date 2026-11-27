@@ -346,9 +346,13 @@ mod tests {
         let case = MoveCase::new();
         let cancel = Cancellation::default();
         assert!(matches!(
-            move_folder_with(case.source(), &case.to, &case.to_path, &cancel, |_, _, _| {
-                Err(Errno::XDEV)
-            }),
+            move_folder_with(
+                case.source(),
+                &case.to,
+                &case.to_path,
+                &cancel,
+                |_, _, _| { Err(Errno::XDEV) }
+            ),
             Err(FolderMoveError::Guard(RegularMoveError::CrossMount))
         ));
         assert!(!case.to_path.join(case.name).exists());
