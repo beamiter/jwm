@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 
-use jwm_file_core::{Cancellation, FileIdentity, ListError, WalkOptions, WalkSummary, visit_local_index};
+use jwm_file_core::{
+    Cancellation, FileIdentity, ListError, WalkOptions, WalkSummary, visit_local_index,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -54,29 +56,40 @@ impl NameIndex {
         identity: FileIdentity,
     ) -> Result<IndexScope, IndexError> {
         let raw = root.as_os_str().as_bytes();
-        if !root.is_absolute() || raw.len() > 4096 || raw.contains(&0)
+        if !root.is_absolute()
+            || raw.len() > 4096
+            || raw.contains(&0)
             || root.components().any(|part| part == Component::ParentDir)
         {
             return Err(IndexError::InvalidRoot);
         }
-        let roots: i64 = self.connection.query_row("SELECT count(*) FROM roots", [], |row| {
-            row.get(0)
-        })?;
+        let roots: i64 = self
+            .connection
+            .query_row("SELECT count(*) FROM roots", [], |row| row.get(0))?;
         if roots >= MAX_REGISTERED_ROOTS {
             return Err(IndexError::RootBudget);
         }
         let encoded = encode_identity(identity);
-        let incarnation = self.connection.query_row(
-            "INSERT INTO roots(id,incarnation,raw_root,root_identity,enabled,generation)
+        let incarnation = self
+            .connection
+            .query_row(
+                "INSERT INTO roots(id,incarnation,raw_root,root_identity,enabled,generation)
              VALUES (?1,randomblob(16),?2,?3,1,0) RETURNING incarnation",
-            params![id, raw, encoded.as_slice()],
-            |row| row.get::<_, Vec<u8>>(0),
-        )?.try_into().map_err(|_| IndexError::InvalidRoot)?;
-        Ok(IndexScope { incarnation, generation: 0 })
+                params![id, raw, encoded.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?
+            .try_into()
+            .map_err(|_| IndexError::InvalidRoot)?;
+        Ok(IndexScope {
+            incarnation,
+            generation: 0,
+        })
     }
 
     pub fn revoke(&mut self, id: i64, scope: IndexScope) -> Result<(), IndexError> {
-        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let n = transaction.execute(
             "DELETE FROM roots WHERE id=?1 AND enabled AND incarnation=?2 AND generation=?3",
             params![id, scope.incarnation.as_slice(), scope.generation],
@@ -123,8 +136,13 @@ impl NameIndex {
         cancel: &Cancellation,
     ) -> Result<IndexScope, IndexError> {
         cancel.check().map_err(IndexError::Walk)?;
-        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let next = scope.generation.checked_add(1).ok_or(IndexError::StaleScope)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let next = scope
+            .generation
+            .checked_add(1)
+            .ok_or(IndexError::StaleScope)?;
         let n = transaction.execute(
             "UPDATE roots SET generation=?4 WHERE id=?1 AND enabled AND incarnation=?2 AND generation=?3",
             params![id, scope.incarnation.as_slice(), scope.generation, next],
@@ -134,18 +152,27 @@ impl NameIndex {
         }
         transaction.execute("DELETE FROM entries WHERE root_id=?1", [id])?;
         {
-            let mut insert = transaction.prepare(
-                "INSERT INTO entries(root_id,raw_key,folded) VALUES (?1,?2,?3)",
-            )?;
+            let mut insert = transaction
+                .prepare("INSERT INTO entries(root_id,raw_key,folded) VALUES (?1,?2,?3)")?;
             for path in names {
                 cancel.check().map_err(IndexError::Walk)?;
-                let label = path.file_name().ok_or(IndexError::Incomplete)?.to_string_lossy();
-                insert.execute(params![id, path.as_os_str().as_bytes(), label.to_lowercase()])?;
+                let label = path
+                    .file_name()
+                    .ok_or(IndexError::Incomplete)?
+                    .to_string_lossy();
+                insert.execute(params![
+                    id,
+                    path.as_os_str().as_bytes(),
+                    label.to_lowercase()
+                ])?;
             }
         }
         cancel.check().map_err(IndexError::Walk)?;
         transaction.commit()?;
-        Ok(IndexScope { generation: next, ..scope })
+        Ok(IndexScope {
+            generation: next,
+            ..scope
+        })
     }
 
     pub fn search(
@@ -178,18 +205,23 @@ impl NameIndex {
             )
         };
         let mut stmt = self.connection.prepare(sql)?;
-        let raw = stmt.query_map(params![id, parameter], |row| row.get(0))?
+        let raw = stmt
+            .query_map(params![id, parameter], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(raw)
     }
 
     fn root_for(&self, id: i64, scope: IndexScope) -> Result<(PathBuf, FileIdentity), IndexError> {
-        let (raw, encoded) = self.connection.query_row(
-            "SELECT raw_root,root_identity FROM roots
+        let (raw, encoded) = self
+            .connection
+            .query_row(
+                "SELECT raw_root,root_identity FROM roots
              WHERE id=?1 AND enabled AND incarnation=?2 AND generation=?3",
-            params![id, scope.incarnation.as_slice(), scope.generation],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        ).optional()?.ok_or(IndexError::StaleScope)?;
+                params![id, scope.incarnation.as_slice(), scope.generation],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?
+            .ok_or(IndexError::StaleScope)?;
         let (device, inode) = encoded.split_at_checked(8).ok_or(IndexError::InvalidRoot)?;
         let identity = FileIdentity {
             device: u64::from_le_bytes(device.try_into().map_err(|_| IndexError::InvalidRoot)?),
@@ -219,7 +251,10 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
             let next = NEXT.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "jwm-file-index-{}-{time}-{next}",
@@ -272,14 +307,26 @@ mod tests {
             index.search(1, root, "alpha").unwrap(),
             [b"ALPHA-%20-\x80".to_vec(), b"ALPHA-%20-\x81".to_vec()]
         );
-        assert_eq!(index.search(1, root, "合同").unwrap(), ["合同三版".as_bytes()]);
-        assert_eq!(index.search(1, root, "合同三").unwrap(), ["合同三版".as_bytes()]);
+        assert_eq!(
+            index.search(1, root, "合同").unwrap(),
+            ["合同三版".as_bytes()]
+        );
+        assert_eq!(
+            index.search(1, root, "合同三").unwrap(),
+            ["合同三版".as_bytes()]
+        );
         assert_eq!(
             index.search(1, root, "some\" OR \"literal").unwrap(),
             [b"some\" OR \"literal".as_slice()]
         );
-        assert_eq!(index.search(2, other_root, "alpha").unwrap(), [b"alpha-foreign".as_slice()]);
-        assert!(matches!(index.search(2, root, "alpha"), Err(IndexError::StaleScope)));
+        assert_eq!(
+            index.search(2, other_root, "alpha").unwrap(),
+            [b"alpha-foreign".as_slice()]
+        );
+        assert!(matches!(
+            index.search(2, root, "alpha"),
+            Err(IndexError::StaleScope)
+        ));
     }
 
     #[test]
@@ -288,9 +335,14 @@ mod tests {
         f.file(b"first");
         let mut index = NameIndex::memory().unwrap();
         let root = index.register(1, &f.0, f.identity()).unwrap();
-        let (complete, _) = index.rebuild(1, root, options(), &Cancellation::default()).unwrap();
+        let (complete, _) = index
+            .rebuild(1, root, options(), &Cancellation::default())
+            .unwrap();
         f.file(b"second");
-        let short = WalkOptions { entries: 1, ..options() };
+        let short = WalkOptions {
+            entries: 1,
+            ..options()
+        };
         assert!(matches!(
             index.rebuild(1, complete, short, &Cancellation::default()),
             Err(IndexError::Incomplete)
@@ -305,7 +357,10 @@ mod tests {
             index.rebuild(1, root, options(), &Cancellation::default()),
             Err(IndexError::StaleScope)
         ));
-        assert_eq!(index.search(1, complete, "first").unwrap(), [b"first".as_slice()]);
+        assert_eq!(
+            index.search(1, complete, "first").unwrap(),
+            [b"first".as_slice()]
+        );
         assert!(index.search(1, complete, "second").unwrap().is_empty());
     }
 
@@ -324,8 +379,13 @@ mod tests {
             index.rebuild(1, stale, options(), &Cancellation::default()),
             Err(IndexError::StaleScope)
         ));
-        let (fresh, _) = index.rebuild(1, fresh, options(), &Cancellation::default()).unwrap();
-        assert_eq!(index.search(1, fresh, "second").unwrap(), [b"second".as_slice()]);
+        let (fresh, _) = index
+            .rebuild(1, fresh, options(), &Cancellation::default())
+            .unwrap();
+        assert_eq!(
+            index.search(1, fresh, "second").unwrap(),
+            [b"second".as_slice()]
+        );
         assert!(index.search(1, fresh, "first").unwrap().is_empty());
     }
 }

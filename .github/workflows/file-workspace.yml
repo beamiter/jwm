@@ -45,13 +45,6 @@ jobs:
       - name: Check the isolated local filename index
         working-directory: crates/jwm_file_index
         run: |
-          if ! grep -q '^version = 4$' Cargo.lock; then
-            rm -- Cargo.lock
-            cargo generate-lockfile
-            printf '%s\n' 'JWM_INDEX_LOCK_BEGIN'
-            cat Cargo.lock
-            printf '%s\n' 'JWM_INDEX_LOCK_END'
-          fi
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
