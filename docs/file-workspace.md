@@ -181,6 +181,19 @@ skipped, failed, cancelled-before-publication and unstarted results. Cancelling
 does not roll back already copied files. This is a window-local report, not
 persistent operation history or proof of crash durability.
 
+### Folder-copy preflight (core only)
+
+The local provider can build a bounded metadata-only plan for an explicitly
+selected real directory. It records exact native names, regular files and
+directories, including hidden entries and empty subdirectories. It rejects
+symlinks, special files, nested mounts, incomplete scans and exceeded limits
+rather than returning a plan for only part of the requested tree.
+
+This plan reads no file contents and writes nothing. It is an observation,
+not a filesystem snapshot or authority to copy. Folder copying is not yet
+available in the application; a later operation must revalidate the tree
+and destination and publish without overwriting.
+
 ### Copy interruption review (core only)
 
 The local provider has a bounded record for one copy intent or an observed
