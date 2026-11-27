@@ -2840,7 +2840,7 @@ mod wayland_acceptance {
         fs::write(outside_index.join("合同外部.txt"), b"outside").unwrap();
         std::os::unix::fs::symlink(&outside_index, search_root.join("z-external-link")).unwrap();
         navigate(&search_root);
-        at(&search_root, "sub");
+        at(&search_root, "▸ sub");
         action("win.search-subdirectories");
         action("win.search-subdirectories");
         let panels = app
@@ -2891,7 +2891,7 @@ mod wayland_acceptance {
         assert!(text().is_empty());
         panel.close();
         until(|| !panel.is_mapped(), "scoped search panel close");
-        at(&search_root, "sub");
+        at(&search_root, "▸ sub");
         println!(
             "GTK4 Wayland scoped filename search: local Unicode result, no external or hidden results"
         );
