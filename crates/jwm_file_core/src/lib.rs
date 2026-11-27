@@ -4,6 +4,8 @@
 #[cfg(target_os = "linux")]
 mod copy;
 #[cfg(target_os = "linux")]
+mod copy_batch;
+#[cfg(target_os = "linux")]
 mod copy_journal;
 #[cfg(target_os = "linux")]
 mod copy_names;
@@ -31,6 +33,8 @@ mod watch;
 
 #[cfg(target_os = "linux")]
 pub use copy::{CopyDestination, CopyError, CopyReceipt, CopySiblingReceipt, CopySource};
+#[cfg(target_os = "linux")]
+pub use copy_batch::{COPY_BATCH_LIMIT, CopyBatchInputError, CopyBatchItem};
 #[cfg(target_os = "linux")]
 pub use copy_journal::{
     COPY_JOURNAL_LIMIT, CopyJournalRecord, CopyJournalState, CopyObservation, CopyReview,
