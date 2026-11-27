@@ -4,17 +4,18 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::CopyBatchItem;
-use std::{ffi::OsString, rc::Rc};
+use std::{ffi::OsString, path::Path, rc::Rc};
 
 #[derive(Clone)]
 pub(super) struct BatchCopyReport {
+    destination: String,
     pub(super) summary: String,
     pub(super) details: String,
     pub(super) has_publication: bool,
 }
 
 impl BatchCopyReport {
-    pub(super) fn from_items(items: Vec<(OsString, CopyBatchItem)>) -> Self {
+    pub(super) fn from_items(target: &Path, items: Vec<(OsString, CopyBatchItem)>) -> Self {
         let (mut published, mut existing, mut cancelled, mut failed, mut not_started) =
             (0, 0, 0, 0, 0);
         let details = items
@@ -53,6 +54,7 @@ impl BatchCopyReport {
             "批量复制：已复制 {published}，同名跳过 {existing}，已取消 {cancelled}，失败 {failed}，未开始 {not_started}。"
         );
         Self {
+            destination: crate::trash_ui::display_path(target.as_os_str()),
             summary,
             details,
             has_publication: published != 0,
@@ -68,12 +70,6 @@ pub(super) fn install(window: &gtk::ApplicationWindow, state: &Shared, status: &
     let state_ref = Rc::downgrade(state);
     let dialog_ref = glib::WeakRef::<gtk::Window>::new();
     action.connect_activate(move |_, _| {
-        if let Some(dialog) = dialog_ref.upgrade()
-            && dialog.is_visible()
-        {
-            dialog.present();
-            return;
-        }
         let (Some(window), Some(state), Some(status)) = (
             window_ref.upgrade(),
             state_ref.upgrade(),
@@ -88,6 +84,9 @@ pub(super) fn install(window: &gtk::ApplicationWindow, state: &Shared, status: &
             }
             state.last_copy_batch.clone()
         };
+        if let Some(dialog) = dialog_ref.upgrade() {
+            dialog.close();
+        }
         let Some(report) = report else {
             notice(&status, "当前窗口没有可查看的批量复制结果。");
             return;
@@ -108,6 +107,12 @@ pub(super) fn install(window: &gtk::ApplicationWindow, state: &Shared, status: &
         column.set_margin_end(16);
         column.set_margin_top(12);
         column.set_margin_bottom(12);
+        let destination = gtk::Label::new(Some(&format!("目标：{}", report.destination)));
+        destination.set_widget_name("jwm-files-batch-target");
+        destination.set_xalign(0.0);
+        destination.set_wrap(true);
+        destination.set_selectable(true);
+        column.append(&destination);
         let summary = gtk::Label::new(Some(&report.summary));
         summary.set_xalign(0.0);
         summary.set_wrap(true);
@@ -150,18 +155,21 @@ mod tests {
 
     #[test]
     fn mixed_result_reports_cancel_without_negating_published_items() {
-        let report = BatchCopyReport::from_items(vec![
-            (
-                "文档".into(),
-                CopyBatchItem::Published(CopyReceipt { bytes: 5 }),
-            ),
-            ("同名".into(), CopyBatchItem::ExistingTarget),
-            (
-                OsString::from_vec(b"raw%\x80".to_vec()),
-                CopyBatchItem::CancelledBeforePublication,
-            ),
-            ("第四项".into(), CopyBatchItem::NotStarted),
-        ]);
+        let report = BatchCopyReport::from_items(
+            Path::new("/fixture"),
+            vec![
+                (
+                    "文档".into(),
+                    CopyBatchItem::Published(CopyReceipt { bytes: 5 }),
+                ),
+                ("同名".into(), CopyBatchItem::ExistingTarget),
+                (
+                    OsString::from_vec(b"raw%\x80".to_vec()),
+                    CopyBatchItem::CancelledBeforePublication,
+                ),
+                ("第四项".into(), CopyBatchItem::NotStarted),
+            ],
+        );
         assert!(report.has_publication);
         assert_eq!(
             report.summary,

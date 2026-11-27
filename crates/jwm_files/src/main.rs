@@ -1442,7 +1442,9 @@ fn open_window_with_tabs(
                 MutationOutcome::FileOperation => None,
                 MutationOutcome::CopyAsSibling(name) => Some(name),
                 MutationOutcome::BatchCopy(items) => {
-                    batch = Some(batch_copy_result::BatchCopyReport::from_items(items));
+                    batch = Some(batch_copy_result::BatchCopyReport::from_items(
+                        &work.path, items,
+                    ));
                     None
                 }
             });
@@ -2954,9 +2956,11 @@ mod wayland_acceptance {
         fs::create_dir_all(batch_source.join("not-a-file")).unwrap();
         fs::create_dir(&batch_target).unwrap();
         let raw_batch = std::ffi::OsStr::from_bytes(b"z-raw%\x80");
+        let alternate_raw = std::ffi::OsStr::from_bytes(b"z-raw%\x81");
         fs::write(batch_source.join("a-合同.txt"), b"first").unwrap();
         fs::write(batch_source.join("b-clash.txt"), b"source").unwrap();
         fs::write(batch_source.join(raw_batch), b"raw").unwrap();
+        fs::write(batch_source.join(alternate_raw), b"alternate").unwrap();
         fs::write(batch_target.join("b-clash.txt"), b"original").unwrap();
         navigate(&batch_source);
         at(&batch_source, "▸ not-a-file");
@@ -2985,6 +2989,16 @@ mod wayland_acceptance {
             .downcast::<gtk::Button>()
             .unwrap();
         assert!(!confirm.is_sensitive());
+        let distinct_labels = || {
+            let labels = descendants(pick_list.upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                .map(|label| label.text())
+                .collect::<Vec<_>>();
+            labels.iter().any(|label| label.as_str() == "z-raw%\\x80")
+                && labels.iter().any(|label| label.as_str() == "z-raw%\\x81")
+        };
+        until(distinct_labels, "distinct rendered raw filename labels");
         assert!(multi.select_item(0, true));
         assert!(!confirm.is_sensitive());
         assert!(multi.select_item(1, true));
@@ -3007,6 +3021,11 @@ mod wayland_acceptance {
             b"original"
         );
         assert_eq!(fs::read(batch_target.join(raw_batch)).unwrap(), b"raw");
+        assert!(!batch_target.join(alternate_raw).exists());
+        assert_eq!(
+            fs::read(batch_source.join(alternate_raw)).unwrap(),
+            b"alternate"
+        );
         assert_eq!(fs::read(batch_source.join("a-合同.txt")).unwrap(), b"first");
         assert_eq!(
             fs::read(batch_source.join("b-clash.txt")).unwrap(),
@@ -3032,7 +3051,47 @@ mod wayland_acceptance {
         assert!(detail_text.contains("a-合同.txt：已复制"));
         assert!(detail_text.contains("b-clash.txt：目标同名，未覆盖"));
         assert!(detail_text.contains("z-raw%\\x80：已复制"));
-        report.close();
+        let second_target = root.join("batch-target-two");
+        fs::create_dir(&second_target).unwrap();
+        fs::write(second_target.join("a-合同.txt"), b"second original").unwrap();
+        navigate(&second_target);
+        at(&second_target, "a-合同.txt");
+        assert!(report.is_mapped());
+        action("win.paste-file");
+        until(
+            || {
+                copy_noticed("已复制 2，同名跳过 1，已取消 0，失败 0，未开始 0")
+                    && second_target.join(raw_batch).exists()
+            },
+            "second batch completed while first report remains open",
+        );
+        action("win.batch-copy-result");
+        let latest = app
+            .windows()
+            .into_iter()
+            .find(|w| w.is_visible() && w.title().as_deref() == Some(batch_copy_result::TITLE))
+            .unwrap();
+        until(
+            || latest.is_mapped() && !report.is_mapped(),
+            "latest batch report replaced the old panel",
+        );
+        let target_label = descendants(latest.upcast_ref())
+            .into_iter()
+            .find(|w| w.widget_name().as_str() == "jwm-files-batch-target")
+            .and_downcast::<gtk::Label>()
+            .unwrap();
+        assert!(target_label.text().ends_with("/batch-target-two"));
+        let details = descendants(latest.upcast_ref())
+            .into_iter()
+            .find(|w| w.widget_name().as_str() == "jwm-files-batch-report")
+            .and_downcast::<gtk::TextView>()
+            .unwrap()
+            .buffer();
+        let body = details.text(&details.start_iter(), &details.end_iter(), true);
+        assert!(body.contains("a-合同.txt：目标同名，未覆盖"));
+        assert!(body.contains("b-clash.txt：已复制"));
+        assert!(!second_target.join(alternate_raw).exists());
+        latest.close();
         println!(
             "GTK4 Wayland batch copy: native picker, exact path bytes, conflict kept, per-file result"
         );

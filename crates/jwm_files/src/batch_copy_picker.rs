@@ -2,7 +2,7 @@
 use crate::{
     Shared,
     copy_ui::{BatchSource, CopyBuffer, StoredCopy, notice},
-    row_model::{FileRowModel, RowPresentation},
+    row_model::FileRowModel,
     trash_ui::display_path,
 };
 use gtk::prelude::*;
@@ -117,15 +117,25 @@ fn show(
             item.set_child(Some(&label));
         }
     });
-    factory.connect_bind(|_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let row = item.item().and_downcast::<glib::BoxedAnyObject>();
-        let label = item.child().and_downcast::<gtk::Label>();
-        if let (Some(row), Some(label)) = (row, label) {
-            let row = row.borrow::<RowPresentation>();
-            label.set_text(&row.list_label());
+    factory.connect_bind({
+        let snapshot = snapshot.clone();
+        move |_, object| {
+            let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some(label) = item.child().and_downcast::<gtk::Label>() else {
+                return;
+            };
+            let Some(row) = snapshot.get(item.position() as usize) else {
+                label.set_text("");
+                return;
+            };
+            let prefix = match row.kind {
+                FileKind::Directory => "▸ ",
+                FileKind::Symlink => "↪ ",
+                _ => "",
+            };
+            label.set_text(&format!("{prefix}{}", display_path(&row.name)));
         }
     });
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
