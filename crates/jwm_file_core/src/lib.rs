@@ -31,6 +31,8 @@ mod trash_info;
 #[cfg(target_os = "linux")]
 mod trash_snapshot;
 #[cfg(target_os = "linux")]
+mod trash_write;
+#[cfg(target_os = "linux")]
 mod tree_copy;
 #[cfg(target_os = "linux")]
 mod tree_copy_payload;
@@ -81,6 +83,8 @@ pub use trash_snapshot::{
     HOME_TRASH_INSPECT_LIMIT, HomeTrashCursor, HomeTrashEntry, HomeTrashSnapshot, RecoverCopyError,
     list_home_trash, recover_home_trash_copy,
 };
+#[cfg(target_os = "linux")]
+pub use trash_write::{HomeTrashWriteError, HomeTrashWriteOutcome, trash_regular_at_home};
 #[cfg(target_os = "linux")]
 pub use tree_copy::{TreeCopyError, TreeCopyReceipt, copy_tree_no_replace};
 #[cfg(target_os = "linux")]

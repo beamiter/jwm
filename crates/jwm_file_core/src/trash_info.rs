@@ -1,7 +1,7 @@
 //! Parse bounded freedesktop home-Trash metadata without interpreting it as a URI.
 use std::{
-    ffi::OsString,
-    os::unix::ffi::OsStringExt,
+    ffi::{OsStr, OsString},
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Component, Path, PathBuf},
 };
 
@@ -56,6 +56,68 @@ pub fn parse_home_trash_info(bytes: &[u8], data_home: &Path) -> Option<HomeTrash
         original,
         deletion_date: date?,
     })
+}
+
+/// Encode bounded home-Trash metadata for an already chosen exact native
+/// absolute path. This function writes nothing and does not choose a storage
+/// name or authorize moving the original file.
+pub(crate) fn encode_home_trash_info(original: &Path, local_date: &str) -> Option<Vec<u8>> {
+    const HEADER: &[u8] = b"[Trash Info]\nPath=";
+    const DATE_FIELD: &[u8] = b"\nDeletionDate=";
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let raw = original.as_os_str().as_bytes();
+    if raw.len() > TRASH_INFO_LIMIT
+        || !original.is_absolute()
+        || original.file_name().is_none()
+        || raw.contains(&0)
+        || raw.ends_with(b"/")
+        || original.components().any(|part| part == Component::ParentDir)
+        || raw.split(|byte| *byte == b'/').any(|part| part == b".")
+    {
+        return None;
+    }
+    let date = deletion_date(local_date.as_bytes())?;
+    let reserved = DATE_FIELD.len() + date.len() + 1;
+    let mut body = Vec::with_capacity(raw.len().min(TRASH_INFO_LIMIT - reserved));
+    body.extend_from_slice(HEADER);
+    for &byte in raw {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            body.push(byte);
+        } else {
+            body.extend_from_slice(&[b'%', HEX[(byte >> 4) as usize], HEX[(byte & 15) as usize]]);
+        }
+        if body.len() > TRASH_INFO_LIMIT - reserved {
+            return None;
+        }
+    }
+    body.extend_from_slice(DATE_FIELD);
+    body.extend_from_slice(date.as_bytes());
+    body.push(b'\n');
+    Some(body)
+}
+
+/// Form a readable bounded key from an observed leaf and caller-owned token.
+/// The key is not authority to create anything. The caller must still reserve
+/// its metadata with O_EXCL and publish the payload without replacement.
+pub(crate) fn trash_storage_key(leaf: &OsStr, token: &str) -> Option<OsString> {
+    const SAFE_LEAF_BYTES: usize = 255 - b".trashinfo".len();
+    const TAG: &[u8] = b".jwm-";
+    let raw = leaf.as_bytes();
+    if raw.is_empty()
+        || matches!(raw, b"." | b"..")
+        || raw.iter().any(|&byte| matches!(byte, b'/' | b'\0'))
+        || token.is_empty()
+        || token.len() > 64
+        || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let prefix = raw.len().min(SAFE_LEAF_BYTES - TAG.len() - token.len());
+    let mut key = raw[..prefix].to_vec();
+    key.extend_from_slice(TAG);
+    key.extend_from_slice(token.as_bytes());
+    Some(OsString::from_vec(key))
 }
 
 fn decode_path(encoded: &[u8]) -> Option<PathBuf> {
@@ -160,7 +222,6 @@ fn deletion_date(value: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::ffi::OsStrExt;
 
     #[test]
     fn restores_exact_original_path_bytes_without_treating_plus_as_space() {
@@ -171,6 +232,47 @@ mod tests {
             b"/home/test/report%+\xe6\xb5\x8b\xe8\xaf\x95\x80"
         );
         assert_eq!(info.deletion_date, "2026-11-26T12:26:00");
+    }
+
+    #[test]
+    fn trash_writer_round_trips_raw_path_without_extra_metadata_fields() {
+        let raw = b"/home/test/report%+\nDeletionDate=forged\r\x80";
+        let path = Path::new(OsStr::from_bytes(raw));
+        let date = "2024-02-29T12:26:00";
+        let record = encode_home_trash_info(path, date).unwrap();
+        assert_eq!(record.iter().filter(|&&byte| byte == b'\n').count(), 3);
+        assert!(record.is_ascii());
+        let parsed = parse_home_trash_info(&record, Path::new("/home/test/.local/share")).unwrap();
+        assert_eq!(parsed.original.as_os_str().as_bytes(), raw);
+        assert_eq!(parsed.deletion_date, date);
+    }
+
+    #[test]
+    fn trash_writer_rejects_unsafe_paths_bad_dates_and_encoded_oversize() {
+        let date = "2024-02-29T12:26:00";
+        for raw in [b"relative".as_slice(), b"/", b"/a/../b", b"/a/./b", b"/a/", b"/x\0y"] {
+            assert!(encode_home_trash_info(Path::new(OsStr::from_bytes(raw)), date).is_none());
+        }
+        let path = Path::new("/home/test/file");
+        assert!(encode_home_trash_info(path, "2025-02-29T01:02:03").is_none());
+        assert!(encode_home_trash_info(path, "20040831T22:32:08").unwrap().ends_with(b"2004-08-31T22:32:08\n"));
+        let oversized = format!("/{}", "%".repeat(TRASH_INFO_LIMIT / 3));
+        assert!(encode_home_trash_info(Path::new(&oversized), date).is_none());
+    }
+
+    #[test]
+    fn trash_storage_key_bounds_payload_and_info_and_keeps_raw_prefix() {
+        let prefix = OsStr::from_bytes(b"report\x81");
+        let one = trash_storage_key(prefix, "aba").unwrap();
+        let two = trash_storage_key(prefix, "abb").unwrap();
+        assert_eq!(one.as_bytes(), b"report\x81.jwm-aba");
+        assert_ne!(one, two);
+        let raw = vec![b'a'; 255];
+        let key = trash_storage_key(OsStr::from_bytes(&raw), &"F".repeat(64)).unwrap();
+        assert_eq!(key.as_bytes().len() + b".trashinfo".len(), 255);
+        assert!(trash_storage_key(OsStr::new(".."), "1").is_none());
+        assert!(trash_storage_key(OsStr::new("nested/path"), "1").is_none());
+        assert!(trash_storage_key(OsStr::new("valid"), "../").is_none());
     }
 
     #[test]
