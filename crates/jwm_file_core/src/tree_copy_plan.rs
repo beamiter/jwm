@@ -1,5 +1,8 @@
 //! Strict metadata-only preflight for a future atomic directory copy.
-use crate::{Cancellation, FileIdentity, FileKind, ListError, WalkOptions, visit_local_index};
+use crate::{
+    Cancellation, DirectoryHandle, FileIdentity, FileKind, ListError, WalkOptions,
+    visit_local_index,
+};
 use std::path::{Path, PathBuf};
 
 const LIMIT: WalkOptions = WalkOptions {
@@ -9,6 +12,7 @@ const LIMIT: WalkOptions = WalkOptions {
     show_hidden: true,
 };
 const PATH_BYTES: usize = 4 * 1024 * 1024;
+const ROOT_PATH_BYTES: usize = 4_095;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeCopyEntry {
@@ -46,6 +50,54 @@ pub fn plan_tree_copy(
     plan(root, identity, cancel, LIMIT, PATH_BYTES)
 }
 
+#[derive(Debug)]
+pub enum TreeCopyTargetError {
+    TargetUnavailable(std::io::Error),
+    TargetChanged,
+    TargetInsideSource,
+    SourceChanged,
+    Plan(TreeCopyPlanError),
+}
+
+/// Revalidate the current source topology and the held destination directory.
+/// This checks observations only and never permits a write by itself.
+pub fn check_tree_copy_target(
+    original: &TreeCopyPlan,
+    held_target: &DirectoryHandle,
+    displayed_target: &Path,
+    cancel: &Cancellation,
+) -> Result<(), TreeCopyTargetError> {
+    let target_id = held_target.identity();
+    let verify_target = || {
+        let current = DirectoryHandle::open_without_symlinks(displayed_target)
+            .map_err(TreeCopyTargetError::TargetUnavailable)?;
+        if current.identity() != target_id {
+            return Err(TreeCopyTargetError::TargetChanged);
+        }
+        Ok(())
+    };
+    verify_target()?;
+    if target_id == original.identity {
+        return Err(TreeCopyTargetError::TargetInsideSource);
+    }
+    let current = plan_tree_copy(&original.root, original.identity, cancel)
+        .map_err(TreeCopyTargetError::Plan)?;
+    if current
+        .entries
+        .iter()
+        .any(|entry| entry.kind == FileKind::Directory && entry.identity == target_id)
+    {
+        return Err(TreeCopyTargetError::TargetInsideSource);
+    }
+    if current.entries != original.entries {
+        return Err(TreeCopyTargetError::SourceChanged);
+    }
+    verify_target()?;
+    cancel
+        .check()
+        .map_err(|e| TreeCopyTargetError::Plan(TreeCopyPlanError::Walk(e)))
+}
+
 fn plan(
     root: &Path,
     identity: FileIdentity,
@@ -55,9 +107,11 @@ fn plan(
 ) -> Result<TreeCopyPlan, TreeCopyPlanError> {
     let mut entries = Vec::new();
     let mut rejected = None;
-    let mut remaining = budget
-        .checked_sub(root.as_os_str().len())
-        .ok_or(TreeCopyPlanError::PathBudget)?;
+    if root.as_os_str().len() > ROOT_PATH_BYTES {
+        return Err(TreeCopyPlanError::PathBudget);
+    }
+    // Root and temporary staging names do not consume the relative tree budget.
+    let mut remaining = budget;
     let summary = visit_local_index(root, identity, options, cancel, |entry| {
         if rejected.is_some() {
             return;
@@ -99,7 +153,6 @@ fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DirectoryHandle;
     use std::{
         ffi::OsStr,
         fs,
@@ -135,6 +188,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn tree_copy_target_rechecks_identity_and_rejects_same_or_descendant() {
+        let f = Fixture::new();
+        let source = f.0.join("source");
+        let inside = source.join("child");
+        let outside = f.0.join("outside");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let held_source = DirectoryHandle::open_without_symlinks(&source).unwrap();
+        let held_inside = DirectoryHandle::open_without_symlinks(&inside).unwrap();
+        let held_outside = DirectoryHandle::open_without_symlinks(&outside).unwrap();
+        let cancel = Cancellation::default();
+        let plan = plan_tree_copy(&source, held_source.identity(), &cancel).unwrap();
+        for (folder, held) in [(&source, &held_source), (&inside, &held_inside)] {
+            assert!(matches!(
+                check_tree_copy_target(&plan, held, folder, &cancel),
+                Err(TreeCopyTargetError::TargetInsideSource)
+            ));
+        }
+        assert!(check_tree_copy_target(&plan, &held_outside, &outside, &cancel).is_ok());
+        let moved = f.0.join("moved");
+        fs::rename(&outside, &moved).unwrap();
+        symlink(&inside, &outside).unwrap();
+        assert!(matches!(
+            check_tree_copy_target(&plan, &held_outside, &outside, &cancel),
+            Err(TreeCopyTargetError::TargetUnavailable(_))
+        ));
+        fs::remove_file(&outside).unwrap();
+        fs::create_dir(&outside).unwrap();
+        assert!(matches!(
+            check_tree_copy_target(&plan, &held_outside, &outside, &cancel),
+            Err(TreeCopyTargetError::TargetChanged)
+        ));
+        fs::write(source.join("changed"), b"new").unwrap();
+        assert!(matches!(
+            check_tree_copy_target(&plan, &held_outside, &moved, &cancel),
+            Err(TreeCopyTargetError::SourceChanged)
+        ));
     }
 
     #[test]
@@ -192,6 +285,25 @@ mod tests {
     }
 
     #[test]
+    fn tree_plan_relative_budget_is_independent_of_absolute_root_length() {
+        let first = Fixture::new();
+        let second = Fixture::new();
+        let long_root = second.0.join("substantially-longer-staging-root");
+        fs::create_dir(&long_root).unwrap();
+        fs::write(first.0.join("leaf"), b"x").unwrap();
+        fs::write(long_root.join("leaf"), b"x").unwrap();
+        let cancel = Cancellation::default();
+        let held = DirectoryHandle::open_without_symlinks(&long_root).unwrap();
+        let short = plan(&first.0, first.identity(), &cancel, LIMIT, 4).unwrap();
+        let long = plan(&long_root, held.identity(), &cancel, LIMIT, 4).unwrap();
+        assert_eq!(short.entries[0].relative, long.entries[0].relative);
+        assert!(matches!(
+            plan(&long_root, held.identity(), &cancel, LIMIT, 3),
+            Err(TreeCopyPlanError::PathBudget)
+        ));
+    }
+
+    #[test]
     fn tree_plan_rejects_budgets_and_prior_cancellation_without_a_partial_result() {
         let root = Fixture::new();
         fs::write(root.0.join("first"), b"a").unwrap();
@@ -207,7 +319,7 @@ mod tests {
             Err(TreeCopyPlanError::Incomplete)
         ));
         assert!(matches!(
-            plan(&root.0, identity, &cancel, LIMIT, root.0.as_os_str().len()),
+            plan(&root.0, identity, &cancel, LIMIT, 0),
             Err(TreeCopyPlanError::PathBudget)
         ));
         cancel.cancel();

@@ -190,9 +190,18 @@ symlinks, special files, nested mounts, incomplete scans and exceeded limits
 rather than returning a plan for only part of the requested tree.
 
 This plan reads no file contents and writes nothing. It is an observation,
-not a filesystem snapshot or authority to copy. Folder copying is not yet
-available in the application; a later operation must revalidate the tree
-and destination and publish without overwriting.
+not a filesystem snapshot or authority to copy.
+
+The separate Linux provider operation revalidates the plan and selected
+destination, then copies at most 1 GiB of logical data into private staging.
+The destination must be owned by the effective user and not group- or
+world-writable. If observations still match, one no-replace rename publishes
+the completed folder. An existing destination is never replaced, and the
+source is never removed. A pre-publication cancellation does not publish
+the final name. It does not promise metadata fidelity, a frozen source,
+or power-loss durability. Unexpected or interrupted staging may remain;
+it is not automatically replayed. Folder copying is not yet available in
+the application UI.
 
 ### Copy interruption review (core only)
 

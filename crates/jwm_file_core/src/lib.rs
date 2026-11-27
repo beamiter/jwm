@@ -29,7 +29,13 @@ mod trash_info;
 #[cfg(target_os = "linux")]
 mod trash_snapshot;
 #[cfg(target_os = "linux")]
+mod tree_copy;
+#[cfg(target_os = "linux")]
+mod tree_copy_payload;
+#[cfg(target_os = "linux")]
 mod tree_copy_plan;
+#[cfg(target_os = "linux")]
+mod tree_copy_stage;
 #[cfg(target_os = "linux")]
 mod watch;
 
@@ -70,7 +76,12 @@ pub use trash_snapshot::{
     list_home_trash, recover_home_trash_copy,
 };
 #[cfg(target_os = "linux")]
-pub use tree_copy_plan::{TreeCopyEntry, TreeCopyPlan, TreeCopyPlanError, plan_tree_copy};
+pub use tree_copy::{TreeCopyError, TreeCopyReceipt, copy_tree_no_replace};
+#[cfg(target_os = "linux")]
+pub use tree_copy_plan::{
+    TreeCopyEntry, TreeCopyPlan, TreeCopyPlanError, TreeCopyTargetError, check_tree_copy_target,
+    plan_tree_copy,
+};
 #[cfg(target_os = "linux")]
 pub use watch::{DirectoryChange, DirectoryWatch};
 
