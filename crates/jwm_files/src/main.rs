@@ -2843,38 +2843,58 @@ mod wayland_acceptance {
         at(&search_root, "sub");
         action("win.search-subdirectories");
         action("win.search-subdirectories");
-        let panels = app.windows().into_iter().filter(|w| {
-            w.title().as_deref() == Some("JWM Files · 查找子目录文件名")
-        }).collect::<Vec<_>>();
+        let panels = app
+            .windows()
+            .into_iter()
+            .filter(|w| w.title().as_deref() == Some("JWM Files · 查找子目录文件名"))
+            .collect::<Vec<_>>();
         assert_eq!(panels.len(), 1);
         let panel = &panels[0];
-        until(|| panel.is_mapped(), "native scoped search panel");
         let field = |name: &str| {
-            descendants(panel.upcast_ref()).into_iter()
+            descendants(panel.upcast_ref())
+                .into_iter()
                 .find(|widget| widget.widget_name().as_str() == name)
                 .unwrap()
         };
-        let query = field("jwm-files-index-query").downcast::<gtk::Entry>().unwrap();
-        let index_status = field("jwm-files-index-status").downcast::<gtk::Label>().unwrap();
-        let index_results = field("jwm-files-index-results").downcast::<gtk::TextView>().unwrap();
-        until(|| index_status.text().starts_with("目录已读取"), "ready scoped search index");
+        let query = field("jwm-files-index-query")
+            .downcast::<gtk::Entry>()
+            .unwrap();
+        let index_status = field("jwm-files-index-status")
+            .downcast::<gtk::Label>()
+            .unwrap();
+        let index_results = field("jwm-files-index-results")
+            .downcast::<gtk::TextView>()
+            .unwrap();
+        assert!(index_status.text().starts_with("正在读取"));
         query.set_text("合同");
         query.emit_activate();
+        assert!(index_status.text().starts_with("已记住"));
+        until(|| panel.is_mapped(), "native scoped search panel");
         let text = || {
             let buf = index_results.buffer();
             buf.text(&buf.start_iter(), &buf.end_iter(), true)
         };
-        until(|| text().as_str() == "sub/合同三版.txt", "exact recursive Unicode result");
+        until(
+            || text().as_str() == "sub/合同三版.txt",
+            "exact recursive Unicode result",
+        );
         assert!(!index_results.is_editable());
+        query.emit_activate();
+        assert!(index_status.text().starts_with("正在查找"));
         query.set_text("合同外部");
         assert!(text().is_empty());
         query.emit_activate();
-        until(|| index_status.text() == "没有匹配的文件名。", "out-of-scope names omitted");
+        until(
+            || index_status.text() == "没有匹配的文件名。",
+            "out-of-scope names omitted",
+        );
         assert!(text().is_empty());
         panel.close();
         until(|| !panel.is_mapped(), "scoped search panel close");
         at(&search_root, "sub");
-        println!("GTK4 Wayland scoped filename search: local Unicode result, no external or hidden results");
+        println!(
+            "GTK4 Wayland scoped filename search: local Unicode result, no external or hidden results"
+        );
 
         let find_path = root.join("finder-native");
         let other_path = root.join("finder-unrelated");

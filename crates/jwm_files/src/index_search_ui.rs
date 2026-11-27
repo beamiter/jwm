@@ -22,9 +22,11 @@ pub(super) fn install(window: &gtk::ApplicationWindow, state: &Shared, status: &
     let status_ref = status.downgrade();
     let panel_ref = glib::WeakRef::<gtk::Window>::new();
     action.connect_activate(move |_, _| {
-        let (Some(window), Some(state), Some(status)) =
-            (window_ref.upgrade(), state_ref.upgrade(), status_ref.upgrade())
-        else {
+        let (Some(window), Some(state), Some(status)) = (
+            window_ref.upgrade(),
+            state_ref.upgrade(),
+            status_ref.upgrade(),
+        ) else {
             return;
         };
         if let Some(panel) = panel_ref.upgrade()
@@ -38,7 +40,10 @@ pub(super) fn install(window: &gtk::ApplicationWindow, state: &Shared, status: &
             if browser.pending.is_some() {
                 None
             } else {
-                browser.parent.as_ref().map(|parent| (browser.path().clone(), parent.clone()))
+                browser
+                    .parent
+                    .as_ref()
+                    .map(|parent| (browser.path().clone(), parent.clone()))
             }
         };
         let Some((root, held)) = selected else {
@@ -52,7 +57,11 @@ pub(super) fn install(window: &gtk::ApplicationWindow, state: &Shared, status: &
     window.add_action(&action);
 }
 
-type BrowserScope = (Weak<RefCell<crate::Browser>>, std::path::PathBuf, Arc<DirectoryHandle>);
+type BrowserScope = (
+    Weak<RefCell<crate::Browser>>,
+    std::path::PathBuf,
+    Arc<DirectoryHandle>,
+);
 
 fn current(scope: &BrowserScope) -> bool {
     let Some(state) = scope.0.upgrade() else {
@@ -61,7 +70,10 @@ fn current(scope: &BrowserScope) -> bool {
     let browser = state.borrow();
     browser.pending.is_none()
         && browser.path() == &scope.1
-        && browser.parent.as_ref().is_some_and(|parent| parent.identity() == scope.2.identity())
+        && browser
+            .parent
+            .as_ref()
+            .is_some_and(|parent| parent.identity() == scope.2.identity())
 }
 
 fn ready_label(summary: WalkSummary) -> String {
@@ -97,7 +109,8 @@ fn show(
     let scope = Rc::new((Rc::downgrade(state), root.to_path_buf(), held.clone()));
     let worker = Rc::new(RefCell::new(Some(worker)));
     let loaded = Rc::new(Cell::new(false));
-    let pending = Rc::new(Cell::new(false));
+    let pending = Rc::new(Cell::new(None::<u64>));
+    let queued = Rc::new(Cell::new(None::<u64>));
     let generation = Rc::new(Cell::new(0u64));
     let closed = Rc::new(Cell::new(false));
 
@@ -128,9 +141,15 @@ fn show(
     info.set_xalign(0.0);
     info.set_wrap(true);
     column.append(&info);
-    let results = gtk::TextView::builder().editable(false).monospace(true).build();
+    let results = gtk::TextView::builder()
+        .editable(false)
+        .monospace(true)
+        .build();
     results.set_widget_name("jwm-files-index-results");
-    let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&results).build();
+    let scroll = gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&results)
+        .build();
     column.append(&scroll);
     let close = gtk::Button::with_label("关闭");
     close.set_halign(gtk::Align::End);
@@ -144,18 +163,25 @@ fn show(
     panel.set_child(Some(&column));
 
     {
-        let (worker, closed) = (worker.clone(), closed.clone());
+        let (worker, closed, queued) = (worker.clone(), closed.clone(), queued.clone());
         panel.connect_close_request(move |_| {
             closed.set(true);
+            queued.set(None);
             worker.borrow_mut().take();
             glib::Propagation::Proceed
         });
     }
     {
-        let (loaded, pending, generation) = (loaded.clone(), pending.clone(), generation.clone());
+        let (loaded, pending, generation, queued) = (
+            loaded.clone(),
+            pending.clone(),
+            generation.clone(),
+            queued.clone(),
+        );
         let (search, info, results) = (search.downgrade(), info.downgrade(), results.downgrade());
         entry.connect_changed(move |entry| {
             generation.set(generation.get().wrapping_add(1));
+            queued.set(None);
             if let Some(results) = results.upgrade() {
                 results.buffer().set_text("");
             }
@@ -164,7 +190,7 @@ fn show(
                     info.set_text("按 Enter 或点击「查找」。");
                 }
                 if let Some(search) = search.upgrade() {
-                    search.set_sensitive(!pending.get() && !entry.text().is_empty());
+                    search.set_sensitive(pending.get().is_none() && !entry.text().is_empty());
                 }
             }
         });
@@ -172,20 +198,24 @@ fn show(
     {
         let search = search.downgrade();
         entry.connect_activate(move |_| {
-            if let Some(search) = search.upgrade()
-                && search.is_sensitive()
-            {
+            if let Some(search) = search.upgrade() {
                 search.emit_clicked();
             }
         });
     }
     {
         let (entry, info, results) = (entry.downgrade(), info.downgrade(), results.downgrade());
-        let (worker, loaded, pending, generation, scope, closed) = (
-            worker.clone(), loaded.clone(), pending.clone(), generation.clone(), scope.clone(), closed.clone(),
+        let (worker, loaded, pending, generation, scope, closed, queued) = (
+            worker.clone(),
+            loaded.clone(),
+            pending.clone(),
+            generation.clone(),
+            scope.clone(),
+            closed.clone(),
+            queued.clone(),
         );
         search.connect_clicked(move |search| {
-            if !loaded.get() || pending.get() {
+            if closed.get() || worker.borrow().is_none() {
                 return;
             }
             let Some(entry_live) = entry.upgrade() else {
@@ -195,6 +225,7 @@ fn show(
                 return;
             };
             if !current(&scope) {
+                queued.set(None);
                 info_live.set_text("当前目录已变化。请关闭后重新打开搜索。");
                 search.set_sensitive(false);
                 return;
@@ -203,44 +234,70 @@ fn show(
             if literal.is_empty() {
                 return;
             }
+            let epoch = generation.get();
+            if !loaded.get() || pending.get().is_some() {
+                if pending.get() != Some(epoch) {
+                    queued.set(Some(epoch));
+                    info_live.set_text("已记住本次查找，准备好后会执行。");
+                }
+                return;
+            }
             let answer = worker.borrow().as_ref().map(|worker| worker.query(literal));
             let Some(Ok(answer)) = answer else {
                 info_live.set_text("搜索暂不可用。");
                 return;
             };
-            pending.set(true);
+            pending.set(Some(epoch));
             search.set_sensitive(false);
             info_live.set_text("正在查找…");
-            let epoch = generation.get();
-            let (entry, info, results, search) =
-                (entry.clone(), info.clone(), results.clone(), search.downgrade());
-            let (pending, generation, scope, closed) =
-                (pending.clone(), generation.clone(), scope.clone(), closed.clone());
+            let (entry, info, results, search) = (
+                entry.clone(),
+                info.clone(),
+                results.clone(),
+                search.downgrade(),
+            );
+            let (pending, generation, scope, closed, queued) = (
+                pending.clone(),
+                generation.clone(),
+                scope.clone(),
+                closed.clone(),
+                queued.clone(),
+            );
             glib::spawn_future_local(async move {
                 let response = answer.await;
-                pending.set(false);
+                pending.set(None);
                 if closed.get() {
                     return;
                 }
-                let (Some(entry), Some(info), Some(results), Some(search)) =
-                    (entry.upgrade(), info.upgrade(), results.upgrade(), search.upgrade())
-                else {
+                let (Some(entry), Some(info), Some(results), Some(search)) = (
+                    entry.upgrade(),
+                    info.upgrade(),
+                    results.upgrade(),
+                    search.upgrade(),
+                ) else {
                     return;
                 };
                 if !current(&scope) {
+                    queued.set(None);
                     results.buffer().set_text("");
                     info.set_text("当前目录已变化。请关闭后重新打开搜索。");
                     return;
                 }
                 search.set_sensitive(!entry.text().is_empty());
+                if queued.take() == Some(generation.get()) {
+                    search.emit_clicked();
+                    return;
+                }
                 if generation.get() != epoch {
                     return;
                 }
                 match response {
                     Ok(Ok(rows)) => {
-                        let text = rows.iter().map(|raw| {
-                            trash_ui::display_path(OsStr::from_bytes(raw))
-                        }).collect::<Vec<_>>().join("\n");
+                        let text = rows
+                            .iter()
+                            .map(|raw| trash_ui::display_path(OsStr::from_bytes(raw)))
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         results.buffer().set_text(&text);
                         info.set_text(match rows.len() {
                             0 => "没有匹配的文件名。",
@@ -266,6 +323,8 @@ fn show(
                 return;
             };
             if !current(&scope) {
+                queued.set(None);
+                worker.borrow_mut().take();
                 info.set_text("当前目录已变化。请关闭后重新打开搜索。");
                 return;
             }
@@ -274,11 +333,20 @@ fn show(
                     loaded.set(true);
                     info.set_text(&ready_label(summary));
                     search.set_sensitive(!entry.text().is_empty());
+                    if queued.take() == Some(generation.get()) {
+                        search.emit_clicked();
+                    }
                 }
                 Ok(Err(IndexError::Incomplete | IndexError::ByteBudget)) => {
+                    queued.set(None);
+                    worker.borrow_mut().take();
                     info.set_text("无法完整读取搜索范围。请选择更小的目录，未显示部分结果。");
                 }
-                _ => info.set_text("无法读取此目录用于搜索。"),
+                _ => {
+                    queued.set(None);
+                    worker.borrow_mut().take();
+                    info.set_text("无法读取此目录用于搜索。");
+                }
             }
         });
     }

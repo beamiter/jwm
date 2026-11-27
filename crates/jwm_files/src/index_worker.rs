@@ -7,6 +7,7 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 
 pub(crate) type SearchReply = Result<Vec<Vec<u8>>, IndexError>;
+type Ready = oneshot::Receiver<Result<WalkSummary, IndexError>>;
 
 struct Query {
     literal: String,
@@ -36,7 +37,7 @@ impl IndexWorker {
     pub(crate) fn start(
         selected_root: PathBuf,
         expected_identity: FileIdentity,
-    ) -> std::io::Result<(Self, oneshot::Receiver<Result<WalkSummary, IndexError>>)> {
+    ) -> std::io::Result<(Self, Ready)> {
         let cancel = Cancellation::default();
         let worker_cancel = cancel.clone();
         let (queries, requests) = mpsc::sync_channel::<Query>(1);
