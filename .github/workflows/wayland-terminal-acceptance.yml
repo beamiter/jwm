@@ -116,6 +116,10 @@ jobs:
           paths = []
           for line in sys.stdin:
               row = json.loads(line)
+              if row.get("reason") == "compiler-message":
+                  rendered = row.get("message", {}).get("rendered")
+                  if rendered:
+                      sys.stderr.write(rendered)
               target = row.get("target", {})
               if row.get("reason") == "compiler-artifact" and target.get("name") == "jwm-files" and row.get("profile", {}).get("test") and row.get("executable"):
                   paths.append(row["executable"])

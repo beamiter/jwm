@@ -1877,7 +1877,7 @@ mod wayland_acceptance {
     fn run_native_drag_copy(wayland: bool) {
         use std::{ffi::OsStr, os::unix::fs::MetadataExt, process::Command};
 
-        fn output(command: &mut Command) -> String {
+        fn command_output(command: &mut Command) -> String {
             let out = command.output().unwrap();
             assert!(
                 out.status.success(),
@@ -1928,7 +1928,11 @@ mod wayland_acceptance {
         let display_name = std::env::var(display_key).unwrap();
         assert!(display_name.starts_with(':'));
         let xd = |args: &[&str]| {
-            output(Command::new("xdotool").args(args).env("DISPLAY", &display_name))
+            command_output(
+                Command::new("xdotool")
+                    .args(args)
+                    .env("DISPLAY", &display_name),
+            )
         };
         if wayland {
             assert!(std::env::var_os("DISPLAY").is_none());
@@ -2042,8 +2046,11 @@ mod wayland_acceptance {
                 xd(&["mousemove", "--window", id, &x, &y]);
             } else {
                 let driver = std::env::var_os("JWM_FILE_DND_POINTER_DRIVER").unwrap();
-                output(Command::new("/usr/bin/python3").arg(driver).args([
-                    "--fixture-pointer", role, &x, &y,
+                command_output(Command::new("/usr/bin/python3").arg(driver).args([
+                    "--fixture-pointer",
+                    role,
+                    &x,
+                    &y,
                 ]));
             }
         };

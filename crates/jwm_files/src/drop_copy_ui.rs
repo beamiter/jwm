@@ -15,7 +15,10 @@ pub(super) const TARGET: &str = "拖到这里复制到当前目录";
 
 pub(super) fn available() -> bool {
     gdk::Display::default().is_some_and(|display| {
-        matches!(display.type_().name(), "GdkX11Display" | "GdkWaylandDisplay")
+        matches!(
+            display.type_().name(),
+            "GdkX11Display" | "GdkWaylandDisplay"
+        )
     })
 }
 
