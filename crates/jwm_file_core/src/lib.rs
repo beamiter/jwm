@@ -4,6 +4,8 @@
 #[cfg(target_os = "linux")]
 mod copy;
 #[cfg(target_os = "linux")]
+mod copy_journal;
+#[cfg(target_os = "linux")]
 mod copy_names;
 #[cfg(target_os = "linux")]
 mod index_walk;
@@ -29,6 +31,10 @@ mod watch;
 
 #[cfg(target_os = "linux")]
 pub use copy::{CopyDestination, CopyError, CopyReceipt, CopySiblingReceipt, CopySource};
+#[cfg(target_os = "linux")]
+pub use copy_journal::{
+    COPY_JOURNAL_LIMIT, CopyJournalRecord, CopyJournalState, CopyObservation, CopyReview,
+};
 #[cfg(target_os = "linux")]
 pub use index_walk::{IndexEntry, WalkOptions, WalkSummary, visit_local_index};
 pub use local::LocalProvider;
