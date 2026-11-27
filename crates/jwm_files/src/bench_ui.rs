@@ -411,7 +411,7 @@ fn keyboard_navigation_benchmark() {
             }
             String::from_utf8(output.stdout).map_err(|e| e.to_string())
         };
-        let step = (|| {
+        let step: Result<Duration, String> = (|| {
             let (phase, _) = receive
                 .recv_timeout(Duration::from_secs(12))
                 .map_err(|_| "initial listing was not confirmed".to_string())?;
