@@ -195,7 +195,14 @@ pub(super) fn paste_into(
     parent: Arc<DirectoryHandle>,
     path: PathBuf,
 ) {
-    paste_with_mode(state, buffer, status, parent, path, PasteMode::ComparisonCopy);
+    paste_with_mode(
+        state,
+        buffer,
+        status,
+        parent,
+        path,
+        PasteMode::ComparisonCopy,
+    );
 }
 
 fn paste_with_mode(

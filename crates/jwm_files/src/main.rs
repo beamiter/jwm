@@ -1490,9 +1490,9 @@ fn open_window_with_tabs(
                 && let Some((_, detail)) = &work.copy
             {
                 let text = match &result {
-                    Ok(_) if move_unverified => format!(
-                        "移动已执行，但无法确认目标文件。请检查两处，不要重试：{detail}"
-                    ),
+                    Ok(_) if move_unverified => {
+                        format!("移动已执行，但无法确认目标文件。请检查两处，不要重试：{detail}")
+                    }
                     Ok(_) => format!("已移动：{detail}"),
                     Err(error) => format!("{error} 操作路径：{detail}"),
                 };
@@ -3240,7 +3240,10 @@ mod wayland_acceptance {
         let cut = || {
             navigate(&move_source);
             at(&move_source, "a-guard.txt");
-            until(|| source_selection.model().unwrap().n_items() == 2, "move source listing");
+            until(
+                || source_selection.model().unwrap().n_items() == 2,
+                "move source listing",
+            );
             source_selection.set_selected(1);
             action("win.cut-file");
             assert!(copy_noticed("粘贴后才会移动"));
@@ -3250,7 +3253,11 @@ mod wayland_acceptance {
         display.clipboard().set_text("cut-clipboard-guard");
         let controllers = window.observe_controllers();
         let file_keys = (0..controllers.n_items())
-            .filter_map(|index| controllers.item(index).and_downcast::<gtk::EventControllerKey>())
+            .filter_map(|index| {
+                controllers
+                    .item(index)
+                    .and_downcast::<gtk::EventControllerKey>()
+            })
             .find(|keys| {
                 keys.property::<Option<glib::GString>>("name").as_deref()
                     == Some("jwm-files-file-shortcuts")
@@ -3260,7 +3267,11 @@ mod wayland_acceptance {
             use glib::translate::IntoGlib;
             file_keys.emit_by_name::<bool>(
                 "key-pressed",
-                &[&key.into_glib(), &0u32, &gtk::gdk::ModifierType::CONTROL_MASK],
+                &[
+                    &key.into_glib(),
+                    &0u32,
+                    &gtk::gdk::ModifierType::CONTROL_MASK,
+                ],
             )
         };
         navigate(&move_source);
@@ -3285,7 +3296,10 @@ mod wayland_acceptance {
         assert!(copy_noticed("不支持粘贴为副本"));
         assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
         assert!(file_key(gtk::gdk::Key::v));
-        until(|| copy_noticed("未覆盖，源文件未移动"), "native move conflict");
+        until(
+            || copy_noticed("未覆盖，源文件未移动"),
+            "native move conflict",
+        );
         println!("GTK4 Wayland cut focus: a focused sidebar could neither arm nor consume a cut");
         assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
         assert_eq!(fs::read(&destination).unwrap(), b"keep existing");
@@ -3298,7 +3312,10 @@ mod wayland_acceptance {
         action("win.paste-file");
         action("win.cancel-file-copy");
         drop(pause);
-        until(|| copy_noticed("已取消，源文件未移动"), "native pre-rename cancellation");
+        until(
+            || copy_noticed("已取消，源文件未移动"),
+            "native pre-rename cancellation",
+        );
         assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
         assert!(!destination.exists());
 
@@ -3320,7 +3337,10 @@ mod wayland_acceptance {
         assert!(!origin.exists());
         assert!(!move_other.join(raw_move).exists());
         let published = fs::metadata(&destination).unwrap();
-        assert_eq!((published.dev(), published.ino()), (observed.dev(), observed.ino()));
+        assert_eq!(
+            (published.dev(), published.ino()),
+            (observed.dev(), observed.ino())
+        );
         assert_eq!(fs::read(&destination).unwrap(), b"exact moved data");
         action("win.paste-file");
         assert!(copy_noticed("请先复制或剪切"));
