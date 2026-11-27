@@ -2044,7 +2044,10 @@ mod wayland_acceptance {
         xd(&["mousemove", "1150", "950"]);
         pump_for(120);
         xd(&["mouseup", "1"]);
-        until(|| drag_source.drag().is_none(), "outside release ended the drag");
+        until(
+            || drag_source.drag().is_none(),
+            "outside release ended the drag",
+        );
         assert!(!output.exists(), "release outside must not publish");
         assert_eq!(source_id(&input), original);
 
