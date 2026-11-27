@@ -290,8 +290,12 @@ yet write these records or offer copy history or recovery in the UI.
 The provider has a separate owner-only local state store for at most 64
 copy intents. Reading never initializes the store. Each slot has an immutable
 intent and may later have one separately synced observation; a partial scratch
-file is not an observation. This slice neither reuses slots nor writes records
-from the copy worker. A missing destination means currently absent, not that
+file is not an observation. The provider's separately invoked tracked
+regular-file copy persists its intent before publication. It only records
+publication evidence after checking the actual held output file against the
+destination name. An evidence failure does not turn a completed link into a
+retryable copy error. The default copy worker and UI do not yet use this
+mode, and slots are not reused. A missing destination means currently absent, not that
 the copy never published; syncing the record is not proof of power-loss
 durability for the copied directory entry. Neither record permits any
 automatic retry, deletion, overwrite, or rollback.

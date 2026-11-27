@@ -46,7 +46,10 @@ mod tree_copy_stage;
 mod watch;
 
 #[cfg(target_os = "linux")]
-pub use copy::{CopyDestination, CopyError, CopyReceipt, CopySiblingReceipt, CopySource};
+pub use copy::{
+    CopyDestination, CopyError, CopyEvidence, CopyReceipt, CopySiblingReceipt, CopySource,
+    TrackedCopyError, TrackedCopyReceipt,
+};
 #[cfg(target_os = "linux")]
 pub use copy_batch::{COPY_BATCH_LIMIT, CopyBatchInputError, CopyBatchItem};
 #[cfg(target_os = "linux")]

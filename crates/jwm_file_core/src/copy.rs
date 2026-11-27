@@ -1,6 +1,9 @@
 //! Staged, no-replace copies of one regular local file.
 use crate::copy_names::{COPY_NAMES, sibling_copy_name};
-use crate::{Cancellation, DirectoryHandle, FileIdentity};
+use crate::{
+    Cancellation, CopyJournalRecord, CopyJournalReservation, CopyJournalState, CopyObservation,
+    DirectoryHandle, FileIdentity, prepare_copy_journal,
+};
 use rustix::{
     fd::AsRawFd,
     fs::{self, AtFlags, CWD, FileType, Mode, OFlags, SeekFrom, Stat},
@@ -79,6 +82,114 @@ pub struct CopyReceipt {
 pub struct CopySiblingReceipt {
     pub name: OsString,
     pub bytes: u64,
+}
+
+/// A link completed, but the strength of its interruption evidence can vary.
+#[derive(Debug)]
+pub enum CopyEvidence {
+    /// A metadata observation of the exact held output was persisted.
+    Recorded,
+    /// The current name could not be tied to the output. Do not retry automatically.
+    Unattributed,
+    /// The link completed but persistence of its observation is uncertain.
+    RecordUnavailable(io::Error),
+}
+
+#[derive(Debug)]
+pub struct TrackedCopyReceipt {
+    pub bytes: u64,
+    pub slot: u8,
+    pub evidence: CopyEvidence,
+}
+
+#[derive(Debug)]
+pub enum TrackedCopyError {
+    /// The intent was not confirmed; no destination link was attempted.
+    Intent(io::Error),
+    /// The link did not complete. A reserved intent may remain for review.
+    Copy {
+        error: CopyError,
+        intent_slot: Option<u8>,
+    },
+}
+
+struct CopyTracking<'a> {
+    base: &'a DirectoryHandle,
+    intent: Option<CopyJournalReservation>,
+    intent_error: Option<io::Error>,
+    evidence: CopyEvidence,
+}
+
+impl CopyTracking<'_> {
+    fn prepare(
+        &mut self,
+        destination: &DirectoryHandle,
+        displayed_parent: &Path,
+        name: &OsStr,
+    ) -> Result<(), CopyError> {
+        let intent = CopyJournalRecord {
+            destination_parent: displayed_parent.into(),
+            parent: destination.identity(),
+            name: name.into(),
+            state: CopyJournalState::Prepared,
+        };
+        match prepare_copy_journal(self.base, intent) {
+            Ok(reservation) => {
+                self.intent = Some(reservation);
+                Ok(())
+            }
+            Err(error) => {
+                self.intent_error = Some(error);
+                Err(CopyError::Io(io::Error::other(
+                    "tracked copy intent could not be persisted",
+                )))
+            }
+        }
+    }
+
+    fn after_link(
+        &mut self,
+        destination: &DirectoryHandle,
+        displayed_parent: &Path,
+        name: &OsStr,
+        output: &File,
+    ) {
+        let Some(intent) = &self.intent else {
+            return;
+        };
+        let Some(observation) = observe_linked_copy(destination, displayed_parent, name, output)
+        else {
+            return;
+        };
+        let record = CopyJournalRecord {
+            destination_parent: displayed_parent.into(),
+            parent: destination.identity(),
+            name: name.into(),
+            state: CopyJournalState::Published(observation),
+        };
+        self.evidence = match intent.record_publication(&record) {
+            Ok(()) => CopyEvidence::Recorded,
+            Err(error) => CopyEvidence::RecordUnavailable(error),
+        };
+    }
+}
+
+fn observe_linked_copy(
+    destination: &DirectoryHandle,
+    displayed_parent: &Path,
+    name: &OsStr,
+    output: &File,
+) -> Option<CopyObservation> {
+    verify_parent(destination, displayed_parent).ok()?;
+    // The publication itself changes the temp inode's ctime and link count.
+    // Observe the held output after link, never the pathname by itself.
+    let pinned = fs::fstat(output).ok()?;
+    let named = fs::statat(&destination.fd, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+    if FileType::from_raw_mode(named.st_mode) != FileType::RegularFile {
+        return None;
+    }
+    let output = CopyObservation::from_stat(&pinned)?;
+    (output == CopyObservation::from_stat(&named)?).then_some(output)
 }
 
 #[derive(Clone, Copy)]
@@ -303,6 +414,47 @@ impl DirectoryHandle {
         self.copy_with_observation(source, destination, cancel, None)
     }
 
+    /// Copy one literal name with an explicit private interruption journal.
+    /// An intent is persisted before linking. Recording after a successful
+    /// link cannot turn publication into a copy error or authorize a retry.
+    /// The journal does not imply destination directory-entry durability.
+    pub fn copy_regular_tracked(
+        &self,
+        source: CopySource<'_>,
+        destination: CopyDestination<'_>,
+        state_base: &DirectoryHandle,
+        cancel: &Cancellation,
+    ) -> Result<TrackedCopyReceipt, TrackedCopyError> {
+        let mut tracking = CopyTracking {
+            base: state_base,
+            intent: None,
+            intent_error: None,
+            evidence: CopyEvidence::Unattributed,
+        };
+        let result = self.copy_with_naming(
+            source,
+            destination.displayed_parent,
+            PublishName::Literal(destination.name),
+            cancel,
+            None,
+            Some(&mut tracking),
+        );
+        let intent_slot = tracking.intent.as_ref().map(CopyJournalReservation::slot);
+        match result {
+            Ok(receipt) => Ok(TrackedCopyReceipt {
+                bytes: receipt.bytes,
+                // Only this literal operation accepts tracking; its link
+                // cannot execute until a reservation has supplied this slot.
+                slot: intent_slot.expect("tracked publication has a journal intent"),
+                evidence: tracking.evidence,
+            }),
+            Err(error) => match tracking.intent_error {
+                Some(error) => Err(TrackedCopyError::Intent(error)),
+                None => Err(TrackedCopyError::Copy { error, intent_slot }),
+            },
+        }
+    }
+
     /// Copy once to anonymous staging and attempt at most 32 sibling names.
     /// Every publication is no-replace; occupied names are never followed.
     pub fn copy_regular_keep_both(
@@ -311,7 +463,14 @@ impl DirectoryHandle {
         displayed_parent: &Path,
         cancel: &Cancellation,
     ) -> Result<CopySiblingReceipt, CopyError> {
-        self.copy_with_naming(source, displayed_parent, PublishName::Sibling, cancel, None)
+        self.copy_with_naming(
+            source,
+            displayed_parent,
+            PublishName::Sibling,
+            cancel,
+            None,
+            None,
+        )
     }
 
     pub(crate) fn copy_with_observation(
@@ -327,6 +486,7 @@ impl DirectoryHandle {
             PublishName::Literal(destination.name),
             cancel,
             expected,
+            None,
         )
         .map(|receipt| CopyReceipt {
             bytes: receipt.bytes,
@@ -340,6 +500,7 @@ impl DirectoryHandle {
         naming: PublishName<'_>,
         cancel: &Cancellation,
         expected: Option<[i128; 5]>,
+        tracking: Option<&mut CopyTracking<'_>>,
     ) -> Result<CopySiblingReceipt, CopyError> {
         check(cancel)?;
         if !crate::mkdir::single_name(source.name)
@@ -431,7 +592,14 @@ impl DirectoryHandle {
         };
         let name = match naming {
             PublishName::Literal(name) => {
-                publish(name)?;
+                if let Some(tracking) = tracking {
+                    check(cancel)?;
+                    tracking.prepare(self, displayed_parent, name)?;
+                    publish(name)?;
+                    tracking.after_link(self, displayed_parent, name, &output);
+                } else {
+                    publish(name)?;
+                }
                 name.to_os_string()
             }
             PublishName::Sibling => {
@@ -522,6 +690,201 @@ mod tests {
             usize::from(COPY_NAMES) + 1
         );
         assert_eq!(std::fs::read(dir.join(original)).unwrap(), b"source");
+    }
+
+    struct TrackedFixture(std::path::PathBuf);
+
+    impl TrackedFixture {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let name = format!("jwm-tracked-copy-{}-{now}", std::process::id());
+            let path = std::env::temp_dir().join(name);
+            std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            for name in ["from", "to", "state"] {
+                std::fs::create_dir(path.join(name)).unwrap();
+            }
+            std::fs::write(path.join("from/file"), b"original").unwrap();
+            Self(path)
+        }
+
+        fn copy(&self, cancel: &Cancellation) -> Result<TrackedCopyReceipt, TrackedCopyError> {
+            use std::os::unix::fs::MetadataExt;
+
+            let from_path = self.0.join("from");
+            let to_path = self.0.join("to");
+            let from = DirectoryHandle::open(&from_path).unwrap();
+            let to = DirectoryHandle::open(&to_path).unwrap();
+            let state = DirectoryHandle::open(&self.0.join("state")).unwrap();
+            let original = std::fs::metadata(from_path.join("file")).unwrap();
+            to.copy_regular_tracked(
+                CopySource {
+                    parent: &from,
+                    displayed_parent: &from_path,
+                    name: OsStr::new("file"),
+                    expected_file: FileIdentity {
+                        device: original.dev(),
+                        inode: original.ino(),
+                    },
+                },
+                CopyDestination {
+                    displayed_parent: &to_path,
+                    name: OsStr::new("target"),
+                },
+                &state,
+                cancel,
+            )
+        }
+
+        fn review(&self, slot: u8) -> crate::CopyReview {
+            let state = DirectoryHandle::open(&self.0.join("state")).unwrap();
+            crate::read_copy_journal(&state, slot).unwrap().review()
+        }
+    }
+
+    impl Drop for TrackedFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn tracked_copy_records_the_exact_post_link_output() {
+        let f = TrackedFixture::new();
+        let receipt = f.copy(&Cancellation::default()).unwrap();
+        assert_eq!(receipt.bytes, 8);
+        assert!(matches!(receipt.evidence, CopyEvidence::Recorded));
+        assert_eq!(f.review(receipt.slot), crate::CopyReview::MetadataMatches);
+        assert_eq!(std::fs::read(f.0.join("to/target")).unwrap(), b"original");
+        assert_eq!(std::fs::read(f.0.join("from/file")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn tracked_copy_never_attributes_a_same_size_post_link_replacement() {
+        let f = TrackedFixture::new();
+        let to = f.0.join("to");
+        let receipt = publication_probe::with_probe(
+            move |point, name| {
+                if point == publication_probe::Point::After {
+                    std::fs::rename(to.join(name), to.join("actual")).unwrap();
+                    std::fs::write(to.join(name), b"sentinel").unwrap();
+                }
+            },
+            || f.copy(&Cancellation::default()),
+        )
+        .unwrap();
+        assert!(matches!(receipt.evidence, CopyEvidence::Unattributed));
+        assert_eq!(
+            f.review(receipt.slot),
+            crate::CopyReview::PresentWithoutPublicationRecord
+        );
+        assert_eq!(std::fs::read(f.0.join("to/target")).unwrap(), b"sentinel");
+        assert_eq!(std::fs::read(f.0.join("to/actual")).unwrap(), b"original");
+        assert_eq!(std::fs::read(f.0.join("from/file")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn tracked_copy_refuses_publication_if_intent_storage_is_unsafe() {
+        use std::os::unix::fs::symlink;
+
+        let f = TrackedFixture::new();
+        let journal = f.0.join("state/jwm-files-copy-journal-v1");
+        symlink(f.0.join("to"), journal).unwrap();
+        assert!(matches!(
+            f.copy(&Cancellation::default()),
+            Err(TrackedCopyError::Intent(_))
+        ));
+        assert_eq!(std::fs::read_dir(f.0.join("to")).unwrap().count(), 0);
+        assert_eq!(std::fs::read(f.0.join("from/file")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn tracked_copy_at_capacity_with_no_readable_intents_never_links() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let f = TrackedFixture::new();
+        let journal = f.0.join("state/jwm-files-copy-journal-v1");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&journal)
+            .unwrap();
+        for slot in 0..crate::COPY_JOURNAL_SLOTS {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(journal.join(format!("{slot:02}")))
+                .unwrap();
+        }
+
+        let state = DirectoryHandle::open(&f.0.join("state")).unwrap();
+        assert!(matches!(
+            crate::read_copy_journal(&state, 0),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        ));
+        assert!(matches!(
+            f.copy(&Cancellation::default()),
+            Err(TrackedCopyError::Intent(error)) if error.kind() == io::ErrorKind::StorageFull
+        ));
+        assert_eq!(std::fs::read_dir(f.0.join("to")).unwrap().count(), 0);
+        assert_eq!(std::fs::read(f.0.join("from/file")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn tracked_copy_cancellation_only_keeps_a_late_reserved_intent() {
+        let f = TrackedFixture::new();
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert!(matches!(
+            f.copy(&cancelled),
+            Err(TrackedCopyError::Copy {
+                error: CopyError::Cancelled,
+                intent_slot: None
+            })
+        ));
+        assert_eq!(std::fs::read_dir(f.0.join("state")).unwrap().count(), 0);
+        let late = std::sync::Arc::new(Cancellation::default());
+        let in_probe = late.clone();
+        let result = publication_probe::with_probe(
+            move |point, _| {
+                if point == publication_probe::Point::Before {
+                    in_probe.cancel();
+                }
+            },
+            || f.copy(&late),
+        );
+        let Err(TrackedCopyError::Copy {
+            error: CopyError::Cancelled,
+            intent_slot: Some(slot),
+        }) = result
+        else {
+            panic!("expected cancellation after recorded intent: {result:?}");
+        };
+        assert_eq!(f.review(slot), crate::CopyReview::DestinationMissing);
+        assert!(!f.0.join("to/target").exists());
+    }
+
+    #[test]
+    fn tracked_copy_does_not_turn_an_observation_failure_into_retry() {
+        let f = TrackedFixture::new();
+        let scratch = f.0.join("state/jwm-files-copy-journal-v1/00/.published.writing");
+        let receipt = publication_probe::with_probe(
+            move |point, _| {
+                if point == publication_probe::Point::After {
+                    std::fs::write(&scratch, b"interrupted").unwrap();
+                }
+            },
+            || f.copy(&Cancellation::default()),
+        )
+        .unwrap();
+        assert!(matches!(receipt.evidence, CopyEvidence::RecordUnavailable(_)));
+        assert_eq!(
+            f.review(receipt.slot),
+            crate::CopyReview::PresentWithoutPublicationRecord
+        );
+        assert_eq!(std::fs::read(f.0.join("to/target")).unwrap(), b"original");
     }
 
     #[test]

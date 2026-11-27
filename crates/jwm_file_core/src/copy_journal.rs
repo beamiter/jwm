@@ -30,7 +30,7 @@ pub struct CopyObservation {
 }
 
 impl CopyObservation {
-    fn from_stat(stat: &Stat) -> Option<Self> {
+    pub(crate) fn from_stat(stat: &Stat) -> Option<Self> {
         let result = Self {
             file: FileIdentity {
                 device: stat.st_dev,
