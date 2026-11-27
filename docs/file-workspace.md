@@ -233,8 +233,8 @@ the primary file list or grid has keyboard focus.
 Use **操作 → 取消正在进行的复制或移动** to request cancellation before
 publication. A move attempt consumes the selection, so if it conflicts or
 is cancelled before the rename, you must cut again to retry. **Ctrl+Shift+V** and the comparison pane's
-copy button do not move a cut file. This does not move directories,
-batches, or files across mounts, and does not offer undo.
+copy button do not move a cut item. Multi-item and cross-mount moves
+and move undo are not supported.
 
 ### Drag-copy a single regular file between Files windows
 
@@ -249,7 +249,7 @@ unchanged. The target is the committed directory at drop time.
 This first slice does not move or link, import external drops, or accept
 directories or multiple files. Keyboard and menu copy remain available.
 
-### Move an ordinary directory on one mount (core only)
+### Move an ordinary directory on one mount
 
 The provider can move an observed directory by one no-replace rename.
 Source and destination parents and the moved directory must be owned by
@@ -261,8 +261,21 @@ and a target inside the source. It does not read file contents.
 If the rename occurs but the new name cannot be verified, the provider
 reports that separately and does not automatically retry, delete or roll
 back. This is not a snapshot of concurrent changes or a crash-durability
-guarantee. No desktop shortcut, multi-item move or cross-mount fallback
-uses this new primitive yet.
+guarantee.
+
+Select one folder in the main list or grid, cut it with **Ctrl+X**, open
+the destination, then press **Ctrl+V** with focus in the main file area.
+The explicit **操作** menu offers the same selection and paste. Cut does
+not modify the text clipboard or touch the filesystem; paste moves to the
+captured directory. Cancellation before the rename leaves the source put,
+and a dispatched attempt consumes the cut. This does not enable folder
+drag, group moves, cross-mount moves, or undo.
+
+For a linked Git worktree, use Git's own
+[`git worktree move`](https://git-scm.com/docs/git-worktree) when supported,
+so the repository's path bookkeeping is updated. A general file-manager
+move does not update it. If a linked worktree has already been moved, see
+the manual's `repair` command.
 
 ### Copy interruption review (core only)
 

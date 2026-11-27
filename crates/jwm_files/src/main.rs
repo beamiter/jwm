@@ -3985,6 +3985,81 @@ mod wayland_acceptance {
             "GTK4 Wayland cut and paste: native identity retained, no overwrite, cancel, no replay"
         );
 
+        let from_folder = root.join("folder-move-source");
+        let to_folder = root.join("folder-move-target");
+        let away_folder = root.join("folder-move-elsewhere");
+        for dir in [&from_folder, &to_folder, &away_folder] {
+            fs::create_dir(dir).unwrap();
+        }
+        let folder = from_folder.join("目录移动");
+        let moved = to_folder.join("目录移动");
+        let raw = std::ffi::OsStr::from_bytes(b".folder-move-raw%\x80");
+        fs::create_dir_all(folder.join("empty")).unwrap();
+        fs::write(folder.join(raw), b"folder inode and bytes").unwrap();
+        fs::create_dir(&moved).unwrap();
+        fs::write(moved.join("sentinel"), b"unchanged target").unwrap();
+        fs::write(to_folder.join("a-keep.txt"), b"settled destination").unwrap();
+        fs::write(away_folder.join("a-away.txt"), b"other destination").unwrap();
+        let expected = fs::metadata(&folder).unwrap();
+        display.clipboard().set_text("folder-move-text-clipboard-guard");
+        let cut_folder = || {
+            navigate(&from_folder);
+            at(&from_folder, "▸ 目录移动");
+            source_selection.set_selected(0);
+            action("win.cut-file");
+            assert!(copy_noticed("粘贴后才会移动"));
+            assert_eq!(fs::metadata(&folder).unwrap().ino(), expected.ino());
+        };
+
+        cut_folder();
+        navigate(&folder);
+        at(&folder, "▸ empty");
+        action("win.paste-file");
+        until(
+            || copy_noticed("不能将文件夹移动到自身或子目录。"),
+            "folder cut refused destination inside source",
+        );
+        assert!(!folder.join("目录移动").exists());
+        cut_folder();
+        navigate(&to_folder);
+        at(&to_folder, "▸ 目录移动");
+        action("win.paste-file");
+        until(
+            || copy_noticed("未覆盖，源文件夹未移动。"),
+            "folder cut reported the conflict without replacing it",
+        );
+        assert_eq!(fs::read(moved.join("sentinel")).unwrap(), b"unchanged target");
+        fs::remove_file(moved.join("sentinel")).unwrap();
+        fs::remove_dir(&moved).unwrap();
+
+        cut_folder();
+        navigate(&to_folder);
+        at(&to_folder, "a-keep.txt");
+        let pause = copy_ui::MOVE_TEST_GATE.lock().unwrap();
+        action("win.paste-file");
+        navigate(&away_folder);
+        at(&away_folder, "a-away.txt");
+        assert!(folder.exists());
+        assert!(!moved.exists());
+        drop(pause);
+        let shown_moved = trash_ui::display_path(moved.as_os_str());
+        until(
+            || status_matches(&|text| text.starts_with("已移动：") && text.ends_with(&shown_moved)),
+            "folder cut receipt names the captured destination",
+        );
+        let found = fs::metadata(&moved).unwrap();
+        assert_eq!((found.dev(), found.ino()), (expected.dev(), expected.ino()));
+        assert_eq!(fs::read(moved.join(raw)).unwrap(), b"folder inode and bytes");
+        assert!(moved.join("empty").is_dir());
+        assert!(!folder.exists());
+        assert!(!away_folder.join("目录移动").exists());
+        action("win.paste-file");
+        assert!(copy_noticed("请先复制或剪切"));
+        assert_eq!(text_clipboard(&display), "folder-move-text-clipboard-guard");
+        println!(
+            "GTK4 Wayland folder cut: descendant and conflict refused, held destination got the exact folder once"
+        );
+
         let find_path = root.join("finder-native");
         let other_path = root.join("finder-unrelated");
         fs::create_dir(&find_path).unwrap();
