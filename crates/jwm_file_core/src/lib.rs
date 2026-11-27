@@ -8,6 +8,8 @@ mod copy_batch;
 #[cfg(target_os = "linux")]
 mod copy_journal;
 #[cfg(target_os = "linux")]
+mod copy_journal_storage;
+#[cfg(target_os = "linux")]
 mod copy_names;
 #[cfg(target_os = "linux")]
 mod index_walk;
@@ -50,6 +52,10 @@ pub use copy_batch::{COPY_BATCH_LIMIT, CopyBatchInputError, CopyBatchItem};
 #[cfg(target_os = "linux")]
 pub use copy_journal::{
     COPY_JOURNAL_LIMIT, CopyJournalRecord, CopyJournalState, CopyObservation, CopyReview,
+};
+#[cfg(target_os = "linux")]
+pub use copy_journal_storage::{
+    COPY_JOURNAL_SLOTS, CopyJournalReservation, prepare_copy_journal, read_copy_journal,
 };
 #[cfg(target_os = "linux")]
 pub use index_walk::{IndexEntry, WalkOptions, WalkSummary, visit_local_index};

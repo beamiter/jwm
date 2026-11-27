@@ -287,6 +287,15 @@ Matching metadata is a point-in-time observation, not proof of identity or
 permission to delete, overwrite, or roll back a file. The application does not
 yet write these records or offer copy history or recovery in the UI.
 
+The provider has a separate owner-only local state store for at most 64
+copy intents. Reading never initializes the store. Each slot has an immutable
+intent and may later have one separately synced observation; a partial scratch
+file is not an observation. This slice neither reuses slots nor writes records
+from the copy worker. A missing destination means currently absent, not that
+the copy never published; syncing the record is not proof of power-loss
+durability for the copied directory entry. Neither record permits any
+automatic retry, deletion, overwrite, or rollback.
+
 ### Find filenames in subdirectories
 
 **操作 → 查找子目录文件名** is separate from Ctrl+F. It starts only for the
