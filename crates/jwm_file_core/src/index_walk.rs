@@ -1,6 +1,8 @@
 //! Read-only, locally scoped directory walk for an explicitly selected index root.
 use crate::{Cancellation, DirectoryHandle, FileIdentity, FileKind, ListError};
+use rustix::fd::{BorrowedFd, OwnedFd};
 use rustix::fs::{self, Dir, FileType, Mode, OFlags, ResolveFlags};
+use rustix::io::Errno;
 use std::{
     ffi::OsStr,
     io,
@@ -29,6 +31,8 @@ pub struct WalkSummary {
     pub observed_names: usize,
     pub read_directories: usize,
     pub skipped: usize,
+    /// Mount boundaries intentionally outside the selected root's search scope.
+    pub excluded_mounts: usize,
     pub incomplete: bool,
 }
 
@@ -65,6 +69,7 @@ fn invalid(root: &Path, details: &str) -> ListError {
 /// Scan only beneath an explicit, absolute, non-symlink directory matching
 /// the caller's observation. Visit own-mount names; never enter another mount
 /// or a symlink, never open regular file contents, and never write anything.
+/// An excluded nested mount is not an incomplete read of eligible names.
 /// Call on a worker. Visitors see a provisional prefix: an incomplete result
 /// or error must not be treated as a complete durable index.
 pub fn visit_local_index(
@@ -72,14 +77,48 @@ pub fn visit_local_index(
     expected_root: FileIdentity,
     options: WalkOptions,
     cancel: &Cancellation,
+    visit: impl FnMut(IndexEntry<'_>),
+) -> Result<WalkSummary, ListError> {
+    visit_local_index_with_open(
+        displayed_root,
+        expected_root,
+        options,
+        cancel,
+        open_entry,
+        visit,
+    )
+}
+
+fn open_entry(parent: BorrowedFd<'_>, name: &std::ffi::CStr) -> Result<OwnedFd, Errno> {
+    // PATH obtains metadata without opening contents; NOFOLLOW describes a
+    // trailing symlink itself. NO_XDEV also catches same-device bind mounts.
+    fs::openat2(
+        parent,
+        name,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        WITHIN_ROOT,
+    )
+}
+
+fn visit_local_index_with_open(
+    displayed_root: &Path,
+    expected_root: FileIdentity,
+    options: WalkOptions,
+    cancel: &Cancellation,
+    mut open: impl FnMut(BorrowedFd<'_>, &std::ffi::CStr) -> Result<OwnedFd, Errno>,
     mut visit: impl FnMut(IndexEntry<'_>),
 ) -> Result<WalkSummary, ListError> {
+    use rustix::fd::AsFd;
     if !displayed_root.is_absolute()
         || !(1..=MAX_ENTRIES).contains(&options.entries)
         || !(1..=MAX_DIRS).contains(&options.directories)
         || options.depth > MAX_DEPTH
     {
-        return Err(invalid(displayed_root, "invalid local index root or budget"));
+        return Err(invalid(
+            displayed_root,
+            "invalid local index root or budget",
+        ));
     }
     let root_error = |source| ListError::ReadDirectory {
         path: displayed_root.to_path_buf(),
@@ -147,19 +186,22 @@ pub fn visit_local_index(
                 summary.skipped += 1;
                 continue;
             }
-            // st_dev alone cannot detect a same-device bind mount. Check
-            // each candidate before handing *any* metadata to the visitor.
-            // PATH opens no contents; NOFOLLOW allows describing the final
-            // symlink itself without traversing it.
-            let stat = fs::openat2(
-                &fd,
-                name,
-                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-                WITHIN_ROOT,
-            )
-            .and_then(|candidate| fs::fstat(&candidate));
-            let Ok(stat) = stat else {
+            let candidate = match open(fd.as_fd(), name) {
+                Ok(candidate) => candidate,
+                // This lookup is a single basename from readdir, with dot
+                // and dot-dot filtered above. EXDEV here is a mount boundary,
+                // never a reason to ignore failures reopening queued branches.
+                Err(Errno::XDEV) => {
+                    summary.excluded_mounts += 1;
+                    continue;
+                }
+                Err(_) => {
+                    summary.incomplete = true;
+                    summary.skipped += 1;
+                    continue;
+                }
+            };
+            let Ok(stat) = fs::fstat(&candidate) else {
                 summary.incomplete = true;
                 summary.skipped += 1;
                 continue;
@@ -207,7 +249,10 @@ pub fn visit_local_index(
         .identity()
         != expected_root
     {
-        return Err(invalid(displayed_root, "local index root changed during scan"));
+        return Err(invalid(
+            displayed_root,
+            "local index root changed during scan",
+        ));
     }
     Ok(summary)
 }
@@ -225,8 +270,8 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let directory = std::env::temp_dir()
-                .join(format!("jwm-index-walk-{}-{n}", std::process::id()));
+            let directory =
+                std::env::temp_dir().join(format!("jwm-index-walk-{}-{n}", std::process::id()));
             std::fs::create_dir(&directory).unwrap();
             Self(directory)
         }
@@ -394,19 +439,53 @@ mod tests {
     }
 
     #[test]
+    fn omitted_mount_is_complete_but_a_discovery_error_is_not() {
+        let root = Fixture::new();
+        std::fs::write(root.0.join("local"), b"data").unwrap();
+        std::fs::create_dir(root.0.join("nested")).unwrap();
+        std::fs::write(root.0.join("nested/not-eligible"), b"data").unwrap();
+        for (failure, incomplete) in [(Errno::XDEV, false), (Errno::IO, true)] {
+            let mut seen = Vec::new();
+            let result = visit_local_index_with_open(
+                &root.0,
+                root.id(),
+                options(),
+                &Cancellation::default(),
+                |parent, name| {
+                    if name.to_bytes() == b"nested" {
+                        Err(failure)
+                    } else {
+                        open_entry(parent, name)
+                    }
+                },
+                |row| seen.push(row.relative.to_path_buf()),
+            )
+            .unwrap();
+            assert_eq!(seen, [PathBuf::from("local")]);
+            assert_eq!(result.observed_names, 2);
+            assert_eq!(result.read_directories, 1);
+            assert_eq!(result.excluded_mounts, if incomplete { 0 } else { 1 });
+            assert_eq!(result.skipped, if incomplete { 1 } else { 0 });
+            assert_eq!(result.incomplete, incomplete);
+        }
+    }
+
+    #[test]
     fn refuses_a_symlink_as_an_explicit_root() {
         let root = Fixture::new();
         let outside = Fixture::new();
         std::fs::write(root.0.join("original"), b"data").unwrap();
         let alias = outside.0.join("alias");
         symlink(&root.0, &alias).unwrap();
-        assert!(visit_local_index(
-            &alias,
-            root.id(),
-            options(),
-            &Cancellation::default(),
-            |_| panic!("explicit root alias must never yield rows"),
-        )
-        .is_err());
+        assert!(
+            visit_local_index(
+                &alias,
+                root.id(),
+                options(),
+                &Cancellation::default(),
+                |_| panic!("explicit root alias must never yield rows"),
+            )
+            .is_err()
+        );
     }
 }
