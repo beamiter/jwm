@@ -362,8 +362,8 @@ fn keyboard_navigation_benchmark() {
     assert!(!display.is_empty());
     assert!(std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some());
 
-    let samples = std::env::var("JWM_FILE_KEYBOARD_SAMPLES")
-        .map_or(5, |raw| raw.parse::<usize>().unwrap());
+    let samples =
+        std::env::var("JWM_FILE_KEYBOARD_SAMPLES").map_or(5, |raw| raw.parse::<usize>().unwrap());
     assert!((5..=30).contains(&samples));
     let fixture = Fixture::new();
     let initial = fixture.0.join("start");
@@ -423,8 +423,7 @@ fn keyboard_navigation_benchmark() {
             let window = windows
                 .lines()
                 .find(|id| {
-                    xdo(&["getwindowname", id])
-                        .is_ok_and(|title| title.trim_end() == opening)
+                    xdo(&["getwindowname", id]).is_ok_and(|title| title.trim_end() == opening)
                 })
                 .ok_or_else(|| "no mapped Files window with the expected PID/title".to_owned())?;
             xdo(&["windowfocus", "--sync", window])?;
@@ -453,7 +452,10 @@ fn keyboard_navigation_benchmark() {
         };
         pipe.join().unwrap();
         timings.push(step.expect("single keyboard path workflow failed"));
-        assert!(status.success(), "native navigation child exited with {status}");
+        assert!(
+            status.success(),
+            "native navigation child exited with {status}"
+        );
     }
     timings.sort_unstable();
     let median = display_ms(timings[samples.div_ceil(2) - 1]);
