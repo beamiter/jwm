@@ -210,6 +210,21 @@ publication to cancel. A folder cannot use the single-file **Ctrl+Shift+V**
 automatic sibling name. Unsupported links or mounts fail the entire folder
 rather than silently omitting content.
 
+### Move one regular file (core only)
+
+The Linux provider can move one observed regular file to an explicitly held
+directory on the same mount, keeping its exact native name. Both parents must
+be owned by the effective user and not writable by the group or others.
+The provider rechecks the parents and source before one no-replace rename.
+An existing item, including a symlink, is left intact. Cross-mount requests
+are refused; there is no copy-then-delete fallback.
+
+Cancellation is honored before the rename. If the rename succeeds but the
+destination can no longer be verified, the provider reports that distinction
+and does not retry or roll back. The source inode check and the rename are not
+one indivisible check, and this operation does not promise power-loss
+durability. This is not yet wired to Cut/Paste and does not move folders.
+
 ### Copy interruption review (core only)
 
 The local provider has a bounded record for one copy intent or an observed
