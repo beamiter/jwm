@@ -325,6 +325,7 @@ xdotool key --clearmodifiers Return
 [[ $(title_id '^JWM Files · .*/cut-to$') == "$window" ]]
 [[ $(stat -c '%d:%i' "$root/cut-from/$cut_name") == "$original_id" ]]
 [[ ! -e "$root/cut-to/$cut_name" ]]
+printf 'GTK4 X11 cut: the focused address handled text cut and paste\n'
 visit_path cut-from
 sleep 0.2
 xdotool mousemove --window "$window" 350 72 click 1
@@ -336,7 +337,11 @@ for attempt in {1..40}; do
   [[ ! -f "$root/cut-to/$cut_name" ]] || break
   sleep 0.1
 done
-[[ ! -e "$root/cut-from/$cut_name" ]]
+if [[ -e "$root/cut-from/$cut_name" || ! -f "$root/cut-to/$cut_name" ]]; then
+  printf 'GTK4 X11 cut: Ctrl+V did not move the cut fixture into the empty target\n' >&2
+  printf 'Focused X11 window: %s\n' "$(xdotool getwindowfocus getwindowname)" >&2
+  exit 1
+fi
 [[ $(stat -c '%d:%i' "$root/cut-to/$cut_name") == "$original_id" ]]
 [[ $(cat "$root/cut-to/$cut_name") == 'one real cut' ]]
 printf 'GTK4 X11 cut: real shortcuts moved the exact inode and left address editing alone\n'

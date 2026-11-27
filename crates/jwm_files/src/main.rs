@@ -500,14 +500,22 @@ fn place_locations(
     locations
 }
 
+fn primary_has_focus(window: &gtk::ApplicationWindow, views: &gtk::Stack) -> bool {
+    gtk::prelude::GtkWindowExt::focus(window)
+        .is_some_and(|focus| focus == *views.upcast_ref::<gtk::Widget>() || focus.is_ancestor(views))
+}
+
 fn focus_current_view(views: &glib::WeakRef<gtk::Stack>) {
-    if let Some(content) = views
-        .upgrade()
-        .and_then(|views| views.visible_child())
-        .and_downcast::<gtk::ScrolledWindow>()
-        .and_then(|scroll| scroll.child())
+    if let Some(views) = views.upgrade()
+        && !views
+            .visible_child()
+            .and_downcast::<gtk::ScrolledWindow>()
+            .and_then(|scroll| scroll.child())
+            .is_some_and(|content| content.grab_focus())
     {
-        content.grab_focus();
+        // An empty list or grid may have no row to focus. Keep keyboard
+        // focus in the primary pane so Paste still targets this directory.
+        views.grab_focus();
     }
 }
 
@@ -739,7 +747,11 @@ fn open_window_with_tabs(
     }
 
     list.set_single_click_activate(false);
-    let views = gtk::Stack::builder().hexpand(true).vexpand(true).build();
+    let views = gtk::Stack::builder()
+        .focusable(true)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
     for (name, content) in [
         ("list", list.upcast_ref::<gtk::Widget>()),
         ("grid", grid.upcast_ref()),
@@ -1251,6 +1263,7 @@ fn open_window_with_tabs(
     start_scan(&state, initial, &address, &status);
     let weak_window = window.downgrade();
     let reveal_list = list.downgrade();
+    let weak_primary = views.downgrade();
     // Associate the incoming item only with the initial scan. User navigation
     // can cancel it; the same folder revisited later must not revive it.
     let mut reveal_pending =
@@ -1340,6 +1353,9 @@ fn open_window_with_tabs(
             let entries = browser.entries.clone();
             tabs.sync(&browser.tabs);
             drop(browser);
+            let retain_primary = weak_primary
+                .upgrade()
+                .is_some_and(|views| primary_has_focus(&window, &views));
             breadcrumb.show(&path);
             selection.set_selected(gtk::INVALID_LIST_POSITION);
             if let Some(reveal) = &reveal_widget {
@@ -1353,6 +1369,12 @@ fn open_window_with_tabs(
             }
             model.replace(entries);
             finder.snapshot_changed();
+            if retain_primary
+                && let Some(views) = weak_primary.upgrade()
+                && !primary_has_focus(&window, &views)
+            {
+                focus_current_view(&weak_primary);
+            }
             if let Some((row, id)) = restore_row
                 && let Ok(row) = u32::try_from(row)
                 && {
