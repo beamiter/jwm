@@ -1882,8 +1882,8 @@ mod wayland_acceptance {
             until(|| Instant::now() >= end, "settled native pointer events");
         }
 
-        fn widget_center(window: &gtk::Window, text: &str) -> (String, String) {
-            let label = descendants(window.upcast_ref())
+        fn control(window: &gtk::Window, text: &str) -> gtk::Label {
+            descendants(window.upcast_ref())
                 .into_iter()
                 .find_map(|widget| {
                     widget
@@ -1891,13 +1891,21 @@ mod wayland_acceptance {
                         .ok()
                         .filter(|label| label.label() == text)
                 })
-                .expect("drag control");
+                .expect("drag control")
+        }
+
+        fn widget_center(window: &gtk::Window, label: &gtk::Label) -> (i32, i32) {
             let bounds = label.compute_bounds(window).expect("mapped label bounds");
             assert!(bounds.width() > 10.0 && bounds.height() > 5.0);
-            (
-                ((bounds.x() + bounds.width() / 2.0) as i32).to_string(),
-                ((bounds.y() + bounds.height() / 2.0) as i32).to_string(),
-            )
+            let x = f64::from(bounds.x() + bounds.width() / 2.0);
+            let y = f64::from(bounds.y() + bounds.height() / 2.0);
+            assert_eq!(
+                window.pick(x, y, gtk::PickFlags::DEFAULT).as_ref(),
+                Some(label.upcast_ref::<gtk::Widget>()),
+                "the pointer must hit the actual drag control"
+            );
+            let (tx, ty) = window.surface_transform();
+            ((x - tx).round() as i32, (y - ty).round() as i32)
         }
 
         let display_name = std::env::var("JWM_FILE_DND_PRIVATE_DISPLAY").unwrap();
@@ -1995,16 +2003,39 @@ mod wayland_acceptance {
                     .is_ok_and(|label| label.is_visible() && predicate(label.label().as_str()))
             })
         };
+        let handle = control(&from, drop_copy_ui::SOURCE);
+        let drop_label = control(&to, drop_copy_ui::TARGET);
+        let controllers = handle.observe_controllers();
+        let drag_source = (0..controllers.n_items())
+            .find_map(|i| controllers.item(i)?.downcast::<gtk::DragSource>().ok())
+            .expect("native drag source on the hit widget");
         let hover = || {
-            let (sx, sy) = widget_center(&from, drop_copy_ui::SOURCE);
-            let (tx, ty) = widget_center(&to, drop_copy_ui::TARGET);
-            let motion_x = (sx.parse::<i32>().unwrap() + 45).to_string();
-            xd(&["mousemove", "--window", &sid, &sx, &sy, "mousedown", "1"]);
+            let (sx, sy) = widget_center(&from, &handle);
+            let (tx, ty) = widget_center(&to, &drop_label);
+            let (sx, sy) = (sx.to_string(), sy.to_string());
+            let (tx, ty) = (tx.to_string(), ty.to_string());
+            xd(&["mousemove", "--window", &sid, &sx, &sy]);
             pump_for(60);
+            xd(&["mousedown", "1"]);
+            pump_for(60);
+            let motion_x = (sx.parse::<i32>().unwrap() + 32).to_string();
             xd(&["mousemove", "--window", &sid, &motion_x, &sy]);
-            pump_for(160);
+            until(|| drag_source.drag().is_some(), "XTEST started a GTK drag");
             xd(&["mousemove", "--window", &tid, &tx, &ty]);
-            pump_for(240);
+            pump_for(160);
+            let motion_x = (tx.parse::<i32>().unwrap() + 4).to_string();
+            xd(&["mousemove", "--window", &tid, &motion_x, &ty]);
+            until(
+                || {
+                    drop_label
+                        .state_flags()
+                        .contains(gtk::StateFlags::DROP_ACTIVE)
+                        && drag_source
+                            .drag()
+                            .is_some_and(|drag| drag.selected_action() == gtk::gdk::DragAction::COPY)
+                },
+                "the other Files window negotiated COPY with the live drag",
+            );
         };
 
         hover();
@@ -2018,6 +2049,10 @@ mod wayland_acceptance {
 
         fs::write(&output, b"occupied exact leaf").unwrap();
         let occupied = source_id(&output);
+        until(
+            || to_model.n_items() == 2,
+            "target watcher settled with the conflict",
+        );
         hover();
         xd(&["mouseup", "1"]);
         until(
@@ -2033,6 +2068,10 @@ mod wayland_acceptance {
         );
 
         fs::remove_file(&output).unwrap();
+        until(
+            || to_model.n_items() == 1,
+            "target watcher settled without the conflict",
+        );
         hover();
         xd(&["mouseup", "1"]);
         until(
