@@ -2,13 +2,14 @@ use futures_channel::oneshot;
 use gtk::{gio, glib, prelude::*};
 use gtk4 as gtk;
 use jwm_file_core::{
-    Cancellation, CopyError, FileKind, HomeTrashCursor, HomeTrashEntry, HomeTrashSnapshot,
-    RecoverCopyError, recover_home_trash_copy,
+    Cancellation, CopyError, FileKind, HomeTrashCursor, HomeTrashEntry, HomeTrashRestoreOutcome,
+    HomeTrashRestorePlan, HomeTrashSnapshot, RecoverCopyError, recover_home_trash_copy,
 };
 use std::{
     cell::{Cell, RefCell},
     ffi::OsStr,
     fmt::Write as _,
+    io::ErrorKind,
     os::unix::ffi::OsStrExt,
     path::PathBuf,
     rc::Rc,
@@ -17,6 +18,8 @@ use std::{
 };
 
 const TITLE: &str = "JWM Files · Home Trash";
+pub(super) const RESTORE_TITLE: &str = "JWM Files · Restore Original";
+const RESTORE_LABEL: &str = "恢复原件";
 
 /// Keep ordinary Unicode readable, but distinguish raw Unix bytes from a
 /// literal replacement character or a filename containing escape notation.
@@ -91,12 +94,14 @@ struct View {
     rows: glib::WeakRef<gtk::StringList>,
     selection: glib::WeakRef<gtk::SingleSelection>,
     recover: glib::WeakRef<gtk::Button>,
+    restore: glib::WeakRef<gtk::Button>,
     next: glib::WeakRef<gtk::Button>,
     cursor: RefCell<Option<HomeTrashCursor>>,
     page: Cell<usize>,
     status: glib::WeakRef<gtk::Label>,
     entries: RefCell<Vec<Arc<HomeTrashEntry>>>,
     confirming: Cell<bool>,
+    needs_refresh: Cell<bool>,
     running: RefCell<Option<Cancellation>>,
     busy: Rc<Cell<bool>>,
     data_home: PathBuf,
@@ -104,6 +109,9 @@ struct View {
 
 impl View {
     fn selected(&self) -> Option<Arc<HomeTrashEntry>> {
+        if self.needs_refresh.get() {
+            return None;
+        }
         let current = self.selection.upgrade()?.selected() as usize;
         self.entries
             .borrow()
@@ -115,6 +123,9 @@ impl View {
     fn update_controls(&self) {
         let available = !self.busy.get() && !self.confirming.get();
         if let Some(button) = self.recover.upgrade() {
+            button.set_sensitive(available && self.selected().is_some());
+        }
+        if let Some(button) = self.restore.upgrade() {
             button.set_sensitive(available && self.selected().is_some());
         }
         if let Some(button) = self.next.upgrade() {
@@ -142,7 +153,7 @@ impl View {
             .modal(true)
             .destroy_with_parent(true)
             .build();
-        dialog.add_button("取消", gtk::ResponseType::Cancel);
+        let cancel = dialog.add_button("取消", gtk::ResponseType::Cancel);
         dialog.add_button("恢复副本", gtk::ResponseType::Accept);
         dialog.set_default_response(gtk::ResponseType::Cancel);
         let label = gtk::Label::new(Some(&format!(
@@ -155,18 +166,24 @@ impl View {
         label.set_wrap(true);
         label.set_selectable(true);
         dialog.content_area().append(&label);
+        let released = Rc::new(Cell::new(false));
         dialog.connect_destroy({
-            let view = self.clone();
+            let (view, released) = (self.clone(), released.clone());
             move |_| {
-                view.confirming.set(false);
-                view.update_controls();
+                if !released.replace(true) {
+                    view.confirming.set(false);
+                    view.update_controls();
+                }
             }
         });
         dialog.connect_response({
             let (view, panel) = (self.clone(), panel.downgrade());
             move |dialog, response| {
-                dialog.destroy();
+                if released.replace(true) {
+                    return;
+                }
                 view.confirming.set(false);
+                dialog.destroy();
                 if response == gtk::ResponseType::Accept
                     && panel.upgrade().is_some_and(|panel| panel.is_visible())
                     && view
@@ -179,6 +196,7 @@ impl View {
             }
         });
         dialog.present();
+        cancel.grab_focus();
     }
 
     fn recover_copy(self: &Rc<Self>, entry: Arc<HomeTrashEntry>) {
@@ -228,6 +246,183 @@ impl View {
                 Ok(Err(error)) => status.set_text(&format!("未能恢复副本：{error}")),
                 Err(_) => status.set_text("恢复副本未返回结果；请检查目标位置。"),
             }
+        });
+    }
+
+    fn prepare_restore(self: &Rc<Self>, panel: &gtk::Window) {
+        if self.busy.get() || self.confirming.get() {
+            return;
+        }
+        let (Some(entry), Some(status)) = (self.selected(), self.status.upgrade()) else {
+            return;
+        };
+        let cancel = Cancellation::default();
+        let worker_cancel = cancel.clone();
+        let data_home = self.data_home.clone();
+        let worker_entry = entry.clone();
+        let (send, receive) = oneshot::channel();
+        if let Err(error) = thread::Builder::new()
+            .name("jwm-trash-prepare-restore".into())
+            .spawn(move || {
+                let _ = send.send(HomeTrashRestorePlan::prepare(
+                    &data_home,
+                    &worker_entry,
+                    &worker_cancel,
+                ));
+            })
+        {
+            status.set_text(&format!("无法核对恢复位置：{error}"));
+            return;
+        }
+        self.busy.set(true);
+        self.running.replace(Some(cancel));
+        self.update_controls();
+        status.set_text("正在核对回收站原件和原位置…");
+        let (view, panel) = (self.clone(), panel.downgrade());
+        glib::MainContext::default().spawn_local(async move {
+            let result = receive.await;
+            view.busy.set(false);
+            let active = view
+                .running
+                .take()
+                .is_some_and(|cancel| cancel.check().is_ok());
+            view.update_controls();
+            let Some(panel) = panel.upgrade().filter(|panel| panel.is_visible()) else {
+                return;
+            };
+            let Some(status) = view.status.upgrade() else {
+                return;
+            };
+            if !active {
+                return;
+            }
+            if !view.selected().is_some_and(|row| Arc::ptr_eq(&row, &entry)) {
+                status.set_text("选择已变化，未恢复。");
+                return;
+            }
+            match result {
+                Ok(Ok(plan)) => view.confirm_restore(&panel, entry, plan),
+                Ok(Err(error)) => status.set_text(&restore_refusal(&error)),
+                Err(_) => status.set_text("未能核对原件，未发起恢复。"),
+            }
+        });
+    }
+
+    fn confirm_restore(
+        self: &Rc<Self>,
+        panel: &gtk::Window,
+        entry: Arc<HomeTrashEntry>,
+        plan: HomeTrashRestorePlan,
+    ) {
+        let slot = display_path(plan.storage_key());
+        let original = display_path(plan.original_path().as_os_str());
+        let dialog = gtk::Dialog::builder()
+            .title(RESTORE_TITLE)
+            .transient_for(panel)
+            .modal(true)
+            .destroy_with_parent(true)
+            .build();
+        let cancel = dialog.add_button("取消", gtk::ResponseType::Cancel);
+        dialog.add_button(RESTORE_LABEL, gtk::ResponseType::Accept);
+        dialog.set_default_response(gtk::ResponseType::Cancel);
+        let label = gtk::Label::new(Some(&format!(
+            "项目：{slot}\n原位置：{original}\n原件将移出回收站，不会覆盖现有文件。"
+        )));
+        label.set_margin_start(12);
+        label.set_margin_end(12);
+        label.set_margin_top(12);
+        label.set_margin_bottom(12);
+        label.set_wrap(true);
+        label.set_selectable(true);
+        dialog.content_area().append(&label);
+        let plan = Rc::new(RefCell::new(Some(plan)));
+        self.confirming.set(true);
+        self.update_controls();
+        dialog.connect_destroy({
+            let (view, plan) = (self.clone(), plan.clone());
+            move |_| {
+                if plan.take().is_some() {
+                    view.confirming.set(false);
+                    view.update_controls();
+                }
+            }
+        });
+        dialog.connect_response({
+            let (view, panel) = (self.clone(), panel.downgrade());
+            move |dialog, response| {
+                let Some(plan) = plan.take() else {
+                    return;
+                };
+                view.confirming.set(false);
+                dialog.destroy();
+                if response == gtk::ResponseType::Accept
+                    && panel.upgrade().is_some_and(|panel| panel.is_visible())
+                    && view.selected().is_some_and(|row| Arc::ptr_eq(&row, &entry))
+                {
+                    view.restore_original(plan);
+                } else if let Some(status) = view.status.upgrade() {
+                    status.set_text("未恢复，回收站原件未变。");
+                }
+                view.update_controls();
+            }
+        });
+        dialog.present();
+        cancel.grab_focus();
+    }
+
+    fn restore_original(self: &Rc<Self>, plan: HomeTrashRestorePlan) {
+        let Some(status) = self.status.upgrade() else {
+            return;
+        };
+        if self.busy.get() {
+            status.set_text("另一个操作正在进行，未恢复。");
+            return;
+        }
+        let cancel = Cancellation::default();
+        let worker_cancel = cancel.clone();
+        let (send, receive) = oneshot::channel();
+        if let Err(error) = thread::Builder::new()
+            .name("jwm-trash-restore-original".into())
+            .spawn(move || {
+                let _ = send.send(plan.restore(&worker_cancel));
+            })
+        {
+            status.set_text(&format!("未能启动恢复原件：{error}"));
+            return;
+        }
+        self.busy.set(true);
+        self.running.replace(Some(cancel));
+        self.update_controls();
+        status.set_text("正在恢复原件…");
+        let view = self.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let result = receive.await;
+            let _ = view.running.take();
+            view.busy.set(false);
+            // The old listing cannot authorize a second action after a
+            // completed or uncertain native rename. Preserve the receipt.
+            if !matches!(&result, Ok(Err(_))) {
+                view.needs_refresh.set(true);
+                let _ = view.cursor.take();
+            }
+            view.update_controls();
+            let Some(status) = view.status.upgrade() else {
+                return;
+            };
+            let receipt = match result {
+                Ok(Ok(HomeTrashRestoreOutcome::Restored)) => {
+                    "已恢复原件到原位置。刷新可查看剩余项目。".into()
+                }
+                Ok(Ok(HomeTrashRestoreOutcome::RestoredWithMetadataRemnant)) => {
+                    "原件已回到原位置，但回收站记录可能保留。请检查，不要重复恢复。".into()
+                }
+                Ok(Ok(HomeTrashRestoreOutcome::RenamedUnverified)) => {
+                    "文件已移出，但无法确认原位置中的文件。请检查，不要重复恢复。".into()
+                }
+                Ok(Err(error)) => restore_refusal(&error),
+                Err(_) => "恢复结果不明，请检查原位置和回收站，不要重复恢复。".into(),
+            };
+            status.set_text(&receipt);
         });
     }
 
@@ -308,6 +503,7 @@ impl View {
                         selection.set_selected(gtk::INVALID_LIST_POSITION);
                     }
                     view.entries.replace(result.entries);
+                    view.needs_refresh.set(false);
                     let refs: Vec<_> = result.labels.iter().map(String::as_str).collect();
                     rows.splice(0, rows.n_items(), &refs);
                     status.set_text(&result.status);
@@ -317,6 +513,17 @@ impl View {
             }
             view.update_controls();
         });
+    }
+}
+
+fn restore_refusal(error: &std::io::Error) -> String {
+    match error.kind() {
+        ErrorKind::AlreadyExists => "原位置已有同名项目，未覆盖。".into(),
+        ErrorKind::NotFound => "原目录或回收站记录已不存在，未恢复。请检查原位置并刷新。".into(),
+        ErrorKind::InvalidData => "回收站记录不能唯一确定原位置，未恢复原件。".into(),
+        ErrorKind::CrossesDevices => "原位置与回收站不在同一挂载点，未恢复原件。".into(),
+        ErrorKind::Interrupted => "已取消，未恢复。".into(),
+        _ => format!("未能恢复原件：{error}"),
     }
 }
 
@@ -354,6 +561,10 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         let recover = gtk::Button::with_label("恢复副本");
         recover.set_sensitive(false);
         toolbar.append(&recover);
+        let restore = gtk::Button::with_label(RESTORE_LABEL);
+        restore.set_tooltip_text(Some("把回收站原件移回原位置，不覆盖现有文件"));
+        restore.set_sensitive(false);
+        toolbar.append(&restore);
         let next = gtk::Button::with_label("下一批");
         next.set_sensitive(false);
         toolbar.append(&next);
@@ -405,12 +616,14 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
             rows: rows.downgrade(),
             selection: model.downgrade(),
             recover: recover.downgrade(),
+            restore: restore.downgrade(),
             next: next.downgrade(),
             cursor: RefCell::new(None),
             page: Cell::new(0),
             status: status.downgrade(),
             entries: RefCell::new(Vec::new()),
             confirming: Cell::new(false),
+            needs_refresh: Cell::new(false),
             running: RefCell::new(None),
             busy: busy.clone(),
             data_home: glib::user_data_dir(),
@@ -424,6 +637,14 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
             move |_| {
                 if let Some(panel) = panel.upgrade() {
                     view.confirm_recover(&panel);
+                }
+            }
+        });
+        restore.connect_clicked({
+            let (view, panel) = (view.clone(), window.downgrade());
+            move |_| {
+                if let Some(panel) = panel.upgrade() {
+                    view.prepare_restore(&panel);
                 }
             }
         });

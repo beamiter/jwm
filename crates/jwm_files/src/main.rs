@@ -2728,6 +2728,169 @@ mod wayland_acceptance {
             },
             "freshly trashed exact filename shown in browser",
         );
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let panel = home_trash_panel().unwrap();
+            let button = |label: &str| {
+                descendants(panel.upcast_ref())
+                    .into_iter()
+                    .find_map(|widget| {
+                        let button = widget.downcast::<gtk::Button>().ok()?;
+                        (button.label().as_deref() == Some(label)).then_some(button)
+                    })
+                    .unwrap()
+            };
+            let payload = trash.join("files").join(&row.name);
+            let mut metadata_name = row.name.clone();
+            metadata_name.push(".trashinfo");
+            let sidecar = trash.join("info").join(metadata_name);
+            let metadata = fs::read(&sidecar).unwrap();
+            let inode = fs::metadata(&payload).unwrap().ino();
+            let neighbor = trash.join("files/restore-fixture-neighbor");
+            let neighbor_info = trash.join("info/restore-fixture-neighbor.trashinfo");
+            fs::write(&neighbor, b"keep older revision").unwrap();
+            fs::write(&neighbor_info, &metadata).unwrap();
+            button("刷新").emit_clicked();
+            let (selection, rows) = descendants(panel.upcast_ref())
+                .into_iter()
+                .find_map(|widget| {
+                    let selection = widget
+                        .downcast::<gtk::ListView>()
+                        .ok()?
+                        .model()?
+                        .downcast::<gtk::SingleSelection>()
+                        .ok()?;
+                    let rows = selection.model()?.downcast::<gtk::StringList>().ok()?;
+                    Some((selection, rows))
+                })
+                .unwrap();
+            until(
+                || rows.n_items() == 2,
+                "two exact original revisions in Trash",
+            );
+            let selected = (0..rows.n_items())
+                .find(|&index| {
+                    rows.string(index).is_some_and(|row| {
+                        row.contains(r"explicit-trash/z-trash%\x80")
+                            && !row.ends_with("restore-fixture-neighbor")
+                    })
+                })
+                .unwrap();
+            selection.set_selected(selected);
+            let restore = button("恢复原件");
+            let recipient_dialog = || {
+                gtk::Window::list_toplevels()
+                    .into_iter()
+                    .find_map(|window| {
+                        let dialog = window.downcast::<gtk::Dialog>().ok()?;
+                        (dialog.is_mapped()
+                            && dialog.title().as_deref() == Some(trash_ui::RESTORE_TITLE)
+                            && dialog.transient_for().as_ref() == Some(&panel))
+                        .then_some(dialog)
+                    })
+            };
+            let launch = || {
+                assert!(restore.is_sensitive());
+                restore.emit_clicked();
+                until(
+                    || recipient_dialog().is_some(),
+                    "restore original confirmation prepared off main thread",
+                );
+                let dialog = recipient_dialog().unwrap();
+                assert!(descendants(dialog.upcast_ref()).iter().any(|widget| {
+                    widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                        label.text().contains(r"explicit-trash/z-trash%\x80")
+                            && label.text().contains("原件将移出回收站")
+                    })
+                }));
+                dialog
+            };
+            let recover = button("恢复副本");
+            assert!(recover.is_sensitive());
+            recover.emit_clicked();
+            let copy_dialog = gtk::Window::list_toplevels()
+                .into_iter()
+                .find_map(|window| {
+                    let dialog = window.downcast::<gtk::Dialog>().ok()?;
+                    (dialog.title().as_deref() == Some("JWM Files · Recover Copy")
+                        && dialog.transient_for().as_ref() == Some(&panel))
+                    .then_some(dialog)
+                })
+                .unwrap();
+            let disposed = Rc::new(std::cell::Cell::new(false));
+            copy_dialog.connect_destroy({
+                let disposed = disposed.clone();
+                move |_| disposed.set(true)
+            });
+            copy_dialog.response(gtk::ResponseType::Cancel);
+            assert!(
+                !disposed.get(),
+                "fixture must keep the old Copy dialog alive"
+            );
+            let cancelled = launch();
+            drop(copy_dialog);
+            until(
+                || disposed.get(),
+                "previous Copy dialog disposed during Restore",
+            );
+            assert!(!restore.is_sensitive() && !recover.is_sensitive());
+            button("刷新").emit_clicked();
+            assert_eq!(selection.selected(), selected);
+            assert_eq!(rows.n_items(), 2);
+            println!("GTK4 Wayland Trash confirmation: stale Copy disposal kept Restore guarded");
+            assert_eq!(
+                cancelled
+                    .default_widget()
+                    .and_downcast::<gtk::Button>()
+                    .unwrap()
+                    .label()
+                    .as_deref(),
+                Some("取消")
+            );
+            cancelled.emit_by_name::<()>("activate-default", &[]);
+            until(
+                || !cancelled.is_mapped() && restore.is_sensitive(),
+                "default Return cancels restore and allows a new independent request",
+            );
+            assert!(!saved.exists());
+            assert_eq!(fs::read(&payload).unwrap(), b"exact trashed data");
+            assert_eq!(fs::read(&sidecar).unwrap(), metadata);
+            println!(
+                "GTK4 Wayland restore original: default Enter cancelled with payload and sidecar unchanged"
+            );
+
+            launch().response(gtk::ResponseType::Accept);
+            until(
+                || {
+                    descendants(panel.upcast_ref()).iter().any(|widget| {
+                        widget
+                            .downcast_ref::<gtk::Label>()
+                            .is_some_and(|label| label.text().starts_with("已恢复原件到原位置。"))
+                    })
+                },
+                "verified restore receipt",
+            );
+            assert!(!restore.is_sensitive() && !button("恢复副本").is_sensitive());
+            assert_eq!(fs::metadata(&saved).unwrap().ino(), inode);
+            assert_eq!(fs::read(&saved).unwrap(), b"exact trashed data");
+            assert!(!payload.exists() && !sidecar.exists());
+            assert_eq!(fs::read(neighbor).unwrap(), b"keep older revision");
+            assert_eq!(fs::read(neighbor_info).unwrap(), metadata);
+            button("刷新").emit_clicked();
+            until(
+                || {
+                    rows.n_items() == 1
+                        && rows
+                            .string(0)
+                            .is_some_and(|row| row.ends_with("restore-fixture-neighbor"))
+                },
+                "only the matching independent revision remains",
+            );
+            println!(
+                "GTK4 Wayland restore original: exact inode restored and sibling revision retained"
+            );
+        }
         home_trash_panel().unwrap().close();
         // Keep the independent historical read/recovery fixture at its own baseline.
         fs::rename(&trash, xdg.join("Trash-write-fixture-hold")).unwrap();
