@@ -97,3 +97,10 @@ jobs:
           GDK_BACKEND=x11 GSK_RENDERER=cairo JWM_FILE_BENCH_SAMPLES=5 \
             xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
             cargo test --locked native_listing_benchmark -- --ignored --nocapture
+      - name: Measure first paint in a fresh private X11 process
+        working-directory: crates/jwm_files
+        timeout-minutes: 3
+        run: |
+          GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none JWM_FILE_FRESH_WINDOW_SAMPLES=5 \
+            dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+            cargo test --locked bench_ui::fresh_window_benchmark -- --exact --ignored --nocapture
