@@ -44,6 +44,13 @@ def identity(path):
     return f"{observed.st_dev}:{observed.st_ino}"
 
 
+def matching_owned_window(rows, pid, name):
+    # JWM's get_windows serializes WindowInfo.name, not an xdg-shell "title" key.
+    found = [row for row in rows if row.get("pid") == pid]
+    assert len(found) <= 1, found
+    return found[0] if found and found[0].get("name") == name else None
+
+
 def prepare_terminal_fixture(root, chosen, env, foot):
     shell = root / "proof-shell"
     shell.write_text('''#!/bin/sh
@@ -121,10 +128,8 @@ def run(args, root, log):
         assert answer.get("success", True), answer
         return answer.get("data", answer)
 
-    def exact_window(pid, title):
-        found = [row for row in jwm_query("get_windows") if row.get("pid") == pid]
-        assert len(found) <= 1, found
-        return found[0] if found and found[0].get("title") == title else None
+    def exact_window(pid, name):
+        return matching_owned_window(jwm_query("get_windows"), pid, name)
 
     try:
         # Give both JWM and the separate GTK client an explicit private bus;
@@ -179,8 +184,10 @@ def run(args, root, log):
         del native["DISPLAY"]
         browser = spawn([args.files, "--", chosen], native)
         displayed = os.fsencode(chosen).decode("utf-8", "replace")
-        bounded(lambda: exact_window(browser.pid, "JWM Files · " + displayed),
-                "native GTK Files view and committed raw directory")
+        native_browser = bounded(lambda: exact_window(browser.pid, "JWM Files · " + displayed),
+                                 "native GTK Files view and committed raw directory")
+        assert native_browser.get("is_on_view"), native_browser
+        print("GTK4 Wayland terminal: native Files PID and exact raw directory matched", flush=True)
         command("xdotool", "windowfocus", outer)
         command("xdotool", "key", "--clearmodifiers", "ctrl+shift+Return")
         adapter_receipt = root / "adapter.receipt"
@@ -193,6 +200,10 @@ def run(args, root, log):
         assert identity(root / "original") == expected and identity(chosen) != expected
         print("GTK4 Wayland terminal: real nested JWM key launched native foot PTY in exact held directory")
     except BaseException:
+        try:
+            print("private compositor window rows:", jwm_query("get_windows"), flush=True)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
         for file in (root / "foot.log", Path(log.name)):
             if file.is_file():
                 print(f"--- {file.name} ---")
