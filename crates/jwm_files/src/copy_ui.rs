@@ -577,6 +577,7 @@ pub(super) fn install(
     buffer: &CopyBuffer,
     selection: &gtk::SingleSelection,
     status: &gtk::Label,
+    primary: &gtk::Stack,
 ) {
     let menu = gio::Menu::new();
     menu.append(Some("新建窗口"), Some("win.new-window"));
@@ -662,8 +663,12 @@ pub(super) fn install(
     menu_button.set_menu_model(Some(&menu));
 
     let keys = gtk::EventControllerKey::new();
+    #[cfg(test)]
+    keys.set_property("name", "jwm-files-file-shortcuts");
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let weak_window = window.downgrade();
+    let primary = primary.downgrade();
+    let buffer = buffer.clone();
     keys.connect_key_pressed(move |_, key, _, modifiers| {
         use gtk::gdk::{Key, ModifierType};
         if !modifiers.contains(ModifierType::CONTROL_MASK)
@@ -687,12 +692,23 @@ pub(super) fn install(
         if crate::comparison::has_focus(&window) {
             return glib::Propagation::Proceed;
         }
+        let focus_guarded_move = action == "win.cut-file"
+            || (action == "win.paste-file"
+                && matches!(buffer.borrow().as_ref(), Some(StoredCopy::Cut(_))));
+        let primary = primary.upgrade();
+        let mut in_primary = false;
         let mut focused = gtk::prelude::GtkWindowExt::focus(&window);
         while let Some(widget) = focused {
             if widget.is::<gtk::Editable>() || widget.is::<gtk::TextView>() {
                 return glib::Propagation::Proceed;
             }
+            in_primary |= primary
+                .as_ref()
+                .is_some_and(|pane| pane.upcast_ref::<gtk::Widget>() == &widget);
             focused = widget.parent();
+        }
+        if focus_guarded_move && !in_primary {
+            return glib::Propagation::Proceed;
         }
         if gtk::prelude::WidgetExt::activate_action(&window, action, None).is_ok() {
             glib::Propagation::Stop

@@ -228,6 +228,8 @@ durability.
 Select a regular file in the main file list, press **Ctrl+X**, open
 the destination in the main file list, then press **Ctrl+V**. Cutting
 does not change the system text clipboard or move the file until paste.
+The Cut shortcut and a paste that would move a cut file only act when
+the primary file list or grid has keyboard focus.
 Use **操作 → 取消正在进行的复制或移动** to request cancellation before
 publication. A move attempt consumes the selection, so if it conflicts or
 is cancelled before the rename, you must cut again to retry. **Ctrl+Shift+V** and the comparison pane's

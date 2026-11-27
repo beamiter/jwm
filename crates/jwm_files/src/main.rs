@@ -872,6 +872,7 @@ fn open_window_with_tabs(
         copy_buffer,
         &selection,
         &copy_status,
+        &views,
     );
     let breadcrumb = Rc::new(breadcrumb::Breadcrumb::new({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
@@ -3247,14 +3248,45 @@ mod wayland_acceptance {
         };
 
         display.clipboard().set_text("cut-clipboard-guard");
-        cut();
+        let controllers = window.observe_controllers();
+        let file_keys = (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index).and_downcast::<gtk::EventControllerKey>())
+            .find(|keys| {
+                keys.property::<Option<glib::GString>>("name").as_deref()
+                    == Some("jwm-files-file-shortcuts")
+            })
+            .unwrap();
+        let file_key = |key: gtk::gdk::Key| {
+            use glib::translate::IntoGlib;
+            file_keys.emit_by_name::<bool>(
+                "key-pressed",
+                &[&key.into_glib(), &0u32, &gtk::gdk::ModifierType::CONTROL_MASK],
+            )
+        };
+        navigate(&move_source);
+        at(&move_source, "a-guard.txt");
+        source_selection.set_selected(1);
+        mounts.set_focusable(true);
+        assert!(mounts.grab_focus());
+        assert!(!file_key(gtk::gdk::Key::x));
+        assert!(!copy_noticed("粘贴后才会移动"));
+        assert!(source_list.grab_focus());
+        assert!(file_key(gtk::gdk::Key::x));
+        assert!(copy_noticed("粘贴后才会移动"));
+        assert!(origin.exists());
         navigate(&move_target);
         at(&move_target, "a-guard.txt");
+        assert!(mounts.grab_focus());
+        assert!(!file_key(gtk::gdk::Key::v));
+        assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
+        assert_eq!(fs::read(&destination).unwrap(), b"keep existing");
+        assert!(source_list.grab_focus());
         action("win.paste-as-copy");
         assert!(copy_noticed("不支持粘贴为副本"));
         assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
-        action("win.paste-file");
+        assert!(file_key(gtk::gdk::Key::v));
         until(|| copy_noticed("未覆盖，源文件未移动"), "native move conflict");
+        println!("GTK4 Wayland cut focus: a focused sidebar could neither arm nor consume a cut");
         assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
         assert_eq!(fs::read(&destination).unwrap(), b"keep existing");
         fs::remove_file(&destination).unwrap();
