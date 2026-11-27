@@ -4,9 +4,9 @@ use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
     Cancellation, CopyDestination, CopyError, CopySource, DirectoryHandle, FileIdentity, FileKind,
-    ListError, RegularMoveError, RegularMoveOutcome, RegularMoveSource, TreeCopyError,
-    TreeCopyPlanError, TreeCopyTargetError, copy_tree_no_replace, move_regular_no_replace,
-    plan_tree_copy,
+    FolderMoveError, FolderMoveOutcome, FolderMoveSource, ListError, RegularMoveError,
+    RegularMoveOutcome, RegularMoveSource, TreeCopyError, TreeCopyPlanError, TreeCopyTargetError,
+    copy_tree_no_replace, move_folder_no_replace, move_regular_no_replace, plan_tree_copy,
 };
 use std::{
     cell::RefCell,
@@ -36,8 +36,14 @@ pub(super) struct BatchSource {
 pub(super) enum StoredCopy {
     Single(StashedCopy),
     Tree(StashedCopy),
-    Cut(StashedCopy),
+    Cut(StashedCopy, MoveKind),
     Batch(BatchSource),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MoveKind {
+    Regular,
+    Folder,
 }
 
 /// Sources are shared by this application instance, never the text clipboard.
@@ -77,10 +83,7 @@ fn stash(
         .as_ref()
         .filter(|_| browser.pending.is_none())
         .zip(browser.entries.get(selected as usize))
-        .filter(|(_, entry)| match intent {
-            SelectionIntent::Cut => entry.kind == FileKind::Regular,
-            SelectionIntent::Copy => matches!(entry.kind, FileKind::Regular | FileKind::Directory),
-        })
+        .filter(|(_, entry)| matches!(entry.kind, FileKind::Regular | FileKind::Directory))
         .and_then(|(parent, entry)| {
             let source = StashedCopy {
                 parent: parent.clone(),
@@ -94,7 +97,7 @@ fn stash(
         // Refuse to leave an earlier, hidden choice armed after a failed copy.
         buffer.replace(None);
         let message = match intent {
-            SelectionIntent::Cut => "剪切仅支持普通文件，请重新选择。",
+            SelectionIntent::Cut => "请选择可剪切的普通文件或文件夹。",
             SelectionIntent::Copy => "请选择可复制的普通文件或文件夹。",
         };
         notice(status, message);
@@ -104,7 +107,12 @@ fn stash(
     let display = crate::trash_ui::display_path(path.as_os_str());
     if matches!(intent, SelectionIntent::Cut) {
         notice(status, &format!("已剪切：{display}。粘贴后才会移动。"));
-        buffer.replace(Some(StoredCopy::Cut(candidate)));
+        let kind = if kind == FileKind::Directory {
+            MoveKind::Folder
+        } else {
+            MoveKind::Regular
+        };
+        buffer.replace(Some(StoredCopy::Cut(candidate, kind)));
     } else if kind == FileKind::Directory {
         notice(status, &format!("已选定复制文件夹：{display}"));
         buffer.replace(Some(StoredCopy::Tree(candidate)));
@@ -225,7 +233,7 @@ fn paste_with_mode(
     };
     let source = match source {
         StoredCopy::Single(source) => source,
-        StoredCopy::Cut(source) => {
+        StoredCopy::Cut(source, kind) => {
             drop(browser);
             if mode != PasteMode::Main {
                 notice(status, "剪切只支持粘贴到主文件列表，不支持粘贴为副本。");
@@ -235,7 +243,7 @@ fn paste_with_mode(
                 // Consume on dispatch, before any other Files window can start
                 // using the same cut. A failed move requires a fresh selection.
                 buffer.replace(None);
-                paste_move(state, status, parent, path, source);
+                paste_move(state, status, parent, path, source, kind);
             }
             return;
         }
@@ -357,12 +365,54 @@ fn move_error(error: RegularMoveError) -> String {
     }
 }
 
+fn folder_move_error(error: FolderMoveError) -> String {
+    match error {
+        FolderMoveError::Guard(RegularMoveError::SourceChanged) | FolderMoveError::NotDirectory => {
+            "源文件夹已变化或不再是普通文件夹，未移动。".into()
+        }
+        FolderMoveError::Guard(RegularMoveError::DestinationExists) => {
+            "目标已有同名项目，未覆盖，源文件夹未移动。".into()
+        }
+        FolderMoveError::Guard(RegularMoveError::Cancelled)
+        | FolderMoveError::Plan(TreeCopyPlanError::Walk(ListError::Cancelled))
+        | FolderMoveError::Target(TreeCopyTargetError::Plan(TreeCopyPlanError::Walk(
+            ListError::Cancelled,
+        ))) => "已取消，源文件夹未移动。".into(),
+        FolderMoveError::Guard(RegularMoveError::CrossMount)
+        | FolderMoveError::MountIdentityUnavailable(_) => {
+            "未能确认源和目标在同一挂载点，源文件夹未移动。".into()
+        }
+        FolderMoveError::Guard(RegularMoveError::Io(error)) => {
+            format!("无法移动文件夹：{error}")
+        }
+        FolderMoveError::Guard(other) => move_error(other),
+        FolderMoveError::SourceNotPrivate => {
+            "只支持你拥有、且未向组或其他用户开放写入的源文件夹。".into()
+        }
+        FolderMoveError::Target(TreeCopyTargetError::TargetInsideSource) => {
+            "不能将文件夹移动到自身或子目录。".into()
+        }
+        FolderMoveError::Plan(TreeCopyPlanError::NestedMount)
+        | FolderMoveError::Target(TreeCopyTargetError::Plan(TreeCopyPlanError::NestedMount)) => {
+            "源文件夹内有其他挂载点，未移动。".into()
+        }
+        FolderMoveError::Plan(TreeCopyPlanError::Unsupported(_))
+        | FolderMoveError::Target(TreeCopyTargetError::Plan(TreeCopyPlanError::Unsupported(_))) => {
+            "源文件夹含链接或特殊文件，未移动。".into()
+        }
+        FolderMoveError::Plan(_) | FolderMoveError::Target(_) => {
+            "无法完整核对源文件夹或目标目录，未移动。".into()
+        }
+    }
+}
+
 fn paste_move(
     state: &Shared,
     status: &gtk::Label,
     parent: Arc<DirectoryHandle>,
     path: PathBuf,
     source: StashedCopy,
+    kind: MoveKind,
 ) {
     let mut browser = state.borrow_mut();
     let detail = format!(
@@ -381,22 +431,40 @@ fn paste_move(
             let _notify = SignalOnDrop(wake);
             #[cfg(test)]
             let _test_gate = MOVE_TEST_GATE.lock().unwrap();
-            let result = move_regular_no_replace(
-                RegularMoveSource {
-                    parent: &source.parent,
-                    displayed_parent: &source.path,
-                    name: &source.name,
-                    identity: source.identity,
-                },
-                &target,
-                &target_path,
-                &on_worker,
-            )
-            .map(|outcome| match outcome {
-                RegularMoveOutcome::Moved => MutationOutcome::FileOperation,
-                RegularMoveOutcome::MovedUnverified => MutationOutcome::MoveUnverified,
-            })
-            .map_err(move_error);
+            let result = match kind {
+                MoveKind::Regular => move_regular_no_replace(
+                    RegularMoveSource {
+                        parent: &source.parent,
+                        displayed_parent: &source.path,
+                        name: &source.name,
+                        identity: source.identity,
+                    },
+                    &target,
+                    &target_path,
+                    &on_worker,
+                )
+                .map(|outcome| match outcome {
+                    RegularMoveOutcome::Moved => MutationOutcome::FileOperation,
+                    RegularMoveOutcome::MovedUnverified => MutationOutcome::MoveUnverified,
+                })
+                .map_err(move_error),
+                MoveKind::Folder => move_folder_no_replace(
+                    FolderMoveSource {
+                        parent: &source.parent,
+                        displayed_parent: &source.path,
+                        name: &source.name,
+                        identity: source.identity,
+                    },
+                    &target,
+                    &target_path,
+                    &on_worker,
+                )
+                .map(|outcome| match outcome {
+                    FolderMoveOutcome::Moved => MutationOutcome::FileOperation,
+                    FolderMoveOutcome::MovedUnverified => MutationOutcome::MoveUnverified,
+                })
+                .map_err(folder_move_error),
+            };
             let _ = send.send(result);
         }) {
         Ok(_) => {
@@ -636,7 +704,7 @@ pub(super) fn install(
     crate::batch_copy_result::install(window, state, status);
     for (name, label) in [
         ("copy-file", "复制选中项目（Ctrl+C）"),
-        ("cut-file", "剪切选中的普通文件（Ctrl+X）"),
+        ("cut-file", "剪切选中文件或文件夹（Ctrl+X）"),
         ("copy-item-path", "复制完整路径（Ctrl+Shift+C）"),
         ("paste-file", "粘贴到当前目录（Ctrl+V）"),
         ("paste-as-copy", "粘贴为副本（Ctrl+Shift+V）"),
@@ -726,7 +794,7 @@ pub(super) fn install(
         }
         let focus_guarded_move = action == "win.cut-file"
             || (action == "win.paste-file"
-                && matches!(buffer.borrow().as_ref(), Some(StoredCopy::Cut(_))));
+                && matches!(buffer.borrow().as_ref(), Some(StoredCopy::Cut(..))));
         let primary = primary.upgrade();
         let mut in_primary = false;
         let mut focused = gtk::prelude::GtkWindowExt::focus(&window);

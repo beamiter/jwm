@@ -77,5 +77,6 @@ grep -Fx 'GTK4 Wayland batch copy: native picker, exact path bytes, conflict kep
 grep -Fx 'GTK4 Wayland folder copy: raw leaf and empty directory, descendant and conflict refused' "$client_log"
 grep -Fx 'GTK4 Wayland cut focus: a focused sidebar could neither arm nor consume a cut' "$client_log"
 grep -Fx 'GTK4 Wayland cut and paste: native identity retained, no overwrite, cancel, no replay' "$client_log"
+grep -Fx 'GTK4 Wayland folder cut: descendant and conflict refused, held destination got the exact folder once' "$client_log"
 grep -F 'GTK4 Wayland find: exact selected row and stale snapshot rejection verified' "$client_log"
 grep -F 'GTK4 Wayland find: one early Enter applied once and an edited query discarded it' "$client_log"
