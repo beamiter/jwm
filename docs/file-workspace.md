@@ -542,8 +542,19 @@ is required if the directory changes during a scan. Select an ordinary
 file with an intact original path and choose **恢复副本** to preview the destination and confirm.
 The action creates a no-overwrite copy at the original path, leaving
 the Trash entry and metadata in place. It refuses a missing or
-symlinked parent. The application does not enumerate other mounts,
-remove an original Trash entry, or offer Trash undo.
+symlinked parent. The application does not enumerate other mounts or
+offer Trash undo.
+
+**恢复原件** is a separate action in the same window. It moves the selected
+ordinary file out of Home Trash to its recorded original location after
+explicit confirmation. Cancel is the default. It requires an existing,
+user-controlled original directory on the same mount, refuses ambiguous
+metadata, and does not replace existing files, create parents or use a
+copy-delete fallback. After a confirmed move, **刷新** lists the remaining
+items. If the receipt says the file or metadata could not be verified,
+check both locations and do not replay the action. The copy action stays
+available for records that do not qualify for moving the original, if
+their recorded parent already exists.
 
 To move one ordinary file, select it in the primary pane and choose
 **操作 → 移到主目录回收站**. Review the exact path shown and confirm the
