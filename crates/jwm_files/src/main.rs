@@ -4001,7 +4001,9 @@ mod wayland_acceptance {
         fs::write(to_folder.join("a-keep.txt"), b"settled destination").unwrap();
         fs::write(away_folder.join("a-away.txt"), b"other destination").unwrap();
         let expected = fs::metadata(&folder).unwrap();
-        display.clipboard().set_text("folder-move-text-clipboard-guard");
+        display
+            .clipboard()
+            .set_text("folder-move-text-clipboard-guard");
         let cut_folder = || {
             navigate(&from_folder);
             at(&from_folder, "▸ 目录移动");
@@ -4028,7 +4030,10 @@ mod wayland_acceptance {
             || copy_noticed("未覆盖，源文件夹未移动。"),
             "folder cut reported the conflict without replacing it",
         );
-        assert_eq!(fs::read(moved.join("sentinel")).unwrap(), b"unchanged target");
+        assert_eq!(
+            fs::read(moved.join("sentinel")).unwrap(),
+            b"unchanged target"
+        );
         fs::remove_file(moved.join("sentinel")).unwrap();
         fs::remove_dir(&moved).unwrap();
 
@@ -4049,7 +4054,10 @@ mod wayland_acceptance {
         );
         let found = fs::metadata(&moved).unwrap();
         assert_eq!((found.dev(), found.ino()), (expected.dev(), expected.ino()));
-        assert_eq!(fs::read(moved.join(raw)).unwrap(), b"folder inode and bytes");
+        assert_eq!(
+            fs::read(moved.join(raw)).unwrap(),
+            b"folder inode and bytes"
+        );
         assert!(moved.join("empty").is_dir());
         assert!(!folder.exists());
         assert!(!away_folder.join("目录移动").exists());
