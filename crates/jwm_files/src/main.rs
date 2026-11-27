@@ -2665,7 +2665,7 @@ mod wayland_acceptance {
         fs::write(&saved, b"exact trashed data").unwrap();
         navigate(&explicit_trash_source);
         at(&explicit_trash_source, "a-keep");
-        let prompt_trash = |decision| {
+        let prompt_trash = || {
             source_selection.set_selected(1);
             action("win.move-to-home-trash");
             let confirm = gtk::Window::list_toplevels()
@@ -2681,12 +2681,22 @@ mod wayland_acceptance {
                         && label.text().contains("不会永久删除")
                 })
             }));
-            confirm.response(decision);
+            until(|| confirm.is_mapped(), "native move to Trash confirmation");
+            confirm
         };
-        prompt_trash(gtk::ResponseType::Cancel);
+        let cancelled = prompt_trash();
+        let default_cancel = cancelled
+            .default_widget()
+            .and_downcast::<gtk::Button>()
+            .expect("confirmation has an explicit default button");
+        assert_eq!(default_cancel.label().as_deref(), Some("取消"));
+        // Exercise GTK's Enter action, not a direct Cancel response.
+        cancelled.emit_by_name::<()>("activate-default", &[]);
+        until(|| !cancelled.is_mapped(), "default action cancelled the move");
         assert!(!trash.exists());
         assert_eq!(fs::read(&saved).unwrap(), b"exact trashed data");
-        prompt_trash(gtk::ResponseType::Accept);
+        println!("GTK4 Wayland move to Trash: default Enter action cancelled without any write");
+        prompt_trash().response(gtk::ResponseType::Accept);
         until(
             || status_matches(&|text| text.starts_with("已移到主目录回收站：")),
             "explicit fresh Trash move result",

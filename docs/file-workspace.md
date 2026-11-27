@@ -550,7 +550,8 @@ To move one ordinary file, select it in the primary pane and choose
 move. Cancel is the default; this action has no global Delete shortcut.
 A successful move preserves the file in Home Trash. Use **恢复副本** to
 copy it back without replacing an existing file or deleting the Trash
-entry. This action does not support directories, symlinks or batches.
+entry. If the Trash window was already open, use **刷新** to list the
+new entry. This action does not support directories, symlinks or batches.
 
 The Linux provider implements the explicit move for one observed
 regular file into Home Trash. It initializes private Trash children

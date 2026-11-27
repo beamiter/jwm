@@ -81,7 +81,7 @@ pub(super) fn install(
             .modal(true)
             .destroy_with_parent(true)
             .build();
-        dialog.add_button("取消", gtk::ResponseType::Cancel);
+        let cancel = dialog.add_button("取消", gtk::ResponseType::Cancel);
         dialog.add_button(OPERATION, gtk::ResponseType::Accept);
         dialog.set_default_response(gtk::ResponseType::Cancel);
         let displayed = trash_ui::display_path(picked.path.join(&picked.name).as_os_str());
@@ -113,6 +113,7 @@ pub(super) fn install(
             }
         });
         dialog.present();
+        cancel.grab_focus();
     });
     window.add_action(&action);
 }
