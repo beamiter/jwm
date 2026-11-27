@@ -7,6 +7,9 @@ use rustix::{
 };
 use std::{ffi::OsStr, io, path::Path};
 
+mod folder;
+pub use folder::{FolderMoveError, FolderMoveOutcome, FolderMoveSource, move_folder_no_replace};
+
 pub struct RegularMoveSource<'a> {
     pub parent: &'a DirectoryHandle,
     pub displayed_parent: &'a Path,

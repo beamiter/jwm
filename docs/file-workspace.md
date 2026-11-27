@@ -249,6 +249,21 @@ unchanged. The target is the committed directory at drop time.
 This first slice does not move or link, import external drops, or accept
 directories or multiple files. Keyboard and menu copy remain available.
 
+### Move an ordinary directory on one mount (core only)
+
+The provider can move an observed directory by one no-replace rename.
+Source and destination parents and the moved directory must be owned by
+the effective user and not writable by group or others; retained directory
+handles, current paths, exact inode and mount identity must agree. A bounded
+metadata walk rejects nested mounts, links, special entries, incomplete trees
+and a target inside the source. It does not read file contents.
+
+If the rename occurs but the new name cannot be verified, the provider
+reports that separately and does not automatically retry, delete or roll
+back. This is not a snapshot of concurrent changes or a crash-durability
+guarantee. No desktop shortcut, multi-item move or cross-mount fallback
+uses this new primitive yet.
+
 ### Copy interruption review (core only)
 
 The local provider has a bounded record for one copy intent or an observed
