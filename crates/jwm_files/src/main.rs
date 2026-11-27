@@ -2765,7 +2765,10 @@ mod wayland_acceptance {
                     Some((selection, rows))
                 })
                 .unwrap();
-            until(|| rows.n_items() == 2, "two exact original revisions in Trash");
+            until(
+                || rows.n_items() == 2,
+                "two exact original revisions in Trash",
+            );
             let selected = (0..rows.n_items())
                 .find(|&index| {
                     rows.string(index).is_some_and(|row| {
@@ -2821,10 +2824,16 @@ mod wayland_acceptance {
                 move |_| disposed.set(true)
             });
             copy_dialog.response(gtk::ResponseType::Cancel);
-            assert!(!disposed.get(), "fixture must keep the old Copy dialog alive");
+            assert!(
+                !disposed.get(),
+                "fixture must keep the old Copy dialog alive"
+            );
             let cancelled = launch();
             drop(copy_dialog);
-            until(|| disposed.get(), "previous Copy dialog disposed during Restore");
+            until(
+                || disposed.get(),
+                "previous Copy dialog disposed during Restore",
+            );
             assert!(!restore.is_sensitive() && !recover.is_sensitive());
             button("刷新").emit_clicked();
             assert_eq!(selection.selected(), selected);
@@ -2847,15 +2856,17 @@ mod wayland_acceptance {
             assert!(!saved.exists());
             assert_eq!(fs::read(&payload).unwrap(), b"exact trashed data");
             assert_eq!(fs::read(&sidecar).unwrap(), metadata);
-            println!("GTK4 Wayland restore original: default Enter cancelled with payload and sidecar unchanged");
+            println!(
+                "GTK4 Wayland restore original: default Enter cancelled with payload and sidecar unchanged"
+            );
 
             launch().response(gtk::ResponseType::Accept);
             until(
                 || {
                     descendants(panel.upcast_ref()).iter().any(|widget| {
-                        widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
-                            label.text().starts_with("已恢复原件到原位置。")
-                        })
+                        widget
+                            .downcast_ref::<gtk::Label>()
+                            .is_some_and(|label| label.text().starts_with("已恢复原件到原位置。"))
                     })
                 },
                 "verified restore receipt",
@@ -2868,11 +2879,17 @@ mod wayland_acceptance {
             assert_eq!(fs::read(neighbor_info).unwrap(), metadata);
             button("刷新").emit_clicked();
             until(
-                || rows.n_items() == 1
-                    && rows.string(0).is_some_and(|row| row.ends_with("restore-fixture-neighbor")),
+                || {
+                    rows.n_items() == 1
+                        && rows
+                            .string(0)
+                            .is_some_and(|row| row.ends_with("restore-fixture-neighbor"))
+                },
                 "only the matching independent revision remains",
             );
-            println!("GTK4 Wayland restore original: exact inode restored and sibling revision retained");
+            println!(
+                "GTK4 Wayland restore original: exact inode restored and sibling revision retained"
+            );
         }
         home_trash_panel().unwrap().close();
         // Keep the independent historical read/recovery fixture at its own baseline.

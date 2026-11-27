@@ -2,8 +2,8 @@ use futures_channel::oneshot;
 use gtk::{gio, glib, prelude::*};
 use gtk4 as gtk;
 use jwm_file_core::{
-    Cancellation, CopyError, FileKind, HomeTrashCursor, HomeTrashEntry, HomeTrashSnapshot,
-    HomeTrashRestoreOutcome, HomeTrashRestorePlan, RecoverCopyError, recover_home_trash_copy,
+    Cancellation, CopyError, FileKind, HomeTrashCursor, HomeTrashEntry, HomeTrashRestoreOutcome,
+    HomeTrashRestorePlan, HomeTrashSnapshot, RecoverCopyError, recover_home_trash_copy,
 };
 use std::{
     cell::{Cell, RefCell},
