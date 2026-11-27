@@ -22,8 +22,21 @@ pub(super) struct StashedCopy {
     identity: FileIdentity,
 }
 
-/// One file source shared by this application instance, never the text clipboard.
-pub(super) type CopyBuffer = Rc<RefCell<Option<StashedCopy>>>;
+#[derive(Clone)]
+pub(super) struct BatchSource {
+    pub(super) parent: Arc<DirectoryHandle>,
+    pub(super) path: PathBuf,
+    pub(super) files: Vec<(OsString, FileIdentity)>,
+}
+
+#[derive(Clone)]
+pub(super) enum StoredCopy {
+    Single(StashedCopy),
+    Batch(BatchSource),
+}
+
+/// Sources are shared by this application instance, never the text clipboard.
+pub(super) type CopyBuffer = Rc<RefCell<Option<StoredCopy>>>;
 
 pub(super) fn notice(label: &gtk::Label, text: &str) {
     label.set_text(text);
@@ -66,7 +79,7 @@ fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label
                 .escape_debug()
         ),
     );
-    buffer.replace(Some(candidate));
+    buffer.replace(Some(StoredCopy::Single(candidate)));
 }
 
 fn copy_path(window: &gtk::ApplicationWindow, state: &Shared, selected: u32, status: &gtk::Label) {
@@ -101,7 +114,7 @@ fn copy_path(window: &gtk::ApplicationWindow, state: &Shared, selected: u32, sta
     );
 }
 
-fn copy_error_message(error: CopyError) -> String {
+pub(super) fn copy_error_message(error: CopyError) -> String {
     use std::io::ErrorKind;
     match error {
         CopyError::Cancelled => "已取消，未写入目标文件。".into(),
@@ -170,6 +183,18 @@ fn paste_with_mode(
         notice(status, "请先选择要复制的普通文件。");
         return;
     };
+    let source = match source {
+        StoredCopy::Single(source) => source,
+        StoredCopy::Batch(source) => {
+            drop(browser);
+            if keep_both {
+                notice(status, "批量复制仅支持跳过同名项目，请使用 Ctrl+V。");
+            } else {
+                paste_batch(state, status, parent, path, source);
+            }
+            return;
+        }
+    };
     if !keep_both && parent.identity() == source.parent.identity() {
         notice(status, "请选择不同的目标目录。同名项目不会被覆盖。");
         return;
@@ -230,6 +255,76 @@ fn paste_with_mode(
     }
 }
 
+fn paste_batch(
+    state: &Shared,
+    status: &gtk::Label,
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+    source: BatchSource,
+) {
+    let mut browser = state.borrow_mut();
+    if browser.mutation.is_some() || browser.dialog_open {
+        return;
+    }
+    if parent.identity() == source.parent.identity() {
+        notice(status, "请选择不同的目标目录。同名项目不会被覆盖。");
+        return;
+    }
+    let detail = format!(
+        "{} 个文件 → {}",
+        source.files.len(),
+        crate::trash_ui::display_path(path.as_os_str())
+    );
+    let target = parent.clone();
+    let target_path = path.clone();
+    let cancel = Cancellation::default();
+    let on_worker = cancel.clone();
+    let wake = browser.wake.clone();
+    let (send, reply) = mpsc::sync_channel(1);
+    match thread::Builder::new()
+        .name("jwm-files-copy-batch".into())
+        .spawn(move || {
+            let _notify = SignalOnDrop(wake);
+            let sources = source
+                .files
+                .iter()
+                .map(|(name, identity)| CopySource {
+                    parent: &source.parent,
+                    displayed_parent: &source.path,
+                    name,
+                    expected_file: *identity,
+                })
+                .collect::<Vec<_>>();
+            let result = target
+                .copy_regular_batch_no_replace(&sources, &target_path, &on_worker)
+                .map(|results| {
+                    MutationOutcome::BatchCopy(
+                        source
+                            .files
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .zip(results)
+                            .collect(),
+                    )
+                })
+                .map_err(|error| format!("批量复制未开始：{error:?}"));
+            let _ = send.send(result);
+        }) {
+        Ok(_) => {
+            browser.last_copy_batch = None;
+            browser.mutation = Some(MutationWork {
+                parent,
+                path,
+                operation: "批量复制",
+                reply,
+                copy: Some((cancel, detail.clone())),
+            });
+            notice(status, &format!("正在批量复制：{detail}"));
+        }
+        Err(error) => notice(status, &format!("无法启动批量复制：{error}")),
+    }
+}
+
 pub(super) fn install(
     window: &gtk::ApplicationWindow,
     menu_button: &gtk::MenuButton,
@@ -259,6 +354,10 @@ pub(super) fn install(
     menu.append(Some("属性（Alt+Enter）"), Some("win.item-properties"));
     menu.append(Some("主目录回收站"), Some("win.home-trash"));
     menu.append(Some("撤销重命名（Ctrl+Z）"), Some("win.undo-rename"));
+    menu.append(Some("选择多个文件复制"), Some("win.pick-batch-copy"));
+    crate::batch_copy_picker::install(window, state, buffer, status);
+    menu.append(Some("查看批量复制结果"), Some("win.batch-copy-result"));
+    crate::batch_copy_result::install(window, state, status);
     for (name, label) in [
         ("copy-file", "复制选中文件（Ctrl+C）"),
         ("copy-item-path", "复制完整路径（Ctrl+Shift+C）"),

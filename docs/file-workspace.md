@@ -166,6 +166,21 @@ If a search hasn't finished when you press Enter, Files remembers one
 explicit step for that query. Editing the query, changing directories, or
 closing search discards that request.
 
+### Copy multiple regular files
+
+Choose **操作 → 选择多个文件复制** and use Ctrl or Shift in the picker to
+select up to 128 regular files from the current local directory. Confirm
+with **选定复制**, then navigate to a different directory and use **Ctrl+V**.
+The same action works with the comparison pane's paste button. It does not
+change the system clipboard. Same-name destinations are skipped without
+overwriting and sources are never removed. The batch does not copy whole
+folders or symlinks, and **Ctrl+Shift+V** is still for a single file.
+
+Use **操作 → 查看批量复制结果** in the destination window for completed,
+skipped, failed, cancelled-before-publication and unstarted results. Cancelling
+does not roll back already copied files. This is a window-local report, not
+persistent operation history or proof of crash durability.
+
 ### Copy interruption review (core only)
 
 The local provider has a bounded record for one copy intent or an observed

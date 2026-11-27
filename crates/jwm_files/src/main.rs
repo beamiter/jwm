@@ -1,3 +1,5 @@
+mod batch_copy_picker;
+mod batch_copy_result;
 #[cfg(all(test, target_os = "linux"))]
 mod bench_ui;
 mod breadcrumb;
@@ -55,6 +57,7 @@ struct Browser {
     entries: Arc<Vec<FileEntry>>,
     parent: Option<Arc<DirectoryHandle>>,
     mutation: Option<MutationWork>,
+    last_copy_batch: Option<batch_copy_result::BatchCopyReport>,
     rename_undo: Option<Arc<RenameReceipt>>,
     activation: Option<Activation>,
     active_scan: Option<ScanId>,
@@ -224,6 +227,7 @@ struct MutationWork {
 enum MutationOutcome {
     FileOperation,
     CopyAsSibling(OsString),
+    BatchCopy(Vec<(OsString, jwm_file_core::CopyBatchItem)>),
     Rename(Option<RenameReceipt>),
     RenameUndone,
 }
@@ -820,6 +824,7 @@ fn open_window_with_tabs(
         entries: Arc::default(),
         parent: None,
         mutation: None,
+        last_copy_batch: None,
         rename_undo: None,
         activation: None,
         active_scan: None,
@@ -1416,12 +1421,15 @@ fn open_window_with_tabs(
             .as_ref()
             .and_then(|work| match work.reply.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err("文件操作未返回结果".into())),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("文件操作未返回结果，无法确认哪些文件已写入。".into()))
+                }
                 Err(mpsc::TryRecvError::Empty) => None,
             });
         if let Some(result) = completed
             && let Some(work) = browser.mutation.take()
         {
+            let mut batch = None;
             let result = result.map(|outcome| match outcome {
                 MutationOutcome::Rename(receipt) => {
                     browser.rename_undo = receipt.map(Arc::new);
@@ -1433,6 +1441,12 @@ fn open_window_with_tabs(
                 }
                 MutationOutcome::FileOperation => None,
                 MutationOutcome::CopyAsSibling(name) => Some(name),
+                MutationOutcome::BatchCopy(items) => {
+                    batch = Some(batch_copy_result::BatchCopyReport::from_items(
+                        &work.path, items,
+                    ));
+                    None
+                }
             });
             let should_refresh = browser.pending.is_none()
                 && browser.path() == &work.path
@@ -1440,7 +1454,9 @@ fn open_window_with_tabs(
                     .parent
                     .as_ref()
                     .is_some_and(|p| p.identity() == work.parent.identity());
-            if let Some((_, detail)) = &work.copy {
+            if let Some(report) = &batch {
+                copy_ui::notice(&copy_status, &report.summary);
+            } else if let Some((_, detail)) = &work.copy {
                 let text = match &result {
                     Ok(Some(name)) => format!("已复制为副本：{name:?}"),
                     Ok(None) => format!("已复制：{detail}"),
@@ -1448,7 +1464,11 @@ fn open_window_with_tabs(
                 };
                 copy_ui::notice(&copy_status, &text);
             }
-            if should_refresh {
+            let refresh_batch = batch.as_ref().is_none_or(|report| report.has_publication);
+            if let Some(report) = batch {
+                browser.last_copy_batch = Some(report);
+            }
+            if should_refresh && refresh_batch {
                 match result {
                     Ok(_) => {
                         let path = browser.path().clone();
@@ -2929,6 +2949,151 @@ mod wayland_acceptance {
         at(&search_root, "▸ sub");
         println!(
             "GTK4 Wayland scoped filename search: local Unicode result, no external or hidden results"
+        );
+
+        let batch_source = root.join("batch-source");
+        let batch_target = root.join("batch-target");
+        fs::create_dir_all(batch_source.join("not-a-file")).unwrap();
+        fs::create_dir(&batch_target).unwrap();
+        let raw_batch = std::ffi::OsStr::from_bytes(b"z-raw%\x80");
+        let alternate_raw = std::ffi::OsStr::from_bytes(b"z-raw%\x81");
+        fs::write(batch_source.join("a-合同.txt"), b"first").unwrap();
+        fs::write(batch_source.join("b-clash.txt"), b"source").unwrap();
+        fs::write(batch_source.join(raw_batch), b"raw").unwrap();
+        fs::write(batch_source.join(alternate_raw), b"alternate").unwrap();
+        fs::write(batch_target.join("b-clash.txt"), b"original").unwrap();
+        navigate(&batch_source);
+        at(&batch_source, "▸ not-a-file");
+        display.clipboard().set_text("batch-clipboard-guard");
+        action("win.pick-batch-copy");
+        let picker = app
+            .windows()
+            .into_iter()
+            .find(|w| w.title().as_deref() == Some("JWM Files · 选择多个文件复制"))
+            .unwrap();
+        until(|| picker.is_mapped(), "native multi-file copy picker");
+        let pick_widget = |name: &str| {
+            descendants(picker.upcast_ref())
+                .into_iter()
+                .find(|widget| widget.widget_name().as_str() == name)
+                .unwrap()
+        };
+        let pick_list = pick_widget("jwm-files-batch-selection")
+            .downcast::<gtk::ListView>()
+            .unwrap();
+        let multi = pick_list
+            .model()
+            .and_downcast::<gtk::MultiSelection>()
+            .unwrap();
+        let confirm = pick_widget("jwm-files-batch-confirm")
+            .downcast::<gtk::Button>()
+            .unwrap();
+        assert!(!confirm.is_sensitive());
+        let distinct_labels = || {
+            let labels = descendants(pick_list.upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                .map(|label| label.text())
+                .collect::<Vec<_>>();
+            labels.iter().any(|label| label.as_str() == "z-raw%\\x80")
+                && labels.iter().any(|label| label.as_str() == "z-raw%\\x81")
+        };
+        until(distinct_labels, "distinct rendered raw filename labels");
+        assert!(multi.select_item(0, true));
+        assert!(!confirm.is_sensitive());
+        assert!(multi.select_item(1, true));
+        assert!(multi.select_item(2, false));
+        assert!(multi.select_item(3, false));
+        assert!(confirm.is_sensitive());
+        confirm.emit_clicked();
+        until(|| !picker.is_mapped(), "multi-file selection accepted");
+        assert_eq!(text_clipboard(&display), "batch-clipboard-guard");
+        navigate(&batch_target);
+        at(&batch_target, "b-clash.txt");
+        action("win.paste-file");
+        until(
+            || copy_noticed("已复制 2，同名跳过 1，已取消 0，失败 0，未开始 0"),
+            "per-file result summary",
+        );
+        assert_eq!(fs::read(batch_target.join("a-合同.txt")).unwrap(), b"first");
+        assert_eq!(
+            fs::read(batch_target.join("b-clash.txt")).unwrap(),
+            b"original"
+        );
+        assert_eq!(fs::read(batch_target.join(raw_batch)).unwrap(), b"raw");
+        assert!(!batch_target.join(alternate_raw).exists());
+        assert_eq!(
+            fs::read(batch_source.join(alternate_raw)).unwrap(),
+            b"alternate"
+        );
+        assert_eq!(fs::read(batch_source.join("a-合同.txt")).unwrap(), b"first");
+        assert_eq!(
+            fs::read(batch_source.join("b-clash.txt")).unwrap(),
+            b"source"
+        );
+        assert_eq!(fs::read(batch_source.join(raw_batch)).unwrap(), b"raw");
+        action("win.batch-copy-result");
+        let report = app
+            .windows()
+            .into_iter()
+            .find(|w| w.title().as_deref() == Some(batch_copy_result::TITLE))
+            .unwrap();
+        until(|| report.is_mapped(), "native per-file copy results");
+        let details = descendants(report.upcast_ref())
+            .into_iter()
+            .find(|widget| widget.widget_name().as_str() == "jwm-files-batch-report")
+            .and_downcast::<gtk::TextView>()
+            .unwrap();
+        assert!(!details.is_editable());
+        let detail_buffer = details.buffer();
+        let detail_text =
+            detail_buffer.text(&detail_buffer.start_iter(), &detail_buffer.end_iter(), true);
+        assert!(detail_text.contains("a-合同.txt：已复制"));
+        assert!(detail_text.contains("b-clash.txt：目标同名，未覆盖"));
+        assert!(detail_text.contains("z-raw%\\x80：已复制"));
+        let second_target = root.join("batch-target-two");
+        fs::create_dir(&second_target).unwrap();
+        fs::write(second_target.join("a-合同.txt"), b"second original").unwrap();
+        navigate(&second_target);
+        at(&second_target, "a-合同.txt");
+        assert!(report.is_mapped());
+        action("win.paste-file");
+        until(
+            || {
+                copy_noticed("已复制 2，同名跳过 1，已取消 0，失败 0，未开始 0")
+                    && second_target.join(raw_batch).exists()
+            },
+            "second batch completed while first report remains open",
+        );
+        action("win.batch-copy-result");
+        let latest = app
+            .windows()
+            .into_iter()
+            .find(|w| w.is_visible() && w.title().as_deref() == Some(batch_copy_result::TITLE))
+            .unwrap();
+        until(
+            || latest.is_mapped() && !report.is_mapped(),
+            "latest batch report replaced the old panel",
+        );
+        let target_label = descendants(latest.upcast_ref())
+            .into_iter()
+            .find(|w| w.widget_name().as_str() == "jwm-files-batch-target")
+            .and_downcast::<gtk::Label>()
+            .unwrap();
+        assert!(target_label.text().ends_with("/batch-target-two"));
+        let details = descendants(latest.upcast_ref())
+            .into_iter()
+            .find(|w| w.widget_name().as_str() == "jwm-files-batch-report")
+            .and_downcast::<gtk::TextView>()
+            .unwrap()
+            .buffer();
+        let body = details.text(&details.start_iter(), &details.end_iter(), true);
+        assert!(body.contains("a-合同.txt：目标同名，未覆盖"));
+        assert!(body.contains("b-clash.txt：已复制"));
+        assert!(!second_target.join(alternate_raw).exists());
+        latest.close();
+        println!(
+            "GTK4 Wayland batch copy: native picker, exact path bytes, conflict kept, per-file result"
         );
 
         let find_path = root.join("finder-native");
