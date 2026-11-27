@@ -2635,20 +2635,18 @@ mod wayland_acceptance {
         let trash = xdg.join("Trash");
         assert!(!trash.exists());
         let home_trash_panel = || {
-            app.windows()
-                .into_iter()
-                .find(|window| {
-                    window.is_visible() && window.title().as_deref() == Some("JWM Files · Home Trash")
-                })
+            app.windows().into_iter().find(|window| {
+                window.is_visible() && window.title().as_deref() == Some("JWM Files · Home Trash")
+            })
         };
         action("win.home-trash");
         until(
             || {
                 home_trash_panel().is_some_and(|panel| {
                     descendants(panel.upcast_ref()).iter().any(|widget| {
-                        widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
-                            label.text().contains("第 1 批 · 0 项")
-                        })
+                        widget
+                            .downcast_ref::<gtk::Label>()
+                            .is_some_and(|label| label.text().contains("第 1 批 · 0 项"))
                     })
                 })
             },
@@ -2677,8 +2675,7 @@ mod wayland_acceptance {
                 .unwrap();
             assert!(descendants(confirm.upcast_ref()).iter().any(|widget| {
                 widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
-                    label.text().contains(r"z-trash%\x80")
-                        && label.text().contains("不会永久删除")
+                    label.text().contains(r"z-trash%\x80") && label.text().contains("不会永久删除")
                 })
             }));
             until(|| confirm.is_mapped(), "native move to Trash confirmation");
@@ -2692,7 +2689,10 @@ mod wayland_acceptance {
         assert_eq!(default_cancel.label().as_deref(), Some("取消"));
         // Exercise GTK's Enter action, not a direct Cancel response.
         cancelled.emit_by_name::<()>("activate-default", &[]);
-        until(|| !cancelled.is_mapped(), "default action cancelled the move");
+        until(
+            || !cancelled.is_mapped(),
+            "default action cancelled the move",
+        );
         assert!(!trash.exists());
         assert_eq!(fs::read(&saved).unwrap(), b"exact trashed data");
         println!("GTK4 Wayland move to Trash: default Enter action cancelled without any write");
@@ -2702,16 +2702,19 @@ mod wayland_acceptance {
             "explicit fresh Trash move result",
         );
         assert!(!saved.exists());
-        assert_eq!(fs::read(explicit_trash_source.join("a-keep")).unwrap(), b"sentinel");
-        let snapshot = jwm_file_core::list_home_trash(
-            &xdg,
-            &jwm_file_core::Cancellation::default(),
-        )
-        .unwrap();
+        assert_eq!(
+            fs::read(explicit_trash_source.join("a-keep")).unwrap(),
+            b"sentinel"
+        );
+        let snapshot =
+            jwm_file_core::list_home_trash(&xdg, &jwm_file_core::Cancellation::default()).unwrap();
         assert_eq!(snapshot.entries.len(), 1);
         let row = &snapshot.entries[0];
         assert_eq!(row.info.as_ref().unwrap().original, saved);
-        assert_eq!(fs::read(trash.join("files").join(&row.name)).unwrap(), b"exact trashed data");
+        assert_eq!(
+            fs::read(trash.join("files").join(&row.name)).unwrap(),
+            b"exact trashed data"
+        );
         action("win.home-trash");
         until(
             || {
@@ -2728,7 +2731,9 @@ mod wayland_acceptance {
         home_trash_panel().unwrap().close();
         // Keep the independent historical read/recovery fixture at its own baseline.
         fs::rename(&trash, xdg.join("Trash-write-fixture-hold")).unwrap();
-        println!("GTK4 Wayland move to Trash: read and cancel unchanged, fresh write and exact readback");
+        println!(
+            "GTK4 Wayland move to Trash: read and cancel unchanged, fresh write and exact readback"
+        );
 
         fs::create_dir_all(trash.join("files")).unwrap();
         fs::create_dir_all(trash.join("info")).unwrap();
