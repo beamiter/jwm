@@ -84,7 +84,10 @@ pub use trash_snapshot::{
     list_home_trash, recover_home_trash_copy,
 };
 #[cfg(target_os = "linux")]
-pub use trash_write::{HomeTrashWriteError, HomeTrashWriteOutcome, trash_regular_at_home};
+pub use trash_write::{
+    HomeTrashRestoreOutcome, HomeTrashRestorePlan, HomeTrashWriteError, HomeTrashWriteOutcome,
+    trash_regular_at_home,
+};
 #[cfg(target_os = "linux")]
 pub use tree_copy::{TreeCopyError, TreeCopyReceipt, copy_tree_no_replace};
 #[cfg(target_os = "linux")]

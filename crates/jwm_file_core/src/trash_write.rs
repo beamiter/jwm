@@ -1,4 +1,7 @@
 //! Private Home Trash write preparation; opening these handles changes no files.
+mod restore_plan;
+pub use restore_plan::{HomeTrashRestoreOutcome, HomeTrashRestorePlan};
+
 use crate::{
     Cancellation, DirectoryHandle, FileIdentity, RegularMoveSource,
     trash_info::{encode_home_trash_info, trash_storage_key},
