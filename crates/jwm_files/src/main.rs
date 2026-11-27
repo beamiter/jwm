@@ -3177,7 +3177,9 @@ mod wayland_acceptance {
         assert_eq!(fs::read(nested.join(raw_leaf)).unwrap(), b"tree file");
         assert_eq!(text_clipboard(&display), "folder-copy-clipboard-guard");
         assert_eq!(fs::read_dir(&tree_target).unwrap().count(), 2);
-        println!("GTK4 Wayland folder copy: raw leaf and empty directory, descendant and conflict refused");
+        println!(
+            "GTK4 Wayland folder copy: raw leaf and empty directory, descendant and conflict refused"
+        );
 
         let find_path = root.join("finder-native");
         let other_path = root.join("finder-unrelated");

@@ -291,11 +291,11 @@ fn tree_error(error: TreeCopyError) -> String {
         TreeCopyError::Target(TreeCopyTargetError::TargetInsideSource) => {
             "不能将文件夹复制到自身或子目录。".into()
         }
-        TreeCopyError::Target(TreeCopyTargetError::TargetUnavailable(_)
-        | TreeCopyTargetError::TargetChanged) => "目标文件夹已变化或无法读取。".into(),
-        TreeCopyError::Target(TreeCopyTargetError::SourceChanged) | TreeCopyError::SourceChanged => {
-            "源文件夹或内容已变化，未发布目标文件夹。".into()
-        }
+        TreeCopyError::Target(
+            TreeCopyTargetError::TargetUnavailable(_) | TreeCopyTargetError::TargetChanged,
+        ) => "目标文件夹已变化或无法读取。".into(),
+        TreeCopyError::Target(TreeCopyTargetError::SourceChanged)
+        | TreeCopyError::SourceChanged => "源文件夹或内容已变化，未发布目标文件夹。".into(),
         TreeCopyError::Target(TreeCopyTargetError::Plan(error)) => plan_error(error),
         TreeCopyError::DestinationExists => "目标已有同名项目，未覆盖。".into(),
         TreeCopyError::Cancelled => "已取消，未发布目标文件夹。".into(),
@@ -306,7 +306,10 @@ fn tree_error(error: TreeCopyError) -> String {
             "无法访问复制所需的目录或文件，请检查访问权限。".into()
         }
         TreeCopyError::Io(error) => format!("无法复制文件夹：{error}"),
-        TreeCopyError::CleanupIncomplete { cause, staging_name } => format!(
+        TreeCopyError::CleanupIncomplete {
+            cause,
+            staging_name,
+        } => format!(
             "{} 临时目录可能保留：{}",
             tree_error(*cause),
             crate::trash_ui::display_path(staging_name.as_os_str())
@@ -348,8 +351,7 @@ fn paste_tree(
                         .map_err(tree_error)
                 });
             let _ = send.send(result);
-        })
-    {
+        }) {
         Ok(_) => {
             browser.mutation = Some(MutationWork {
                 parent,
