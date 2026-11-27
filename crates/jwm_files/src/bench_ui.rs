@@ -193,9 +193,9 @@ fn fresh_window_child() {
                 widget.is_mapped()
                     && widget.width() > 0
                     && widget.height() > 0
-                    && widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
-                        label.text().as_str() == FRESH_FILE
-                    })
+                    && widget
+                        .downcast_ref::<gtk::Label>()
+                        .is_some_and(|label| label.text().as_str() == FRESH_FILE)
             })
     });
     let clock = window.frame_clock().expect("mapped Files frame clock");
