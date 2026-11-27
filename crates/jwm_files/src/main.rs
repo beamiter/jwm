@@ -1902,7 +1902,10 @@ mod wayland_acceptance {
 
         let display_name = std::env::var("JWM_FILE_DND_PRIVATE_DISPLAY").unwrap();
         assert!(display_name.starts_with(':'));
-        assert_eq!(std::env::var("DISPLAY").as_deref(), Ok(display_name.as_str()));
+        assert_eq!(
+            std::env::var("DISPLAY").as_deref(),
+            Ok(display_name.as_str())
+        );
         assert_eq!(xd(&["getdisplaygeometry"]), "2400 1000");
         assert_eq!(std::env::var("GDK_BACKEND").as_deref(), Ok("x11"));
         gtk::init().unwrap();
@@ -1948,7 +1951,10 @@ mod wayland_acceptance {
                 .find_map(|widget| {
                     let list = widget.downcast::<gtk::ListView>().ok()?;
                     let selection = list.model()?.downcast::<gtk::SingleSelection>().ok()?;
-                    let model = selection.model()?.downcast::<row_model::FileRowModel>().ok()?;
+                    let model = selection
+                        .model()?
+                        .downcast::<row_model::FileRowModel>()
+                        .ok()?;
                     Some((selection, model))
                 })
                 .expect("primary pane model")
@@ -1957,8 +1963,10 @@ mod wayland_acceptance {
         let (_, to_model) = get_model(&to);
         until(
             || {
-                from.is_mapped() && to.is_mapped()
-                    && from_model.n_items() == 1 && to_model.n_items() == 1
+                from.is_mapped()
+                    && to.is_mapped()
+                    && from_model.n_items() == 1
+                    && to_model.n_items() == 1
             },
             "two populated native Files windows",
         );
@@ -1967,7 +1975,10 @@ mod wayland_acceptance {
         let xid = |pattern| {
             let matches = xd(&["search", "--onlyvisible", "--name", pattern]);
             assert_eq!(matches.lines().count(), 1);
-            assert_eq!(xd(&["getwindowpid", &matches]), std::process::id().to_string());
+            assert_eq!(
+                xd(&["getwindowpid", &matches]),
+                std::process::id().to_string()
+            );
             matches
         };
         let sid = xid("^JWM Files · .*/files-dnd-source$");
@@ -1979,9 +1990,9 @@ mod wayland_acceptance {
 
         let status = |predicate: &dyn Fn(&str) -> bool| {
             descendants(to.upcast_ref()).into_iter().any(|widget| {
-                widget.downcast::<gtk::Label>().is_ok_and(|label| {
-                    label.is_visible() && predicate(label.label().as_str())
-                })
+                widget
+                    .downcast::<gtk::Label>()
+                    .is_ok_and(|label| label.is_visible() && predicate(label.label().as_str()))
             })
         };
         let hover = || {
@@ -2017,16 +2028,21 @@ mod wayland_acceptance {
         assert_eq!(fs::read(&output).unwrap(), b"occupied exact leaf");
         assert_eq!(source_id(&input), original);
         assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
-        println!("GTK4 X11 drag copy: hover and outside release wrote nothing; conflict retained exact target");
+        println!(
+            "GTK4 X11 drag copy: hover and outside release wrote nothing; conflict retained exact target"
+        );
 
         fs::remove_file(&output).unwrap();
         hover();
         xd(&["mouseup", "1"]);
         until(
-            || status(&|message| {
-                message.starts_with("已复制：") && message.contains("files-dnd-target")
-                    && message.contains(r"\x80")
-            }),
+            || {
+                status(&|message| {
+                    message.starts_with("已复制：")
+                        && message.contains("files-dnd-target")
+                        && message.contains(r"\x80")
+                })
+            },
             "terminal captured-path receipt after physical drop",
         );
         assert_eq!(fs::read(&output).unwrap(), b"exact raw source");
@@ -2035,7 +2051,9 @@ mod wayland_acceptance {
         assert_eq!(fs::read(&input).unwrap(), b"exact raw source");
         assert_eq!(fs::read(&lookalike).unwrap(), b"different native leaf");
         assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
-        println!("GTK4 X11 drag copy: real inter-window pointer copied exact native bytes and kept source and clipboard");
+        println!(
+            "GTK4 X11 drag copy: real inter-window pointer copied exact native bytes and kept source and clipboard"
+        );
     }
 
     #[test]

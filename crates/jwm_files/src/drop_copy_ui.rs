@@ -188,13 +188,24 @@ pub(super) fn install(
                 return false;
             };
             // true only acknowledges enqueue; the terminal receipt is separate.
-            copy_ui::dispatch_regular_copy(&state, &status, parent, path, offer.pending.source, false)
+            copy_ui::dispatch_regular_copy(
+                &state,
+                &status,
+                parent,
+                path,
+                offer.pending.source,
+                false,
+            )
         }
     });
     destination.add_controller(target);
 
     let update = {
-        let (handle, state, selection) = (source_handle.downgrade(), state.clone(), selection.downgrade());
+        let (handle, state, selection) = (
+            source_handle.downgrade(),
+            state.clone(),
+            selection.downgrade(),
+        );
         move || {
             if let (Some(handle), Some(selection)) = (handle.upgrade(), selection.upgrade()) {
                 let text = Pending::capture(&state, &selection).map_or_else(
