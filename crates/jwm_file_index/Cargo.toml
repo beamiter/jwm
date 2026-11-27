@@ -1,0 +1,13 @@
+[package]
+name = "jwm_file_index"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+jwm_file_core = { path = "../jwm_file_core" }
+rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled"] }
