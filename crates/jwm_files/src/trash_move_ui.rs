@@ -7,9 +7,11 @@ use jwm_file_core::{
     HomeTrashWriteOutcome, RegularMoveSource, trash_regular_at_home,
 };
 use std::{
+    cell::Cell,
     ffi::OsString,
     io::ErrorKind,
     path::PathBuf,
+    rc::Rc,
     sync::{Arc, mpsc},
     thread,
 };
@@ -95,17 +97,33 @@ pub(super) fn install(
         text.set_margin_top(12);
         text.set_margin_bottom(12);
         dialog.content_area().append(&text);
-        dialog.connect_destroy({
+        // A response ends the operation even when a caller still holds a
+        // widget reference. A later destroy signal must not clear a newer dialog.
+        let released = Rc::new(Cell::new(false));
+        let release = {
             let state = state.clone();
-            move |_| {
+            move || {
+                if released.replace(true) {
+                    return false;
+                }
                 let mut browser = state.borrow_mut();
                 browser.dialog_open = false;
                 browser.wake.signal();
+                true
+            }
+        };
+        dialog.connect_destroy({
+            let release = release.clone();
+            move |_| {
+                release();
             }
         });
         dialog.connect_response({
             let (state, status) = (state.clone(), status.clone());
             move |dialog, response| {
+                if !release() {
+                    return;
+                }
                 dialog.destroy();
                 if response == gtk::ResponseType::Accept {
                     dispatch(&state, &status, &picked);
