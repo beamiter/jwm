@@ -2836,6 +2836,10 @@ mod wayland_acceptance {
         fs::create_dir_all(search_root.join("sub")).unwrap();
         fs::create_dir(&outside_index).unwrap();
         fs::write(search_root.join("sub/合同三版.txt"), b"inside").unwrap();
+        let raw_hit = search_root
+            .join("sub")
+            .join(std::ffi::OsStr::from_bytes(b"nonutf-path%\x80.txt"));
+        fs::write(&raw_hit, b"raw").unwrap();
         fs::write(search_root.join("sub/.合同隐藏.txt"), b"hidden").unwrap();
         fs::write(outside_index.join("合同外部.txt"), b"outside").unwrap();
         std::os::unix::fs::symlink(&outside_index, search_root.join("z-external-link")).unwrap();
@@ -2863,32 +2867,63 @@ mod wayland_acceptance {
             .downcast::<gtk::Label>()
             .unwrap();
         let index_results = field("jwm-files-index-results")
-            .downcast::<gtk::TextView>()
+            .downcast::<gtk::ListBox>()
+            .unwrap();
+        let index_copy = field("jwm-files-index-copy-path")
+            .downcast::<gtk::Button>()
             .unwrap();
         assert!(index_status.text().starts_with("正在读取"));
         query.set_text("合同");
         query.emit_activate();
         assert!(index_status.text().starts_with("已记住"));
         until(|| panel.is_mapped(), "native scoped search panel");
-        let text = || {
-            let buf = index_results.buffer();
-            buf.text(&buf.start_iter(), &buf.end_iter(), true)
+        let displayed = || {
+            index_results
+                .row_at_index(0)
+                .and_then(|row| row.child())
+                .and_downcast::<gtk::Label>()
+                .map(|label| label.text())
         };
         until(
-            || text().as_str() == "sub/合同三版.txt",
+            || displayed().as_deref() == Some("sub/合同三版.txt"),
             "exact recursive Unicode result",
         );
-        assert!(!index_results.is_editable());
+        assert!(index_results.row_at_index(1).is_none());
+        let copy_first = || {
+            let row = index_results.row_at_index(0).unwrap();
+            index_results.select_row(Some(&row));
+            assert!(index_copy.is_sensitive());
+            index_copy.emit_clicked();
+            text_clipboard(&display)
+        };
+        assert_eq!(
+            copy_first(),
+            search_root.join("sub/合同三版.txt").to_str().unwrap()
+        );
         query.emit_activate();
         assert!(index_status.text().starts_with("正在查找"));
         query.set_text("合同外部");
-        assert!(text().is_empty());
+        assert!(displayed().is_none());
+        assert!(!index_copy.is_sensitive());
+        gtk::prelude::WidgetExt::display(&index_copy)
+            .clipboard()
+            .set_text("stale-copy-guard");
+        index_copy.emit_clicked();
+        assert_eq!(text_clipboard(&display), "stale-copy-guard");
         query.emit_activate();
         until(
             || index_status.text() == "没有匹配的文件名。",
             "out-of-scope names omitted",
         );
-        assert!(text().is_empty());
+        assert!(displayed().is_none());
+        query.set_text("nonutf-path");
+        query.emit_activate();
+        until(|| displayed().is_some(), "raw recursive result");
+        assert!(index_results.row_at_index(1).is_none());
+        let raw_uri = copy_first();
+        assert!(raw_uri.starts_with("file://"));
+        assert_eq!(gio::File::for_uri(&raw_uri).path().as_ref(), Some(&raw_hit));
+        println!("GTK4 Wayland scoped search copy: Unicode and exact raw URI, stale rows rejected");
         panel.close();
         until(|| !panel.is_mapped(), "scoped search panel close");
         at(&search_root, "▸ sub");
