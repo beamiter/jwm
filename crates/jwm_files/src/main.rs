@@ -1464,12 +1464,14 @@ fn open_window_with_tabs(
                 copy_ui::notice(&copy_status, &report.summary);
             } else if let Some(receipt) = tree {
                 let mut text = format!(
-                    "已复制文件夹：{} 个文件，{} 个目录。",
-                    receipt.files, receipt.directories
+                    "已复制文件夹：{} 个文件，{} 个目录。 目标：{}",
+                    receipt.files,
+                    receipt.directories,
+                    trash_ui::display_path(work.path.as_os_str())
                 );
                 if let Some(residue) = receipt.staging_remains {
                     text.push_str(" 临时目录可能保留：");
-                    text.push_str(&trash_ui::display_path(&residue));
+                    text.push_str(&trash_ui::display_path(work.path.join(residue).as_os_str()));
                 }
                 copy_ui::notice(&copy_status, &text);
             } else if let Some((_, detail)) = &work.copy {
@@ -3157,15 +3159,32 @@ mod wayland_acceptance {
         );
         navigate(&tree_target);
         at(&tree_target, "keep.txt");
+        let other_tree_target = root.join("recursive-elsewhere");
+        fs::create_dir(&other_tree_target).unwrap();
+        fs::write(other_tree_target.join("not-target.txt"), b"stay here").unwrap();
+        let pause = copy_ui::TREE_COPY_TEST_GATE.lock().unwrap();
         action("win.paste-file");
+        navigate(&other_tree_target);
+        at(&other_tree_target, "not-target.txt");
+        assert!(!tree_target.join("目录副本").exists());
+        drop(pause);
+        let shown_target = trash_ui::display_path(tree_target.as_os_str());
+        let expected_target = format!("目标：{shown_target}");
         until(
-            || copy_noticed("已复制文件夹：1 个文件，3 个目录。"),
-            "native folder copy selected source and exact target",
+            || {
+                status_matches(&|text| {
+                    text.starts_with("已复制文件夹：1 个文件，3 个目录。")
+                        && text.ends_with(&expected_target)
+                })
+            },
+            "native folder copy showed the held target after navigating away",
         );
+        assert!(!other_tree_target.join("目录副本").exists());
         let copied = tree_target.join("目录副本/sub");
         assert_eq!(fs::read(copied.join(raw_leaf)).unwrap(), b"tree file");
         assert!(copied.join("empty").is_dir());
         assert_eq!(fs::read(nested.join(raw_leaf)).unwrap(), b"tree file");
+        navigate(&tree_target);
         at(&tree_target, "▸ 目录副本");
         fs::write(copied.join(raw_leaf), b"keep my target").unwrap();
         action("win.paste-file");

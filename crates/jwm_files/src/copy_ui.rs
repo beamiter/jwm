@@ -282,7 +282,7 @@ fn plan_error(error: TreeCopyPlanError) -> String {
     }
 }
 
-fn tree_error(error: TreeCopyError) -> String {
+fn tree_error(error: TreeCopyError, target: &std::path::Path) -> String {
     match error {
         TreeCopyError::InvalidName => "目标名称无效。".into(),
         TreeCopyError::TargetNotPrivate => {
@@ -311,11 +311,14 @@ fn tree_error(error: TreeCopyError) -> String {
             staging_name,
         } => format!(
             "{} 临时目录可能保留：{}",
-            tree_error(*cause),
-            crate::trash_ui::display_path(staging_name.as_os_str())
+            tree_error(*cause, target),
+            crate::trash_ui::display_path(target.join(staging_name).as_os_str())
         ),
     }
 }
+
+#[cfg(test)]
+pub(super) static TREE_COPY_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn paste_tree(
     state: &Shared,
@@ -343,12 +346,18 @@ fn paste_tree(
         .name("jwm-files-copy-tree".into())
         .spawn(move || {
             let _notify = SignalOnDrop(wake);
+            #[cfg(test)]
+            let _test_gate = TREE_COPY_TEST_GATE.lock().unwrap();
             let result = plan_tree_copy(&source_root, source.identity, &on_worker)
                 .map_err(plan_error)
                 .and_then(|plan| {
                     copy_tree_no_replace(&plan, &target, &target_path, &source.name, &on_worker)
                         .map(MutationOutcome::TreeCopy)
-                        .map_err(tree_error)
+                        .map_err(|error| tree_error(error, &target_path))
+                })
+                .map_err(|error| {
+                    let destination = crate::trash_ui::display_path(target_path.as_os_str());
+                    format!("{error} 目标：{destination}")
                 });
             let _ = send.send(result);
         }) {
