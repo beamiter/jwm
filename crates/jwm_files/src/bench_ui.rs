@@ -171,12 +171,15 @@ const FRESH_FILE: &str = "00-fresh-window-probe";
 fn fresh_window_child() {
     let fixture = PathBuf::from(std::env::var_os("JWM_FILE_FRESH_WINDOW_ROOT").unwrap());
     assert!(fixture.is_absolute());
+    eprintln!("fresh-window child: initializing GTK");
     gtk::init().unwrap();
+    eprintln!("fresh-window child: GTK initialized");
     let app = gtk::Application::builder()
         .application_id("org.jwm.Files.FreshWindowBenchmark")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.register(None::<&gio::Cancellable>).unwrap();
+    eprintln!("fresh-window child: application registered");
     open_window(
         &app,
         &fixture,
@@ -184,6 +187,7 @@ fn fresh_window_child() {
         &[],
         &copy_ui::CopyBuffer::default(),
     );
+    eprintln!("fresh-window child: open_window returned");
     let window = app.active_window().unwrap();
     let expected_title = format!("JWM Files · {}", fixture.display());
     until(|| {
@@ -198,6 +202,7 @@ fn fresh_window_child() {
                         .is_some_and(|label| label.text().as_str() == FRESH_FILE)
             })
     });
+    eprintln!("fresh-window child: known row allocated");
     let clock = window.frame_clock().expect("mapped Files frame clock");
     let painted = Rc::new(Cell::new(false));
     let handler = clock.connect_after_paint({
@@ -206,6 +211,7 @@ fn fresh_window_child() {
     });
     window.queue_draw();
     until(|| painted.get());
+    eprintln!("fresh-window child: confirmed after-paint");
     clock.disconnect(handler);
     println!("{FRESH_WINDOW_MARKER}");
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
