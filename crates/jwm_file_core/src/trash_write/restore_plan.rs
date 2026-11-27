@@ -46,7 +46,9 @@ pub enum HomeTrashRestoreOutcome {
 }
 
 fn check(cancel: &Cancellation) -> io::Result<()> {
-    cancel.check().map_err(|_| io::ErrorKind::Interrupted.into())
+    cancel
+        .check()
+        .map_err(|_| io::ErrorKind::Interrupted.into())
 }
 
 fn changed() -> io::Error {
@@ -121,11 +123,12 @@ impl HomeTrashRestorePlan {
             return Err(changed());
         }
         let sidecar = SidecarWitness::capture(&roots.info.fd, &entry.name)?;
-        let info = unambiguous_original(sidecar.bytes(), data_home)
-            .ok_or_else(|| io::Error::new(
+        let info = unambiguous_original(sidecar.bytes(), data_home).ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Trash metadata does not identify an unambiguous absolute original path",
-            ))?;
+            )
+        })?;
         if &info != expected_info {
             return Err(changed());
         }
@@ -141,8 +144,9 @@ impl HomeTrashRestorePlan {
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let parent =
-            DirectoryHandle::open_without_symlinks(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+        let parent = DirectoryHandle::open_without_symlinks(
+            path.parent().ok_or(io::ErrorKind::InvalidInput)?,
+        )?;
         let plan = Self {
             roots,
             source,
@@ -192,11 +196,10 @@ impl HomeTrashRestorePlan {
         // Cancellation is no longer interpreted as a refusal. Rename can
         // change ctime, so check the still-held payload identity instead.
         let published = self.verify_parent().is_ok()
-            && fs::statat(&self.parent.fd, name, AtFlags::SYMLINK_NOFOLLOW)
-                .is_ok_and(|stat| {
-                    FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
-                        && identity(&stat) == self.source_identity
-                });
+            && fs::statat(&self.parent.fd, name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|stat| {
+                FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                    && identity(&stat) == self.source_identity
+            });
         if !published {
             return Ok(HomeTrashRestoreOutcome::RenamedUnverified);
         }
@@ -213,12 +216,7 @@ impl HomeTrashRestorePlan {
                 Err(Errno::NOENT)
             )
             && self.sidecar.verify(&self.roots.info.fd).is_ok()
-            && fs::unlinkat(
-                &self.roots.info.fd,
-                self.sidecar.name(),
-                AtFlags::empty(),
-            )
-            .is_ok();
+            && fs::unlinkat(&self.roots.info.fd, self.sidecar.name(), AtFlags::empty()).is_ok();
         Ok(if removed {
             HomeTrashRestoreOutcome::Restored
         } else {
@@ -298,7 +296,10 @@ mod metadata_tests {
     fn restore_metadata_accepts_exact_percent_escaped_native_bytes() {
         let bytes = b"[Trash Info]\r\nPath=/data/dir/report%25-%80-%0A\r\nDeletionDate=2026-11-27T16:26:36\r\n";
         let info = unambiguous_original(bytes, Path::new("/data")).unwrap();
-        assert_eq!(info.original.as_os_str().as_bytes(), b"/data/dir/report%-\x80-\n");
+        assert_eq!(
+            info.original.as_os_str().as_bytes(),
+            b"/data/dir/report%-\x80-\n"
+        );
     }
 }
 
@@ -340,11 +341,8 @@ mod mutation_tests {
             let payload = data.join("Trash/files/key-2");
             let sidecar = data.join("Trash/info/key-2.trashinfo");
             disk::write(&payload, b"retained exact bytes").unwrap();
-            let info = crate::trash_info::encode_home_trash_info(
-                &original,
-                "2026-11-27T16:26:36",
-            )
-            .unwrap();
+            let info = crate::trash_info::encode_home_trash_info(&original, "2026-11-27T16:26:36")
+                .unwrap();
             disk::write(&sidecar, info).unwrap();
             Self {
                 root,
@@ -396,7 +394,8 @@ mod mutation_tests {
         assert_eq!(plan.storage_key(), OsStr::new("key-2"));
         assert!(!f.original.exists());
         assert_eq!(
-            plan.restore_with(&cancel, || {}, || cancel.cancel()).unwrap(),
+            plan.restore_with(&cancel, || {}, || cancel.cancel())
+                .unwrap(),
             HomeTrashRestoreOutcome::Restored
         );
         assert_eq!(disk::metadata(&f.original).unwrap().ino(), inode);
