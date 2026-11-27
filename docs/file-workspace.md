@@ -157,6 +157,15 @@ Files stores one private, atomically replaced record under
 configured absolute state root must already exist and be privately owned
 and must not pass through a symlink. No default applications are changed.
 
+### Open the current directory in a terminal
+
+Choose **在此处打开终端** or press **Ctrl+Shift+Enter**. On Linux this
+requests the configured `xdg-terminal-exec` (or Debian's
+`x-terminal-emulator` when the former is missing). Files passes a held
+local directory to the terminal's shell helper, not a path to reinterpret
+or a shell command. If the identity or the launch acknowledgement is
+unavailable, it does not report success. No desktop defaults are changed.
+
 ### New Folder
 
 The toolbar action or Ctrl+Shift+N creates one named folder in the currently

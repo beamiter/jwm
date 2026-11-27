@@ -67,6 +67,9 @@ for attempt in 1 2 3 4 5; do
 done
 xdotool getdisplaygeometry >/dev/null
 
+source "$(dirname "$0")/terminal-fixture-x11.sh"
+prepare_terminal_fixture
+
 GDK_BACKEND=x11 GSK_RENDERER=cairo "$binary" "$root/start" &
 child=$!
 window=$(title_id '^JWM Files · .*/start$')
@@ -352,6 +355,8 @@ sleep 0.25
 [[ $(xdotool getwindowname "$window") == "JWM Files · $root/uri-away/literal%20" ]]
 xdotool key --clearmodifiers Escape
 printf 'GTK4 X11 location: rejected a remote URI and kept literal percent path semantics\n'
+
+exercise_terminal_fixture
 
 mkdir -p "$root/find-in-folder/zz intended target"
 for i in {1..90}; do mkdir "$root/find-in-folder/a-$i"; done

@@ -17,6 +17,8 @@ mod scan_worker;
 #[cfg(target_os = "linux")]
 mod session_state_file;
 #[cfg(target_os = "linux")]
+mod terminal_handoff;
+#[cfg(target_os = "linux")]
 mod trash_info;
 #[cfg(target_os = "linux")]
 mod trash_snapshot;
@@ -42,6 +44,8 @@ pub use scan_worker::{ScanId, ScanReply, ScanWorker};
 pub use session_state_file::{
     FILES_TAB_STATE_CAP, open_files_state_root, read_files_tab_state, write_files_tab_state,
 };
+#[cfg(target_os = "linux")]
+pub use terminal_handoff::{TerminalChildSetup, TerminalHandoff, TerminalLocator};
 #[cfg(target_os = "linux")]
 pub use trash_info::{HomeTrashInfo, TRASH_INFO_LIMIT, parse_home_trash_info};
 #[cfg(target_os = "linux")]
