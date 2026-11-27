@@ -5,6 +5,7 @@ mod bench_ui;
 mod breadcrumb;
 mod comparison;
 mod copy_ui;
+mod drop_copy_ui;
 mod file_manager_bus;
 mod find_in_folder;
 mod folder_terminal_handoff;
@@ -657,6 +658,20 @@ fn open_window_with_tabs(
     layout.append(&header);
     let tabs = Rc::new(tab_strip::TabStrip::new());
     layout.append(&tabs.container);
+    let drop_strip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    drop_strip.set_margin_start(10);
+    drop_strip.set_margin_end(10);
+    let drag_selected = gtk::Label::new(Some(drop_copy_ui::SOURCE));
+    let drop_here = gtk::Label::new(Some(drop_copy_ui::TARGET));
+    drag_selected.set_tooltip_text(Some("先选择一个普通文件，再从这里拖到另一个 Files 窗口"));
+    drop_here.set_tooltip_text(Some("只复制到当前目录，不移动或覆盖原文件"));
+    for label in [&drag_selected, &drop_here] {
+        label.add_css_class("frame");
+        label.set_margin_top(3);
+        label.set_margin_bottom(3);
+        label.set_width_chars(24);
+        drop_strip.append(label);
+    }
 
     let places = gtk::ListBox::new();
     places.add_css_class("navigation-sidebar");
@@ -821,6 +836,9 @@ fn open_window_with_tabs(
     copy_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     copy_status.set_visible(false);
     layout.append(&copy_status);
+    if drop_copy_ui::available() {
+        layout.append(&drop_strip);
+    }
     window.set_child(Some(&layout));
     let (wake, mut notifications) = Wake::channel();
     let scan_wake = wake.clone();
@@ -881,6 +899,9 @@ fn open_window_with_tabs(
     session_ui::install(app, &window, &state, &status, home, special, copy_buffer);
     trash_ui::install(&window);
     trash_move_ui::install(&window, &state, &selection, &copy_status);
+    if drop_copy_ui::available() {
+        drop_copy_ui::install(&drag_selected, &drop_here, &state, &selection, &copy_status);
+    }
     copy_ui::install(
         &window,
         &file_actions,
@@ -1839,6 +1860,182 @@ mod wayland_acceptance {
             .item(0)
             .and_downcast::<glib::BoxedAnyObject>()
             .map(|row| row.borrow::<row_model::RowPresentation>().list_label())
+    }
+
+    #[test]
+    #[ignore = "requires a private native X11 display, XTEST and xdotool"]
+    fn native_x11_drop_copies_one_exact_file() {
+        use std::{ffi::OsStr, os::unix::fs::MetadataExt, process::Command};
+
+        fn xd(args: &[&str]) -> String {
+            let out = Command::new("xdotool").args(args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "xdotool {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        }
+
+        fn pump_for(ms: u64) {
+            let end = Instant::now() + Duration::from_millis(ms);
+            until(|| Instant::now() >= end, "settled native pointer events");
+        }
+
+        fn widget_center(window: &gtk::Window, text: &str) -> (String, String) {
+            let label = descendants(window.upcast_ref())
+                .into_iter()
+                .find_map(|widget| {
+                    widget
+                        .downcast::<gtk::Label>()
+                        .ok()
+                        .filter(|label| label.label() == text)
+                })
+                .expect("drag control");
+            let bounds = label.compute_bounds(window).expect("mapped label bounds");
+            assert!(bounds.width() > 10.0 && bounds.height() > 5.0);
+            (
+                ((bounds.x() + bounds.width() / 2.0) as i32).to_string(),
+                ((bounds.y() + bounds.height() / 2.0) as i32).to_string(),
+            )
+        }
+
+        let display_name = std::env::var("JWM_FILE_DND_PRIVATE_DISPLAY").unwrap();
+        assert!(display_name.starts_with(':'));
+        assert_eq!(std::env::var("DISPLAY").as_deref(), Ok(display_name.as_str()));
+        assert_eq!(xd(&["getdisplaygeometry"]), "2400 1000");
+        assert_eq!(std::env::var("GDK_BACKEND").as_deref(), Ok("x11"));
+        gtk::init().unwrap();
+        let display = gtk::gdk::Display::default().unwrap();
+        assert_eq!(display.type_().name(), "GdkX11Display");
+
+        let root = PathBuf::from(std::env::var_os("JWM_FILE_DND_FIXTURE").unwrap());
+        let source = root.join("files-dnd-source");
+        let target = root.join("files-dnd-target");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+        let raw = OsStr::from_bytes(b"notes %\x80.txt");
+        let input = source.join(raw);
+        let output = target.join(raw);
+        let lookalike = target.join("notes %�.txt");
+        fs::write(&input, b"exact raw source").unwrap();
+        fs::write(&lookalike, b"different native leaf").unwrap();
+        let source_id = |path: &Path| {
+            let meta = fs::symlink_metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        let original = source_id(&input);
+        let clipboard = display.clipboard();
+        clipboard.set_text("unchanged independent clipboard");
+
+        let app = gtk::Application::builder()
+            .application_id("org.jwm.Files.X11DropSmoke")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gio::Cancellable>).unwrap();
+        let buffer = copy_ui::CopyBuffer::default();
+        open_window(&app, &source, &root, &[], &buffer);
+        let from = app.active_window().unwrap();
+        open_window(&app, &target, &root, &[], &buffer);
+        let to = app
+            .windows()
+            .into_iter()
+            .find(|window| window != &from)
+            .expect("the second Files window");
+        let get_model = |window: &gtk::Window| {
+            descendants(window.upcast_ref())
+                .into_iter()
+                .find_map(|widget| {
+                    let list = widget.downcast::<gtk::ListView>().ok()?;
+                    let selection = list.model()?.downcast::<gtk::SingleSelection>().ok()?;
+                    let model = selection.model()?.downcast::<row_model::FileRowModel>().ok()?;
+                    Some((selection, model))
+                })
+                .expect("primary pane model")
+        };
+        let (selection, from_model) = get_model(&from);
+        let (_, to_model) = get_model(&to);
+        until(
+            || {
+                from.is_mapped() && to.is_mapped()
+                    && from_model.n_items() == 1 && to_model.n_items() == 1
+            },
+            "two populated native Files windows",
+        );
+        selection.set_selected(0);
+
+        let xid = |pattern| {
+            let matches = xd(&["search", "--onlyvisible", "--name", pattern]);
+            assert_eq!(matches.lines().count(), 1);
+            assert_eq!(xd(&["getwindowpid", &matches]), std::process::id().to_string());
+            matches
+        };
+        let sid = xid("^JWM Files · .*/files-dnd-source$");
+        let tid = xid("^JWM Files · .*/files-dnd-target$");
+        assert_ne!(sid, tid);
+        xd(&["windowmove", &sid, "30", "45"]);
+        xd(&["windowmove", &tid, "1240", "45"]);
+        pump_for(240);
+
+        let status = |predicate: &dyn Fn(&str) -> bool| {
+            descendants(to.upcast_ref()).into_iter().any(|widget| {
+                widget.downcast::<gtk::Label>().is_ok_and(|label| {
+                    label.is_visible() && predicate(label.label().as_str())
+                })
+            })
+        };
+        let hover = || {
+            let (sx, sy) = widget_center(&from, drop_copy_ui::SOURCE);
+            let (tx, ty) = widget_center(&to, drop_copy_ui::TARGET);
+            let motion_x = (sx.parse::<i32>().unwrap() + 45).to_string();
+            xd(&["mousemove", "--window", &sid, &sx, &sy, "mousedown", "1"]);
+            pump_for(60);
+            xd(&["mousemove", "--window", &sid, &motion_x, &sy]);
+            pump_for(160);
+            xd(&["mousemove", "--window", &tid, &tx, &ty]);
+            pump_for(240);
+        };
+
+        hover();
+        assert!(!output.exists(), "hover must not publish a file");
+        xd(&["mousemove", "1150", "950"]);
+        pump_for(120);
+        xd(&["mouseup", "1"]);
+        pump_for(240);
+        assert!(!output.exists(), "release outside must not publish");
+        assert_eq!(source_id(&input), original);
+
+        fs::write(&output, b"occupied exact leaf").unwrap();
+        let occupied = source_id(&output);
+        hover();
+        xd(&["mouseup", "1"]);
+        until(
+            || status(&|message| message == "目标已有同名项目，未覆盖。"),
+            "terminal conflict after physical drop",
+        );
+        assert_eq!(source_id(&output), occupied);
+        assert_eq!(fs::read(&output).unwrap(), b"occupied exact leaf");
+        assert_eq!(source_id(&input), original);
+        assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
+        println!("GTK4 X11 drag copy: hover and outside release wrote nothing; conflict retained exact target");
+
+        fs::remove_file(&output).unwrap();
+        hover();
+        xd(&["mouseup", "1"]);
+        until(
+            || status(&|message| {
+                message.starts_with("已复制：") && message.contains("files-dnd-target")
+                    && message.contains(r"\x80")
+            }),
+            "terminal captured-path receipt after physical drop",
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"exact raw source");
+        assert_ne!(source_id(&output), original);
+        assert_eq!(source_id(&input), original);
+        assert_eq!(fs::read(&input).unwrap(), b"exact raw source");
+        assert_eq!(fs::read(&lookalike).unwrap(), b"different native leaf");
+        assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
+        println!("GTK4 X11 drag copy: real inter-window pointer copied exact native bytes and kept source and clipboard");
     }
 
     #[test]
