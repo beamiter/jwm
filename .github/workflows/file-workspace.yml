@@ -102,5 +102,5 @@ jobs:
         timeout-minutes: 3
         run: |
           GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none JWM_FILE_FRESH_WINDOW_SAMPLES=5 \
-            xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
+            dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24 -nolisten tcp' \
             cargo test --locked bench_ui::fresh_window_benchmark -- --exact --ignored --nocapture
