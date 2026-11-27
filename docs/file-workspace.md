@@ -160,10 +160,23 @@ Remote file URIs are rejected without changing the current view.
 filename substring. Press Enter or **下一个** to select the next match, and
 **上一个** to go back. The search never opens a file or walks other folders.
 It does no filesystem I/O or indexing and stores no search history on disk.
+
 A result from a previous directory or an older snapshot is never applied.
 If a search hasn't finished when you press Enter, Files remembers one
 explicit step for that query. Editing the query, changing directories, or
 closing search discards that request.
+
+### Find filenames in subdirectories
+
+**操作 → 查找子目录文件名** is separate from Ctrl+F. It starts only for the
+currently loaded local directory and builds a temporary filename index in
+memory. It does not read file contents, include hidden names, follow links or
+cross mount boundaries. Enter searches literal text, including Chinese, and
+shows up to 50 read-only relative paths. The panel does not open results or
+change the current directory. Closing it discards the index; if the bounded
+scan cannot complete, Files shows an error instead of partial results.
+If Enter is pressed before the index is ready, Files keeps one explicit
+request for the unchanged query.
 
 ### Save and restore tabs (opt-in)
 

@@ -16,4 +16,5 @@ path = "src/main.rs"
 futures-channel = "=0.3.34"
 gtk4 = "=0.11.4"
 jwm_file_core = { path = "../jwm_file_core" }
+jwm_file_index = { path = "../jwm_file_index" }
 jwm_markdown = { path = "../jwm_markdown" }

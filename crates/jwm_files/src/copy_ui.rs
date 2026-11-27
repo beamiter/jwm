@@ -252,6 +252,7 @@ pub(super) fn install(
         Some("win.restore-tabs"),
     );
     menu.append(Some("在当前目录查找（Ctrl+F）"), Some("win.find-in-folder"));
+    menu.append(Some("查找子目录文件名"), Some("win.search-subdirectories"));
     menu.append(Some("在此处打开终端"), Some("win.folder-terminal"));
     menu.append(Some("目录对照栏（F3）"), Some("win.comparison-pane"));
     menu.append(Some("快速预览（空格）"), Some("win.quick-preview"));
