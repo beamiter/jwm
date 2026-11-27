@@ -153,7 +153,9 @@ impl CopyJournalRecord {
         let path = self.destination_parent.as_os_str().as_bytes();
         let name = self.name.as_bytes();
         let mut out = Vec::with_capacity(
-            HEADER + path.len() + name.len()
+            HEADER
+                + path.len()
+                + name.len()
                 + if matches!(self.state, CopyJournalState::Published(_)) {
                     OBSERVATION
                 } else {
@@ -161,7 +163,10 @@ impl CopyJournalRecord {
                 },
         );
         out.extend(MAGIC);
-        out.push(u8::from(matches!(self.state, CopyJournalState::Published(_))));
+        out.push(u8::from(matches!(
+            self.state,
+            CopyJournalState::Published(_)
+        )));
         out.extend(u16::try_from(path.len()).ok()?.to_le_bytes());
         out.extend(u16::try_from(name.len()).ok()?.to_le_bytes());
         push_identity(&mut out, self.parent);
@@ -252,10 +257,7 @@ mod tests {
                 .as_nanos();
             let path = std::env::temp_dir()
                 .join(format!("jwm-copy-review-{}-{stamp}", std::process::id()));
-            stdfs::DirBuilder::new()
-                .mode(0o700)
-                .create(&path)
-                .unwrap();
+            stdfs::DirBuilder::new().mode(0o700).create(&path).unwrap();
             Self(path)
         }
     }
@@ -269,7 +271,10 @@ mod tests {
     fn example(state: CopyJournalState) -> CopyJournalRecord {
         CopyJournalRecord {
             destination_parent: PathBuf::from(OsString::from_vec(b"/mnt/raw%\x80".to_vec())),
-            parent: FileIdentity { device: 3, inode: 5 },
+            parent: FileIdentity {
+                device: 3,
+                inode: 5,
+            },
             name: OsString::from_vec(b"report%\x81.txt".to_vec()),
             state,
         }
@@ -277,7 +282,10 @@ mod tests {
 
     fn observed() -> CopyObservation {
         CopyObservation {
-            file: FileIdentity { device: 3, inode: 9 },
+            file: FileIdentity {
+                device: 3,
+                inode: 9,
+            },
             size: 4096,
             mtime_seconds: -3,
             mtime_nanos: 100,
@@ -327,7 +335,10 @@ mod tests {
         stdfs::remove_file(&requested).unwrap();
         stdfs::create_dir(&requested).unwrap();
         assert_eq!(restored.review(), CopyReview::ParentChanged);
-        assert_eq!(stdfs::read(moved.join("keep")).unwrap(), b"different length");
+        assert_eq!(
+            stdfs::read(moved.join("keep")).unwrap(),
+            b"different length"
+        );
     }
 
     #[test]
