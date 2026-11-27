@@ -14,6 +14,8 @@ mod index_walk;
 mod local;
 #[cfg(target_os = "linux")]
 mod mkdir;
+#[cfg(target_os = "linux")]
+mod move_file;
 mod name_find;
 #[cfg(target_os = "linux")]
 mod preview;
@@ -52,6 +54,10 @@ pub use index_walk::{IndexEntry, WalkOptions, WalkSummary, visit_local_index};
 pub use local::LocalProvider;
 #[cfg(target_os = "linux")]
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};
+#[cfg(target_os = "linux")]
+pub use move_file::{
+    RegularMoveError, RegularMoveOutcome, RegularMoveSource, move_regular_no_replace,
+};
 pub use name_find::NameQuery;
 #[cfg(target_os = "linux")]
 pub use preview::{
