@@ -542,5 +542,17 @@ is required if the directory changes during a scan. Select an ordinary
 file with an intact original path and choose **恢复副本** to preview the destination and confirm.
 The action creates a no-overwrite copy at the original path, leaving
 the Trash entry and metadata in place. It refuses a missing or
-symlinked parent. It does not enumerate other mounts, move files to
-Trash, remove an original Trash entry, or offer Trash undo.
+symlinked parent. The application does not enumerate other mounts,
+send files to Trash, remove an original Trash entry, or offer Trash undo.
+
+The Linux provider now has an explicit, core-only operation to move one
+observed regular file into Home Trash. It initializes private Trash children
+under an existing, user-controlled XDG data directory only on that explicit
+operation. Opening the listing remains read-only. The selected parent and
+Trash directories must be on the same mount; the operation refuses unsafe
+ownership or permissions, changed paths and symlinks. It reserves the
+original-path sidecar before a no-replace move, preserves the native file
+name in that metadata, and never falls back to permanently deleting the
+file. A failed sidecar cleanup or a completed move whose result cannot be
+verified is reported separately; neither is permission to replay or undo.
+This is not wired to the browser yet and is not a power-loss guarantee.
