@@ -236,6 +236,20 @@ is cancelled before the rename, you must cut again to retry. **Ctrl+Shift+V** an
 copy button do not move a cut file. This does not move directories,
 batches, or files across mounts, and does not offer undo.
 
+### Drag-copy a single regular file between Files windows (X11)
+
+In an X11 session, select a regular file and use **拖拽复制所选文件**.
+Release it on **拖到这里复制到当前目录** in a second window of the same
+Files instance. No destination is changed by hovering, and only a
+released drop queues a copy. Check the destination window's status for
+the actual result; an accepted gesture does not mean the copy finished.
+An existing name is never replaced. The source and clipboard remain
+unchanged. The target is the committed directory at drop time.
+
+This first slice does not move or link, import external drops, or accept
+directories or multiple files. Wayland keeps keyboard and menu copy;
+the drag controls are not exposed there in this slice.
+
 ### Copy interruption review (core only)
 
 The local provider has a bounded record for one copy intent or an observed
