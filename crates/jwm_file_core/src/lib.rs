@@ -58,7 +58,8 @@ pub use local::LocalProvider;
 pub use mkdir::{DirectoryHandle, MakeDirectoryError};
 #[cfg(target_os = "linux")]
 pub use move_file::{
-    RegularMoveError, RegularMoveOutcome, RegularMoveSource, move_regular_no_replace,
+    FolderMoveError, FolderMoveOutcome, FolderMoveSource, RegularMoveError, RegularMoveOutcome,
+    RegularMoveSource, move_folder_no_replace, move_regular_no_replace,
 };
 pub use name_find::NameQuery;
 #[cfg(target_os = "linux")]
