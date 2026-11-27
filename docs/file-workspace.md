@@ -181,7 +181,7 @@ skipped, failed, cancelled-before-publication and unstarted results. Cancelling
 does not roll back already copied files. This is a window-local report, not
 persistent operation history or proof of crash durability.
 
-### Folder-copy preflight (core only)
+### Copy a folder
 
 The local provider can build a bounded metadata-only plan for an explicitly
 selected real directory. It records exact native names, regular files and
@@ -200,8 +200,15 @@ the completed folder. An existing destination is never replaced, and the
 source is never removed. A pre-publication cancellation does not publish
 the final name. It does not promise metadata fidelity, a frozen source,
 or power-loss durability. Unexpected or interrupted staging may remain;
-it is not automatically replayed. Folder copying is not yet available in
-the application UI.
+it is not automatically replayed.
+
+To use it, select a real folder and press **Ctrl+C**, navigate to the
+destination, then press **Ctrl+V**. It uses the application-local clipboard,
+leaves the source untouched and rejects the same folder, its descendants or
+an existing same-name item. Use **操作 → 取消正在进行的复制** before
+publication to cancel. A folder cannot use the single-file **Ctrl+Shift+V**
+automatic sibling name. Unsupported links or mounts fail the entire folder
+rather than silently omitting content.
 
 ### Copy interruption review (core only)
 

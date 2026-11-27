@@ -4,6 +4,8 @@ use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
     Cancellation, CopyDestination, CopyError, CopySource, DirectoryHandle, FileIdentity, FileKind,
+    ListError, TreeCopyError, TreeCopyPlanError, TreeCopyTargetError, copy_tree_no_replace,
+    plan_tree_copy,
 };
 use std::{
     cell::RefCell,
@@ -32,6 +34,7 @@ pub(super) struct BatchSource {
 #[derive(Clone)]
 pub(super) enum StoredCopy {
     Single(StashedCopy),
+    Tree(StashedCopy),
     Batch(BatchSource),
 }
 
@@ -53,33 +56,31 @@ fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label
         .as_ref()
         .filter(|_| browser.pending.is_none())
         .zip(browser.entries.get(selected as usize))
-        .filter(|(_, entry)| entry.kind == FileKind::Regular)
+        .filter(|(_, entry)| matches!(entry.kind, FileKind::Regular | FileKind::Directory))
         .and_then(|(parent, entry)| {
-            Some(StashedCopy {
+            let source = StashedCopy {
                 parent: parent.clone(),
                 path: browser.path().clone(),
                 name: entry.name.clone(),
                 identity: entry.identity?,
-            })
+            };
+            Some((entry.kind, source))
         });
-    let Some(candidate) = candidate else {
+    let Some((kind, candidate)) = candidate else {
         // Refuse to leave an earlier, hidden choice armed after a failed copy.
         buffer.replace(None);
-        notice(status, "请选择一个可复制的普通文件。");
+        notice(status, "请选择可复制的普通文件或文件夹。");
         return;
     };
-    notice(
-        status,
-        &format!(
-            "已选定复制：{}",
-            candidate
-                .path
-                .join(&candidate.name)
-                .to_string_lossy()
-                .escape_debug()
-        ),
-    );
-    buffer.replace(Some(StoredCopy::Single(candidate)));
+    let path = candidate.path.join(&candidate.name);
+    let display = crate::trash_ui::display_path(path.as_os_str());
+    if kind == FileKind::Directory {
+        notice(status, &format!("已选定复制文件夹：{display}"));
+        buffer.replace(Some(StoredCopy::Tree(candidate)));
+    } else {
+        notice(status, &format!("已选定复制：{display}"));
+        buffer.replace(Some(StoredCopy::Single(candidate)));
+    }
 }
 
 fn copy_path(window: &gtk::ApplicationWindow, state: &Shared, selected: u32, status: &gtk::Label) {
@@ -180,11 +181,20 @@ fn paste_with_mode(
         return;
     }
     let Some(source) = buffer.borrow().clone() else {
-        notice(status, "请先选择要复制的普通文件。");
+        notice(status, "请先选择要复制的文件或文件夹。");
         return;
     };
     let source = match source {
         StoredCopy::Single(source) => source,
+        StoredCopy::Tree(source) => {
+            drop(browser);
+            if keep_both {
+                notice(status, "文件夹复制不支持自动改名，请使用 Ctrl+V。");
+            } else {
+                paste_tree(state, status, parent, path, source);
+            }
+            return;
+        }
         StoredCopy::Batch(source) => {
             drop(browser);
             if keep_both {
@@ -252,6 +262,116 @@ fn paste_with_mode(
             notice(status, &format!("正在复制：{label}"));
         }
         Err(error) => notice(status, &format!("无法启动复制：{error}")),
+    }
+}
+
+fn plan_error(error: TreeCopyPlanError) -> String {
+    match error {
+        TreeCopyPlanError::Walk(ListError::Cancelled) => "已取消，未发布目标文件夹。".into(),
+        TreeCopyPlanError::Walk(ListError::ReadDirectory { .. }) => {
+            "无法读取源文件夹，或源文件夹已变化。".into()
+        }
+        TreeCopyPlanError::Incomplete | TreeCopyPlanError::PathBudget => {
+            "目录扫描不完整或超出限制，未发布目标文件夹。".into()
+        }
+        TreeCopyPlanError::NestedMount => "源文件夹内有挂载点，未发布目标文件夹。".into(),
+        TreeCopyPlanError::Unsupported(path) => format!(
+            "源文件夹含有链接或特殊文件，未复制：{}",
+            crate::trash_ui::display_path(path.as_os_str())
+        ),
+    }
+}
+
+fn tree_error(error: TreeCopyError, target: &std::path::Path) -> String {
+    match error {
+        TreeCopyError::InvalidName => "目标名称无效。".into(),
+        TreeCopyError::TargetNotPrivate => {
+            "整目录复制只支持你拥有、且未向组或其他用户开放写入的目标目录。".into()
+        }
+        TreeCopyError::Target(TreeCopyTargetError::TargetInsideSource) => {
+            "不能将文件夹复制到自身或子目录。".into()
+        }
+        TreeCopyError::Target(
+            TreeCopyTargetError::TargetUnavailable(_) | TreeCopyTargetError::TargetChanged,
+        ) => "目标文件夹已变化或无法读取。".into(),
+        TreeCopyError::Target(TreeCopyTargetError::SourceChanged)
+        | TreeCopyError::SourceChanged => "源文件夹或内容已变化，未发布目标文件夹。".into(),
+        TreeCopyError::Target(TreeCopyTargetError::Plan(error)) => plan_error(error),
+        TreeCopyError::DestinationExists => "目标已有同名项目，未覆盖。".into(),
+        TreeCopyError::Cancelled => "已取消，未发布目标文件夹。".into(),
+        TreeCopyError::StagingChanged => "临时文件夹发生变化，未发布目标文件夹。".into(),
+        TreeCopyError::ByteBudget => "文件夹内容超过 1 GiB，未复制。".into(),
+        TreeCopyError::File(error) => format!("未发布目标文件夹：{}", copy_error_message(error)),
+        TreeCopyError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            "无法访问复制所需的目录或文件，请检查访问权限。".into()
+        }
+        TreeCopyError::Io(error) => format!("无法复制文件夹：{error}"),
+        TreeCopyError::CleanupIncomplete {
+            cause,
+            staging_name,
+        } => format!(
+            "{} 临时目录可能保留：{}",
+            tree_error(*cause, target),
+            crate::trash_ui::display_path(target.join(staging_name).as_os_str())
+        ),
+    }
+}
+
+#[cfg(test)]
+pub(super) static TREE_COPY_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn paste_tree(
+    state: &Shared,
+    status: &gtk::Label,
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+    source: StashedCopy,
+) {
+    let mut browser = state.borrow_mut();
+    if browser.mutation.is_some() || browser.dialog_open {
+        return;
+    }
+    let source_root = source.path.join(&source.name);
+    let detail = format!(
+        "{} → {}",
+        crate::trash_ui::display_path(source_root.as_os_str()),
+        crate::trash_ui::display_path(path.as_os_str())
+    );
+    let (target, target_path) = (parent.clone(), path.clone());
+    let cancellation = Cancellation::default();
+    let on_worker = cancellation.clone();
+    let wake = browser.wake.clone();
+    let (send, reply) = mpsc::sync_channel(1);
+    match thread::Builder::new()
+        .name("jwm-files-copy-tree".into())
+        .spawn(move || {
+            let _notify = SignalOnDrop(wake);
+            #[cfg(test)]
+            let _test_gate = TREE_COPY_TEST_GATE.lock().unwrap();
+            let result = plan_tree_copy(&source_root, source.identity, &on_worker)
+                .map_err(plan_error)
+                .and_then(|plan| {
+                    copy_tree_no_replace(&plan, &target, &target_path, &source.name, &on_worker)
+                        .map(MutationOutcome::TreeCopy)
+                        .map_err(|error| tree_error(error, &target_path))
+                })
+                .map_err(|error| {
+                    let destination = crate::trash_ui::display_path(target_path.as_os_str());
+                    format!("{error} 目标：{destination}")
+                });
+            let _ = send.send(result);
+        }) {
+        Ok(_) => {
+            browser.mutation = Some(MutationWork {
+                parent,
+                path,
+                operation: "复制文件夹",
+                reply,
+                copy: Some((cancellation, detail.clone())),
+            });
+            notice(status, &format!("正在复制文件夹：{detail}"));
+        }
+        Err(error) => notice(status, &format!("无法启动文件夹复制：{error}")),
     }
 }
 
@@ -359,7 +479,7 @@ pub(super) fn install(
     menu.append(Some("查看批量复制结果"), Some("win.batch-copy-result"));
     crate::batch_copy_result::install(window, state, status);
     for (name, label) in [
-        ("copy-file", "复制选中文件（Ctrl+C）"),
+        ("copy-file", "复制选中项目（Ctrl+C）"),
         ("copy-item-path", "复制完整路径（Ctrl+Shift+C）"),
         ("paste-file", "粘贴到当前目录（Ctrl+V）"),
         ("paste-as-copy", "粘贴为副本（Ctrl+Shift+V）"),
