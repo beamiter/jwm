@@ -19,6 +19,21 @@ warm directory display 200 ms, 10,000-entry first display 500 ms. These are
 targets, not measurements. Record desktop/backend, filesystem, fixture size,
 warm/cold definition and sample count with any reported timings.
 
+For a separate first-paint measurement, run from `crates/jwm_files`
+with a private X11 display:
+
+```sh
+GDK_BACKEND=x11 GSK_RENDERER=cairo JWM_FILE_FRESH_WINDOW_SAMPLES=20 \
+  xvfb-run -a cargo test --locked bench_ui::fresh_window_benchmark -- --exact --ignored --nocapture
+```
+
+Each sample starts a fresh GTK test client using the same window code,
+waits until the first known row is mapped and allocated, and observes a
+completed paint. It reports P50, P95 and maximum for 100 synthetic
+entries. It reuses a fixture with warm OS caches and includes test
+harness startup. The CI run uses five samples for coverage, not a
+release latency gate. This is not a production cold-disk or hardware result.
+
 ## First slice: isolated local provider
 
 `crates/jwm_file_core` is a standalone Cargo workspace with no GTK or

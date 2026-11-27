@@ -162,3 +162,128 @@ fn native_listing_benchmark() {
     }
     window.close();
 }
+
+const FRESH_WINDOW_MARKER: &str = "JWM_FILES_FRESH_WINDOW_PAINTED";
+const FRESH_FILE: &str = "00-fresh-window-probe";
+
+#[test]
+#[ignore = "internal child for the private fresh-process UI benchmark"]
+fn fresh_window_child() {
+    let fixture = PathBuf::from(std::env::var_os("JWM_FILE_FRESH_WINDOW_ROOT").unwrap());
+    assert!(fixture.is_absolute());
+    gtk::init().unwrap();
+    let app = gtk::Application::builder()
+        .application_id("org.jwm.Files.FreshWindowBenchmark")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.register(None::<&gio::Cancellable>).unwrap();
+    open_window(
+        &app,
+        &fixture,
+        &fixture,
+        &[],
+        &copy_ui::CopyBuffer::default(),
+    );
+    let window = app.active_window().unwrap();
+    let expected_title = format!("JWM Files · {}", fixture.display());
+    until(|| {
+        window.is_mapped()
+            && window.title().as_deref() == Some(&expected_title)
+            && visit(window.upcast_ref(), &mut |widget| {
+                widget.is_mapped()
+                    && widget.width() > 0
+                    && widget.height() > 0
+                    && widget.downcast_ref::<gtk::Label>().is_some_and(|label| {
+                        label.text().as_str() == FRESH_FILE
+                    })
+            })
+    });
+    let clock = window.frame_clock().expect("mapped Files frame clock");
+    let painted = Rc::new(Cell::new(false));
+    let handler = clock.connect_after_paint({
+        let painted = painted.clone();
+        move |_| painted.set(true)
+    });
+    window.queue_draw();
+    until(|| painted.get());
+    clock.disconnect(handler);
+    println!("{FRESH_WINDOW_MARKER}");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    window.close();
+}
+
+#[test]
+#[ignore = "opt-in fresh-process benchmark requiring a private graphic display"]
+fn fresh_window_benchmark() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let samples = std::env::var("JWM_FILE_FRESH_WINDOW_SAMPLES")
+        .map_or(20, |value| value.parse::<usize>().unwrap());
+    assert!((5..=100).contains(&samples));
+    let fixture = Fixture::new();
+    fs::File::create_new(fixture.0.join(FRESH_FILE)).unwrap();
+    for index in 1..100 {
+        fs::File::create_new(fixture.0.join(format!("entry-{index:06}"))).unwrap();
+    }
+    // A new test process and GTK application per sample. The same 100-row
+    // synthetic fixture is reused; this does not flush kernel disk caches.
+    let executable = std::env::current_exe().unwrap();
+    let mut result = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let mut command = Command::new(&executable);
+        command
+            .args([
+                "bench_ui::fresh_window_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("JWM_FILE_FRESH_WINDOW_ROOT", &fixture.0)
+            .stdout(Stdio::piped());
+        let (send, receive) = mpsc::sync_channel(1);
+        let start = Instant::now();
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let read = thread::spawn(move || {
+            let mut sent = false;
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if !sent && line.contains(FRESH_WINDOW_MARKER) {
+                    sent = true;
+                    let _ = send.send(start.elapsed());
+                }
+            }
+        });
+        let measurement = receive.recv_timeout(Duration::from_secs(12));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if measurement.is_err() || Instant::now() >= deadline {
+                let _ = child.kill();
+                break child.wait().unwrap();
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        read.join().unwrap();
+        let latency = measurement.expect("fresh Files never confirmed a painted listing");
+        assert!(status.success(), "fresh Files child exited with {status}");
+        result.push(latency);
+    }
+    result.sort_unstable();
+    let ranked = |rank: usize| display_ms(result[(samples * rank).div_ceil(100) - 1]);
+    let backend = std::env::var("GDK_BACKEND").unwrap_or_else(|_| "auto".into());
+    println!(
+        "measure: spawn fresh GTK test client to confirmed first Files listing paint; \
+         GDK_BACKEND={backend}; warm OS cache; fixture has 100 entries"
+    );
+    println!("samples,p50_ms,p95_ms,max_ms");
+    println!(
+        "{samples},{:.3},{:.3},{:.3}",
+        ranked(50),
+        ranked(95),
+        display_ms(result[samples - 1])
+    );
+}
