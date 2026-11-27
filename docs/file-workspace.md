@@ -205,12 +205,12 @@ it is not automatically replayed.
 To use it, select a real folder and press **Ctrl+C**, navigate to the
 destination, then press **Ctrl+V**. It uses the application-local clipboard,
 leaves the source untouched and rejects the same folder, its descendants or
-an existing same-name item. Use **操作 → 取消正在进行的复制** before
+an existing same-name item. Use **操作 → 取消正在进行的复制或移动** before
 publication to cancel. A folder cannot use the single-file **Ctrl+Shift+V**
 automatic sibling name. Unsupported links or mounts fail the entire folder
 rather than silently omitting content.
 
-### Move one regular file (core only)
+### Move one regular file
 
 The Linux provider can move one observed regular file to an explicitly held
 directory on the same mount, keeping its exact native name. Both parents must
@@ -223,7 +223,16 @@ Cancellation is honored before the rename. If the rename succeeds but the
 destination can no longer be verified, the provider reports that distinction
 and does not retry or roll back. The source inode check and the rename are not
 one indivisible check, and this operation does not promise power-loss
-durability. This is not yet wired to Cut/Paste and does not move folders.
+durability.
+
+Select a regular file in the main file list, press **Ctrl+X**, open
+the destination in the main file list, then press **Ctrl+V**. Cutting
+does not change the system text clipboard or move the file until paste.
+Use **操作 → 取消正在进行的复制或移动** to request cancellation before
+publication. A move attempt consumes the selection, so if it conflicts or
+is cancelled before the rename, you must cut again to retry. **Ctrl+Shift+V** and the comparison pane's
+copy button do not move a cut file. This does not move directories,
+batches, or files across mounts, and does not offer undo.
 
 ### Copy interruption review (core only)
 

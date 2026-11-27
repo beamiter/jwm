@@ -4,7 +4,8 @@ use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
     Cancellation, CopyDestination, CopyError, CopySource, DirectoryHandle, FileIdentity, FileKind,
-    ListError, TreeCopyError, TreeCopyPlanError, TreeCopyTargetError, copy_tree_no_replace,
+    ListError, RegularMoveError, RegularMoveOutcome, RegularMoveSource, TreeCopyError,
+    TreeCopyPlanError, TreeCopyTargetError, copy_tree_no_replace, move_regular_no_replace,
     plan_tree_copy,
 };
 use std::{
@@ -35,6 +36,7 @@ pub(super) struct BatchSource {
 pub(super) enum StoredCopy {
     Single(StashedCopy),
     Tree(StashedCopy),
+    Cut(StashedCopy),
     Batch(BatchSource),
 }
 
@@ -46,7 +48,26 @@ pub(super) fn notice(label: &gtk::Label, text: &str) {
     label.set_visible(!text.is_empty());
 }
 
-fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label) {
+#[derive(Clone, Copy)]
+enum SelectionIntent {
+    Copy,
+    Cut,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasteMode {
+    Main,
+    Sibling,
+    ComparisonCopy,
+}
+
+fn stash(
+    state: &Shared,
+    buffer: &CopyBuffer,
+    selected: u32,
+    status: &gtk::Label,
+    intent: SelectionIntent,
+) {
     let browser = state.borrow();
     if browser.mutation.is_some() || browser.dialog_open {
         return;
@@ -56,7 +77,10 @@ fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label
         .as_ref()
         .filter(|_| browser.pending.is_none())
         .zip(browser.entries.get(selected as usize))
-        .filter(|(_, entry)| matches!(entry.kind, FileKind::Regular | FileKind::Directory))
+        .filter(|(_, entry)| match intent {
+            SelectionIntent::Cut => entry.kind == FileKind::Regular,
+            SelectionIntent::Copy => matches!(entry.kind, FileKind::Regular | FileKind::Directory),
+        })
         .and_then(|(parent, entry)| {
             let source = StashedCopy {
                 parent: parent.clone(),
@@ -69,12 +93,19 @@ fn stash(state: &Shared, buffer: &CopyBuffer, selected: u32, status: &gtk::Label
     let Some((kind, candidate)) = candidate else {
         // Refuse to leave an earlier, hidden choice armed after a failed copy.
         buffer.replace(None);
-        notice(status, "请选择可复制的普通文件或文件夹。");
+        let message = match intent {
+            SelectionIntent::Cut => "剪切仅支持普通文件，请重新选择。",
+            SelectionIntent::Copy => "请选择可复制的普通文件或文件夹。",
+        };
+        notice(status, message);
         return;
     };
     let path = candidate.path.join(&candidate.name);
     let display = crate::trash_ui::display_path(path.as_os_str());
-    if kind == FileKind::Directory {
+    if matches!(intent, SelectionIntent::Cut) {
+        notice(status, &format!("已剪切：{display}。粘贴后才会移动。"));
+        buffer.replace(Some(StoredCopy::Cut(candidate)));
+    } else if kind == FileKind::Directory {
         notice(status, &format!("已选定复制文件夹：{display}"));
         buffer.replace(Some(StoredCopy::Tree(candidate)));
     } else {
@@ -139,7 +170,7 @@ pub(super) fn copy_error_message(error: CopyError) -> String {
     }
 }
 
-fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label, keep_both: bool) {
+fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label, mode: PasteMode) {
     let destination = {
         let browser = state.borrow();
         browser
@@ -152,7 +183,7 @@ fn paste(state: &Shared, buffer: &CopyBuffer, status: &gtk::Label, keep_both: bo
         notice(status, "请先打开目标目录。");
         return;
     };
-    paste_with_mode(state, buffer, status, parent, path, keep_both);
+    paste_with_mode(state, buffer, status, parent, path, mode);
 }
 
 /// The destination is the clicked pane's committed directory, never the
@@ -164,7 +195,7 @@ pub(super) fn paste_into(
     parent: Arc<DirectoryHandle>,
     path: PathBuf,
 ) {
-    paste_with_mode(state, buffer, status, parent, path, false);
+    paste_with_mode(state, buffer, status, parent, path, PasteMode::ComparisonCopy);
 }
 
 fn paste_with_mode(
@@ -173,19 +204,34 @@ fn paste_with_mode(
     status: &gtk::Label,
     parent: Arc<DirectoryHandle>,
     path: PathBuf,
-    keep_both: bool,
+    mode: PasteMode,
 ) {
+    let keep_both = mode == PasteMode::Sibling;
     let mut browser = state.borrow_mut();
     if browser.mutation.is_some() || browser.dialog_open {
         notice(status, "有文件操作正在进行，请稍候。");
         return;
     }
     let Some(source) = buffer.borrow().clone() else {
-        notice(status, "请先选择要复制的文件或文件夹。");
+        notice(status, "请先复制或剪切要粘贴的项目。");
         return;
     };
     let source = match source {
         StoredCopy::Single(source) => source,
+        StoredCopy::Cut(source) => {
+            drop(browser);
+            if mode != PasteMode::Main {
+                notice(status, "剪切只支持粘贴到主文件列表，不支持粘贴为副本。");
+            } else if parent.identity() == source.parent.identity() {
+                notice(status, "请选择不同的目标目录。");
+            } else {
+                // Consume on dispatch, before any other Files window can start
+                // using the same cut. A failed move requires a fresh selection.
+                buffer.replace(None);
+                paste_move(state, status, parent, path, source);
+            }
+            return;
+        }
         StoredCopy::Tree(source) => {
             drop(browser);
             if keep_both {
@@ -264,6 +310,85 @@ fn paste_with_mode(
         Err(error) => notice(status, &format!("无法启动复制：{error}")),
     }
 }
+
+pub(super) const MOVE_OPERATION: &str = "移动文件";
+
+fn move_error(error: RegularMoveError) -> String {
+    match error {
+        RegularMoveError::InvalidName => "文件名无效，未移动。".into(),
+        RegularMoveError::SameDirectory => "源和目标是同一个目录，未移动。".into(),
+        RegularMoveError::ParentChanged => "源或目标目录已变化，未移动。".into(),
+        RegularMoveError::ParentNotPrivate => {
+            "只支持你拥有、且未向组或其他用户开放写入的源和目标目录。".into()
+        }
+        RegularMoveError::SourceChanged | RegularMoveError::NotRegular => {
+            "源文件已变化或不再是普通文件，未移动。".into()
+        }
+        RegularMoveError::DestinationExists => "目标已有同名项目，未覆盖，源文件未移动。".into(),
+        RegularMoveError::CrossMount => "暂不支持跨挂载点移动，源文件未移动。".into(),
+        RegularMoveError::Cancelled => "已取消，源文件未移动。".into(),
+        RegularMoveError::Io(error) => format!("无法移动文件：{error}"),
+    }
+}
+
+fn paste_move(
+    state: &Shared,
+    status: &gtk::Label,
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+    source: StashedCopy,
+) {
+    let mut browser = state.borrow_mut();
+    let detail = format!(
+        "{} → {}",
+        crate::trash_ui::display_path(source.path.join(&source.name).as_os_str()),
+        crate::trash_ui::display_path(path.join(&source.name).as_os_str())
+    );
+    let (target, target_path) = (parent.clone(), path.clone());
+    let cancellation = Cancellation::default();
+    let on_worker = cancellation.clone();
+    let wake = browser.wake.clone();
+    let (send, reply) = mpsc::sync_channel(1);
+    match thread::Builder::new()
+        .name("jwm-files-move".into())
+        .spawn(move || {
+            let _notify = SignalOnDrop(wake);
+            #[cfg(test)]
+            let _test_gate = MOVE_TEST_GATE.lock().unwrap();
+            let result = move_regular_no_replace(
+                RegularMoveSource {
+                    parent: &source.parent,
+                    displayed_parent: &source.path,
+                    name: &source.name,
+                    identity: source.identity,
+                },
+                &target,
+                &target_path,
+                &on_worker,
+            )
+            .map(|outcome| match outcome {
+                RegularMoveOutcome::Moved => MutationOutcome::FileOperation,
+                RegularMoveOutcome::MovedUnverified => MutationOutcome::MoveUnverified,
+            })
+            .map_err(move_error);
+            let _ = send.send(result);
+        }) {
+        Ok(_) => {
+            browser.mutation = Some(MutationWork {
+                parent,
+                path,
+                operation: MOVE_OPERATION,
+                reply,
+                copy: Some((cancellation, detail.clone())),
+            });
+            notice(status, &format!("正在移动：{detail}"));
+        }
+        Err(error) => notice(status, &format!("无法启动文件移动：{error}")),
+    }
+}
+
+#[cfg(test)]
+pub(super) static MOVE_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn plan_error(error: TreeCopyPlanError) -> String {
     match error {
@@ -480,10 +605,11 @@ pub(super) fn install(
     crate::batch_copy_result::install(window, state, status);
     for (name, label) in [
         ("copy-file", "复制选中项目（Ctrl+C）"),
+        ("cut-file", "剪切选中的普通文件（Ctrl+X）"),
         ("copy-item-path", "复制完整路径（Ctrl+Shift+C）"),
         ("paste-file", "粘贴到当前目录（Ctrl+V）"),
         ("paste-as-copy", "粘贴为副本（Ctrl+Shift+V）"),
-        ("cancel-file-copy", "取消正在进行的复制"),
+        ("cancel-file-copy", "取消正在进行的复制或移动"),
     ] {
         let action = gio::SimpleAction::new(name, None);
         let (state, buffer, selection, status) = (
@@ -494,23 +620,39 @@ pub(super) fn install(
         );
         let weak_window = window.downgrade();
         action.connect_activate(move |action, _| match action.name().as_str() {
-            "copy-file" => stash(&state, &buffer, selection.selected(), &status),
+            "copy-file" => stash(
+                &state,
+                &buffer,
+                selection.selected(),
+                &status,
+                SelectionIntent::Copy,
+            ),
+            "cut-file" => stash(
+                &state,
+                &buffer,
+                selection.selected(),
+                &status,
+                SelectionIntent::Cut,
+            ),
             "copy-item-path" => {
                 if let Some(window) = weak_window.upgrade() {
                     copy_path(&window, &state, selection.selected(), &status);
                 }
             }
-            "paste-file" => paste(&state, &buffer, &status, false),
-            "paste-as-copy" => paste(&state, &buffer, &status, true),
+            "paste-file" => paste(&state, &buffer, &status, PasteMode::Main),
+            "paste-as-copy" => paste(&state, &buffer, &status, PasteMode::Sibling),
             _ => {
-                if let Some((cancel, _)) = state
-                    .borrow()
-                    .mutation
-                    .as_ref()
-                    .and_then(|work| work.copy.as_ref())
+                let browser = state.borrow();
+                if let Some(work) = &browser.mutation
+                    && let Some((cancel, _)) = &work.copy
                 {
                     cancel.cancel();
-                    notice(&status, "正在取消复制…");
+                    let text = if work.operation == MOVE_OPERATION {
+                        "正在取消移动…"
+                    } else {
+                        "正在取消复制…"
+                    };
+                    notice(&status, text);
                 }
             }
         });
@@ -533,6 +675,7 @@ pub(super) fn install(
         let action = match (key, shifted) {
             (Key::c | Key::C, true) => "win.copy-item-path",
             (Key::c, false) => "win.copy-file",
+            (Key::x, false) => "win.cut-file",
             (Key::v, false) => "win.paste-file",
             (Key::v | Key::V, true) => "win.paste-as-copy",
             (Key::z, false) => "win.undo-rename",

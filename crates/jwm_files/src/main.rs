@@ -227,6 +227,7 @@ struct MutationWork {
 enum MutationOutcome {
     FileOperation,
     CopyAsSibling(OsString),
+    MoveUnverified,
     TreeCopy(jwm_file_core::TreeCopyReceipt),
     BatchCopy(Vec<(OsString, jwm_file_core::CopyBatchItem)>),
     Rename(Option<RenameReceipt>),
@@ -1423,7 +1424,12 @@ fn open_window_with_tabs(
             .and_then(|work| match work.reply.try_recv() {
                 Ok(result) => Some(result),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("文件操作未返回结果，无法确认哪些文件已写入。".into()))
+                    let message = if work.operation == copy_ui::MOVE_OPERATION {
+                        "移动未返回结果。请检查源和目标，不要直接重试。"
+                    } else {
+                        "文件操作未返回结果，无法确认哪些文件已写入。"
+                    };
+                    Some(Err(message.into()))
                 }
                 Err(mpsc::TryRecvError::Empty) => None,
             });
@@ -1432,6 +1438,7 @@ fn open_window_with_tabs(
         {
             let mut batch = None;
             let mut tree = None;
+            let mut move_unverified = false;
             let result = result.map(|outcome| match outcome {
                 MutationOutcome::Rename(receipt) => {
                     browser.rename_undo = receipt.map(Arc::new);
@@ -1443,6 +1450,10 @@ fn open_window_with_tabs(
                 }
                 MutationOutcome::FileOperation => None,
                 MutationOutcome::CopyAsSibling(name) => Some(name),
+                MutationOutcome::MoveUnverified => {
+                    move_unverified = true;
+                    None
+                }
                 MutationOutcome::TreeCopy(receipt) => {
                     tree = Some(receipt);
                     None
@@ -1473,6 +1484,17 @@ fn open_window_with_tabs(
                     text.push_str(" 临时目录可能保留：");
                     text.push_str(&trash_ui::display_path(work.path.join(residue).as_os_str()));
                 }
+                copy_ui::notice(&copy_status, &text);
+            } else if work.operation == copy_ui::MOVE_OPERATION
+                && let Some((_, detail)) = &work.copy
+            {
+                let text = match &result {
+                    Ok(_) if move_unverified => format!(
+                        "移动已执行，但无法确认目标文件。请检查两处，不要重试：{detail}"
+                    ),
+                    Ok(_) => format!("已移动：{detail}"),
+                    Err(error) => format!("{error} 操作路径：{detail}"),
+                };
                 copy_ui::notice(&copy_status, &text);
             } else if let Some((_, detail)) = &work.copy {
                 let text = match &result {
@@ -3198,6 +3220,82 @@ mod wayland_acceptance {
         assert_eq!(fs::read_dir(&tree_target).unwrap().count(), 2);
         println!(
             "GTK4 Wayland folder copy: raw leaf and empty directory, descendant and conflict refused"
+        );
+
+        use std::os::unix::fs::MetadataExt;
+        let move_source = root.join("move-source");
+        let move_target = root.join("move-target");
+        let move_other = root.join("move-elsewhere");
+        for dir in [&move_source, &move_target, &move_other] {
+            fs::create_dir(dir).unwrap();
+            fs::write(dir.join("a-guard.txt"), b"guard").unwrap();
+        }
+        let raw_move = std::ffi::OsStr::from_bytes(b"z-move%\x81");
+        let origin = move_source.join(raw_move);
+        let destination = move_target.join(raw_move);
+        fs::write(&origin, b"exact moved data").unwrap();
+        fs::write(&destination, b"keep existing").unwrap();
+        let observed = fs::metadata(&origin).unwrap();
+        let cut = || {
+            navigate(&move_source);
+            at(&move_source, "a-guard.txt");
+            until(|| source_selection.model().unwrap().n_items() == 2, "move source listing");
+            source_selection.set_selected(1);
+            action("win.cut-file");
+            assert!(copy_noticed("粘贴后才会移动"));
+            assert_eq!(fs::metadata(&origin).unwrap().ino(), observed.ino());
+        };
+
+        display.clipboard().set_text("cut-clipboard-guard");
+        cut();
+        navigate(&move_target);
+        at(&move_target, "a-guard.txt");
+        action("win.paste-as-copy");
+        assert!(copy_noticed("不支持粘贴为副本"));
+        assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
+        action("win.paste-file");
+        until(|| copy_noticed("未覆盖，源文件未移动"), "native move conflict");
+        assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
+        assert_eq!(fs::read(&destination).unwrap(), b"keep existing");
+        fs::remove_file(&destination).unwrap();
+
+        cut();
+        navigate(&move_target);
+        at(&move_target, "a-guard.txt");
+        let pause = copy_ui::MOVE_TEST_GATE.lock().unwrap();
+        action("win.paste-file");
+        action("win.cancel-file-copy");
+        drop(pause);
+        until(|| copy_noticed("已取消，源文件未移动"), "native pre-rename cancellation");
+        assert_eq!(fs::read(&origin).unwrap(), b"exact moved data");
+        assert!(!destination.exists());
+
+        cut();
+        navigate(&move_target);
+        at(&move_target, "a-guard.txt");
+        let pause = copy_ui::MOVE_TEST_GATE.lock().unwrap();
+        action("win.paste-file");
+        navigate(&move_other);
+        at(&move_other, "a-guard.txt");
+        assert!(origin.exists());
+        assert!(!destination.exists());
+        drop(pause);
+        let held_target = trash_ui::display_path(destination.as_os_str());
+        until(
+            || status_matches(&|text| text.starts_with("已移动：") && text.ends_with(&held_target)),
+            "native move completion named the held destination",
+        );
+        assert!(!origin.exists());
+        assert!(!move_other.join(raw_move).exists());
+        let published = fs::metadata(&destination).unwrap();
+        assert_eq!((published.dev(), published.ino()), (observed.dev(), observed.ino()));
+        assert_eq!(fs::read(&destination).unwrap(), b"exact moved data");
+        action("win.paste-file");
+        assert!(copy_noticed("请先复制或剪切"));
+        assert!(!move_other.join(raw_move).exists());
+        assert_eq!(text_clipboard(&display), "cut-clipboard-guard");
+        println!(
+            "GTK4 Wayland cut and paste: native identity retained, no overwrite, cancel, no replay"
         );
 
         let find_path = root.join("finder-native");
