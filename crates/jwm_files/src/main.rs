@@ -3002,10 +3002,16 @@ mod wayland_acceptance {
             "per-file result summary",
         );
         assert_eq!(fs::read(batch_target.join("a-合同.txt")).unwrap(), b"first");
-        assert_eq!(fs::read(batch_target.join("b-clash.txt")).unwrap(), b"original");
+        assert_eq!(
+            fs::read(batch_target.join("b-clash.txt")).unwrap(),
+            b"original"
+        );
         assert_eq!(fs::read(batch_target.join(raw_batch)).unwrap(), b"raw");
         assert_eq!(fs::read(batch_source.join("a-合同.txt")).unwrap(), b"first");
-        assert_eq!(fs::read(batch_source.join("b-clash.txt")).unwrap(), b"source");
+        assert_eq!(
+            fs::read(batch_source.join("b-clash.txt")).unwrap(),
+            b"source"
+        );
         assert_eq!(fs::read(batch_source.join(raw_batch)).unwrap(), b"raw");
         action("win.batch-copy-result");
         let report = app
@@ -3021,12 +3027,15 @@ mod wayland_acceptance {
             .unwrap();
         assert!(!details.is_editable());
         let detail_buffer = details.buffer();
-        let detail_text = detail_buffer.text(&detail_buffer.start_iter(), &detail_buffer.end_iter(), true);
+        let detail_text =
+            detail_buffer.text(&detail_buffer.start_iter(), &detail_buffer.end_iter(), true);
         assert!(detail_text.contains("a-合同.txt：已复制"));
         assert!(detail_text.contains("b-clash.txt：目标同名，未覆盖"));
         assert!(detail_text.contains("z-raw%\\x80：已复制"));
         report.close();
-        println!("GTK4 Wayland batch copy: native picker, exact path bytes, conflict kept, per-file result");
+        println!(
+            "GTK4 Wayland batch copy: native picker, exact path bytes, conflict kept, per-file result"
+        );
 
         let find_path = root.join("finder-native");
         let other_path = root.join("finder-unrelated");

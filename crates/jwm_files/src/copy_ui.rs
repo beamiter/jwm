@@ -309,8 +309,7 @@ fn paste_batch(
                 })
                 .map_err(|error| format!("批量复制未开始：{error:?}"));
             let _ = send.send(result);
-        })
-    {
+        }) {
         Ok(_) => {
             browser.last_copy_batch = None;
             browser.mutation = Some(MutationWork {

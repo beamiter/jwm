@@ -95,7 +95,9 @@ fn show(
     location.set_xalign(0.0);
     location.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     column.append(&location);
-    let hint = gtk::Label::new(Some("用 Ctrl 或 Shift 选择普通文件。粘贴时会跳过同名项目。"));
+    let hint = gtk::Label::new(Some(
+        "用 Ctrl 或 Shift 选择普通文件。粘贴时会跳过同名项目。",
+    ));
     hint.set_xalign(0.0);
     hint.set_wrap(true);
     column.append(&hint);
@@ -228,7 +230,10 @@ fn show(
             path: path.clone(),
             files,
         })));
-        notice(&status, &format!("已选定复制 {count} 个文件。请到目标目录粘贴。"));
+        notice(
+            &status,
+            &format!("已选定复制 {count} 个文件。请到目标目录粘贴。"),
+        );
         panel.close();
     });
     panel.present();

@@ -151,7 +151,10 @@ mod tests {
     #[test]
     fn mixed_result_reports_cancel_without_negating_published_items() {
         let report = BatchCopyReport::from_items(vec![
-            ("文档".into(), CopyBatchItem::Published(CopyReceipt { bytes: 5 })),
+            (
+                "文档".into(),
+                CopyBatchItem::Published(CopyReceipt { bytes: 5 }),
+            ),
             ("同名".into(), CopyBatchItem::ExistingTarget),
             (
                 OsString::from_vec(b"raw%\x80".to_vec()),
