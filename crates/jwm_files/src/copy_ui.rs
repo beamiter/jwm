@@ -19,10 +19,10 @@ use std::{
 
 #[derive(Clone)]
 pub(super) struct StashedCopy {
-    parent: Arc<DirectoryHandle>,
-    path: PathBuf,
-    name: OsString,
-    identity: FileIdentity,
+    pub(super) parent: Arc<DirectoryHandle>,
+    pub(super) path: PathBuf,
+    pub(super) name: OsString,
+    pub(super) identity: FileIdentity,
 }
 
 #[derive(Clone)]
@@ -214,7 +214,7 @@ fn paste_with_mode(
     mode: PasteMode,
 ) {
     let keep_both = mode == PasteMode::Sibling;
-    let mut browser = state.borrow_mut();
+    let browser = state.borrow();
     if browser.mutation.is_some() || browser.dialog_open {
         notice(status, "有文件操作正在进行，请稍候。");
         return;
@@ -258,21 +258,36 @@ fn paste_with_mode(
             return;
         }
     };
+    drop(browser);
+    let _ = dispatch_regular_copy(state, status, parent, path, source, keep_both);
+}
+
+/// True indicates worker dispatch, not a disk result. A future internal
+/// drop may acknowledge the gesture here, but only the worker publishes.
+pub(super) fn dispatch_regular_copy(
+    state: &Shared,
+    status: &gtk::Label,
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+    source: StashedCopy,
+    keep_both: bool,
+) -> bool {
+    let mut browser = state.borrow_mut();
+    if browser.mutation.is_some() || browser.dialog_open {
+        notice(status, "有文件操作正在进行，请稍候。");
+        return false;
+    }
     if !keep_both && parent.identity() == source.parent.identity() {
         notice(status, "请选择不同的目标目录。同名项目不会被覆盖。");
-        return;
+        return false;
     }
     let (target, target_path) = (parent.clone(), path.clone());
     let cancellation = Cancellation::default();
     let on_worker = cancellation.clone();
     let label = format!(
         "{} → {}",
-        source
-            .path
-            .join(&source.name)
-            .to_string_lossy()
-            .escape_debug(),
-        path.to_string_lossy().escape_debug()
+        crate::trash_ui::display_path(source.path.join(&source.name).as_os_str()),
+        crate::trash_ui::display_path(path.as_os_str())
     );
     let (send, reply) = mpsc::sync_channel(1);
     let wake = browser.wake.clone();
@@ -313,8 +328,12 @@ fn paste_with_mode(
                 copy: Some((cancellation, label.clone())),
             });
             notice(status, &format!("正在复制：{label}"));
+            true
         }
-        Err(error) => notice(status, &format!("无法启动复制：{error}")),
+        Err(error) => {
+            notice(status, &format!("无法启动复制：{error}"));
+            false
+        }
     }
 }
 

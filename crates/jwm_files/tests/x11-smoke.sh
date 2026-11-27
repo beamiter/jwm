@@ -673,3 +673,15 @@ property_window=$(timeout 10s xdotool search --sync --onlyvisible --name '^JWM F
 printf 'GTK4 X11 FileManager1: ShowItemProperties mapped a native panel without convenience activation\n'
 
 BUS
+
+# A separate display with room for two visible, non-overlapping Files windows.
+# The test drives XTEST events only after authenticating the private display.
+mkdir -m700 "$root/dnd"
+(
+  cd "$(dirname "$0")/.."
+  dbus-run-session -- xvfb-run -a -s '-screen 0 2400x1000x24 -nolisten tcp -noreset' bash -c '
+    GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none \
+    JWM_FILE_DND_PRIVATE_DISPLAY="$DISPLAY" JWM_FILE_DND_FIXTURE="$1" \
+    timeout 50s cargo test --locked wayland_acceptance::native_x11_drop_copies_one_exact_file -- --exact --ignored --nocapture
+  ' files-dnd "$root/dnd"
+)
