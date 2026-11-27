@@ -9,6 +9,7 @@ import select
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -110,7 +111,8 @@ def run(args, root, log):
     chosen = root / os.fsdecode(b"held-%20-\x80")
     chosen.mkdir()
     expected = identity(chosen)
-    prepare_terminal_fixture(root, chosen, env, foot)
+    if not args.drag_test:
+        prepare_terminal_fixture(root, chosen, env, foot)
     owned = []
 
     def spawn(argv, child_env=None, **kw):
@@ -148,9 +150,10 @@ def run(args, root, log):
             os.close(read)
             if write is not None:
                 os.close(write)
+        width, height = (1920, 1000) if args.drag_test else (1280, 800)
         read, write = os.pipe()
         try:
-            spawn(["Xvfb", "-displayfd", write, "-screen", "0", "1280x800x24",
+            spawn(["Xvfb", "-displayfd", write, "-screen", "0", f"{width}x{height}x24",
                    "-nolisten", "tcp", "-noreset"], pass_fds=(write,))
             os.close(write)
             write = None
@@ -173,7 +176,7 @@ def run(args, root, log):
         spawn([args.jwm, "--backend", "wayland-winit"])
         outer = bounded(lambda: command("xdotool", "search", "--name", "JWM ").strip(),
                         "outer JWM output").splitlines()[0]
-        command("xdotool", "windowsize", outer, "1280", "800")
+        command("xdotool", "windowsize", outer, width, height)
         command("xdotool", "windowfocus", outer)
         bounded(lambda: jwm_query("get_monitors"), "real nested output")
         runtime = Path(env["XDG_RUNTIME_DIR"])
@@ -182,6 +185,26 @@ def run(args, root, log):
         native = dict(env, WAYLAND_DISPLAY=socket, GDK_BACKEND="wayland",
                       GSK_RENDERER="cairo", GTK_A11Y="none")
         del native["DISPLAY"]
+        if args.drag_test:
+            native.update(
+                JWM_FILE_DND_FIXTURE=str(root),
+                JWM_FILE_DND_POINTER_DRIVER=str(Path(__file__).resolve()),
+                JWM_FILE_DND_X11_HOST_DISPLAY=env["DISPLAY"],
+                JWM_FILE_DND_OUTER=outer,
+                JWM_FILE_DND_JWM_TOOL=str(args.jwm_tool),
+            )
+            fixture = spawn([args.drag_test,
+                             "wayland_acceptance::native_jwm_wayland_drop_copies_one_exact_file",
+                             "--exact", "--ignored", "--nocapture"], native)
+            assert fixture.wait(timeout=60) == 0, "native Files pointer fixture failed"
+            output = Path(log.name).read_text(errors="replace").splitlines()
+            for marker in (
+                "GTK4 Wayland drag copy: hover and outside release wrote nothing; conflict retained exact target",
+                "GTK4 Wayland drag copy: real inter-window pointer copied exact native bytes and kept source and clipboard",
+            ):
+                assert output.count(marker) == 1, marker
+                print(marker)
+            return
         browser = spawn([args.files, "--", chosen], native)
         displayed = os.fsencode(chosen).decode("utf-8", "replace")
         native_browser = bounded(lambda: exact_window(browser.pid, "JWM Files · " + displayed),
@@ -223,10 +246,63 @@ def run(args, root, log):
                 child.wait(timeout=2)
 
 
+def drag_pointer(root, tool, outer, host_display, window_pid, role, x, y):
+    """Translate a fixture's native client point and inject into its private host."""
+    assert host_display.startswith(":") and host_display[1:].isdecimal()
+    assert role in ("source", "target")
+    assert int(window_pid) > 1 and int(outer) > 1
+    x, y = int(x), int(y)
+    assert 0 <= x < 2400 and 0 <= y < 1200
+
+    def command(argv, env):
+        return subprocess.check_output(argv, env=env, text=True, timeout=5)
+
+    client_env = dict(os.environ)
+    assert "DISPLAY" not in client_env
+    runtime = Path(client_env["XDG_RUNTIME_DIR"])
+    assert runtime == root / "runtime" and runtime.is_dir()
+    assert (runtime / client_env["WAYLAND_DISPLAY"]).is_socket()
+    rows = json.loads(command([tool, "msg", "get_windows", "--raw"], client_env))
+    assert rows.get("success", True), rows
+    rows = [row for row in rows["data"] if row.get("pid") == int(window_pid)]
+    assert len(rows) == 2, rows
+
+    def rect(kind):
+        title = f"JWM Files · {root / ('files-dnd-' + kind)}"
+        found = [row for row in rows if row.get("name") == title]
+        assert len(found) == 1, rows
+        row = found[0]
+        return tuple(int(row[key]) for key in ("x", "y", "w", "h"))
+
+    a, b = rect("source"), rect("target")
+    assert all(w >= 250 and h >= 250 for _, _, w, h in (a, b)), (a, b)
+    assert (a[0] + a[2] <= b[0] or b[0] + b[2] <= a[0]
+            or a[1] + a[3] <= b[1] or b[1] + b[3] <= a[1]), (a, b)
+    wx, wy, ww, wh = a if role == "source" else b
+    assert x < ww and y < wh, (role, x, y, a, b)
+    gx, gy = wx + x, wy + y
+    assert 0 <= gx < 1920 and 0 <= gy < 1000, (gx, gy)
+    host_env = dict(client_env, DISPLAY=host_display)
+    del host_env["WAYLAND_DISPLAY"]
+    command(["xdotool", "mousemove", "--window", outer, str(gx), str(gy)], host_env)
+
+
 def main():
+    if len(sys.argv) == 5 and sys.argv[1] == "--fixture-pointer":
+        drag_pointer(
+            Path(os.environ["JWM_FILE_DND_FIXTURE"]),
+            os.environ["JWM_FILE_DND_JWM_TOOL"],
+            os.environ["JWM_FILE_DND_OUTER"],
+            os.environ["JWM_FILE_DND_X11_HOST_DISPLAY"],
+            os.getppid(), *sys.argv[2:],
+        )
+        return
     parser = argparse.ArgumentParser(description=__doc__)
-    for option in ("jwm", "jwm-tool", "files"):
+    for option in ("jwm", "jwm-tool"):
         parser.add_argument("--" + option, type=lambda p: Path(p).resolve(), required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--files", type=lambda p: Path(p).resolve())
+    group.add_argument("--drag-test", type=lambda p: Path(p).resolve())
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="jwm-files-wayland-") as directory:
         root = Path(directory)

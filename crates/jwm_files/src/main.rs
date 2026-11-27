@@ -1865,13 +1865,23 @@ mod wayland_acceptance {
     #[test]
     #[ignore = "requires a private native X11 display, XTEST and xdotool"]
     fn native_x11_drop_copies_one_exact_file() {
+        run_native_drag_copy(false);
+    }
+
+    #[test]
+    #[ignore = "requires a private nested JWM Wayland compositor and physical host pointer"]
+    fn native_jwm_wayland_drop_copies_one_exact_file() {
+        run_native_drag_copy(true);
+    }
+
+    fn run_native_drag_copy(wayland: bool) {
         use std::{ffi::OsStr, os::unix::fs::MetadataExt, process::Command};
 
-        fn xd(args: &[&str]) -> String {
-            let out = Command::new("xdotool").args(args).output().unwrap();
+        fn command_output(command: &mut Command) -> String {
+            let out = command.output().unwrap();
             assert!(
                 out.status.success(),
-                "xdotool {args:?}: {}",
+                "{command:?}: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
             String::from_utf8(out.stdout).unwrap().trim().to_owned()
@@ -1908,17 +1918,41 @@ mod wayland_acceptance {
             ((x - tx).round() as i32, (y - ty).round() as i32)
         }
 
-        let display_name = std::env::var("JWM_FILE_DND_PRIVATE_DISPLAY").unwrap();
+        let backend = if wayland { "wayland" } else { "x11" };
+        assert_eq!(std::env::var("GDK_BACKEND").as_deref(), Ok(backend));
+        let display_key = if wayland {
+            "JWM_FILE_DND_X11_HOST_DISPLAY"
+        } else {
+            "JWM_FILE_DND_PRIVATE_DISPLAY"
+        };
+        let display_name = std::env::var(display_key).unwrap();
         assert!(display_name.starts_with(':'));
-        assert_eq!(
-            std::env::var("DISPLAY").as_deref(),
-            Ok(display_name.as_str())
-        );
-        assert_eq!(xd(&["getdisplaygeometry"]), "2400 1000");
-        assert_eq!(std::env::var("GDK_BACKEND").as_deref(), Ok("x11"));
+        let xd = |args: &[&str]| {
+            command_output(
+                Command::new("xdotool")
+                    .args(args)
+                    .env("DISPLAY", &display_name),
+            )
+        };
+        if wayland {
+            assert!(std::env::var_os("DISPLAY").is_none());
+            assert_eq!(xd(&["getdisplaygeometry"]), "1920 1000");
+        } else {
+            assert_eq!(
+                std::env::var("DISPLAY").as_deref(),
+                Ok(display_name.as_str())
+            );
+            assert_eq!(xd(&["getdisplaygeometry"]), "2400 1000");
+        }
         gtk::init().unwrap();
         let display = gtk::gdk::Display::default().unwrap();
-        assert_eq!(display.type_().name(), "GdkX11Display");
+        let native_name = if wayland {
+            "GdkWaylandDisplay"
+        } else {
+            "GdkX11Display"
+        };
+        assert_eq!(display.type_().name(), native_name);
+        let backend_label = if wayland { "Wayland" } else { "X11" };
 
         let root = PathBuf::from(std::env::var_os("JWM_FILE_DND_FIXTURE").unwrap());
         let source = root.join("files-dnd-source");
@@ -1947,12 +1981,18 @@ mod wayland_acceptance {
         let buffer = copy_ui::CopyBuffer::default();
         open_window(&app, &source, &root, &[], &buffer);
         let from = app.active_window().unwrap();
+        if wayland {
+            from.set_decorated(false);
+        }
         open_window(&app, &target, &root, &[], &buffer);
         let to = app
             .windows()
             .into_iter()
             .find(|window| window != &from)
             .expect("the second Files window");
+        if wayland {
+            to.set_decorated(false);
+        }
         let get_model = |window: &gtk::Window| {
             descendants(window.upcast_ref())
                 .into_iter()
@@ -1980,21 +2020,41 @@ mod wayland_acceptance {
         );
         selection.set_selected(0);
 
-        let xid = |pattern| {
-            let matches = xd(&["search", "--onlyvisible", "--name", pattern]);
-            assert_eq!(matches.lines().count(), 1);
-            assert_eq!(
-                xd(&["getwindowpid", &matches]),
-                std::process::id().to_string()
-            );
-            matches
+        let x11 = if wayland {
+            None
+        } else {
+            let xid = |pattern| {
+                let matches = xd(&["search", "--onlyvisible", "--name", pattern]);
+                assert_eq!(matches.lines().count(), 1);
+                assert_eq!(
+                    xd(&["getwindowpid", &matches]),
+                    std::process::id().to_string()
+                );
+                matches
+            };
+            let sid = xid("^JWM Files · .*/files-dnd-source$");
+            let tid = xid("^JWM Files · .*/files-dnd-target$");
+            assert_ne!(sid, tid);
+            xd(&["windowmove", &sid, "30", "45"]);
+            xd(&["windowmove", &tid, "1240", "45"]);
+            Some((sid, tid))
         };
-        let sid = xid("^JWM Files · .*/files-dnd-source$");
-        let tid = xid("^JWM Files · .*/files-dnd-target$");
-        assert_ne!(sid, tid);
-        xd(&["windowmove", &sid, "30", "45"]);
-        xd(&["windowmove", &tid, "1240", "45"]);
-        pump_for(240);
+        let move_in = |role: &str, x: i32, y: i32| {
+            let (x, y) = (x.to_string(), y.to_string());
+            if let Some((sid, tid)) = &x11 {
+                let id = if role == "source" { sid } else { tid };
+                xd(&["mousemove", "--window", id, &x, &y]);
+            } else {
+                let driver = std::env::var_os("JWM_FILE_DND_POINTER_DRIVER").unwrap();
+                command_output(Command::new("/usr/bin/python3").arg(driver).args([
+                    "--fixture-pointer",
+                    role,
+                    &x,
+                    &y,
+                ]));
+            }
+        };
+        pump_for(300);
 
         let status = |predicate: &dyn Fn(&str) -> bool| {
             descendants(to.upcast_ref()).into_iter().any(|widget| {
@@ -2012,20 +2072,16 @@ mod wayland_acceptance {
         let hover = || {
             let (sx, sy) = widget_center(&from, &handle);
             let (tx, ty) = widget_center(&to, &drop_label);
-            let (sx, sy) = (sx.to_string(), sy.to_string());
-            let (tx, ty) = (tx.to_string(), ty.to_string());
-            xd(&["mousemove", "--window", &sid, &sx, &sy]);
+            move_in("source", sx, sy);
             pump_for(60);
             xd(&["mousedown", "1"]);
             // GTK 4.14 requires 100 ms after press before threshold motion starts a drag.
             pump_for(180);
-            let motion_x = (sx.parse::<i32>().unwrap() + 32).to_string();
-            xd(&["mousemove", "--window", &sid, &motion_x, &sy]);
+            move_in("source", sx + 32, sy);
             until(|| drag_source.drag().is_some(), "XTEST started a GTK drag");
-            xd(&["mousemove", "--window", &tid, &tx, &ty]);
+            move_in("target", tx, ty);
             pump_for(160);
-            let motion_x = (tx.parse::<i32>().unwrap() + 4).to_string();
-            xd(&["mousemove", "--window", &tid, &motion_x, &ty]);
+            move_in("target", tx + 4, ty);
             until(
                 || {
                     drop_label
@@ -2041,7 +2097,12 @@ mod wayland_acceptance {
 
         hover();
         assert!(!output.exists(), "hover must not publish a file");
-        xd(&["mousemove", "1150", "950"]);
+        if wayland {
+            let (sx, sy) = widget_center(&from, &handle);
+            move_in("source", sx, sy - 75);
+        } else {
+            xd(&["mousemove", "1150", "950"]);
+        }
         pump_for(120);
         xd(&["mouseup", "1"]);
         until(
@@ -2068,7 +2129,7 @@ mod wayland_acceptance {
         assert_eq!(source_id(&input), original);
         assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
         println!(
-            "GTK4 X11 drag copy: hover and outside release wrote nothing; conflict retained exact target"
+            "GTK4 {backend_label} drag copy: hover and outside release wrote nothing; conflict retained exact target"
         );
 
         fs::remove_file(&output).unwrap();
@@ -2095,7 +2156,7 @@ mod wayland_acceptance {
         assert_eq!(fs::read(&lookalike).unwrap(), b"different native leaf");
         assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
         println!(
-            "GTK4 X11 drag copy: real inter-window pointer copied exact native bytes and kept source and clipboard"
+            "GTK4 {backend_label} drag copy: real inter-window pointer copied exact native bytes and kept source and clipboard"
         );
     }
 
