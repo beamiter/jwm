@@ -2030,9 +2030,9 @@ mod wayland_acceptance {
                     drop_label
                         .state_flags()
                         .contains(gtk::StateFlags::DROP_ACTIVE)
-                        && drag_source
-                            .drag()
-                            .is_some_and(|drag| drag.selected_action() == gtk::gdk::DragAction::COPY)
+                        && drag_source.drag().is_some_and(|drag| {
+                            drag.selected_action() == gtk::gdk::DragAction::COPY
+                        })
                 },
                 "the other Files window negotiated COPY with the live drag",
             );
