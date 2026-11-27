@@ -1,6 +1,7 @@
 //! Strict metadata-only preflight for a future atomic directory copy.
 use crate::{
-    Cancellation, DirectoryHandle, FileIdentity, FileKind, ListError, WalkOptions, visit_local_index,
+    Cancellation, DirectoryHandle, FileIdentity, FileKind, ListError, WalkOptions,
+    visit_local_index,
 };
 use std::path::{Path, PathBuf};
 

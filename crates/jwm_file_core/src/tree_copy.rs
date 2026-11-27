@@ -82,10 +82,7 @@ fn parts(path: &Path) -> Result<(&Path, &OsStr), TreeCopyError> {
     Ok((parent, name))
 }
 
-fn child(
-    parent: &DirectoryHandle,
-    name: &OsStr,
-) -> Result<(FileIdentity, FileType), Errno> {
+fn child(parent: &DirectoryHandle, name: &OsStr) -> Result<(FileIdentity, FileType), Errno> {
     let stat = fs::statat(&parent.fd, name, AtFlags::SYMLINK_NOFOLLOW)?;
     Ok((
         FileIdentity {
@@ -109,9 +106,7 @@ fn remove_created(tree: &DirectoryHandle, created: &[Created]) -> bool {
             all = false;
             continue;
         };
-        if parent.identity() != item.parent
-            || child(&parent, name) != Ok((item.child, item.kind))
-        {
+        if parent.identity() != item.parent || child(&parent, name) != Ok((item.child, item.kind)) {
             all = false;
             continue;
         }
@@ -157,7 +152,8 @@ fn fill_tree(
                 if child(&origin, name) != Ok((entry.identity, FileType::Directory)) {
                     return Err(TreeCopyError::SourceChanged);
                 }
-                fs::mkdirat(&target.fd, name, Mode::RWXU).map_err(|e| TreeCopyError::Io(e.into()))?;
+                fs::mkdirat(&target.fd, name, Mode::RWXU)
+                    .map_err(|e| TreeCopyError::Io(e.into()))?;
                 dirs += 1;
                 FileType::Directory
             }
@@ -224,7 +220,10 @@ fn validate_staging(
     cancel: &Cancellation,
 ) -> Result<(), TreeCopyError> {
     let observed = crate::plan_tree_copy(path, tree.identity(), cancel).map_err(|error| {
-        if matches!(error, crate::TreeCopyPlanError::Walk(crate::ListError::Cancelled)) {
+        if matches!(
+            error,
+            crate::TreeCopyPlanError::Walk(crate::ListError::Cancelled)
+        ) {
             TreeCopyError::Cancelled
         } else {
             TreeCopyError::StagingChanged
@@ -299,10 +298,19 @@ pub fn copy_tree_no_replace(
     let staging_path = displayed_target.join(&staging_name).join(STAGED_ROOT);
     let mut created = Vec::with_capacity(plan.entries.len());
     let operation = (|| {
-        let counts = fill_tree(plan, &measurement, &tree, &staging_path, cancel, &mut created)?;
+        let counts = fill_tree(
+            plan,
+            &measurement,
+            &tree,
+            &staging_path,
+            cancel,
+            &mut created,
+        )?;
         validate_staging(&tree, &staging_path, &created, cancel)?;
         check_tree_copy_target(plan, target, displayed_target, cancel).map_err(from_target)?;
-        measurement.validate_current(plan, cancel).map_err(from_payload)?;
+        measurement
+            .validate_current(plan, cancel)
+            .map_err(from_payload)?;
         same_destination(target, displayed_target)?;
         check(cancel)?;
         stage.publish(&tree, name).map_err(|error| {
@@ -357,8 +365,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let base = std::env::temp_dir()
-                .join(format!("jwm-tree-copy-{}-{stamp}", std::process::id()));
+            let base =
+                std::env::temp_dir().join(format!("jwm-tree-copy-{}-{stamp}", std::process::id()));
             files::DirBuilder::new().mode(0o700).create(&base).unwrap();
             for name in ["source", "target"] {
                 files::create_dir(base.join(name)).unwrap();
@@ -426,7 +434,10 @@ mod tests {
             b"bytes"
         );
         assert_eq!(files::read(target.join("published/zero")).unwrap(), b"");
-        assert_eq!(files::read(source.join("nested").join(raw)).unwrap(), b"bytes");
+        assert_eq!(
+            files::read(source.join("nested").join(raw)).unwrap(),
+            b"bytes"
+        );
         assert_eq!(files::read_dir(target).unwrap().count(), 1);
     }
 
@@ -537,7 +548,11 @@ mod tests {
                 )
             },
         );
-        let Err(TreeCopyError::CleanupIncomplete { cause, staging_name }) = result else {
+        let Err(TreeCopyError::CleanupIncomplete {
+            cause,
+            staging_name,
+        }) = result
+        else {
             panic!("untracked stage content must be retained");
         };
         assert!(matches!(*cause, TreeCopyError::StagingChanged));
@@ -545,7 +560,10 @@ mod tests {
         let residue = target.join(staging_name).join(STAGED_ROOT);
         assert!(!residue.join("leaf").exists());
         assert_eq!(files::read(residue.join("foreign")).unwrap(), b"preserve");
-        assert_eq!(files::read(fixture.source().join("leaf")).unwrap(), b"source");
+        assert_eq!(
+            files::read(fixture.source().join("leaf")).unwrap(),
+            b"source"
+        );
     }
 
     #[test]

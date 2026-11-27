@@ -43,7 +43,10 @@ fn stat_identity(stat: &fs::Stat) -> FileIdentity {
 }
 
 fn private_error() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, "copy staging requires a private writable destination")
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "copy staging requires a private writable destination",
+    )
 }
 
 fn open_dir(parent: &DirectoryHandle, name: &OsStr) -> io::Result<DirectoryHandle> {
@@ -122,24 +125,29 @@ impl<'a> Stage<'a> {
             || current.st_uid != geteuid().as_raw()
             || current.st_mode & 0o777 != 0o700
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "copy staging folder changed"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "copy staging folder changed",
+            ));
         }
         Ok(())
     }
 
-    pub(super) fn publish(
-        &self,
-        tree: &DirectoryHandle,
-        final_name: &OsStr,
-    ) -> io::Result<()> {
+    pub(super) fn publish(&self, tree: &DirectoryHandle, final_name: &OsStr) -> io::Result<()> {
         if !crate::mkdir::single_name(final_name) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected a single final name"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a single final name",
+            ));
         }
         let current = fs::statat(&self.wrapper.fd, STAGED_ROOT, AtFlags::SYMLINK_NOFOLLOW)?;
         if FileType::from_raw_mode(current.st_mode) != FileType::Directory
             || stat_identity(&current) != tree.identity()
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "staged folder changed"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged folder changed",
+            ));
         }
         self.check_wrapper()?;
         fs::renameat_with(
@@ -157,7 +165,10 @@ impl<'a> Stage<'a> {
         if FileType::from_raw_mode(current.st_mode) != FileType::Directory
             || stat_identity(&current) != tree.identity()
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "staged folder changed"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged folder changed",
+            ));
         }
         fs::unlinkat(&self.wrapper.fd, STAGED_ROOT, AtFlags::REMOVEDIR)?;
         Ok(())
