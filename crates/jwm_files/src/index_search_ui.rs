@@ -1,6 +1,6 @@
 //! Explicit, read-only filename lookup below the currently loaded directory.
 use crate::index_worker::IndexWorker;
-use crate::{Shared, trash_ui};
+use crate::{Shared, native_path, trash_ui};
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
@@ -76,6 +76,13 @@ fn current(scope: &BrowserScope) -> bool {
             .is_some_and(|parent| parent.identity() == scope.2.identity())
 }
 
+fn clear_results(list: &gtk::ListBox, keys: &RefCell<Vec<Vec<u8>>>) {
+    keys.borrow_mut().clear();
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+}
+
 fn ready_label(summary: WalkSummary) -> String {
     format!(
         "目录已读取，可输入文件名。已跳过 {} 个挂载点。",
@@ -141,9 +148,10 @@ fn show(
     info.set_xalign(0.0);
     info.set_wrap(true);
     column.append(&info);
-    let results = gtk::TextView::builder()
-        .editable(false)
-        .monospace(true)
+    let keys = Rc::new(RefCell::new(Vec::<Vec<u8>>::new()));
+    let results = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Single)
+        .activate_on_single_click(false)
         .build();
     results.set_widget_name("jwm-files-index-results");
     let scroll = gtk::ScrolledWindow::builder()
@@ -151,16 +159,65 @@ fn show(
         .child(&results)
         .build();
     column.append(&scroll);
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    footer.set_halign(gtk::Align::End);
+    let copy = gtk::Button::with_label("复制完整路径");
+    copy.set_widget_name("jwm-files-index-copy-path");
+    copy.set_sensitive(false);
+    footer.append(&copy);
     let close = gtk::Button::with_label("关闭");
-    close.set_halign(gtk::Align::End);
     let panel_ref = panel.downgrade();
     close.connect_clicked(move |_| {
         if let Some(panel) = panel_ref.upgrade() {
             panel.close();
         }
     });
-    column.append(&close);
+    footer.append(&close);
+    column.append(&footer);
     panel.set_child(Some(&column));
+    {
+        let copy = copy.downgrade();
+        results.connect_row_selected(move |_, row| {
+            if let Some(copy) = copy.upgrade() {
+                copy.set_sensitive(row.is_some());
+            }
+        });
+    }
+    {
+        let (results, info) = (results.downgrade(), info.downgrade());
+        let (keys, scope, closed) = (keys.clone(), scope.clone(), closed.clone());
+        copy.connect_clicked(move |copy| {
+            let (Some(results), Some(info)) = (results.upgrade(), info.upgrade()) else {
+                return;
+            };
+            if closed.get() || !current(&scope) {
+                clear_results(&results, &keys);
+                copy.set_sensitive(false);
+                info.set_text("当前目录已变化。请关闭后重新打开搜索。");
+                return;
+            }
+            let Some(row) = results.selected_row() else {
+                return;
+            };
+            let Ok(i) = usize::try_from(row.index()) else {
+                return;
+            };
+            let keys = keys.borrow();
+            let Some(raw) = keys.get(i) else {
+                return;
+            };
+            let path = scope.1.join(OsStr::from_bytes(raw));
+            let (text, uri) = native_path::path_text(&path);
+            gtk::prelude::WidgetExt::display(copy)
+                .clipboard()
+                .set_text(&text);
+            info.set_text(if uri {
+                "已复制文件 URI，保留完整路径。"
+            } else {
+                "已复制完整路径。"
+            });
+        });
+    }
 
     {
         let (worker, closed, queued) = (worker.clone(), closed.clone(), queued.clone());
@@ -179,11 +236,12 @@ fn show(
             queued.clone(),
         );
         let (search, info, results) = (search.downgrade(), info.downgrade(), results.downgrade());
+        let keys = keys.clone();
         entry.connect_changed(move |entry| {
             generation.set(generation.get().wrapping_add(1));
             queued.set(None);
             if let Some(results) = results.upgrade() {
-                results.buffer().set_text("");
+                clear_results(&results, &keys);
             }
             if loaded.get() {
                 if let Some(info) = info.upgrade() {
@@ -214,6 +272,7 @@ fn show(
             closed.clone(),
             queued.clone(),
         );
+        let keys = keys.clone();
         search.connect_clicked(move |search| {
             if closed.get() || worker.borrow().is_none() {
                 return;
@@ -226,6 +285,9 @@ fn show(
             };
             if !current(&scope) {
                 queued.set(None);
+                if let Some(results) = results.upgrade() {
+                    clear_results(&results, &keys);
+                }
                 info_live.set_text("当前目录已变化。请关闭后重新打开搜索。");
                 search.set_sensitive(false);
                 return;
@@ -248,6 +310,9 @@ fn show(
                 return;
             };
             pending.set(Some(epoch));
+            if let Some(results) = results.upgrade() {
+                clear_results(&results, &keys);
+            }
             search.set_sensitive(false);
             info_live.set_text("正在查找…");
             let (entry, info, results, search) = (
@@ -263,6 +328,7 @@ fn show(
                 closed.clone(),
                 queued.clone(),
             );
+            let keys = keys.clone();
             glib::spawn_future_local(async move {
                 let response = answer.await;
                 pending.set(None);
@@ -279,7 +345,7 @@ fn show(
                 };
                 if !current(&scope) {
                     queued.set(None);
-                    results.buffer().set_text("");
+                    clear_results(&results, &keys);
                     info.set_text("当前目录已变化。请关闭后重新打开搜索。");
                     return;
                 }
@@ -293,13 +359,18 @@ fn show(
                 }
                 match response {
                     Ok(Ok(rows)) => {
-                        let text = rows
-                            .iter()
-                            .map(|raw| trash_ui::display_path(OsStr::from_bytes(raw)))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        results.buffer().set_text(&text);
-                        info.set_text(match rows.len() {
+                        let len = rows.len();
+                        keys.replace(rows);
+                        for raw in keys.borrow().iter() {
+                            let name = trash_ui::display_path(OsStr::from_bytes(raw));
+                            let label = gtk::Label::new(Some(&name));
+                            label.set_xalign(0.0);
+                            label.set_wrap(true);
+                            label.set_margin_top(4);
+                            label.set_margin_bottom(4);
+                            results.append(&label);
+                        }
+                        info.set_text(match len {
                             0 => "没有匹配的文件名。",
                             50 => "显示前 50 个匹配项。可缩小搜索范围。",
                             _ => "匹配的相对路径（只读）：",

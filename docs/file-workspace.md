@@ -172,8 +172,11 @@ closing search discards that request.
 currently loaded local directory and builds a temporary filename index in
 memory. It does not read file contents, include hidden names, follow links or
 cross mount boundaries. Enter searches literal text, including Chinese, and
-shows up to 50 read-only relative paths. The panel does not open results or
-change the current directory. Closing it discards the index; if the bounded
+shows up to 50 read-only relative paths. Select a result and use
+**复制完整路径** to copy it as text, or as a lossless local file URI if its
+native filename cannot be represented as safe single-line UTF-8. Editing or
+resubmitting the query clears the preceding selection. The panel does not open
+results or change the current directory. Closing it discards the index; if the bounded
 scan cannot complete, Files shows an error instead of partial results.
 If Enter is pressed before the index is ready, Files keeps one explicit
 request for the unchanged query.
