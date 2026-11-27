@@ -227,6 +227,7 @@ struct MutationWork {
 enum MutationOutcome {
     FileOperation,
     CopyAsSibling(OsString),
+    TreeCopy(jwm_file_core::TreeCopyReceipt),
     BatchCopy(Vec<(OsString, jwm_file_core::CopyBatchItem)>),
     Rename(Option<RenameReceipt>),
     RenameUndone,
@@ -1430,6 +1431,7 @@ fn open_window_with_tabs(
             && let Some(work) = browser.mutation.take()
         {
             let mut batch = None;
+            let mut tree = None;
             let result = result.map(|outcome| match outcome {
                 MutationOutcome::Rename(receipt) => {
                     browser.rename_undo = receipt.map(Arc::new);
@@ -1441,6 +1443,10 @@ fn open_window_with_tabs(
                 }
                 MutationOutcome::FileOperation => None,
                 MutationOutcome::CopyAsSibling(name) => Some(name),
+                MutationOutcome::TreeCopy(receipt) => {
+                    tree = Some(receipt);
+                    None
+                }
                 MutationOutcome::BatchCopy(items) => {
                     batch = Some(batch_copy_result::BatchCopyReport::from_items(
                         &work.path, items,
@@ -1456,6 +1462,16 @@ fn open_window_with_tabs(
                     .is_some_and(|p| p.identity() == work.parent.identity());
             if let Some(report) = &batch {
                 copy_ui::notice(&copy_status, &report.summary);
+            } else if let Some(receipt) = tree {
+                let mut text = format!(
+                    "已复制文件夹：{} 个文件，{} 个目录。",
+                    receipt.files, receipt.directories
+                );
+                if let Some(residue) = receipt.staging_remains {
+                    text.push_str(" 临时目录可能保留：");
+                    text.push_str(&trash_ui::display_path(&residue));
+                }
+                copy_ui::notice(&copy_status, &text);
             } else if let Some((_, detail)) = &work.copy {
                 let text = match &result {
                     Ok(Some(name)) => format!("已复制为副本：{name:?}"),
@@ -3095,6 +3111,73 @@ mod wayland_acceptance {
         println!(
             "GTK4 Wayland batch copy: native picker, exact path bytes, conflict kept, per-file result"
         );
+
+        let tree_source = root.join("recursive-source");
+        let tree_target = root.join("recursive-target");
+        let picked = tree_source.join("目录副本");
+        let nested = picked.join("sub");
+        fs::create_dir_all(nested.join("empty")).unwrap();
+        fs::create_dir(&tree_target).unwrap();
+        fs::write(tree_target.join("keep.txt"), b"another file").unwrap();
+        let raw_leaf = std::ffi::OsStr::from_bytes(b".raw%\x80");
+        fs::write(nested.join(raw_leaf), b"tree file").unwrap();
+        display.clipboard().set_text("folder-copy-clipboard-guard");
+        navigate(&tree_source);
+        at(&tree_source, "▸ 目录副本");
+        source_selection.set_selected(0);
+        action("win.copy-file");
+        assert!(copy_noticed("已选定复制文件夹："));
+        navigate(&nested);
+        at(&nested, "▸ empty");
+        action("win.paste-file");
+        until(
+            || copy_noticed("不能将文件夹复制到自身或子目录。"),
+            "tree copy rejected its own descendant target",
+        );
+        assert!(!nested.join("目录副本").exists());
+        let shared_target = root.join("recursive-shared");
+        fs::create_dir(&shared_target).unwrap();
+        fs::set_permissions(
+            &shared_target,
+            <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o775),
+        )
+        .unwrap();
+        fs::write(shared_target.join("unchanged.txt"), b"leave this").unwrap();
+        navigate(&shared_target);
+        at(&shared_target, "unchanged.txt");
+        action("win.paste-file");
+        until(
+            || copy_noticed("未向组或其他用户开放写入的目标目录"),
+            "native folder copy explained shared target policy",
+        );
+        assert_eq!(fs::read_dir(&shared_target).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(shared_target.join("unchanged.txt")).unwrap(),
+            b"leave this"
+        );
+        navigate(&tree_target);
+        at(&tree_target, "keep.txt");
+        action("win.paste-file");
+        until(
+            || copy_noticed("已复制文件夹：1 个文件，3 个目录。"),
+            "native folder copy selected source and exact target",
+        );
+        let copied = tree_target.join("目录副本/sub");
+        assert_eq!(fs::read(copied.join(raw_leaf)).unwrap(), b"tree file");
+        assert!(copied.join("empty").is_dir());
+        assert_eq!(fs::read(nested.join(raw_leaf)).unwrap(), b"tree file");
+        at(&tree_target, "▸ 目录副本");
+        fs::write(copied.join(raw_leaf), b"keep my target").unwrap();
+        action("win.paste-file");
+        until(
+            || copy_noticed("目标已有同名项目，未覆盖。"),
+            "native folder copy did not overwrite",
+        );
+        assert_eq!(fs::read(copied.join(raw_leaf)).unwrap(), b"keep my target");
+        assert_eq!(fs::read(nested.join(raw_leaf)).unwrap(), b"tree file");
+        assert_eq!(text_clipboard(&display), "folder-copy-clipboard-guard");
+        assert_eq!(fs::read_dir(&tree_target).unwrap().count(), 2);
+        println!("GTK4 Wayland folder copy: raw leaf and empty directory, descendant and conflict refused");
 
         let find_path = root.join("finder-native");
         let other_path = root.join("finder-unrelated");

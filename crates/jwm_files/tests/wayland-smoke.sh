@@ -69,5 +69,6 @@ grep -F 'GTK4 Wayland location: raw bytes round-tripped through the editable URI
 grep -Fx 'GTK4 Wayland scoped filename search: local Unicode result, no external or hidden results' "$client_log"
 grep -Fx 'GTK4 Wayland scoped search copy: Unicode and exact raw URI, stale rows rejected' "$client_log"
 grep -Fx 'GTK4 Wayland batch copy: native picker, exact path bytes, conflict kept, per-file result' "$client_log"
+grep -Fx 'GTK4 Wayland folder copy: raw leaf and empty directory, descendant and conflict refused' "$client_log"
 grep -F 'GTK4 Wayland find: exact selected row and stale snapshot rejection verified' "$client_log"
 grep -F 'GTK4 Wayland find: one early Enter applied once and an edited query discarded it' "$client_log"
