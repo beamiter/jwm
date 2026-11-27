@@ -15,6 +15,49 @@ use std::{
     path::Path,
 };
 
+#[cfg(test)]
+pub(crate) mod publication_probe {
+    use std::{cell::RefCell, ffi::OsStr};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum Point {
+        Before,
+        After,
+    }
+
+    type Probe = Box<dyn FnMut(Point, &OsStr)>;
+    thread_local! {
+        static ACTIVE: RefCell<Option<Probe>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn with_probe<T>(
+        probe: impl FnMut(Point, &OsStr) + 'static,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                ACTIVE.with(|cell| cell.borrow_mut().take());
+            }
+        }
+        ACTIVE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            assert!(slot.is_none(), "only one test probe per thread");
+            *slot = Some(Box::new(probe));
+        });
+        let _reset = Reset;
+        run()
+    }
+
+    pub(super) fn emit(point: Point, name: &OsStr) {
+        ACTIVE.with(|cell| {
+            if let Some(probe) = cell.borrow_mut().as_mut() {
+                probe(point, name);
+            }
+        });
+    }
+}
+
 pub struct CopySource<'a> {
     pub parent: &'a DirectoryHandle,
     pub displayed_parent: &'a Path,
@@ -365,6 +408,8 @@ impl DirectoryHandle {
             if !same_content_observation(&before, &observed) {
                 return Err(CopyError::SourceChanged);
             }
+            #[cfg(test)]
+            publication_probe::emit(publication_probe::Point::Before, name);
             check(cancel)?;
             fs::linkat(
                 CWD,
@@ -379,7 +424,10 @@ impl DirectoryHandle {
                 } else {
                     io_error(e)
                 }
-            })
+            })?;
+            #[cfg(test)]
+            publication_probe::emit(publication_probe::Point::After, name);
+            Ok(())
         };
         let name = match naming {
             PublishName::Literal(name) => {
