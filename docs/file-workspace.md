@@ -24,7 +24,7 @@ with a private X11 display:
 
 ```sh
 GDK_BACKEND=x11 GSK_RENDERER=cairo JWM_FILE_FRESH_WINDOW_SAMPLES=20 \
-  xvfb-run -a cargo test --locked bench_ui::fresh_window_benchmark -- --exact --ignored --nocapture
+  dbus-run-session -- xvfb-run -a cargo test --locked bench_ui::fresh_window_benchmark -- --exact --ignored --nocapture
 ```
 
 Each sample starts a fresh GTK test client using the same window code,
@@ -180,6 +180,12 @@ requests the configured `xdg-terminal-exec` (or Debian's
 local directory to the terminal's shell helper, not a path to reinterpret
 or a shell command. If the identity or the launch acknowledgement is
 unavailable, it does not report success. No desktop defaults are changed.
+
+CI exercises the shortcut in private X11 with xterm and, separately, in
+JWM's nested native Wayland compositor with foot. Both tests require a
+real terminal PTY and verify the held directory after a synthetic rename
+and replacement. These fixtures do not cover every configured terminal
+or physical Linux desktop.
 
 ### New Folder
 
