@@ -166,6 +166,16 @@ If a search hasn't finished when you press Enter, Files remembers one
 explicit step for that query. Editing the query, changing directories, or
 closing search discards that request.
 
+### Copy interruption review (core only)
+
+The local provider has a bounded record for one copy intent or an observed
+publication. The record retains native path bytes. Review reopens the
+destination directory without following symlinks and checks metadata only.
+A file present with an intent but no publication record is indeterminate.
+Matching metadata is a point-in-time observation, not proof of identity or
+permission to delete, overwrite, or roll back a file. The application does not
+yet write these records or offer copy history or recovery in the UI.
+
 ### Find filenames in subdirectories
 
 **操作 → 查找子目录文件名** is separate from Ctrl+F. It starts only for the
