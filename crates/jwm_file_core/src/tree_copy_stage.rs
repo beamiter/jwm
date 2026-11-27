@@ -18,6 +18,7 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 pub(super) struct StageCreateError {
     pub(super) error: io::Error,
     pub(super) residue: Option<OsString>,
+    pub(super) target_not_private: bool,
 }
 
 impl From<io::Error> for StageCreateError {
@@ -25,6 +26,7 @@ impl From<io::Error> for StageCreateError {
         Self {
             error,
             residue: None,
+            target_not_private: false,
         }
     }
 }
@@ -63,7 +65,11 @@ impl<'a> Stage<'a> {
     pub(super) fn create(parent: &'a DirectoryHandle) -> Result<Self, StageCreateError> {
         let stat = fs::fstat(&parent.fd).map_err(io::Error::from)?;
         if stat.st_uid != geteuid().as_raw() || stat.st_mode & 0o022 != 0 {
-            return Err(private_error().into());
+            return Err(StageCreateError {
+                error: private_error(),
+                residue: None,
+                target_not_private: true,
+            });
         }
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -84,6 +90,7 @@ impl<'a> Stage<'a> {
             let after_mkdir = |error| StageCreateError {
                 error,
                 residue: Some(name.clone()),
+                target_not_private: false,
             };
             let wrapper = open_dir(parent, &name).map_err(&after_mkdir)?;
             let current = fs::fstat(&wrapper.fd)

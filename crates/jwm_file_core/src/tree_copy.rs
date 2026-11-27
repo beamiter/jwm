@@ -20,6 +20,7 @@ use std::{
 pub enum TreeCopyError {
     InvalidName,
     Target(TreeCopyTargetError),
+    TargetNotPrivate,
     SourceChanged,
     StagingChanged,
     ByteBudget,
@@ -270,6 +271,9 @@ pub fn copy_tree_no_replace(
     same_destination(target, displayed_target)?;
     check(cancel)?;
     let stage = Stage::create(target).map_err(|error| {
+        if error.target_not_private {
+            return TreeCopyError::TargetNotPrivate;
+        }
         let cause = TreeCopyError::Io(error.error);
         if let Some(staging_name) = error.residue {
             TreeCopyError::CleanupIncomplete {
@@ -353,7 +357,10 @@ mod tests {
     };
     use std::{
         fs as files,
-        os::unix::{ffi::OsStrExt, fs::DirBuilderExt},
+        os::unix::{
+            ffi::OsStrExt,
+            fs::{DirBuilderExt, PermissionsExt},
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -564,6 +571,23 @@ mod tests {
             files::read(fixture.source().join("leaf")).unwrap(),
             b"source"
         );
+    }
+
+    #[test]
+    fn tree_copy_reports_shared_target_policy_before_writing() {
+        let fixture = Fixture::new();
+        let (plan, held) = fixture.observe();
+        let target = fixture.target();
+        files::set_permissions(&target, files::Permissions::from_mode(0o775)).unwrap();
+        let result = copy_tree_no_replace(
+            &plan,
+            &held,
+            &target,
+            OsStr::new("published"),
+            &Cancellation::default(),
+        );
+        assert!(matches!(result, Err(TreeCopyError::TargetNotPrivate)));
+        assert_eq!(files::read_dir(target).unwrap().count(), 0);
     }
 
     #[test]

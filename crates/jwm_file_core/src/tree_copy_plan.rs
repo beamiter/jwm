@@ -12,6 +12,7 @@ const LIMIT: WalkOptions = WalkOptions {
     show_hidden: true,
 };
 const PATH_BYTES: usize = 4 * 1024 * 1024;
+const ROOT_PATH_BYTES: usize = 4_095;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeCopyEntry {
@@ -106,9 +107,11 @@ fn plan(
 ) -> Result<TreeCopyPlan, TreeCopyPlanError> {
     let mut entries = Vec::new();
     let mut rejected = None;
-    let mut remaining = budget
-        .checked_sub(root.as_os_str().len())
-        .ok_or(TreeCopyPlanError::PathBudget)?;
+    if root.as_os_str().len() > ROOT_PATH_BYTES {
+        return Err(TreeCopyPlanError::PathBudget);
+    }
+    // Root and temporary staging names do not consume the relative tree budget.
+    let mut remaining = budget;
     let summary = visit_local_index(root, identity, options, cancel, |entry| {
         if rejected.is_some() {
             return;
@@ -282,6 +285,25 @@ mod tests {
     }
 
     #[test]
+    fn tree_plan_relative_budget_is_independent_of_absolute_root_length() {
+        let first = Fixture::new();
+        let second = Fixture::new();
+        let long_root = second.0.join("substantially-longer-staging-root");
+        fs::create_dir(&long_root).unwrap();
+        fs::write(first.0.join("leaf"), b"x").unwrap();
+        fs::write(long_root.join("leaf"), b"x").unwrap();
+        let cancel = Cancellation::default();
+        let held = DirectoryHandle::open_without_symlinks(&long_root).unwrap();
+        let short = plan(&first.0, first.identity(), &cancel, LIMIT, 4).unwrap();
+        let long = plan(&long_root, held.identity(), &cancel, LIMIT, 4).unwrap();
+        assert_eq!(short.entries[0].relative, long.entries[0].relative);
+        assert!(matches!(
+            plan(&long_root, held.identity(), &cancel, LIMIT, 3),
+            Err(TreeCopyPlanError::PathBudget)
+        ));
+    }
+
+    #[test]
     fn tree_plan_rejects_budgets_and_prior_cancellation_without_a_partial_result() {
         let root = Fixture::new();
         fs::write(root.0.join("first"), b"a").unwrap();
@@ -297,7 +319,7 @@ mod tests {
             Err(TreeCopyPlanError::Incomplete)
         ));
         assert!(matches!(
-            plan(&root.0, identity, &cancel, LIMIT, root.0.as_os_str().len()),
+            plan(&root.0, identity, &cancel, LIMIT, 0),
             Err(TreeCopyPlanError::PathBudget)
         ));
         cancel.cancel();
