@@ -34,6 +34,14 @@ entries. It reuses a fixture with warm OS caches and includes test
 harness startup. The CI run uses five samples for coverage, not a
 release latency gate. This is not a production cold-disk or hardware result.
 
+A separate keyboard measurement in private X11 starts a fresh Files test
+window, waits for a confirmed ready listing, then sends one **Ctrl+L** and
+**Return** to a fixture directory with spaces and Chinese characters. It
+does not retry input. It reports the time from issuing Return to a
+confirmed paint of the exact target listing and its distinctive row.
+The runner time includes the key injector and test-process IPC overhead; this
+is not a full startup-to-input or Finder comparison.
+
 ## First slice: isolated local provider
 
 `crates/jwm_file_core` is a standalone Cargo workspace with no GTK or
