@@ -1,7 +1,5 @@
 //! Strict metadata-only preflight for a future atomic directory copy.
-use crate::{
-    Cancellation, FileIdentity, FileKind, ListError, WalkOptions, visit_local_index,
-};
+use crate::{Cancellation, FileIdentity, FileKind, ListError, WalkOptions, visit_local_index};
 use std::path::{Path, PathBuf};
 
 const LIMIT: WalkOptions = WalkOptions {
@@ -120,8 +118,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir()
-                .join(format!("jwm-tree-plan-{}-{stamp}", std::process::id()));
+            let root =
+                std::env::temp_dir().join(format!("jwm-tree-plan-{}-{stamp}", std::process::id()));
             fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
             Self(root)
         }
@@ -200,7 +198,10 @@ mod tests {
         fs::write(root.0.join("second"), b"b").unwrap();
         let identity = root.identity();
         let cancel = Cancellation::default();
-        let narrow = WalkOptions { entries: 1, ..LIMIT };
+        let narrow = WalkOptions {
+            entries: 1,
+            ..LIMIT
+        };
         assert!(matches!(
             plan(&root.0, identity, &cancel, narrow, PATH_BYTES),
             Err(TreeCopyPlanError::Incomplete)
