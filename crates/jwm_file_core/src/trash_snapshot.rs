@@ -32,6 +32,14 @@ pub struct HomeTrashEntry {
     version: [i128; 5],
 }
 
+impl HomeTrashEntry {
+    pub(crate) fn matches_payload(&self, stat: &fs::Stat) -> bool {
+        stat.st_dev == self.file.device
+            && stat.st_ino == self.file.inode
+            && content_observation(stat) == self.version
+    }
+}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct HomeTrashSnapshot {
     pub entries: Vec<HomeTrashEntry>,
