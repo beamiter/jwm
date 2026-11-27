@@ -7,6 +7,7 @@ on:
       - '.github/workflows/file-workspace.yml'
       - 'crates/jwm_file_core/**'
       - 'crates/jwm_files/**'
+      - 'scripts/test-files-terminal-wayland.py'
       - 'crates/jwm_markdown/**'
   push:
     branches: [master]
@@ -14,6 +15,7 @@ on:
       - '.github/workflows/file-workspace.yml'
       - 'crates/jwm_file_core/**'
       - 'crates/jwm_files/**'
+      - 'scripts/test-files-terminal-wayland.py'
       - 'crates/jwm_markdown/**'
 
 permissions:
