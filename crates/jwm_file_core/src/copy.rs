@@ -704,7 +704,10 @@ mod tests {
                 .as_nanos();
             let name = format!("jwm-tracked-copy-{}-{now}", std::process::id());
             let path = std::env::temp_dir().join(name);
-            std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
             for name in ["from", "to", "state"] {
                 std::fs::create_dir(path.join(name)).unwrap();
             }
@@ -869,7 +872,8 @@ mod tests {
     #[test]
     fn tracked_copy_does_not_turn_an_observation_failure_into_retry() {
         let f = TrackedFixture::new();
-        let scratch = f.0.join("state/jwm-files-copy-journal-v1/00/.published.writing");
+        let scratch =
+            f.0.join("state/jwm-files-copy-journal-v1/00/.published.writing");
         let receipt = publication_probe::with_probe(
             move |point, _| {
                 if point == publication_probe::Point::After {
@@ -879,7 +883,10 @@ mod tests {
             || f.copy(&Cancellation::default()),
         )
         .unwrap();
-        assert!(matches!(receipt.evidence, CopyEvidence::RecordUnavailable(_)));
+        assert!(matches!(
+            receipt.evidence,
+            CopyEvidence::RecordUnavailable(_)
+        ));
         assert_eq!(
             f.review(receipt.slot),
             crate::CopyReview::PresentWithoutPublicationRecord
