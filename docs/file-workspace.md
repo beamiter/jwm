@@ -607,7 +607,12 @@ selected regular file. Escape closes the preview, and Space closes
 it when focus is not on a preview toggle.
 The dialog shows the full source path. When it is already open, another
 explicit preview request switches it to the newly selected file. An older
-read finishing later cannot overwrite the new view.
+read finishing later cannot overwrite the new view. With Quick Preview
+focused, **Alt+Left** and **Alt+Right** select and preview the previous
+or next regular file in the current directory. They skip directories
+and symbolic links, and stop at the ends. If the previewed item was
+replaced or the browser left its tab or directory, open a new preview
+to start stepping again.
 
 Reading happens off the UI thread through the selected directory and
 file identities, without opening links or special files. UTF-8 files

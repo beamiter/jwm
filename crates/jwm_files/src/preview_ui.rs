@@ -1,25 +1,86 @@
-use super::Shared;
+use super::{Browser, Shared, row_model::FileRowModel, tabs::TabId};
 use futures_channel::oneshot;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
-    Cancellation, DirectoryHandle, FileIdentity, FileKind, ImagePreview, PreviewError, TextPreview,
+    Cancellation, DirectoryHandle, FileEntry, FileIdentity, FileKind, ImagePreview, PreviewError,
+    TextPreview,
 };
 use std::{
     cell::{Cell, RefCell},
     ffi::OsString,
     path::{Path, PathBuf},
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::Arc,
     thread,
 };
 
+#[derive(Clone)]
 struct Target {
     parent: Arc<DirectoryHandle>,
     path: PathBuf,
     name: OsString,
     identity: FileIdentity,
+}
+
+struct PreviewCursor {
+    tab: TabId,
+    position: usize,
+    target: Target,
+}
+
+impl PreviewCursor {
+    fn at(browser: &Browser, position: usize) -> Option<Self> {
+        let entry = browser.entries.get(position)?;
+        if entry.kind != FileKind::Regular {
+            return None;
+        }
+        Some(Self {
+            tab: browser.tabs.active_id(),
+            position,
+            target: Target {
+                parent: browser.parent.as_ref()?.clone(),
+                path: browser.path().clone(),
+                name: entry.name.clone(),
+                identity: entry.identity?,
+            },
+        })
+    }
+
+    fn step(&self, browser: &Browser, forward: bool) -> Option<Self> {
+        if browser.tabs.active_id() != self.tab
+            || browser.path() != &self.target.path
+            || browser.parent.as_ref()?.identity() != self.target.parent.identity()
+        {
+            return None;
+        }
+        let current = |entry: &FileEntry| {
+            entry.kind == FileKind::Regular
+                && entry.name == self.target.name
+                && entry.identity == Some(self.target.identity)
+        };
+        let position = if browser.entries.get(self.position).is_some_and(current) {
+            self.position
+        } else {
+            browser.entries.iter().position(current)?
+        };
+        let valid = |entry: &FileEntry| entry.kind == FileKind::Regular && entry.identity.is_some();
+        let next = if forward {
+            position + 1 + browser.entries[position + 1..].iter().position(valid)?
+        } else {
+            browser.entries[..position].iter().rposition(valid)?
+        };
+        Self::at(browser, next)
+    }
+}
+
+fn committed(selection: &gtk::SingleSelection, browser: &Browser) -> bool {
+    browser.pending.is_none()
+        && selection
+            .model()
+            .and_downcast::<FileRowModel>()
+            .is_some_and(|model| model.represents(&browser.entries))
 }
 
 struct Request {
@@ -190,6 +251,10 @@ impl View {
 #[derive(Default)]
 struct PreviewState {
     generation: Generation,
+    browser: Weak<RefCell<Browser>>,
+    owner: glib::WeakRef<gtk::ApplicationWindow>,
+    selection: glib::WeakRef<gtk::SingleSelection>,
+    cursor: RefCell<Option<PreviewCursor>>,
     current: RefCell<Option<View>>,
     running: RefCell<Option<Cancellation>>,
     pending: RefCell<Option<Request>>,
@@ -211,6 +276,7 @@ impl PreviewState {
 
     fn reset(&self) {
         self.current.take();
+        self.cursor.take();
         self.generation.clear();
         self.pending.take();
         if let Some(cancel) = self.running.borrow().as_ref() {
@@ -218,7 +284,27 @@ impl PreviewState {
         }
     }
 
-    fn show(self: &Rc<Self>, parent: &gtk::ApplicationWindow, target: Target) {
+    fn step(self: &Rc<Self>, forward: bool) -> Option<()> {
+        let (state, parent, selection) = (
+            self.browser.upgrade()?,
+            self.owner.upgrade()?,
+            self.selection.upgrade()?,
+        );
+        let cursor = {
+            let browser = state.borrow();
+            if !committed(&selection, &browser) {
+                return None;
+            }
+            self.cursor.borrow().as_ref()?.step(&browser, forward)?
+        };
+        selection.set_selected(u32::try_from(cursor.position).ok()?);
+        self.show(&parent, cursor);
+        Some(())
+    }
+
+    fn show(self: &Rc<Self>, parent: &gtk::ApplicationWindow, cursor: PreviewCursor) {
+        let target = cursor.target.clone();
+        self.cursor.replace(Some(cursor));
         let view = self.current.borrow().clone();
         let (view, window) = match view.and_then(|view| {
             let window = view.window.upgrade()?;
@@ -239,7 +325,9 @@ impl PreviewState {
             .to_string();
         if let Some(heading) = view.heading.upgrade() {
             heading.set_text(&source);
-            heading.set_tooltip_text(Some(&source));
+            heading.set_tooltip_text(Some(&format!(
+                "{source}\nAlt+← / Alt+→：上一个 / 下一个文件"
+            )));
         }
         view.body.take();
         if let Some(toggle) = view.source_toggle.upgrade() {
@@ -477,7 +565,21 @@ impl PreviewState {
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = window.downgrade();
         let choices = [source_toggle.downgrade(), image_size.downgrade()];
+        let preview = Rc::downgrade(self);
         keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if matches!(key, gtk::gdk::Key::Left | gtk::gdk::Key::Right)
+                && modifiers.contains(gtk::gdk::ModifierType::ALT_MASK)
+                && !modifiers.intersects(
+                    gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::SHIFT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK,
+                )
+            {
+                if let Some(preview) = preview.upgrade() {
+                    let _ = preview.step(key == gtk::gdk::Key::Right);
+                }
+                return glib::Propagation::Stop;
+            }
             let focused_toggle = choices
                 .iter()
                 .filter_map(glib::WeakRef::upgrade)
@@ -531,7 +633,12 @@ pub(super) fn install(
     let action = gio::SimpleAction::new("quick-preview", None);
     let weak_parent = parent.downgrade();
     let (state, selection, status) = (state.clone(), selection.clone(), status.clone());
-    let preview = Rc::new(PreviewState::default());
+    let preview = Rc::new(PreviewState {
+        browser: Rc::downgrade(&state),
+        owner: parent.downgrade(),
+        selection: selection.downgrade(),
+        ..PreviewState::default()
+    });
     parent.connect_destroy({
         let preview = preview.clone();
         move |_| preview.reset()
@@ -540,30 +647,18 @@ pub(super) fn install(
         let Some(parent) = weak_parent.upgrade() else {
             return;
         };
-        let target = {
+        let cursor = {
             let browser = state.borrow();
-            if browser.pending.is_some() {
+            if !committed(&selection, &browser) {
                 return;
             }
-            browser
-                .parent
-                .as_ref()
-                .zip(browser.entries.get(selection.selected() as usize))
-                .filter(|(_, entry)| entry.kind == FileKind::Regular)
-                .and_then(|(handle, entry)| {
-                    Some(Target {
-                        parent: handle.clone(),
-                        path: browser.path().clone(),
-                        name: entry.name.clone(),
-                        identity: entry.identity?,
-                    })
-                })
+            PreviewCursor::at(&browser, selection.selected() as usize)
         };
-        let Some(target) = target else {
+        let Some(cursor) = cursor else {
             status.set_text("请选择一个可预览的普通文件。");
             return;
         };
-        preview.show(&parent, target);
+        preview.show(&parent, cursor);
     });
     parent.add_action(&action);
 }
