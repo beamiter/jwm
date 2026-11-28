@@ -90,6 +90,27 @@ impl FileRowModel {
         glib::Object::new()
     }
 
+    pub(crate) fn represents(&self, entries: &Arc<Vec<FileEntry>>) -> bool {
+        use glib::subclass::prelude::ObjectSubclassIsExt;
+
+        Arc::ptr_eq(&self.imp().state.borrow().entries, entries)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn native_name_at(&self, position: u32) -> Option<std::ffi::OsString> {
+        use glib::subclass::prelude::ObjectSubclassIsExt;
+
+        Some(
+            self.imp()
+                .state
+                .borrow()
+                .entries
+                .get(position as usize)?
+                .name
+                .clone(),
+        )
+    }
+
     pub(crate) fn replace(&self, entries: Arc<Vec<FileEntry>>) {
         use glib::subclass::prelude::ObjectSubclassIsExt;
 
