@@ -3075,7 +3075,7 @@ mod wayland_acceptance {
             "managed-new-visible.txt",
         ]));
         assert!(!journal_text(&["retired-not-a-live-row.txt"]));
-        assert_eq!(fs::read(retired_frame).unwrap(), untouched);
+        assert_eq!(fs::read(&retired_frame).unwrap(), untouched);
         println!(
             "GTK4 Wayland managed journal: new numbered record and pending retired cleanup shown separately"
         );
@@ -3138,6 +3138,116 @@ mod wayland_acceptance {
         );
         assert_eq!(previous_text.text(), "正在检查当前目标…");
         assert!(!detached.exists());
+        let payload = root.join("copied-data-keep.txt");
+        fs::write(&payload, b"journal cleanup never touches data").unwrap();
+        let live_frame = fs::read(managed_root.join("00/intent")).unwrap();
+        let clean = controls()
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some("清理已移出的日志"))
+            .unwrap();
+        assert!(clean.is_visible());
+        let clean_dialog = || {
+            app.windows().into_iter().find_map(|window| {
+                let dialog = window.downcast::<gtk::Dialog>().ok()?;
+                (dialog.is_mapped()
+                    && dialog.title().as_deref() == Some("JWM Files · 清理复制日志"))
+                .then_some(dialog)
+            })
+        };
+        clean.emit_clicked();
+        until(
+            || clean_dialog().is_some(),
+            "retired cleanup confirmation shown",
+        );
+        let def = clean_dialog()
+            .unwrap()
+            .default_widget()
+            .and_downcast::<gtk::Button>()
+            .unwrap();
+        assert_eq!(def.label().as_deref(), Some("取消"));
+        def.emit_clicked();
+        until(
+            || journal_text(&["已取消，日志未改变。"]),
+            "default cancel did not change logs",
+        );
+        assert_eq!(fs::read(&retired_frame).unwrap(), untouched);
+        clean.emit_clicked();
+        until(
+            || clean_dialog().is_some(),
+            "stale cleanup confirmation shown",
+        );
+        let retired_dir = managed_root.join(".retired");
+        let old_retired = managed_root.join("private-stale-prepare");
+        fs::rename(&retired_dir, &old_retired).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&retired_dir)
+            .unwrap();
+        fs::copy(old_retired.join("intent"), &retired_frame).unwrap();
+        clean_dialog().unwrap().response(gtk::ResponseType::Accept);
+        until(
+            || journal_text(&["旧日志已变化或无法安全清理，未启动清理。"]),
+            "cleanup refused a differently pinned retired directory",
+        );
+        assert_eq!(fs::read(&retired_frame).unwrap(), untouched);
+        assert_eq!(fs::read(old_retired.join("intent")).unwrap(), untouched);
+        fs::rename(&retired_dir, managed_root.join("private-confirm-decoy")).unwrap();
+        fs::rename(&old_retired, &retired_dir).unwrap();
+        let reload = controls()
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some("刷新复制记录"))
+            .unwrap();
+        until(
+            || reload.is_sensitive(),
+            "failed cleanup finished its status refresh",
+        );
+        reload.emit_clicked();
+        until(|| clean.is_visible(), "current pending cleanup shown again");
+        clean.emit_clicked();
+        until(
+            || clean_dialog().is_some(),
+            "new cleanup confirmation shown",
+        );
+        let (cleanup_reached, resume_cleanup) = copy_journal_ui::refresh_test_gate::arm_cleanup();
+        clean_dialog().unwrap().response(gtk::ResponseType::Accept);
+        until(
+            || cleanup_reached.try_recv().is_ok(),
+            "confirmed cleanup has not run the provider yet",
+        );
+        let (read_reached, resume_read) = copy_journal_ui::refresh_test_gate::arm_read();
+        reload.emit_clicked();
+        until(
+            || read_reached.try_recv().is_ok(),
+            "manual refresh captured the old pending state before cleanup",
+        );
+        resume_cleanup.send(()).unwrap();
+        until(
+            || journal_text(&["已清理旧日志，复制的文件未改变。"]),
+            "cleanup finished while the old read is held",
+        );
+        assert!(!reload.is_sensitive());
+        assert!(!retired_frame.exists());
+        resume_read.send(()).unwrap();
+        until(
+            || journal_text(&["已清理旧日志，复制的文件未改变。", "没有待清理的托管记录。"]),
+            "confirmed retired cleanup and coherent snapshot refresh",
+        );
+        assert!(!clean.is_visible());
+        assert!(!retired_frame.exists());
+        assert_eq!(
+            fs::read(managed_root.join("00/intent")).unwrap(),
+            live_frame
+        );
+        assert_eq!(
+            fs::read(payload).unwrap(),
+            b"journal cleanup never touches data"
+        );
+        println!(
+            "GTK4 Wayland managed journal cleanup: overlapping refresh did not restore stale pending state"
+        );
+        println!(
+            "GTK4 Wayland managed journal cleanup: cancel preserved evidence; confirm removed only retired metadata"
+        );
         journal_panel().unwrap().close();
         println!(
             "GTK4 Wayland copy journal: fresh state left untouched; saved, incomplete and unreadable records shown without destination check"

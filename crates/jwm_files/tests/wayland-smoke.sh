@@ -82,5 +82,7 @@ grep -Fx 'GTK4 Wayland folder cut: descendant and conflict refused, held destina
 grep -Fx 'GTK4 Wayland copy journal: fresh state left untouched; saved, incomplete and unreadable records shown without destination check' "$client_log"
 grep -Fx 'GTK4 Wayland copy journal check: explicit probe only; refresh dismissed the delayed result' "$client_log"
 grep -Fx 'GTK4 Wayland managed journal: new numbered record and pending retired cleanup shown separately' "$client_log"
+grep -Fx 'GTK4 Wayland managed journal cleanup: cancel preserved evidence; confirm removed only retired metadata' "$client_log"
+grep -Fx 'GTK4 Wayland managed journal cleanup: overlapping refresh did not restore stale pending state' "$client_log"
 grep -F 'GTK4 Wayland find: exact selected row and stale snapshot rejection verified' "$client_log"
 grep -F 'GTK4 Wayland find: one early Enter applied once and an edited query discarded it' "$client_log"

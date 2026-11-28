@@ -1,9 +1,11 @@
-//! Read-only, bounded copy-journal records for a Files window.
+//! Bounded copy-journal records and explicit retired cleanup for a Files window.
+
+mod retired_action;
 use gtk::{gio, glib, prelude::*};
 use gtk4 as gtk;
 use jwm_file_core::{
     COPY_JOURNAL_SLOTS, CopyJournalRecord, CopyJournalSlotState, CopyJournalSnapshot,
-    CopyJournalState, CopyReview, ManagedJournalSnapshot, ManagedRetiredState,
+    CopyJournalState, CopyReview, DirectoryHandle, ManagedJournalSnapshot, ManagedRetiredState,
     inspect_copy_journal, inspect_managed_journal, open_files_state_root,
 };
 use std::{cell::Cell, io, path::PathBuf, rc::Rc};
@@ -15,10 +17,14 @@ struct JournalViews {
     managed: io::Result<Option<ManagedJournalSnapshot>>,
 }
 
-fn load() -> io::Result<JournalViews> {
+fn state_root() -> io::Result<DirectoryHandle> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
-    let root = match open_files_state_root(home.as_deref(), state_home.as_deref(), false) {
+    open_files_state_root(home.as_deref(), state_home.as_deref(), false)
+}
+
+fn load() -> io::Result<JournalViews> {
+    let root = match state_root() {
         Ok(root) => root,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(JournalViews {
@@ -179,6 +185,7 @@ fn populate(
     rows: &gtk::Box,
     status: &gtk::Label,
     window: &gtk::Window,
+    clean: &gtk::Button,
     view: JournalViews,
     reviewing: &Rc<Cell<bool>>,
 ) {
@@ -190,6 +197,7 @@ fn populate(
             .as_ref()
             .map_or(ManagedRetiredState::Absent, |s| s.retired)
     });
+    clean.set_visible(matches!(retired, Ok(ManagedRetiredState::PendingCleanup)));
     let summary = match retired {
         Ok(ManagedRetiredState::Absent) => "没有待清理的托管记录。",
         Ok(ManagedRetiredState::PendingCleanup) => "有已移出的托管记录待清理，不占用复制记录编号。",
@@ -210,6 +218,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
     let popup = glib::WeakRef::<gtk::Window>::new();
     let busy = Rc::new(Cell::new(false));
     let reviewing = Rc::new(Cell::new(false));
+    let cleaning = Rc::new(Cell::new(false));
     action.connect_activate(move |_, _| {
         let Some(parent) = weak_parent.upgrade() else {
             return;
@@ -239,7 +248,26 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         toolbar.append(&status);
         toolbar.append(&refresh);
         layout.append(&toolbar);
-        let note = gtk::Label::new(Some("只读 · 按记录编号排列，不自动检查当前目标文件"));
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let clean = gtk::Button::with_label(retired_action::BUTTON);
+        clean.set_visible(false);
+        let feedback = gtk::Label::new(None);
+        feedback.set_xalign(0.0);
+        feedback.set_wrap(true);
+        feedback.set_hexpand(true);
+        actions.append(&clean);
+        actions.append(&feedback);
+        layout.append(&actions);
+        let refresh_after_read = Rc::new(Cell::new(false));
+        retired_action::install(
+            &window,
+            &clean,
+            &feedback,
+            &refresh,
+            &cleaning,
+            &refresh_after_read,
+        );
+        let note = gtk::Label::new(Some("按记录编号排列，不自动检查当前目标文件或清理日志"));
         note.set_xalign(0.0);
         note.add_css_class("dim-label");
         layout.append(&note);
@@ -259,6 +287,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
             busy.clone(),
         );
         let reviewing = reviewing.clone();
+        let weak_clean = clean.downgrade();
         refresh.connect_clicked(move |refresh| {
             let Some(status) = weak_status.upgrade() else {
                 return;
@@ -268,11 +297,17 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                 return;
             }
             status.set_text("正在读取复制记录…");
+            if let Some(clean) = weak_clean.upgrade() {
+                clean.set_visible(false);
+            }
             let (send, receive) = futures_channel::oneshot::channel();
             let spawned = std::thread::Builder::new()
                 .name("jwm-files-copy-records".into())
                 .spawn(move || {
-                    let _ = send.send(load());
+                    let result = load();
+                    #[cfg(test)]
+                    refresh_test_gate::after_read();
+                    let _ = send.send(result);
                 });
             if spawned.is_err() {
                 busy.set(false);
@@ -287,7 +322,8 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                 refresh.downgrade(),
                 busy.clone(),
             );
-            let reviewing = reviewing.clone();
+            let (reviewing, clean) = (reviewing.clone(), weak_clean.clone());
+            let refresh_after_read = refresh_after_read.clone();
             glib::spawn_future_local(async move {
                 let result = receive.await;
                 busy.set(false);
@@ -300,8 +336,17 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                     return;
                 };
                 refresh.set_sensitive(true);
+                if refresh_after_read.replace(false) {
+                    // A confirmed write finished after this read was requested.
+                    // Never render this possibly obsolete snapshot.
+                    refresh.emit_clicked();
+                    return;
+                }
+                let Some(clean) = clean.upgrade() else {
+                    return;
+                };
                 match result {
-                    Ok(Ok(view)) => populate(&rows, &status, &window, view, &reviewing),
+                    Ok(Ok(view)) => populate(&rows, &status, &window, &clean, view, &reviewing),
                     Ok(Err(_)) | Err(_) => {
                         while let Some(child) = rows.first_child() {
                             rows.remove(&child);
@@ -365,5 +410,53 @@ pub(super) mod check_test_gate {
             let _ = gate.reached.send(());
             let _ = gate.release.recv_timeout(Duration::from_secs(8));
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod refresh_test_gate {
+    use std::{
+        sync::{Mutex, mpsc},
+        time::Duration,
+    };
+
+    struct Gate {
+        reached: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    static READ: Mutex<Option<Gate>> = Mutex::new(None);
+    static CLEANUP: Mutex<Option<Gate>> = Mutex::new(None);
+
+    fn arm(slot: &Mutex<Option<Gate>>) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (reached, observed) = mpsc::channel();
+        let (resume, release) = mpsc::channel();
+        let old = slot.lock().unwrap().replace(Gate { reached, release });
+        assert!(old.is_none(), "only one held action of each kind");
+        (observed, resume)
+    }
+
+    fn wait(slot: &Mutex<Option<Gate>>) {
+        let gate = slot.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            let _ = gate.release.recv_timeout(Duration::from_secs(8));
+        }
+    }
+
+    pub fn arm_read() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        arm(&READ)
+    }
+
+    pub fn arm_cleanup() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        arm(&CLEANUP)
+    }
+
+    pub(super) fn after_read() {
+        wait(&READ);
+    }
+
+    pub(super) fn before_cleanup() {
+        wait(&CLEANUP);
     }
 }
