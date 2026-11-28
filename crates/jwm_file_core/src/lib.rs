@@ -59,9 +59,9 @@ pub use copy_journal::{
 #[cfg(target_os = "linux")]
 pub use copy_journal_storage::{
     COPY_JOURNAL_SLOTS, CopyJournalReservation, CopyJournalSlot, CopyJournalSlotState,
-    CopyJournalSnapshot, ManagedCopyJournalSelection, ManagedJournalRetirement,
+    CopyJournalSnapshot, ManagedCopyJournalSelection, ManagedJournalRetirement, ManagedJournalSnapshot,
     ManagedRetiredCleanup, ManagedRetiredSelection, ManagedRetiredState, cleanup_managed_retired,
-    inspect_copy_journal, inspect_managed_copy_journal, managed_retired_state,
+    inspect_copy_journal, inspect_managed_copy_journal, inspect_managed_journal, managed_retired_state,
     prepare_copy_journal, prepare_managed_copy_journal, read_copy_journal,
     retire_managed_copy_journal, select_managed_copy_journal, select_managed_retired,
 };

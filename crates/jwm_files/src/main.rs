@@ -2954,6 +2954,7 @@ mod wayland_acceptance {
         use std::os::unix::ffi::OsStringExt as _;
         let journal_state = root.parent().unwrap().join("state");
         let journal_root = journal_state.join("jwm-files-copy-journal-v1");
+        let managed_root = journal_state.join("jwm-files-copy-journal-v2");
         let journal_panel = || {
             app.windows().into_iter().find(|window| {
                 window.is_visible() && window.title().as_deref() == Some(copy_journal_ui::TITLE)
@@ -2980,6 +2981,7 @@ mod wayland_acceptance {
             "fresh native journal panel",
         );
         assert!(!journal_root.exists());
+        assert!(!managed_root.exists());
         journal_panel().unwrap().close();
 
         let state_root = DirectoryHandle::open(&journal_state).unwrap();
@@ -3017,6 +3019,29 @@ mod wayland_acceptance {
             .unwrap();
         fs::write(journal_root.join("03"), b"not a slot directory").unwrap();
 
+        let mut managed_record = record.clone();
+        managed_record.name = "retired-not-a-live-row.txt".into();
+        managed_record.state = jwm_file_core::CopyJournalState::Prepared;
+        let managed = jwm_file_core::prepare_managed_copy_journal(
+            &state_root,
+            managed_record.clone(),
+        )
+        .unwrap();
+        let selected = jwm_file_core::select_managed_copy_journal(&state_root, managed.slot())
+            .unwrap();
+        drop(managed);
+        assert!(matches!(
+            jwm_file_core::retire_managed_copy_journal(&state_root, selected).unwrap(),
+            jwm_file_core::ManagedJournalRetirement::Retired
+        ));
+        managed_record.name = "managed-new-visible.txt".into();
+        let replacement =
+            jwm_file_core::prepare_managed_copy_journal(&state_root, managed_record).unwrap();
+        assert_eq!(replacement.slot(), 0);
+        drop(replacement);
+        let retired_frame = managed_root.join(".retired/intent");
+        let untouched = fs::read(&retired_frame).unwrap();
+
         let (check_reached, resume_check) = copy_journal_ui::check_test_gate::arm(
             detached.clone(),
             OsString::from_vec(b"not-current-\x80.txt".to_vec()),
@@ -3045,6 +3070,15 @@ mod wayland_acceptance {
             check_reached.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+        assert!(journal_text(&[
+            "托管记录 · 已占用 1/64",
+            "旧版记录（只读） · 已占用 4/64",
+            "有已移出的托管记录待清理，不占用复制记录编号。",
+            "managed-new-visible.txt",
+        ]));
+        assert!(!journal_text(&["retired-not-a-live-row.txt"]));
+        assert_eq!(fs::read(retired_frame).unwrap(), untouched);
+        println!("GTK4 Wayland managed journal: new numbered record and pending retired cleanup shown separately");
         let controls = || {
             descendants(journal_panel().unwrap().upcast_ref())
                 .into_iter()
