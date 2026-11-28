@@ -316,6 +316,10 @@ participate in nonblocking shared/exclusive locking. It leaves prototype
 records in their original namespace. A confirmed, unchanged managed slot
 can be retired atomically to one reserved name without touching any copy
 destination. A failed post-rename check is not retried automatically. The
+provider reports cleanup pending independently of numbered capacity. It can
+discard only preflighted journal artifacts in the exact retired directory
+selected for cleanup. Unsupported mounts, aliases, and changed selections
+are refused without changing numbered records or copy destinations. The
 application does not yet create managed records or expose retirement or
 cleanup, and this is not a network-filesystem locking guarantee.
 
