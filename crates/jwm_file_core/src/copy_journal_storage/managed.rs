@@ -5,10 +5,16 @@ use super::{
 };
 use rustix::{
     fd::OwnedFd,
-    fs::{self, AtFlags, Dir, FileType, FlockOperation, RenameFlags, Stat},
+    fs::{
+        self, AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, Stat,
+    },
     process::geteuid,
 };
-use std::io::{self, ErrorKind};
+use std::{
+    ffi::OsStr,
+    io::{self, ErrorKind},
+    os::unix::ffi::OsStrExt,
+};
 
 const MANAGED: &str = "jwm-files-copy-journal-v2";
 const RETIRED: &str = ".retired";
@@ -22,12 +28,14 @@ fn verify_named(parent: &OwnedFd, name: &str, held: &OwnedFd) -> io::Result<()> 
     Ok(())
 }
 
+fn private_dir(meta: &Stat) -> bool {
+    FileType::from_raw_mode(meta.st_mode) == FileType::Directory
+        && meta.st_uid == geteuid().as_raw()
+        && meta.st_mode & 0o7777 == 0o700
+}
+
 fn same_dir(first: &Stat, second: &Stat) -> bool {
-    first.st_dev == second.st_dev
-        && first.st_ino == second.st_ino
-        && FileType::from_raw_mode(second.st_mode) == FileType::Directory
-        && second.st_uid == geteuid().as_raw()
-        && second.st_mode & 0o7777 == 0o700
+    first.st_dev == second.st_dev && first.st_ino == second.st_ino && private_dir(second)
 }
 
 fn locked(base: &DirectoryHandle, create: bool, operation: FlockOperation) -> io::Result<OwnedFd> {
@@ -70,6 +78,26 @@ struct Artifact {
     revision: [i128; 7],
 }
 
+fn artifact_revision(slot: &OwnedFd, name: &OsStr) -> io::Result<[i128; 7]> {
+    let meta = fs::statat(slot, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(meta.st_mode) != FileType::RegularFile
+        || meta.st_uid != geteuid().as_raw()
+        || meta.st_mode & 0o7777 != 0o600
+        || meta.st_nlink != 1
+    {
+        return Err(private_error());
+    }
+    Ok([
+        i128::from(meta.st_dev),
+        i128::from(meta.st_ino),
+        i128::from(meta.st_size),
+        i128::from(meta.st_mtime),
+        i128::from(meta.st_mtime_nsec),
+        i128::from(meta.st_ctime),
+        i128::from(meta.st_ctime_nsec),
+    ])
+}
+
 fn artifacts(slot: &OwnedFd) -> io::Result<Vec<Artifact>> {
     let mut result = Vec::new();
     for item in Dir::read_from(slot)? {
@@ -87,25 +115,9 @@ fn artifacts(slot: &OwnedFd) -> io::Result<Vec<Artifact>> {
         {
             return Err(invalid("unknown artifact in managed journal slot"));
         }
-        let meta = fs::statat(slot, name, AtFlags::SYMLINK_NOFOLLOW)?;
-        if FileType::from_raw_mode(meta.st_mode) != FileType::RegularFile
-            || meta.st_uid != geteuid().as_raw()
-            || meta.st_mode & 0o7777 != 0o600
-            || meta.st_nlink != 1
-        {
-            return Err(private_error());
-        }
         result.push(Artifact {
             name: bytes.to_vec(),
-            revision: [
-                i128::from(meta.st_dev),
-                i128::from(meta.st_ino),
-                i128::from(meta.st_size),
-                i128::from(meta.st_mtime),
-                i128::from(meta.st_mtime_nsec),
-                i128::from(meta.st_ctime),
-                i128::from(meta.st_ctime_nsec),
-            ],
+            revision: artifact_revision(slot, OsStr::from_bytes(bytes))?,
         });
     }
     result.sort_unstable();
@@ -177,6 +189,136 @@ pub fn retire_managed_copy_journal(
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagedRetiredState {
+    Absent,
+    PendingCleanup,
+    Unsafe,
+}
+
+fn unmounted_private_child(parent: &OwnedFd, name: &str) -> io::Result<OwnedFd> {
+    let child = fs::openat2(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+    )?;
+    let meta = fs::fstat(&child)?;
+    if !private_dir(&meta) {
+        return Err(private_error());
+    }
+    Ok(child)
+}
+
+fn revalidate_unmounted(parent: &OwnedFd, name: &str, held: &OwnedFd) -> io::Result<()> {
+    let fresh = unmounted_private_child(parent, name)?;
+    if !same_dir(&fs::fstat(held)?, &fs::fstat(&fresh)?) {
+        return Err(invalid("managed retired selection changed"));
+    }
+    Ok(())
+}
+
+fn acquire_retired_root(base: &DirectoryHandle, operation: FlockOperation) -> io::Result<OwnedFd> {
+    let journal = unmounted_private_child(&base.fd, MANAGED)?;
+    fs::flock(&journal, operation)?;
+    revalidate_unmounted(&base.fd, MANAGED, &journal)?;
+    Ok(journal)
+}
+
+/// Determine independently of numbered capacity whether retirement cleanup
+/// is pending. Missing state never causes any initialization.
+pub fn managed_retired_state(base: &DirectoryHandle) -> io::Result<ManagedRetiredState> {
+    let journal = match acquire_retired_root(base, FlockOperation::NonBlockingLockShared) {
+        Ok(journal) => journal,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(ManagedRetiredState::Absent);
+        }
+        Err(error) => return Err(error),
+    };
+    match unmounted_private_child(&journal, RETIRED) {
+        Ok(dir) => Ok(if artifacts(&dir).is_ok() {
+            ManagedRetiredState::PendingCleanup
+        } else {
+            ManagedRetiredState::Unsafe
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(ManagedRetiredState::Absent),
+        Err(_) => Ok(ManagedRetiredState::Unsafe),
+    }
+}
+
+pub struct ManagedRetiredSelection {
+    journal: OwnedFd,
+    dir: OwnedFd,
+    artifacts: Vec<Artifact>,
+}
+
+/// Prepare a read-only cleanup selection. It can be held while the user
+/// confirms a specific reserved retired record; it is not a copy path.
+pub fn select_managed_retired(base: &DirectoryHandle) -> io::Result<ManagedRetiredSelection> {
+    let journal = acquire_retired_root(base, FlockOperation::NonBlockingLockShared)?;
+    let dir = unmounted_private_child(&journal, RETIRED)?;
+    let expected = artifacts(&dir)?;
+    revalidate_unmounted(&journal, RETIRED, &dir)?;
+    fs::flock(&journal, FlockOperation::Unlock)?;
+    Ok(ManagedRetiredSelection {
+        journal,
+        dir,
+        artifacts: expected,
+    })
+}
+
+#[derive(Debug)]
+pub enum ManagedRetiredCleanup {
+    Cleaned,
+    /// The retired entry may retain some artifacts; canonical rows are unchanged.
+    Incomplete(io::Error),
+    /// The reserved name was removed but final directory sync was unverified.
+    RemovalUnverified(io::Error),
+}
+
+/// Remove only exact preflighted journal artifacts from the fixed retired
+/// directory. No recursion or live slot/destination access. A new operation on
+/// the old number cannot be affected. Call only after explicit confirmation.
+pub fn cleanup_managed_retired(
+    base: &DirectoryHandle,
+    selected: ManagedRetiredSelection,
+) -> io::Result<ManagedRetiredCleanup> {
+    let journal = acquire_retired_root(base, FlockOperation::NonBlockingLockExclusive)?;
+    revalidate_unmounted(&base.fd, MANAGED, &selected.journal)?;
+    revalidate_unmounted(&journal, RETIRED, &selected.dir)?;
+    if artifacts(&selected.dir)? != selected.artifacts {
+        return Err(invalid("managed retired artifacts changed"));
+    }
+    let cleanup = (|| {
+        for artifact in &selected.artifacts {
+            revalidate_unmounted(&base.fd, MANAGED, &journal)?;
+            revalidate_unmounted(&journal, RETIRED, &selected.dir)?;
+            let name = OsStr::from_bytes(&artifact.name);
+            if artifact_revision(&selected.dir, name)? != artifact.revision {
+                return Err(invalid("managed retired artifact changed during cleanup"));
+            }
+            fs::unlinkat(&selected.dir, name, AtFlags::empty())?;
+        }
+        fs::fsync(&selected.dir)?;
+        revalidate_unmounted(&base.fd, MANAGED, &journal)?;
+        revalidate_unmounted(&journal, RETIRED, &selected.dir)?;
+        fs::unlinkat(&journal, RETIRED, AtFlags::REMOVEDIR)?;
+        Ok::<(), io::Error>(())
+    })();
+    if let Err(error) = cleanup {
+        return Ok(ManagedRetiredCleanup::Incomplete(error));
+    }
+    let confirmed = (|| {
+        fs::fsync(&journal)?;
+        revalidate_unmounted(&base.fd, MANAGED, &journal)
+    })();
+    Ok(match confirmed {
+        Ok(()) => ManagedRetiredCleanup::Cleaned,
+        Err(error) => ManagedRetiredCleanup::RemovalUnverified(error),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +366,110 @@ mod tests {
         fn drop(&mut self) {
             let _ = stdfs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn managed_cleanup_reports_pending_separately_and_preserves_reused_slot() {
+        let f = Fixture::new();
+        let root = f.open();
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::Absent
+        );
+        assert!(!f.0.join(MANAGED).exists());
+        drop(prepare_managed_copy_journal(&root, f.intent("old")).unwrap());
+        let selected = select_managed_copy_journal(&root, 0).unwrap();
+        assert!(matches!(
+            retire_managed_copy_journal(&root, selected).unwrap(),
+            ManagedJournalRetirement::Retired
+        ));
+        let vacant = inspect_managed_copy_journal(&root).unwrap();
+        assert!(vacant.occupied().is_empty());
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::PendingCleanup
+        );
+        let old = f.0.join("old");
+        stdfs::write(&old, b"old destination untouched").unwrap();
+        let new = f.intent("new");
+        let active = prepare_managed_copy_journal(&root, new.clone()).unwrap();
+        assert_eq!(active.slot(), 0);
+        let cleanup = select_managed_retired(&root).unwrap();
+        let busy = cleanup_managed_retired(&root, cleanup).unwrap_err();
+        assert_eq!(busy.kind(), ErrorKind::WouldBlock);
+        drop(active);
+        let cleanup = select_managed_retired(&root).unwrap();
+        assert!(matches!(
+            cleanup_managed_retired(&root, cleanup).unwrap(),
+            ManagedRetiredCleanup::Cleaned
+        ));
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::Absent
+        );
+        let after = inspect_managed_copy_journal(&root).unwrap();
+        assert_eq!(
+            after.occupied()[0].state,
+            CopyJournalSlotState::Readable(new)
+        );
+        assert_eq!(stdfs::read(old).unwrap(), b"old destination untouched");
+    }
+
+    #[test]
+    fn managed_cleanup_rejects_aliased_and_unexpected_retired_entries() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new();
+        let root = f.open();
+        drop(prepare_managed_copy_journal(&root, f.intent("target")).unwrap());
+        let retired = f.0.join(MANAGED).join(RETIRED);
+        let non_journal = Fixture::new();
+        let guarded = non_journal.0.join("intent");
+        stdfs::write(&guarded, b"outside").unwrap();
+        symlink(&non_journal.0, &retired).unwrap();
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::Unsafe
+        );
+        assert!(select_managed_retired(&root).is_err());
+        assert_eq!(stdfs::read(&guarded).unwrap(), b"outside");
+        stdfs::remove_file(&retired).unwrap();
+
+        let pick = select_managed_copy_journal(&root, 0).unwrap();
+        assert!(matches!(
+            retire_managed_copy_journal(&root, pick).unwrap(),
+            ManagedJournalRetirement::Retired
+        ));
+        let cleanup = select_managed_retired(&root).unwrap();
+        let intact = stdfs::read(retired.join("intent")).unwrap();
+        stdfs::write(retired.join("unrelated"), b"unknown").unwrap();
+        assert!(cleanup_managed_retired(&root, cleanup).is_err());
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::Unsafe
+        );
+        assert_eq!(stdfs::read(retired.join("intent")).unwrap(), intact);
+        assert_eq!(stdfs::read(retired.join("unrelated")).unwrap(), b"unknown");
+    }
+
+    #[test]
+    fn managed_cleanup_refuses_a_replaced_retired_directory() {
+        let f = Fixture::new();
+        let root = f.open();
+        drop(prepare_managed_copy_journal(&root, f.intent("old")).unwrap());
+        let selection = select_managed_copy_journal(&root, 0).unwrap();
+        retire_managed_copy_journal(&root, selection).unwrap();
+        let cleanup = select_managed_retired(&root).unwrap();
+        let journal = f.0.join(MANAGED);
+        let retired = journal.join(RETIRED);
+        stdfs::rename(&retired, journal.join("prior-retired")).unwrap();
+        stdfs::DirBuilder::new()
+            .mode(0o700)
+            .create(&retired)
+            .unwrap();
+        assert!(cleanup_managed_retired(&root, cleanup).is_err());
+        assert!(retired.is_dir());
+        assert!(journal.join("prior-retired/intent").exists());
     }
 
     #[test]

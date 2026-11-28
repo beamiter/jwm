@@ -3,8 +3,10 @@ use crate::{COPY_JOURNAL_LIMIT, CopyJournalRecord, CopyJournalState, DirectoryHa
 
 mod managed;
 pub use managed::{
-    ManagedCopyJournalSelection, ManagedJournalRetirement, inspect_managed_copy_journal,
-    prepare_managed_copy_journal, retire_managed_copy_journal, select_managed_copy_journal,
+    ManagedCopyJournalSelection, ManagedJournalRetirement, ManagedRetiredCleanup,
+    ManagedRetiredSelection, ManagedRetiredState, cleanup_managed_retired,
+    inspect_managed_copy_journal, managed_retired_state, prepare_managed_copy_journal,
+    retire_managed_copy_journal, select_managed_copy_journal, select_managed_retired,
 };
 use rustix::{
     fd::{AsRawFd, OwnedFd},
