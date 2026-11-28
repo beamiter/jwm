@@ -304,8 +304,12 @@ for example after interruption during intent creation. It does not inspect
 copy destinations or clear slots. **操作 → 查看复制记录** opens this bounded
 journal-only view without creating state. It shows used capacity, exact stored
 record labels and incomplete/unreadable slots in slot order, not chronological
-order. The panel does not check destination paths, start any copy or clear
-records. Ordinary copies still do not create these records.
+order. The panel never checks destinations automatically. Choose **检查当前目标**
+on a readable row for a read-only, point-in-time metadata check. A slow check
+does not block refreshing the list; replies for replaced rows or closed
+windows are ignored. A metadata match is neither re-verification of file
+contents nor permission to change the file. The panel does not start copies
+or clear records. Ordinary copies still do not create these records.
 
 ### Find filenames in subdirectories
 
