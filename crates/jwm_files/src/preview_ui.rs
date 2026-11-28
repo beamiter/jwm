@@ -389,8 +389,15 @@ impl PreviewState {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = window.downgrade();
+        let source_choice = source_toggle.downgrade();
         keys.connect_key_pressed(move |_, key, _, modifiers| {
-            if (key == gtk::gdk::Key::Escape || key == gtk::gdk::Key::space)
+            let focused_toggle = source_choice
+                .upgrade()
+                .is_some_and(|button| button.is_mapped() && button.has_focus());
+            // Let GTK activate the focused control instead of closing the preview.
+            let dismiss = key == gtk::gdk::Key::Escape
+                || (key == gtk::gdk::Key::space && !focused_toggle);
+            if dismiss
                 && !modifiers.intersects(
                     gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK,
                 )

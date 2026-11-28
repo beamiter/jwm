@@ -206,6 +206,7 @@ def run(args, root, log):
                 "GTK4 Wayland folder row target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory",
                 "GTK4 Wayland folder icon target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory",
                 "GTK4 Wayland folder icon target: reflow of live tiles cleared acceptance, stale release wrote nothing",
+                "GTK4 Wayland preview keyboard: Space toggled focused Markdown source; Escape and ordinary Space closed",
             ):
                 assert output.count(marker) == 1, marker
                 print(marker)
@@ -254,7 +255,7 @@ def run(args, root, log):
 def drag_pointer(root, tool, outer, host_display, window_pid, role, x, y):
     """Translate a fixture's native client point and inject into its private host."""
     assert host_display.startswith(":") and host_display[1:].isdecimal()
-    assert role in ("source", "target")
+    assert role in ("source", "target", "preview")
     assert int(window_pid) > 1 and int(outer) > 1
     x, y = int(x), int(y)
     assert 0 <= x < 2400 and 0 <= y < 1200
@@ -270,10 +271,11 @@ def drag_pointer(root, tool, outer, host_display, window_pid, role, x, y):
     rows = json.loads(command([tool, "msg", "get_windows", "--raw"], client_env))
     assert rows.get("success", True), rows
     rows = [row for row in rows["data"] if row.get("pid") == int(window_pid)]
-    assert len(rows) == 2, rows
+    assert len(rows) == (3 if role == "preview" else 2), rows
 
     def rect(kind):
-        title = f"JWM Files · {root / ('files-dnd-' + kind)}"
+        title = ("JWM Files · Preview" if kind == "preview"
+                 else f"JWM Files · {root / ('files-dnd-' + kind)}")
         found = [row for row in rows if row.get("name") == title]
         assert len(found) == 1, rows
         row = found[0]
@@ -283,7 +285,7 @@ def drag_pointer(root, tool, outer, host_display, window_pid, role, x, y):
     assert all(w >= 250 and h >= 250 for _, _, w, h in (a, b)), (a, b)
     assert (a[0] + a[2] <= b[0] or b[0] + b[2] <= a[0]
             or a[1] + a[3] <= b[1] or b[1] + b[3] <= a[1]), (a, b)
-    wx, wy, ww, wh = a if role == "source" else b
+    wx, wy, ww, wh = rect("preview") if role == "preview" else (a if role == "source" else b)
     assert x < ww and y < wh, (role, x, y, a, b)
     gx, gy = wx + x, wy + y
     assert 0 <= gx < 1920 and 0 <= gy < 1000, (gx, gy)

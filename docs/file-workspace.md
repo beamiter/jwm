@@ -603,7 +603,8 @@ physical or virtual. No timings are asserted by these benchmarks.
 
 Choose **快速预览** from the operation menu, or press Space with the
 main list or icon view focused, to preview the first 128 KiB of a
-selected regular file. Escape or Space closes the preview.
+selected regular file. Escape closes the preview, and Space closes
+it when focus is not on the Markdown source toggle.
 The dialog shows the full source path. When it is already open, another
 explicit preview request switches it to the newly selected file. An older
 read finishing later cannot overwrite the new view.
@@ -612,6 +613,7 @@ Reading happens off the UI thread through the selected directory and
 file identities, without opening links or special files. UTF-8 files
 ending in `.md` or `.markdown` use the same inert Markdown formatting
 as JWM Notes, and **查看源码** switches to the exact source prefix.
+With that button focused, Space switches between source and rendering.
 HTML is escaped; links and images never load external resources. Other
 UTF-8 files, including TSX, remain plain text. The preview does not
 execute any file and reports when only a truncated prefix is shown.
