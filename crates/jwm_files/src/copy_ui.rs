@@ -4,11 +4,10 @@ use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
     Cancellation, CopyDestination, CopyError, CopyEvidence, CopySource, DirectoryHandle,
-    FileIdentity, FileKind,
-    FolderMoveError, FolderMoveOutcome, FolderMoveSource, ListError, RegularMoveError,
-    RegularMoveOutcome, RegularMoveSource, TrackedCopyError, TrackedCopyReceipt, TreeCopyError,
-    TreeCopyPlanError, TreeCopyTargetError,
-    copy_tree_no_replace, move_folder_no_replace, move_regular_no_replace, plan_tree_copy,
+    FileIdentity, FileKind, FolderMoveError, FolderMoveOutcome, FolderMoveSource, ListError,
+    RegularMoveError, RegularMoveOutcome, RegularMoveSource, TrackedCopyError, TrackedCopyReceipt,
+    TreeCopyError, TreeCopyPlanError, TreeCopyTargetError, copy_tree_no_replace,
+    move_folder_no_replace, move_regular_no_replace, plan_tree_copy,
 };
 use std::{
     cell::RefCell,
@@ -241,7 +240,10 @@ fn paste_with_mode(
         return;
     };
     if mode == PasteMode::Managed && !matches!(&source, StoredCopy::Single(_)) {
-        notice(status, "保留复制记录仅支持单个普通文件，不会执行剪切或批量操作。");
+        notice(
+            status,
+            "保留复制记录仅支持单个普通文件，不会执行剪切或批量操作。",
+        );
         return;
     }
     let source = match source {
@@ -356,10 +358,8 @@ fn dispatch_regular_copy_with_policy(
                     .copy_regular_no_replace(from, destination, &on_worker)
                     .map(|_| MutationOutcome::FileOperation)
                     .map_err(copy_error_message),
-                CopyPolicy::Managed => {
-                    managed_copy(&target, from, destination, &on_worker)
-                        .map(MutationOutcome::ManagedCopy)
-                }
+                CopyPolicy::Managed => managed_copy(&target, from, destination, &on_worker)
+                    .map(MutationOutcome::ManagedCopy),
             };
             let _ = send.send(result);
         }) {
@@ -395,14 +395,10 @@ fn managed_copy(
     target
         .copy_regular_managed(source, destination, &state, cancel)
         .map_err(|error| match error {
-            TrackedCopyError::Intent(error)
-                if error.kind() == std::io::ErrorKind::StorageFull =>
-            {
+            TrackedCopyError::Intent(error) if error.kind() == std::io::ErrorKind::StorageFull => {
                 "复制记录已满。请先移出旧记录；目标未写入。".into()
             }
-            TrackedCopyError::Intent(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock =>
-            {
+            TrackedCopyError::Intent(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 "另有复制日志操作正在进行，目标未写入。".into()
             }
             TrackedCopyError::Intent(_) => "无法保存复制开始记录，目标未写入。".into(),

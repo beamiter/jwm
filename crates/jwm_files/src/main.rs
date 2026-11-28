@@ -3367,10 +3367,16 @@ mod wayland_acceptance {
         assert!(copy_noticed("已选定复制："));
         navigate(&plain_target);
         action("win.paste-file");
-        until(|| copy_noticed("已复制："), "ordinary paste completed without recording");
+        until(
+            || copy_noticed("已复制："),
+            "ordinary paste completed without recording",
+        );
         at(&plain_target, chosen);
         assert!(!managed_root.join("00").exists());
-        assert_eq!(fs::read(plain_target.join(chosen)).unwrap(), b"one explicit copy");
+        assert_eq!(
+            fs::read(plain_target.join(chosen)).unwrap(),
+            b"one explicit copy"
+        );
 
         navigate(&managed_target);
         action("win.paste-with-record");
@@ -3379,7 +3385,10 @@ mod wayland_acceptance {
             "explicit tracked paste recorded its evidence",
         );
         at(&managed_target, chosen);
-        assert_eq!(fs::read(managed_target.join(chosen)).unwrap(), b"one explicit copy");
+        assert_eq!(
+            fs::read(managed_target.join(chosen)).unwrap(),
+            b"one explicit copy"
+        );
         action("win.copy-journal");
         until(
             || journal_text(&["托管记录 · 已占用 1/64", "01 · 有保存的写入记录", chosen]),
@@ -3391,8 +3400,14 @@ mod wayland_acceptance {
             || copy_noticed("已留下开始记录 02"),
             "explicit tracked copy refused to overwrite the same name",
         );
-        assert_eq!(fs::read(managed_target.join(chosen)).unwrap(), b"one explicit copy");
-        assert_eq!(fs::read(managed_source.join(chosen)).unwrap(), b"one explicit copy");
+        assert_eq!(
+            fs::read(managed_target.join(chosen)).unwrap(),
+            b"one explicit copy"
+        );
+        assert_eq!(
+            fs::read(managed_source.join(chosen)).unwrap(),
+            b"one explicit copy"
+        );
         assert!(!managed_root.join("01/published").exists());
         assert_eq!(fs::read(&retired_frame).unwrap(), latest_frame);
         println!(
