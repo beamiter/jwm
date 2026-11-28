@@ -425,6 +425,111 @@ pub(super) fn managed_copy_notice(receipt: TrackedCopyReceipt) -> String {
     }
 }
 
+pub(super) fn dispatch_drop_into_folder(
+    state: &Shared,
+    status: &gtk::Label,
+    folder: StashedCopy,
+    source: StashedCopy,
+    kind: FileKind,
+) -> bool {
+    let mut browser = state.borrow_mut();
+    if browser.pending.is_some() || browser.mutation.is_some() || browser.dialog_open {
+        return false;
+    }
+    let target_path = folder.path.join(&folder.name);
+    let path_for_worker = target_path.clone();
+    let detail = format!(
+        "{} → {}",
+        crate::trash_ui::display_path(source.path.join(&source.name).as_os_str()),
+        crate::trash_ui::display_path(target_path.as_os_str())
+    );
+    let parent = folder.parent.clone();
+    let cancellation = Cancellation::default();
+    let on_worker = cancellation.clone();
+    let wake = browser.wake.clone();
+    let (send, reply) = mpsc::sync_channel(1);
+    match thread::Builder::new()
+        .name("jwm-files-folder-drop".into())
+        .spawn(move || {
+            let _notify = SignalOnDrop(wake);
+            let result =
+                copy_into_listed_folder(&folder, &path_for_worker, &source, kind, &on_worker);
+            let _ = send.send(result);
+        }) {
+        Ok(_) => {
+            browser.mutation = Some(MutationWork {
+                parent,
+                path: target_path,
+                operation: "复制到文件夹",
+                reply,
+                copy: Some((cancellation, detail.clone())),
+            });
+            notice(status, &format!("正在复制：{detail}"));
+            true
+        }
+        Err(error) => {
+            notice(status, &format!("无法启动复制：{error}"));
+            false
+        }
+    }
+}
+
+fn copy_into_listed_folder(
+    folder: &StashedCopy,
+    target_path: &std::path::Path,
+    source: &StashedCopy,
+    kind: FileKind,
+    cancel: &Cancellation,
+) -> Result<MutationOutcome, String> {
+    let target = folder
+        .parent
+        .open_listed_child(&folder.path, &folder.name, folder.identity)
+        .map_err(|_| String::from("目标文件夹已变化或不可访问，未写入。"))?;
+    if target.identity() == source.parent.identity() {
+        return Err("请选择不同的目标目录。同名项目不会被覆盖。".into());
+    }
+    let tree = match kind {
+        FileKind::Regular => {
+            target
+                .copy_regular_no_replace(
+                    CopySource {
+                        parent: &source.parent,
+                        displayed_parent: &source.path,
+                        name: &source.name,
+                        expected_file: source.identity,
+                    },
+                    CopyDestination {
+                        displayed_parent: target_path,
+                        name: &source.name,
+                    },
+                    cancel,
+                )
+                .map_err(copy_error_message)?;
+            None
+        }
+        FileKind::Directory => {
+            #[cfg(test)]
+            let _test_gate = TREE_COPY_TEST_GATE.lock().unwrap();
+            if !DirectoryHandle::open(&source.path)
+                .is_ok_and(|current| current.identity() == source.parent.identity())
+            {
+                return Err("源目录已变化，未写入目标文件夹。".into());
+            }
+            let root = source.path.join(&source.name);
+            let plan = plan_tree_copy(&root, source.identity, cancel).map_err(plan_error)?;
+            Some(
+                copy_tree_no_replace(&plan, &target, target_path, &source.name, cancel)
+                    .map_err(|error| tree_error(error, target_path))?,
+            )
+        }
+        _ => return Err("此项目不支持拖拽复制。".into()),
+    };
+    Ok(MutationOutcome::FolderDrop {
+        identity: target.identity(),
+        tree,
+    })
+}
+
 pub(super) const MOVE_OPERATION: &str = "移动文件";
 
 fn move_error(error: RegularMoveError) -> String {
