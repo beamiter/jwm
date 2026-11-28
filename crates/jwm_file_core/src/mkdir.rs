@@ -82,6 +82,38 @@ impl DirectoryHandle {
         })
     }
 
+    /// Open one immediate child on a worker without following a symlink.
+    /// Both the displayed parent and the child's identity must match the
+    /// listing used to choose the destination. Never reopen the child for a
+    /// mutation by absolute path; keep using the returned directory handle.
+    pub fn open_listed_child(
+        &self,
+        displayed_parent: &Path,
+        name: &OsStr,
+        expected: FileIdentity,
+    ) -> io::Result<Self> {
+        if !single_name(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a single directory name",
+            ));
+        }
+        if Self::open(displayed_parent)?.identity() != self.identity() {
+            return Err(io::Error::other("listed parent changed"));
+        }
+        let fd = fs::openat(
+            &self.fd,
+            name,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        let child = Self::from_directory_fd(fd)?;
+        if child.identity() != expected {
+            return Err(io::Error::other("listed directory changed"));
+        }
+        Ok(child)
+    }
+
     pub fn identity(&self) -> FileIdentity {
         self.identity
     }

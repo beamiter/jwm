@@ -234,6 +234,10 @@ enum MutationOutcome {
     MoveUnverified,
     TrashMove(Option<OsString>),
     TreeCopy(jwm_file_core::TreeCopyReceipt),
+    FolderDrop {
+        identity: FileIdentity,
+        tree: Option<jwm_file_core::TreeCopyReceipt>,
+    },
     BatchCopy(Vec<(OsString, jwm_file_core::CopyBatchItem)>),
     Rename(Option<RenameReceipt>),
     RenameUndone,
@@ -699,10 +703,12 @@ fn open_window_with_tabs(
     let reveal_widget = reveal.as_ref().map(|_| Rc::new(RevealWidget::default()));
     let row_drag_view = Rc::new(RefCell::new(std::rc::Weak::new()));
     let row_drag_enabled = drop_copy_ui::available();
+    let folder_drop_rows = Rc::new(drop_copy_ui::FolderRowTargets::default());
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup({
         let model = model.downgrade();
         let row_drag_view = row_drag_view.clone();
+        let folder_drop_rows = folder_drop_rows.clone();
         move |_, object| {
             if let Ok(item) = object.clone().downcast::<gtk::ListItem>() {
                 let label = gtk::Label::new(None);
@@ -714,8 +720,23 @@ fn open_window_with_tabs(
                 label.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 if row_drag_enabled && let Some(model) = model.upgrade() {
                     drop_copy_ui::install_row(&label, &item, &model, row_drag_view.clone());
+                    drop_copy_ui::install_folder_target(
+                        &label,
+                        &item,
+                        &model,
+                        row_drag_view.clone(),
+                        folder_drop_rows.clone(),
+                    );
                 }
                 item.set_child(Some(&label));
+            }
+        }
+    });
+    factory.connect_unbind({
+        let folder_drop_rows = folder_drop_rows.clone();
+        move |_, object| {
+            if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+                folder_drop_rows.unbind(item);
             }
         }
     });
@@ -849,6 +870,7 @@ fn open_window_with_tabs(
     copy_status.set_ellipsize(gtk::pango::EllipsizeMode::End);
     copy_status.set_visible(false);
     layout.append(&copy_status);
+    folder_drop_rows.set_status(&copy_status);
     if drop_copy_ui::available() {
         layout.append(&drop_strip);
     }
@@ -1503,6 +1525,7 @@ fn open_window_with_tabs(
         {
             let mut batch = None;
             let mut tree = None;
+            let mut actual_target = work.parent.identity();
             let mut managed_copy = None;
             let mut move_unverified = false;
             let mut trash_unverified = None;
@@ -1533,6 +1556,11 @@ fn open_window_with_tabs(
                     tree = Some(receipt);
                     None
                 }
+                MutationOutcome::FolderDrop { identity, tree: receipt } => {
+                    actual_target = identity;
+                    tree = receipt;
+                    None
+                }
                 MutationOutcome::BatchCopy(items) => {
                     batch = Some(batch_copy_result::BatchCopyReport::from_items(
                         &work.path, items,
@@ -1545,7 +1573,7 @@ fn open_window_with_tabs(
                 && browser
                     .parent
                     .as_ref()
-                    .is_some_and(|p| p.identity() == work.parent.identity());
+                    .is_some_and(|p| p.identity() == actual_target);
             if let Some(receipt) = managed_copy {
                 copy_ui::notice(&copy_status, &copy_ui::managed_copy_notice(receipt));
             } else if let Some(report) = &batch {
@@ -2093,9 +2121,9 @@ mod wayland_acceptance {
                 .find_map(|i| controllers.item(i)?.downcast::<gtk::DragSource>().ok())
         };
         let drag_source = drag_controller(&handle).expect("native drag source on the handle");
-        let hover_from = |label: &gtk::Label, drag_source: &gtk::DragSource| {
+        let hover_to = |label: &gtk::Label, drag_source: &gtk::DragSource, destination: &gtk::Label| {
             let (sx, sy) = widget_center(&from, label);
-            let (tx, ty) = widget_center(&to, &drop_label);
+            let (tx, ty) = widget_center(&to, destination);
             move_in("source", sx, sy);
             pump_for(60);
             xd(&["mousedown", "1"]);
@@ -2108,7 +2136,7 @@ mod wayland_acceptance {
             move_in("target", tx + 4, ty);
             until(
                 || {
-                    drop_label
+                    destination
                         .state_flags()
                         .contains(gtk::StateFlags::DROP_ACTIVE)
                         && drag_source.drag().is_some_and(|drag| {
@@ -2119,6 +2147,9 @@ mod wayland_acceptance {
             );
         };
 
+        let hover_from = |label: &gtk::Label, drag_source: &gtk::DragSource| {
+            hover_to(label, drag_source, &drop_label);
+        };
         let hover = || hover_from(&handle, &drag_source);
 
         hover();
@@ -2335,6 +2366,88 @@ mod wayland_acceptance {
         println!(
             "GTK4 {backend_label} row drag copy: rebound native-name twin copied exactly; stale row drop wrote nothing"
         );
+
+        let existing_tree = source_id(&outgoing);
+        let old_leaf = "01-destination-old";
+        let new_leaf = "01-destination-new";
+        let old_dest = target.join(old_leaf);
+        let new_dest = target.join(new_leaf);
+        let moved_dest = root.join("held-old-destination");
+        let prepared_dest = root.join("prepared-new-destination");
+        fs::create_dir(&old_dest).unwrap();
+        fs::create_dir(&prepared_dest).unwrap();
+        let old_identity = source_id(&old_dest);
+        let new_identity = source_id(&prepared_dest);
+        let folder_model_row = |name: &str| {
+            (0..to_model.n_items()).find(|&row| {
+                to_model.native_name_at(row).as_deref() == Some(OsStr::new(name))
+            })
+        };
+        let folder_label = |name: &str| {
+            let marker = format!("▸ {name}");
+            descendants(to.upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                .find(|label| label.is_mapped() && label.label().as_str() == marker)
+        };
+        until(
+            || folder_model_row(old_leaf).is_some() && folder_label(old_leaf).is_some(),
+            "old target folder row is committed and visible",
+        );
+        let old_pos = folder_model_row(old_leaf).unwrap();
+        fs::remove_file(&output).unwrap();
+        until(
+            || (0..to_model.n_items()).all(|row| to_model.native_name_at(row).as_deref() != Some(raw)),
+            "parent leaf removed before the drop-target test",
+        );
+        let old_label = folder_label(old_leaf).unwrap();
+        let old_point = widget_center(&to, &old_label);
+        selection.set_selected(model_position(raw).unwrap());
+        hover_to(&handle, &drag_source, &old_label);
+        assert!(!old_dest.join(raw).exists(), "hover does not write a file");
+        fs::rename(&old_dest, &moved_dest).unwrap();
+        fs::rename(&prepared_dest, &new_dest).unwrap();
+        until(
+            || folder_model_row(old_leaf).is_none()
+                && folder_model_row(new_leaf) == Some(old_pos)
+                && folder_label(new_leaf).is_some_and(|label| widget_center(&to, &label) == old_point),
+            "destination-only refresh rebound the row under the stationary pointer",
+        );
+        xd(&["mouseup", "1"]);
+        until(|| drag_source.drag().is_none(), "old folder-target drag ended");
+        pump_for(200);
+        assert!(!moved_dest.join(raw).exists());
+        assert!(!new_dest.join(raw).exists());
+        assert!(!output.exists());
+        assert_eq!(source_id(&moved_dest), old_identity);
+
+        let new_label = folder_label(new_leaf).unwrap();
+        hover_to(&handle, &drag_source, &new_label);
+        xd(&["mouseup", "1"]);
+        until(
+            || status(&|message| message.starts_with("已复制：") && message.contains(new_leaf)),
+            "fresh regular drop completed inside the new target folder",
+        );
+        assert_eq!(fs::read(new_dest.join(raw)).unwrap(), b"exact raw source");
+        assert!(!output.exists());
+        assert_eq!(source_id(&input), original);
+
+        selection.set_selected(folder_row().unwrap());
+        hover_to(&handle, &drag_source, &new_label);
+        xd(&["mouseup", "1"]);
+        until(
+            || status(&|message| message.starts_with("已复制文件夹：") && message.contains(new_leaf)),
+            "fresh tree drop completed inside the new target folder",
+        );
+        assert_eq!(
+            fs::read(new_dest.join(folder_name).join("nested").join(raw)).unwrap(),
+            b"exact nested bytes"
+        );
+        assert_eq!(source_id(&incoming), folder_identity);
+        assert_eq!(source_id(&new_dest), new_identity);
+        assert_eq!(source_id(&outgoing), existing_tree);
+        assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
+        println!("GTK4 {backend_label} folder row target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory");
     }
 
     #[test]
