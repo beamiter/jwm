@@ -3041,7 +3041,10 @@ mod wayland_acceptance {
             fs::read(journal_root.join("03")).unwrap(),
             b"not a slot directory"
         );
-        assert!(matches!(check_reached.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(matches!(
+            check_reached.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
         let controls = || {
             descendants(journal_panel().unwrap().upcast_ref())
                 .into_iter()

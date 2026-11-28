@@ -3,8 +3,7 @@ use gtk::{gio, glib, prelude::*};
 use gtk4 as gtk;
 use jwm_file_core::{
     COPY_JOURNAL_SLOTS, CopyJournalRecord, CopyJournalSlotState, CopyJournalSnapshot,
-    CopyJournalState, CopyReview,
-    inspect_copy_journal, open_files_state_root,
+    CopyJournalState, CopyReview, inspect_copy_journal, open_files_state_root,
 };
 use std::{cell::Cell, io, path::PathBuf, rc::Rc};
 
@@ -91,7 +90,8 @@ fn append_check(
                 return;
             };
             if !label.root().is_some_and(|root| {
-                root.downcast::<gtk::Window>().is_ok_and(|root| root == window)
+                root.downcast::<gtk::Window>()
+                    .is_ok_and(|root| root == window)
             }) {
                 return;
             }
