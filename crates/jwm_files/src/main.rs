@@ -4,6 +4,7 @@ mod batch_copy_result;
 mod bench_ui;
 mod breadcrumb;
 mod comparison;
+mod copy_journal_ui;
 mod copy_ui;
 mod drop_copy_ui;
 mod file_manager_bus;
@@ -897,6 +898,7 @@ fn open_window_with_tabs(
     folder_terminal_handoff::install(&window, &state, &status);
     app.set_accels_for_action("win.folder-terminal", &["<Control><Shift>Return"]);
     session_ui::install(app, &window, &state, &status, home, special, copy_buffer);
+    copy_journal_ui::install(&window);
     trash_ui::install(&window);
     trash_move_ui::install(&window, &state, &selection, &copy_status);
     if drop_copy_ui::available() {
@@ -2948,6 +2950,97 @@ mod wayland_acceptance {
         action("win.undo-rename");
         assert!(status_matches(&|text| text == "没有可撤销的重命名。"));
         println!("GTK4 Wayland undo: directory-bound rename conflicts were non-destructive");
+
+        use std::os::unix::ffi::OsStringExt as _;
+        let journal_state = root.parent().unwrap().join("state");
+        let journal_root = journal_state.join("jwm-files-copy-journal-v1");
+        let journal_panel = || {
+            app.windows().into_iter().find(|window| {
+                window.is_visible() && window.title().as_deref() == Some(copy_journal_ui::TITLE)
+            })
+        };
+        let journal_text = |needles: &[&str]| {
+            journal_panel().is_some_and(|panel| {
+                if !panel.is_mapped() {
+                    return false;
+                }
+                let labels: Vec<_> = descendants(panel.upcast_ref())
+                    .into_iter()
+                    .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                    .map(|label| label.text())
+                    .collect();
+                needles
+                    .iter()
+                    .all(|needle| labels.iter().any(|label| label.contains(needle)))
+            })
+        };
+        action("win.copy-journal");
+        until(
+            || journal_text(&["已占用 0/64", "尚无复制记录"]),
+            "fresh native journal panel",
+        );
+        assert!(!journal_root.exists());
+        journal_panel().unwrap().close();
+
+        let state_root = DirectoryHandle::open(&journal_state).unwrap();
+        let detached = root.join("offline-destination-do-not-probe");
+        let mut record = jwm_file_core::CopyJournalRecord {
+            destination_parent: detached.clone(),
+            parent: FileIdentity {
+                device: 7,
+                inode: 9,
+            },
+            name: OsString::from_vec(b"not-current-\x80.txt".to_vec()),
+            state: jwm_file_core::CopyJournalState::Prepared,
+        };
+        let prepared = jwm_file_core::prepare_copy_journal(&state_root, record.clone()).unwrap();
+        assert_eq!(prepared.slot(), 0);
+        record.name = "previous.txt".into();
+        let observed = jwm_file_core::prepare_copy_journal(&state_root, record.clone()).unwrap();
+        assert_eq!(observed.slot(), 1);
+        record.state = jwm_file_core::CopyJournalState::Published(jwm_file_core::CopyObservation {
+            file: FileIdentity {
+                device: 7,
+                inode: 10,
+            },
+            size: 15,
+            mtime_seconds: 1,
+            mtime_nanos: 0,
+            ctime_seconds: 2,
+            ctime_nanos: 0,
+        });
+        observed.record_publication(&record).unwrap();
+        use std::os::unix::fs::DirBuilderExt as _;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(journal_root.join("02"))
+            .unwrap();
+        fs::write(journal_root.join("03"), b"not a slot directory").unwrap();
+
+        action("win.copy-journal");
+        until(
+            || {
+                journal_text(&[
+                    "已占用 4/64",
+                    "01 · 只有开始记录，复制结果未知",
+                    "not-current-\\x80.txt",
+                    "02 · 有写入记录，未检查当前文件",
+                    "03 · 记录未写完",
+                    "04 · 记录无法读取",
+                    "按记录编号排列，不检查当前目标文件",
+                ])
+            },
+            "native record types and capacity without looking at destinations",
+        );
+        assert!(!detached.exists());
+        assert_eq!(
+            fs::read(journal_root.join("03")).unwrap(),
+            b"not a slot directory"
+        );
+        journal_panel().unwrap().close();
+        println!(
+            "GTK4 Wayland copy journal: fresh state left untouched; saved, incomplete and unreadable records shown without destination check"
+        );
 
         let xdg = glib::user_data_dir();
         assert_eq!(xdg, root.parent().unwrap().join("data"));

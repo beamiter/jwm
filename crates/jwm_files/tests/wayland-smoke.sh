@@ -19,7 +19,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -m 700 "$fixture/run" "$fixture/config" "$fixture/data" "$fixture/files"
+mkdir -m 700 "$fixture/run" "$fixture/config" "$fixture/data" "$fixture/files" "$fixture/state"
+export XDG_STATE_HOME="$fixture/state"
 export XDG_RUNTIME_DIR="$fixture/run" XDG_CONFIG_HOME="$fixture/config" XDG_DATA_HOME="$fixture/data"
 export WAYLAND_DISPLAY=jwm-files-test GDK_BACKEND=wayland GSK_RENDERER=cairo GTK_A11Y=test
 export JWM_FILE_SMOKE_FIXTURE="$fixture/files"
@@ -78,5 +79,6 @@ grep -Fx 'GTK4 Wayland folder copy: raw leaf and empty directory, descendant and
 grep -Fx 'GTK4 Wayland cut focus: a focused sidebar could neither arm nor consume a cut' "$client_log"
 grep -Fx 'GTK4 Wayland cut and paste: native identity retained, no overwrite, cancel, no replay' "$client_log"
 grep -Fx 'GTK4 Wayland folder cut: descendant and conflict refused, held destination got the exact folder once' "$client_log"
+grep -Fx 'GTK4 Wayland copy journal: fresh state left untouched; saved, incomplete and unreadable records shown without destination check' "$client_log"
 grep -F 'GTK4 Wayland find: exact selected row and stale snapshot rejection verified' "$client_log"
 grep -F 'GTK4 Wayland find: one early Enter applied once and an edited query discarded it' "$client_log"
