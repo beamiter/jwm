@@ -2256,9 +2256,8 @@ mod wayland_acceptance {
         fs::write(source.join(second), b"the clicked native leaf").unwrap();
         let second_identity = source_id(&source.join(second));
         let model_position = |name: &OsStr| {
-            (0..from_model.n_items()).find(|&index| {
-                from_model.native_name_at(index).as_deref() == Some(name)
-            })
+            (0..from_model.n_items())
+                .find(|&index| from_model.native_name_at(index).as_deref() == Some(name))
         };
         let row_label = |name: &OsStr| {
             let index = model_position(name)?;
@@ -2296,7 +2295,11 @@ mod wayland_acceptance {
         let stale_drag = drag_controller(&stale_label).unwrap();
         selection.set_selected(model_position(first).unwrap());
         hover_from(&stale_label, &stale_drag);
-        fs::write(source.join("00-rebind.txt"), b"force a new directory snapshot").unwrap();
+        fs::write(
+            source.join("00-rebind.txt"),
+            b"force a new directory snapshot",
+        )
+        .unwrap();
         until(
             || {
                 model_position(OsStr::new("00-rebind.txt")).is_some()
@@ -2322,7 +2325,10 @@ mod wayland_acceptance {
             || status(&|message| message.starts_with("已复制：") && message.contains(r"\x81")),
             "rebound row copied the exact clicked native leaf",
         );
-        assert_eq!(fs::read(target.join(second)).unwrap(), b"the clicked native leaf");
+        assert_eq!(
+            fs::read(target.join(second)).unwrap(),
+            b"the clicked native leaf"
+        );
         assert!(!target.join(first).exists());
         assert_eq!(source_id(&source.join(second)), second_identity);
         assert_eq!(text_clipboard(&display), "unchanged independent clipboard");

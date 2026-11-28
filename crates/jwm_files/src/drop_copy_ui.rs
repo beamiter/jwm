@@ -76,7 +76,9 @@ impl Pending {
         };
         if Rc::ptr_eq(&view, target)
             || self.selection.as_ref().is_some_and(|selected| {
-                selected.upgrade().is_none_or(|selected| selected.selected() != self.index)
+                selected
+                    .upgrade()
+                    .is_none_or(|selected| selected.selected() != self.index)
             })
         {
             return false;
