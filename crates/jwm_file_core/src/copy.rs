@@ -2,7 +2,7 @@
 use crate::copy_names::{COPY_NAMES, sibling_copy_name};
 use crate::{
     Cancellation, CopyJournalRecord, CopyJournalReservation, CopyJournalState, CopyObservation,
-    DirectoryHandle, FileIdentity, prepare_copy_journal,
+    DirectoryHandle, FileIdentity, prepare_copy_journal, prepare_managed_copy_journal,
 };
 use rustix::{
     fd::AsRawFd,
@@ -113,7 +113,14 @@ pub enum TrackedCopyError {
     },
 }
 
+#[derive(Clone, Copy)]
+enum JournalNamespace {
+    Prototype,
+    Managed,
+}
+
 struct CopyTracking<'a> {
+    namespace: JournalNamespace,
     base: &'a DirectoryHandle,
     intent: Option<CopyJournalReservation>,
     intent_error: Option<io::Error>,
@@ -133,7 +140,11 @@ impl CopyTracking<'_> {
             name: name.into(),
             state: CopyJournalState::Prepared,
         };
-        match prepare_copy_journal(self.base, intent) {
+        let reservation = match self.namespace {
+            JournalNamespace::Prototype => prepare_copy_journal(self.base, intent),
+            JournalNamespace::Managed => prepare_managed_copy_journal(self.base, intent),
+        };
+        match reservation {
             Ok(reservation) => {
                 self.intent = Some(reservation);
                 Ok(())
@@ -425,7 +436,45 @@ impl DirectoryHandle {
         state_base: &DirectoryHandle,
         cancel: &Cancellation,
     ) -> Result<TrackedCopyReceipt, TrackedCopyError> {
+        self.copy_with_journal(
+            source,
+            destination,
+            state_base,
+            cancel,
+            JournalNamespace::Prototype,
+        )
+    }
+
+    /// Explicit managed-journal copy of one local regular file without replacement.
+    /// Does not fall back to normal or prototype copy if the intent cannot be
+    /// saved. A linked destination is still a success if only the publication
+    /// evidence cannot be persisted. No rollback or directory sync is implied.
+    pub fn copy_regular_managed(
+        &self,
+        source: CopySource<'_>,
+        destination: CopyDestination<'_>,
+        state_base: &DirectoryHandle,
+        cancel: &Cancellation,
+    ) -> Result<TrackedCopyReceipt, TrackedCopyError> {
+        self.copy_with_journal(
+            source,
+            destination,
+            state_base,
+            cancel,
+            JournalNamespace::Managed,
+        )
+    }
+
+    fn copy_with_journal(
+        &self,
+        source: CopySource<'_>,
+        destination: CopyDestination<'_>,
+        state_base: &DirectoryHandle,
+        cancel: &Cancellation,
+        namespace: JournalNamespace,
+    ) -> Result<TrackedCopyReceipt, TrackedCopyError> {
         let mut tracking = CopyTracking {
+            namespace,
             base: state_base,
             intent: None,
             intent_error: None,
@@ -716,6 +765,14 @@ mod tests {
         }
 
         fn copy(&self, cancel: &Cancellation) -> Result<TrackedCopyReceipt, TrackedCopyError> {
+            self.copy_using(cancel, JournalNamespace::Prototype)
+        }
+
+        fn copy_using(
+            &self,
+            cancel: &Cancellation,
+            namespace: JournalNamespace,
+        ) -> Result<TrackedCopyReceipt, TrackedCopyError> {
             use std::os::unix::fs::MetadataExt;
 
             let from_path = self.0.join("from");
@@ -724,23 +781,27 @@ mod tests {
             let to = DirectoryHandle::open(&to_path).unwrap();
             let state = DirectoryHandle::open(&self.0.join("state")).unwrap();
             let original = std::fs::metadata(from_path.join("file")).unwrap();
-            to.copy_regular_tracked(
-                CopySource {
-                    parent: &from,
-                    displayed_parent: &from_path,
-                    name: OsStr::new("file"),
-                    expected_file: FileIdentity {
-                        device: original.dev(),
-                        inode: original.ino(),
-                    },
+            let source = CopySource {
+                parent: &from,
+                displayed_parent: &from_path,
+                name: OsStr::new("file"),
+                expected_file: FileIdentity {
+                    device: original.dev(),
+                    inode: original.ino(),
                 },
-                CopyDestination {
-                    displayed_parent: &to_path,
-                    name: OsStr::new("target"),
-                },
-                &state,
-                cancel,
-            )
+            };
+            let destination = CopyDestination {
+                displayed_parent: &to_path,
+                name: OsStr::new("target"),
+            };
+            match namespace {
+                JournalNamespace::Prototype => {
+                    to.copy_regular_tracked(source, destination, &state, cancel)
+                }
+                JournalNamespace::Managed => {
+                    to.copy_regular_managed(source, destination, &state, cancel)
+                }
+            }
         }
 
         fn review(&self, slot: u8) -> crate::CopyReview {
@@ -753,6 +814,54 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn managed_copy_records_publication_only_in_its_own_namespace() {
+        let f = TrackedFixture::new();
+        let receipt = f
+            .copy_using(&Cancellation::default(), JournalNamespace::Managed)
+            .unwrap();
+        assert_eq!(receipt.bytes, 8);
+        assert!(matches!(receipt.evidence, CopyEvidence::Recorded));
+        let state = DirectoryHandle::open(&f.0.join("state")).unwrap();
+        let journal = crate::inspect_managed_journal(&state).unwrap();
+        let [entry] = journal.numbered.occupied() else {
+            panic!("expected one explicit managed record");
+        };
+        assert_eq!(entry.slot, receipt.slot);
+        let crate::CopyJournalSlotState::Readable(record) = &entry.state else {
+            panic!("expected readable managed copy evidence");
+        };
+        assert_eq!(record.review(), crate::CopyReview::MetadataMatches);
+        assert!(!f.0.join("state/jwm-files-copy-journal-v1").exists());
+        assert_eq!(std::fs::read(f.0.join("from/file")).unwrap(), b"original");
+        assert_eq!(std::fs::read(f.0.join("to/target")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn managed_copy_full_journal_does_not_fallback_or_publish() {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let f = TrackedFixture::new();
+        let journal = f.0.join("state/jwm-files-copy-journal-v2");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&journal)
+            .unwrap();
+        for slot in 0..crate::COPY_JOURNAL_SLOTS {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(journal.join(format!("{slot:02}")))
+                .unwrap();
+        }
+        assert!(matches!(
+            f.copy_using(&Cancellation::default(), JournalNamespace::Managed),
+            Err(TrackedCopyError::Intent(error)) if error.kind() == io::ErrorKind::StorageFull
+        ));
+        assert_eq!(std::fs::read_dir(f.0.join("to")).unwrap().count(), 0);
+        assert!(!f.0.join("state/jwm-files-copy-journal-v1").exists());
+        assert_eq!(std::fs::read(f.0.join("from/file")).unwrap(), b"original");
     }
 
     #[test]
