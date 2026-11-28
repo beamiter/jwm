@@ -452,10 +452,10 @@ pub(super) fn dispatch_drop_into_folder(
         .name("jwm-files-folder-drop".into())
         .spawn(move || {
             let _notify = SignalOnDrop(wake);
-            let result = copy_into_listed_folder(&folder, &path_for_worker, &source, kind, &on_worker);
+            let result =
+                copy_into_listed_folder(&folder, &path_for_worker, &source, kind, &on_worker);
             let _ = send.send(result);
-        })
-    {
+        }) {
         Ok(_) => {
             browser.mutation = Some(MutationWork {
                 parent,

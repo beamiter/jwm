@@ -189,7 +189,12 @@ impl FolderRowTargets {
 
     pub(super) fn unbind(&self, item: &gtk::ListItem) {
         if let Some(hover) = self.hover.borrow_mut().as_mut()
-            && hover.active.as_ref().and_then(glib::WeakRef::upgrade).as_ref() == Some(item)
+            && hover
+                .active
+                .as_ref()
+                .and_then(glib::WeakRef::upgrade)
+                .as_ref()
+                == Some(item)
         {
             hover.invalidated = true;
             hover.active = None;
@@ -227,7 +232,12 @@ impl FolderRowTargets {
 
     fn leave(&self, item: &gtk::ListItem) {
         if let Some(hover) = self.hover.borrow_mut().as_mut()
-            && hover.active.as_ref().and_then(glib::WeakRef::upgrade).as_ref() == Some(item)
+            && hover
+                .active
+                .as_ref()
+                .and_then(glib::WeakRef::upgrade)
+                .as_ref()
+                == Some(item)
         {
             hover.active = None;
         }
@@ -238,7 +248,12 @@ impl FolderRowTargets {
             !hover.invalidated
                 && hover.drag.upgrade().as_ref() == Some(drag)
                 && hover.rows.ptr_eq(&Arc::downgrade(rows))
-                && hover.active.as_ref().and_then(glib::WeakRef::upgrade).as_ref() == Some(item)
+                && hover
+                    .active
+                    .as_ref()
+                    .and_then(glib::WeakRef::upgrade)
+                    .as_ref()
+                    == Some(item)
         })
     }
 }
@@ -255,7 +270,8 @@ pub(super) fn install_folder_target(
     let capture = Rc::new({
         let item = item.clone();
         move |drag: &gdk::Drag| {
-            let (item, model, state) = (item.upgrade()?, model.upgrade()?, view.borrow().upgrade()?);
+            let (item, model, state) =
+                (item.upgrade()?, model.upgrade()?, view.borrow().upgrade()?);
             let bound = item.item()?;
             let folder = Pending::capture(&state, item.position(), None, Some((&model, &bound)))?;
             if folder.kind != FileKind::Directory
@@ -278,17 +294,23 @@ pub(super) fn install_folder_target(
         move |_, drop| {
             drop.actions() == gdk::DragAction::COPY
                 && drop.drag().is_some_and(|drag| {
-                    capture(&drag).is_some_and(|(_, _, folder)| targets.allows_epoch(&drag, &folder.rows))
+                    capture(&drag)
+                        .is_some_and(|(_, _, folder)| targets.allows_epoch(&drag, &folder.rows))
                 })
         }
     });
     target.connect_enter({
         let (capture, targets) = (capture.clone(), targets.clone());
         move |target, _, _| {
-            let Some(drag) = target.property::<Option<gdk::Drop>>("drop").and_then(|drop| drop.drag()) else {
+            let Some(drag) = target
+                .property::<Option<gdk::Drop>>("drop")
+                .and_then(|drop| drop.drag())
+            else {
                 return gdk::DragAction::empty();
             };
-            if capture(&drag).is_some_and(|(item, _, folder)| targets.enter(&drag, &item, &folder.rows)) {
+            if capture(&drag)
+                .is_some_and(|(item, _, folder)| targets.enter(&drag, &item, &folder.rows))
+            {
                 gdk::DragAction::COPY
             } else {
                 gdk::DragAction::empty()
@@ -298,10 +320,15 @@ pub(super) fn install_folder_target(
     target.connect_motion({
         let (capture, targets) = (capture.clone(), targets.clone());
         move |target, _, _| {
-            let Some(drag) = target.property::<Option<gdk::Drop>>("drop").and_then(|drop| drop.drag()) else {
+            let Some(drag) = target
+                .property::<Option<gdk::Drop>>("drop")
+                .and_then(|drop| drop.drag())
+            else {
                 return gdk::DragAction::empty();
             };
-            if capture(&drag).is_some_and(|(item, _, folder)| targets.accepts(&drag, &item, &folder.rows)) {
+            if capture(&drag)
+                .is_some_and(|(item, _, folder)| targets.accepts(&drag, &item, &folder.rows))
+            {
                 gdk::DragAction::COPY
             } else {
                 gdk::DragAction::empty()

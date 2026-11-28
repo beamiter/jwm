@@ -1556,7 +1556,10 @@ fn open_window_with_tabs(
                     tree = Some(receipt);
                     None
                 }
-                MutationOutcome::FolderDrop { identity, tree: receipt } => {
+                MutationOutcome::FolderDrop {
+                    identity,
+                    tree: receipt,
+                } => {
                     actual_target = identity;
                     tree = receipt;
                     None
@@ -1954,18 +1957,24 @@ mod wayland_acceptance {
                 .expect("drag control")
         }
 
-        fn widget_center(window: &gtk::Window, label: &gtk::Label) -> (i32, i32) {
-            let bounds = label.compute_bounds(window).expect("mapped label bounds");
-            assert!(bounds.width() > 10.0 && bounds.height() > 5.0);
+        fn hit_center(window: &gtk::Window, label: &gtk::Label) -> Option<(i32, i32)> {
+            let bounds = label.compute_bounds(window)?;
+            if bounds.width() <= 10.0 || bounds.height() <= 5.0 {
+                return None;
+            }
             let x = f64::from(bounds.x() + bounds.width() / 2.0);
             let y = f64::from(bounds.y() + bounds.height() / 2.0);
-            assert_eq!(
-                window.pick(x, y, gtk::PickFlags::DEFAULT).as_ref(),
-                Some(label.upcast_ref::<gtk::Widget>()),
-                "the pointer must hit the actual drag control"
-            );
+            if window.pick(x, y, gtk::PickFlags::DEFAULT).as_ref()
+                != Some(label.upcast_ref::<gtk::Widget>())
+            {
+                return None;
+            }
             let (tx, ty) = window.surface_transform();
-            ((x - tx).round() as i32, (y - ty).round() as i32)
+            Some(((x - tx).round() as i32, (y - ty).round() as i32))
+        }
+
+        fn widget_center(window: &gtk::Window, label: &gtk::Label) -> (i32, i32) {
+            hit_center(window, label).expect("the pointer must hit the actual allocated drag control")
         }
 
         let backend = if wayland { "wayland" } else { "x11" };
@@ -2121,31 +2130,32 @@ mod wayland_acceptance {
                 .find_map(|i| controllers.item(i)?.downcast::<gtk::DragSource>().ok())
         };
         let drag_source = drag_controller(&handle).expect("native drag source on the handle");
-        let hover_to = |label: &gtk::Label, drag_source: &gtk::DragSource, destination: &gtk::Label| {
-            let (sx, sy) = widget_center(&from, label);
-            let (tx, ty) = widget_center(&to, destination);
-            move_in("source", sx, sy);
-            pump_for(60);
-            xd(&["mousedown", "1"]);
-            // GTK 4.14 requires 100 ms after press before threshold motion starts a drag.
-            pump_for(180);
-            move_in("source", sx + 32, sy);
-            until(|| drag_source.drag().is_some(), "XTEST started a GTK drag");
-            move_in("target", tx, ty);
-            pump_for(160);
-            move_in("target", tx + 4, ty);
-            until(
-                || {
-                    destination
-                        .state_flags()
-                        .contains(gtk::StateFlags::DROP_ACTIVE)
-                        && drag_source.drag().is_some_and(|drag| {
-                            drag.selected_action() == gtk::gdk::DragAction::COPY
-                        })
-                },
-                "the other Files window negotiated COPY with the live drag",
-            );
-        };
+        let hover_to =
+            |label: &gtk::Label, drag_source: &gtk::DragSource, destination: &gtk::Label| {
+                let (sx, sy) = widget_center(&from, label);
+                let (tx, ty) = widget_center(&to, destination);
+                move_in("source", sx, sy);
+                pump_for(60);
+                xd(&["mousedown", "1"]);
+                // GTK 4.14 requires 100 ms after press before threshold motion starts a drag.
+                pump_for(180);
+                move_in("source", sx + 32, sy);
+                until(|| drag_source.drag().is_some(), "XTEST started a GTK drag");
+                move_in("target", tx, ty);
+                pump_for(160);
+                move_in("target", tx + 4, ty);
+                until(
+                    || {
+                        destination
+                            .state_flags()
+                            .contains(gtk::StateFlags::DROP_ACTIVE)
+                            && drag_source.drag().is_some_and(|drag| {
+                                drag.selected_action() == gtk::gdk::DragAction::COPY
+                            })
+                    },
+                    "the other Files window negotiated COPY with the live drag",
+                );
+            };
 
         let hover_from = |label: &gtk::Label, drag_source: &gtk::DragSource| {
             hover_to(label, drag_source, &drop_label);
@@ -2379,16 +2389,19 @@ mod wayland_acceptance {
         let old_identity = source_id(&old_dest);
         let new_identity = source_id(&prepared_dest);
         let folder_model_row = |name: &str| {
-            (0..to_model.n_items()).find(|&row| {
-                to_model.native_name_at(row).as_deref() == Some(OsStr::new(name))
-            })
+            (0..to_model.n_items())
+                .find(|&row| to_model.native_name_at(row).as_deref() == Some(OsStr::new(name)))
         };
         let folder_label = |name: &str| {
             let marker = format!("▸ {name}");
             descendants(to.upcast_ref())
                 .into_iter()
                 .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
-                .find(|label| label.is_mapped() && label.label().as_str() == marker)
+                .find(|label| {
+                    label.is_mapped()
+                        && label.label().as_str() == marker
+                        && hit_center(&to, label).is_some()
+                })
         };
         until(
             || folder_model_row(old_leaf).is_some() && folder_label(old_leaf).is_some(),
@@ -2397,7 +2410,11 @@ mod wayland_acceptance {
         let old_pos = folder_model_row(old_leaf).unwrap();
         fs::remove_file(&output).unwrap();
         until(
-            || (0..to_model.n_items()).all(|row| to_model.native_name_at(row).as_deref() != Some(raw)),
+            || {
+                (0..to_model.n_items())
+                    .all(|row| to_model.native_name_at(row).as_deref() != Some(raw))
+                    && folder_label(old_leaf).is_some()
+            },
             "parent leaf removed before the drop-target test",
         );
         let old_label = folder_label(old_leaf).unwrap();
@@ -2408,13 +2425,19 @@ mod wayland_acceptance {
         fs::rename(&old_dest, &moved_dest).unwrap();
         fs::rename(&prepared_dest, &new_dest).unwrap();
         until(
-            || folder_model_row(old_leaf).is_none()
-                && folder_model_row(new_leaf) == Some(old_pos)
-                && folder_label(new_leaf).is_some_and(|label| widget_center(&to, &label) == old_point),
+            || {
+                let new_point = folder_label(new_leaf).and_then(|label| hit_center(&to, &label));
+                folder_model_row(old_leaf).is_none()
+                    && folder_model_row(new_leaf) == Some(old_pos)
+                    && new_point == Some(old_point)
+            },
             "destination-only refresh rebound the row under the stationary pointer",
         );
         xd(&["mouseup", "1"]);
-        until(|| drag_source.drag().is_none(), "old folder-target drag ended");
+        until(
+            || drag_source.drag().is_none(),
+            "old folder-target drag ended",
+        );
         pump_for(200);
         assert!(!moved_dest.join(raw).exists());
         assert!(!new_dest.join(raw).exists());
@@ -2436,7 +2459,11 @@ mod wayland_acceptance {
         hover_to(&handle, &drag_source, &new_label);
         xd(&["mouseup", "1"]);
         until(
-            || status(&|message| message.starts_with("已复制文件夹：") && message.contains(new_leaf)),
+            || {
+                status(&|message| {
+                    message.starts_with("已复制文件夹：") && message.contains(new_leaf)
+                })
+            },
             "fresh tree drop completed inside the new target folder",
         );
         assert_eq!(
@@ -2447,7 +2474,9 @@ mod wayland_acceptance {
         assert_eq!(source_id(&new_dest), new_identity);
         assert_eq!(source_id(&outgoing), existing_tree);
         assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
-        println!("GTK4 {backend_label} folder row target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory");
+        println!(
+            "GTK4 {backend_label} folder row target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory"
+        );
     }
 
     #[test]

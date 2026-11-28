@@ -625,7 +625,10 @@ fn listed_folder_target_never_follows_an_alias_or_accepts_a_replacement() {
     fs::create_dir(&child).unwrap();
     let (parent, expected) = scanned_child(&root, listed);
     assert_eq!(
-        parent.open_listed_child(&root.0, listed, expected).unwrap().identity(),
+        parent
+            .open_listed_child(&root.0, listed, expected)
+            .unwrap()
+            .identity(),
         expected,
     );
 
@@ -637,9 +640,11 @@ fn listed_folder_target_never_follows_an_alias_or_accepts_a_replacement() {
     assert!(parent.open_listed_child(&root.0, listed, expected).is_err());
 
     let other = Fixture::new();
-    assert!(parent
-        .open_listed_child(&other.0, OsStr::new("retained"), expected)
-        .is_err());
+    assert!(
+        parent
+            .open_listed_child(&other.0, OsStr::new("retained"), expected)
+            .is_err()
+    );
     assert_eq!(fs::read_dir(&child).unwrap().count(), 0);
     assert_eq!(fs::read_dir(&original).unwrap().count(), 0);
 }
