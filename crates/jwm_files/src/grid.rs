@@ -1,8 +1,10 @@
+use crate::drop_copy_ui::FolderRowTargets;
 use crate::row_model::RowPresentation;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::glib;
 use jwm_file_core::FileKind;
+use std::rc::Rc;
 
 fn icon(kind: FileKind) -> &'static str {
     match kind {
@@ -13,25 +15,49 @@ fn icon(kind: FileKind) -> &'static str {
     }
 }
 
-pub(crate) fn new(selection: &gtk::SingleSelection) -> gtk::GridView {
+pub(crate) fn new(
+    selection: &gtk::SingleSelection,
+    targets: Option<Rc<FolderRowTargets>>,
+) -> gtk::GridView {
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let tile = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        tile.set_size_request(84, 70);
-        tile.set_margin_top(6);
-        tile.set_margin_bottom(6);
-        let image = gtk::Image::new();
-        image.set_pixel_size(34);
-        tile.append(&image);
-        let label = gtk::Label::new(None);
-        label.set_max_width_chars(16);
-        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        tile.append(&label);
-        item.set_child(Some(&tile));
+    factory.connect_setup({
+        let targets = targets.clone();
+        move |_, object| {
+            let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let tile = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            tile.set_size_request(84, 70);
+            tile.set_margin_top(6);
+            tile.set_margin_bottom(6);
+            let image = gtk::Image::new();
+            image.set_pixel_size(34);
+            tile.append(&image);
+            let label = gtk::Label::new(None);
+            label.set_max_width_chars(16);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            tile.append(&label);
+            if let Some(targets) = &targets {
+                targets.setup(item, &tile);
+            }
+            item.set_child(Some(&tile));
+        }
     });
+    if let Some(targets) = targets {
+        factory.connect_unbind({
+            let targets = targets.clone();
+            move |_, object| {
+                if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+                    targets.unbind(item);
+                }
+            }
+        });
+        factory.connect_teardown(move |_, object| {
+            if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+                targets.teardown(item);
+            }
+        });
+    }
     factory.connect_bind(|_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;

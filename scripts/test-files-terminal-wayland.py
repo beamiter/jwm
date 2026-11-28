@@ -204,6 +204,8 @@ def run(args, root, log):
                 "GTK4 Wayland drag folder copy: physical drop kept existing tree, then copied exact nested bytes without moving source",
                 "GTK4 Wayland row drag copy: rebound native-name twin copied exactly; stale row drop wrote nothing",
                 "GTK4 Wayland folder row target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory",
+                "GTK4 Wayland folder icon target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory",
+                "GTK4 Wayland folder icon target: reflow of live tiles cleared acceptance, stale release wrote nothing",
             ):
                 assert output.count(marker) == 1, marker
                 print(marker)
