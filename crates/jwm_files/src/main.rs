@@ -2181,15 +2181,22 @@ mod wayland_acceptance {
         fs::write(outgoing.join("existing"), b"keep destination").unwrap();
         let folder_identity = source_id(&incoming);
         let conflict_identity = source_id(&outgoing);
+        let folder_row = || {
+            (0..from_model.n_items()).find(|&position| {
+                from_model
+                    .item(position)
+                    .and_downcast::<glib::BoxedAnyObject>()
+                    .is_some_and(|item| {
+                        let row = item.borrow::<row_model::RowPresentation>();
+                        row.kind == FileKind::Directory && row.name == folder_name
+                    })
+            })
+        };
         until(
-            || {
-                from_model.n_items() == 2
-                    && to_model.n_items() == 3
-                    && first_label(&from_model).as_deref() == Some(folder_name)
-            },
+            || from_model.n_items() == 2 && to_model.n_items() == 3 && folder_row().is_some(),
             "folder drag source and occupied target settled",
         );
-        selection.set_selected(0);
+        selection.set_selected(folder_row().expect("committed directory row"));
         hover();
         assert!(!outgoing.join("nested").exists());
         xd(&["mouseup", "1"]);

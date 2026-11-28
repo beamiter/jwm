@@ -209,10 +209,7 @@ pub(super) fn install(
                 ),
                 FileKind::Directory => {
                     if parent.identity() == offer.pending.source.parent.identity() {
-                        copy_ui::notice(
-                            &status,
-                            "请选择不同的目标目录。同名项目不会被覆盖。",
-                        );
+                        copy_ui::notice(&status, "请选择不同的目标目录。同名项目不会被覆盖。");
                         return false;
                     }
                     copy_ui::dispatch_tree_copy(&state, &status, parent, path, offer.pending.source)
