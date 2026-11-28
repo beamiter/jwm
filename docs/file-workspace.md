@@ -321,7 +321,12 @@ discard only preflighted journal artifacts in the exact retired directory
 selected for cleanup. Unsupported mounts, aliases, and changed selections
 are refused without changing numbered records or copy destinations. The
 application does not yet create managed records or expose retirement or
-cleanup, and this is not a network-filesystem locking guarantee.
+cleanup actions. The same read-only panel shows managed and prototype
+records in separate groups, and reports retired cleanup independently of
+numbered capacity. Both managed observations use the same shared lock so
+retirement and cleanup cannot intervene between them. Active shared writers
+can still update numbered entries. This is not a network-filesystem locking
+or a global transaction guarantee.
 
 ### Find filenames in subdirectories
 

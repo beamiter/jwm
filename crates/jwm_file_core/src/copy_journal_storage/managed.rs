@@ -236,7 +236,11 @@ pub fn managed_retired_state(base: &DirectoryHandle) -> io::Result<ManagedRetire
         }
         Err(error) => return Err(error),
     };
-    match unmounted_private_child(&journal, RETIRED) {
+    retired_state(&journal)
+}
+
+fn retired_state(journal: &OwnedFd) -> io::Result<ManagedRetiredState> {
+    match unmounted_private_child(journal, RETIRED) {
         Ok(dir) => Ok(if artifacts(&dir).is_ok() {
             ManagedRetiredState::PendingCleanup
         } else {
@@ -245,6 +249,42 @@ pub fn managed_retired_state(base: &DirectoryHandle) -> io::Result<ManagedRetire
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(ManagedRetiredState::Absent),
         Err(_) => Ok(ManagedRetiredState::Unsafe),
     }
+}
+
+/// Numbered entries and retired state observed under the same shared journal
+/// lock. Cooperating retirement/cleanup cannot intervene, but a shared writer
+/// can still reserve or publish a numbered entry during observation.
+pub struct ManagedJournalSnapshot {
+    pub numbered: CopyJournalSnapshot,
+    pub retired: ManagedRetiredState,
+}
+
+/// Inspect both parts of management state without opening copy destinations.
+pub fn inspect_managed_journal(base: &DirectoryHandle) -> io::Result<ManagedJournalSnapshot> {
+    inspect_managed_journal_during(base, || {})
+}
+
+fn inspect_managed_journal_during(
+    base: &DirectoryHandle,
+    between: impl FnOnce(),
+) -> io::Result<ManagedJournalSnapshot> {
+    let journal = match acquire_retired_root(base, FlockOperation::NonBlockingLockShared) {
+        Ok(journal) => journal,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(ManagedJournalSnapshot {
+                numbered: CopyJournalSnapshot {
+                    occupied: Vec::new(),
+                },
+                retired: ManagedRetiredState::Absent,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let numbered = inspect_slots(&journal)?;
+    between();
+    let retired = retired_state(&journal)?;
+    revalidate_unmounted(&base.fd, MANAGED, &journal)?;
+    Ok(ManagedJournalSnapshot { numbered, retired })
 }
 
 pub struct ManagedRetiredSelection {
@@ -366,6 +406,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = stdfs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn managed_panel_snapshot_excludes_retirement_between_observations() {
+        let f = Fixture::new();
+        let base = f.open();
+        drop(prepare_managed_copy_journal(&base, f.intent("existing")).unwrap());
+        let other = f.open();
+        let selected = select_managed_copy_journal(&other, 0).unwrap();
+        let before = inspect_managed_journal_during(&base, || {
+            let failure = retire_managed_copy_journal(&other, selected).unwrap_err();
+            assert_eq!(failure.kind(), ErrorKind::WouldBlock);
+        })
+        .unwrap();
+        assert_eq!(before.numbered.occupied().len(), 1);
+        assert_eq!(before.retired, ManagedRetiredState::Absent);
+
+        let selected = select_managed_copy_journal(&other, 0).unwrap();
+        retire_managed_copy_journal(&other, selected).unwrap();
+        let after = inspect_managed_journal(&base).unwrap();
+        assert!(after.numbered.occupied().is_empty());
+        assert_eq!(after.retired, ManagedRetiredState::PendingCleanup);
     }
 
     #[test]

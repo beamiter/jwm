@@ -3,21 +3,35 @@ use gtk::{gio, glib, prelude::*};
 use gtk4 as gtk;
 use jwm_file_core::{
     COPY_JOURNAL_SLOTS, CopyJournalRecord, CopyJournalSlotState, CopyJournalSnapshot,
-    CopyJournalState, CopyReview, inspect_copy_journal, open_files_state_root,
+    CopyJournalState, CopyReview, ManagedJournalSnapshot, ManagedRetiredState,
+    inspect_copy_journal, inspect_managed_journal, open_files_state_root,
 };
 use std::{cell::Cell, io, path::PathBuf, rc::Rc};
 
 pub(super) const TITLE: &str = "JWM Files · 复制记录";
 
-fn load() -> io::Result<Option<CopyJournalSnapshot>> {
+struct JournalViews {
+    legacy: io::Result<Option<CopyJournalSnapshot>>,
+    managed: io::Result<Option<ManagedJournalSnapshot>>,
+}
+
+fn load() -> io::Result<JournalViews> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
     let root = match open_files_state_root(home.as_deref(), state_home.as_deref(), false) {
         Ok(root) => root,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(JournalViews {
+                legacy: Ok(None),
+                managed: Ok(None),
+            });
+        }
         Err(error) => return Err(error),
     };
-    inspect_copy_journal(&root).map(Some)
+    Ok(JournalViews {
+        legacy: inspect_copy_journal(&root).map(Some),
+        managed: inspect_managed_journal(&root).map(Some),
+    })
 }
 
 fn review_text(result: CopyReview) -> &'static str {
@@ -102,16 +116,21 @@ fn append_check(
     row.append(&button);
 }
 
-fn populate(
+fn append_group(
     rows: &gtk::Box,
-    status: &gtk::Label,
     window: &gtk::Window,
-    snapshot: Option<CopyJournalSnapshot>,
+    title: &str,
+    snapshot: io::Result<Option<CopyJournalSnapshot>>,
     reviewing: &Rc<Cell<bool>>,
 ) {
-    while let Some(child) = rows.first_child() {
-        rows.remove(&child);
-    }
+    let header = gtk::Label::new(None);
+    header.set_xalign(0.0);
+    header.add_css_class("heading");
+    rows.append(&header);
+    let Ok(snapshot) = snapshot else {
+        header.set_text(&format!("{title} · 暂时无法安全读取"));
+        return;
+    };
     let occupied = snapshot.as_ref().map_or(&[][..], |view| view.occupied());
     let suffix = if occupied.is_empty() {
         " · 尚无复制记录"
@@ -119,7 +138,9 @@ fn populate(
         ""
     };
     let used = occupied.len();
-    status.set_text(&format!("已占用 {used}/{COPY_JOURNAL_SLOTS}{suffix}"));
+    header.set_text(&format!(
+        "{title} · 已占用 {used}/{COPY_JOURNAL_SLOTS}{suffix}"
+    ));
     for entry in occupied {
         let state = match &entry.state {
             CopyJournalSlotState::Incomplete => "记录未写完".into(),
@@ -152,6 +173,35 @@ fn populate(
         }
         rows.append(&container);
     }
+}
+
+fn populate(
+    rows: &gtk::Box,
+    status: &gtk::Label,
+    window: &gtk::Window,
+    view: JournalViews,
+    reviewing: &Rc<Cell<bool>>,
+) {
+    while let Some(child) = rows.first_child() {
+        rows.remove(&child);
+    }
+    let retired = view.managed.as_ref().map(|snapshot| {
+        snapshot
+            .as_ref()
+            .map_or(ManagedRetiredState::Absent, |s| s.retired)
+    });
+    let summary = match retired {
+        Ok(ManagedRetiredState::Absent) => "没有待清理的托管记录。",
+        Ok(ManagedRetiredState::PendingCleanup) => "有已移出的托管记录待清理，不占用复制记录编号。",
+        Ok(ManagedRetiredState::Unsafe) => "待清理的托管记录无法安全读取。",
+        Err(_) => "暂时无法确认是否有托管记录待清理。",
+    };
+    status.set_text(summary);
+    let managed = view
+        .managed
+        .map(|snapshot| snapshot.map(|view| view.numbered));
+    append_group(rows, window, "托管记录", managed, reviewing);
+    append_group(rows, window, "旧版记录（只读）", view.legacy, reviewing);
 }
 
 pub(super) fn install(parent: &gtk::ApplicationWindow) {
