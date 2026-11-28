@@ -1,5 +1,11 @@
 //! Owner-only storage for bounded, read-only copy interruption evidence.
 use crate::{COPY_JOURNAL_LIMIT, CopyJournalRecord, CopyJournalState, DirectoryHandle};
+
+mod managed;
+pub use managed::{
+    ManagedCopyJournalSelection, ManagedJournalRetirement, inspect_managed_copy_journal,
+    prepare_managed_copy_journal, retire_managed_copy_journal, select_managed_copy_journal,
+};
 use rustix::{
     fd::{AsRawFd, OwnedFd},
     fs::{self, AtFlags, FileType, Mode, OFlags, RenameFlags},
@@ -44,14 +50,18 @@ fn open_dir(parent: &OwnedFd, name: &str, exact: bool) -> io::Result<OwnedFd> {
 }
 
 fn open_journal(base: &DirectoryHandle, create: bool) -> io::Result<OwnedFd> {
+    open_journal_at(base, JOURNAL, create)
+}
+
+fn open_journal_at(base: &DirectoryHandle, name: &str, create: bool) -> io::Result<OwnedFd> {
     let root = open_dir(&base.fd, ".", false)?;
     if create {
-        match fs::mkdirat(&root, JOURNAL, Mode::RWXU) {
+        match fs::mkdirat(&root, name, Mode::RWXU) {
             Ok(()) | Err(Errno::EXIST) => {}
             Err(error) => return Err(error.into()),
         }
     }
-    let journal = open_dir(&root, JOURNAL, true)?;
+    let journal = open_dir(&root, name, true)?;
     if create {
         fs::fsync(&root)?;
     }
@@ -137,6 +147,7 @@ pub struct CopyJournalReservation {
     slot: u8,
     dir: OwnedFd,
     intent: CopyJournalRecord,
+    _managed_lock: Option<OwnedFd>,
 }
 
 impl CopyJournalReservation {
@@ -165,10 +176,22 @@ pub fn prepare_copy_journal(
     base: &DirectoryHandle,
     intent: CopyJournalRecord,
 ) -> io::Result<CopyJournalReservation> {
+    validate_intent(&intent)?;
+    reserve_intent(open_journal(base, true)?, intent, false)
+}
+
+fn validate_intent(intent: &CopyJournalRecord) -> io::Result<()> {
     if intent.state != CopyJournalState::Prepared || intent.encode().is_none() {
         return Err(invalid("invalid copy journal intent"));
     }
-    let journal = open_journal(base, true)?;
+    Ok(())
+}
+
+fn reserve_intent(
+    journal: OwnedFd,
+    intent: CopyJournalRecord,
+    managed: bool,
+) -> io::Result<CopyJournalReservation> {
     for slot in 0..COPY_JOURNAL_SLOTS {
         let name = slot_name(slot)?;
         match fs::mkdirat(&journal, name.as_str(), Mode::RWXU) {
@@ -179,7 +202,12 @@ pub fn prepare_copy_journal(
         let dir = open_dir(&journal, &name, true)?;
         write_record(&dir, INTENT, &intent)?;
         fs::fsync(&journal)?;
-        return Ok(CopyJournalReservation { slot, dir, intent });
+        return Ok(CopyJournalReservation {
+            slot,
+            dir,
+            intent,
+            _managed_lock: managed.then_some(journal),
+        });
     }
     Err(io::Error::new(
         ErrorKind::StorageFull,
@@ -251,23 +279,31 @@ impl CopyJournalSnapshot {
 /// record, opening a copy destination, or probing arbitrary siblings. Call
 /// this on a worker. It has no effect on active copies or on retention.
 pub fn inspect_copy_journal(base: &DirectoryHandle) -> io::Result<CopyJournalSnapshot> {
-    let mut view = CopyJournalSnapshot {
-        occupied: Vec::new(),
-    };
     let root = open_dir(&base.fd, ".", false)?;
     let journal = match open_dir(&root, JOURNAL, true) {
         Ok(journal) => journal,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(view),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(CopyJournalSnapshot {
+                occupied: Vec::new(),
+            });
+        }
         Err(error) => return Err(error),
+    };
+    inspect_slots(&journal)
+}
+
+fn inspect_slots(journal: &OwnedFd) -> io::Result<CopyJournalSnapshot> {
+    let mut view = CopyJournalSnapshot {
+        occupied: Vec::new(),
     };
     for slot in 0..COPY_JOURNAL_SLOTS {
         let name = slot_name(slot)?;
-        match fs::statat(&journal, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        match fs::statat(journal, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
             Ok(_) => {}
             Err(Errno::NOENT) => continue,
             Err(error) => return Err(error.into()),
         }
-        let state = match open_dir(&journal, &name, true) {
+        let state = match open_dir(journal, &name, true) {
             Ok(dir) => match fs::statat(&dir, INTENT, AtFlags::SYMLINK_NOFOLLOW) {
                 Err(Errno::NOENT) => CopyJournalSlotState::Incomplete,
                 Ok(_) => match read_slot(&dir) {

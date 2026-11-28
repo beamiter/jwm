@@ -311,6 +311,14 @@ windows are ignored. A metadata match is neither re-verification of file
 contents nor permission to change the file. The panel does not start copies
 or clear records. Ordinary copies still do not create these records.
 
+The provider also offers a separate managed local journal for callers that
+participate in nonblocking shared/exclusive locking. It leaves prototype
+records in their original namespace. A confirmed, unchanged managed slot
+can be retired atomically to one reserved name without touching any copy
+destination. A failed post-rename check is not retried automatically. The
+application does not yet create managed records or expose retirement or
+cleanup, and this is not a network-filesystem locking guarantee.
+
 ### Find filenames in subdirectories
 
 **操作 → 查找子目录文件名** is separate from Ctrl+F. It starts only for the
