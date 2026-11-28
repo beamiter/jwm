@@ -2699,11 +2699,140 @@ mod wayland_acceptance {
             }
             until(|| popup.is_active(), "native preview owns keyboard focus");
         };
-        verify_preview_keyboard(&app, &from, &focus_preview, &|key| {
+        let key = |key: &str| {
             xd(&["key", "--clearmodifiers", key]);
-        });
+        };
+        verify_preview_keyboard(&app, &from, &focus_preview, &key);
         println!(
             "GTK4 {backend_label} preview keyboard: Space toggled focused Markdown source; Escape and ordinary Space closed"
+        );
+        let image_fixtures = include_str!("../tests/fixtures/preview-zoom.hex")
+            .lines()
+            .filter(|line| !line.starts_with('#'));
+        for (name, hex) in ["small-zoom.png", "large-zoom.png"].into_iter().zip(image_fixtures) {
+            let pixels: Vec<_> = (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+                .collect();
+            fs::write(source.join(name), pixels).unwrap();
+        }
+        let show_image = |name: &str| {
+            let name = OsStr::new(name);
+            until(|| model_position(name).is_some(), "image in the source model");
+            selection.set_selected(model_position(name).unwrap());
+            gtk::prelude::WidgetExt::activate_action(&from, "win.quick-preview", None).unwrap();
+        };
+        verify_image_zoom(&app, &show_image, &focus_preview, &key);
+        println!(
+            "GTK4 {backend_label} image zoom: small fit stayed native; original reused the texture, scrolled both axes, and reset on the next file"
+        );
+    }
+
+    fn verify_image_zoom(
+        app: &gtk::Application,
+        show_image: &impl Fn(&str),
+        focus_preview: &impl Fn(&gtk::Window, &gtk::Label),
+        key: &impl Fn(&str),
+    ) {
+        let locate = |name: &str, dimensions: (i32, i32)| {
+            let popup = app.windows().into_iter().find(|window| {
+                window.is_mapped() && window.title().as_deref() == Some("JWM Files · Preview")
+            })?;
+            let widgets = descendants(popup.upcast_ref());
+            let stack = widgets
+                .iter()
+                .filter_map(|widget| widget.downcast_ref::<gtk::Stack>())
+                .find(|stack| stack.is_mapped() && stack.child_by_name("fit").is_some())?
+                .clone();
+            let fit = stack.child_by_name("fit")?.downcast::<gtk::Picture>().ok()?;
+            let scroll = stack
+                .child_by_name("original")?
+                .downcast::<gtk::ScrolledWindow>()
+                .ok()?;
+            let original = scroll
+                .child()
+                .and_downcast::<gtk::Viewport>()?
+                .child()
+                .and_downcast::<gtk::Picture>()?;
+            let texture = fit.paintable()?;
+            if (texture.intrinsic_width(), texture.intrinsic_height()) != dimensions {
+                return None;
+            }
+            let header = widgets
+                .iter()
+                .filter_map(|widget| widget.downcast_ref::<gtk::Label>())
+                .find(|label| label.label().ends_with(name))?
+                .clone();
+            let toggle = widgets
+                .iter()
+                .filter_map(|widget| widget.downcast_ref::<gtk::ToggleButton>())
+                .find(|button| {
+                    button.is_mapped() && button.label().as_deref() == Some("原始尺寸（100%）")
+                })?
+                .clone();
+            Some((popup, header, stack, fit, scroll, original, toggle))
+        };
+        let open = |name: &str, dimensions| {
+            show_image(name);
+            until(
+                || locate(name, dimensions).is_some(),
+                "correct image received a native preview",
+            );
+            locate(name, dimensions).unwrap()
+        };
+        let (popup, _, stack, fit, _, _, toggle) = open("small-zoom.png", (32, 17));
+        until(
+            || fit.width() == 32 && fit.height() == 17,
+            "Fit does not enlarge a small image",
+        );
+        assert_eq!(stack.visible_child_name().as_deref(), Some("fit"));
+        assert!(!toggle.is_active());
+
+        let (same_popup, heading, stack, fit, scroll, original, toggle) =
+            open("large-zoom.png", (1500, 1100));
+        assert_eq!(same_popup, popup);
+        until(
+            || fit.is_mapped() && fit.width() > 0 && fit.width() < 1500 && fit.height() < 1100,
+            "large Fit occupies only the preview viewport",
+        );
+        let texture = fit.paintable().unwrap();
+        assert_eq!(original.paintable().as_ref(), Some(&texture));
+        focus_preview(&popup, &heading);
+        assert!(toggle.grab_focus());
+        until(|| toggle.has_focus(), "image size toggle owns native focus");
+        let viewport_size = (popup.width(), popup.height());
+        key("space");
+        let axes = [scroll.hadjustment(), scroll.vadjustment()];
+        let has_range = |axis: &gtk::Adjustment| {
+            axis.page_size() > 0.0 && axis.upper() - axis.page_size() > axis.lower()
+        };
+        until(
+            || {
+                toggle.is_active()
+                    && original.is_mapped()
+                    && original.width() == 1500
+                    && original.height() == 1100
+                    && axes.iter().all(has_range)
+            },
+            "100% matches the decoded logical size and can pan in both directions",
+        );
+        assert_eq!(stack.visible_child_name().as_deref(), Some("original"));
+        assert_eq!((popup.width(), popup.height()), viewport_size);
+        assert!(!fit.is_mapped());
+        assert_eq!(original.paintable().as_ref(), Some(&texture));
+        for axis in &axes {
+            axis.set_value(axis.upper() - axis.page_size());
+            assert!((axis.value() + axis.page_size() - axis.upper()).abs() < 1.0);
+            assert!(axis.value() > axis.lower());
+        }
+        let (same_popup, _, stack, fit, _, _, toggle) = open("small-zoom.png", (32, 17));
+        assert_eq!(same_popup, popup);
+        assert_eq!(stack.visible_child_name().as_deref(), Some("fit"));
+        assert!(!toggle.is_active());
+        assert!(axes.iter().all(|axis| axis.value() == axis.lower()));
+        until(
+            || fit.width() == 32 && fit.height() == 17,
+            "the next file returns to Fit and clean scroll positions",
         );
     }
 

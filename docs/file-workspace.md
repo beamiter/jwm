@@ -604,7 +604,7 @@ physical or virtual. No timings are asserted by these benchmarks.
 Choose **快速预览** from the operation menu, or press Space with the
 main list or icon view focused, to preview the first 128 KiB of a
 selected regular file. Escape closes the preview, and Space closes
-it when focus is not on the Markdown source toggle.
+it when focus is not on a preview toggle.
 The dialog shows the full source path. When it is already open, another
 explicit preview request switches it to the newly selected file. An older
 read finishing later cannot overwrite the new view.
@@ -622,10 +622,16 @@ Image previews use a separate format-specific path; audio and video are not yet 
 ### PNG and JPEG Quick Preview
 
 Select a regular `.png`, `.jpg` or `.jpeg` file and use the same Quick
-Preview action. Image decoding runs off the UI thread and accepts up to 8 MiB of input, 8,388,608
-pixels, and 8,192 pixels per axis. The window fits the image without
-changing the file. It rejects animated or invalid PNG data, never uses an
-external viewer and does not process embedded text or ICC profiles.
+Preview action. The default Fit view shrinks large images to the preview
+without enlarging small ones. **原始尺寸（100%）** shows the same image at
+its decoded size in GTK logical pixels, with scrolling in both directions
+as needed. It does not promise one physical screen pixel per image pixel.
+Switching files resets Fit and both scroll positions.
+
+Decoding runs off the UI thread and accepts up to 8 MiB of input,
+8,388,608 pixels, and 8,192 pixels per axis. It rejects animated or invalid
+PNG data, never uses an external viewer and does not process embedded text
+or ICC profiles.
 JPEG uses the primary EXIF orientation tag when valid, without reading
 thumbnail directories or loading external resources. Progressive JPEGs
 are limited to 36 scans. Other image formats and icon-grid thumbnails
