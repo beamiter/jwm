@@ -208,6 +208,7 @@ def run(args, root, log):
                 "GTK4 Wayland folder icon target: reflow of live tiles cleared acceptance, stale release wrote nothing",
                 "GTK4 Wayland preview keyboard: Space toggled focused Markdown source; Escape and ordinary Space closed",
                 "GTK4 Wayland image zoom: small fit stayed native; original reused the texture, scrolled both axes, and reset on the next file",
+                "GTK4 Wayland preview siblings: real Alt arrows skipped a symlink, stayed at the boundary, and rejected a replaced entry and a different tab",
             ):
                 assert output.count(marker) == 1, marker
                 print(marker)

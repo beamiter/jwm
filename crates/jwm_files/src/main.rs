@@ -2719,18 +2719,117 @@ mod wayland_acceptance {
                 .collect();
             fs::write(source.join(name), pixels).unwrap();
         }
-        let show_image = |name: &str| {
+        let show_preview = |name: &str| {
             let name = OsStr::new(name);
             until(
                 || model_position(name).is_some(),
-                "image in the source model",
+                "preview file in the source model",
             );
             selection.set_selected(model_position(name).unwrap());
             gtk::prelude::WidgetExt::activate_action(&from, "win.quick-preview", None).unwrap();
         };
-        verify_image_zoom(&app, &show_image, &focus_preview, &key);
+        verify_image_zoom(&app, &show_preview, &focus_preview, &key);
         println!(
             "GTK4 {backend_label} image zoom: small fit stayed native; original reused the texture, scrolled both axes, and reset on the next file"
+        );
+
+        let a = "zz-preview-a.txt";
+        let link = "zz-preview-b.link";
+        let c = "zz-preview-c.txt";
+        fs::write(source.join(a), b"first neighbor\n").unwrap();
+        fs::write(source.join(c), b"old third neighbor\n").unwrap();
+        std::os::unix::fs::symlink(source.join(a), source.join(link)).unwrap();
+        let rank = |name: &str| model_position(OsStr::new(name));
+        until(
+            || [a, link, c].into_iter().all(|name| rank(name).is_some()),
+            "regular and symlink siblings committed",
+        );
+        assert!(rank(a).unwrap() < rank(link).unwrap());
+        assert!(rank(link).unwrap() < rank(c).unwrap());
+        show_preview(a);
+        let popup = app
+            .windows()
+            .into_iter()
+            .find(|window| window.title().as_deref() == Some("JWM Files · Preview"))
+            .expect("preview reused for adjacent files");
+        let heading = || {
+            descendants(popup.upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                .find(|label| label.label().starts_with(source.to_str().unwrap()))
+        };
+        let at = |name: &str, expected: &str| {
+            let matches = || {
+                popup.is_mapped()
+                    && heading().is_some_and(|label| label.label().ends_with(name))
+                    && descendants(popup.upcast_ref()).into_iter().any(|widget| {
+                        widget.downcast::<gtk::TextView>().is_ok_and(|view| {
+                            let text = view.buffer();
+                            view.is_mapped()
+                                && text
+                                    .text(&text.start_iter(), &text.end_iter(), false)
+                                    .as_str()
+                                    == expected
+                        })
+                    })
+            };
+            until(matches, "the same preview shows the exact sibling path and body");
+        };
+        at(a, "first neighbor\n");
+        focus_preview(&popup, &heading().unwrap());
+        key("alt+Right");
+        at(c, "old third neighbor\n");
+        assert_eq!(selection.selected(), rank(c).unwrap());
+        key("alt+Right");
+        pump_for(300);
+        assert_eq!(selection.selected(), rank(c).unwrap());
+        at(c, "old third neighbor\n");
+        key("alt+Left");
+        at(a, "first neighbor\n");
+        assert_eq!(selection.selected(), rank(a).unwrap());
+        key("alt+Right");
+        at(c, "old third neighbor\n");
+
+        let old_model = from_model.item(rank(c).unwrap()).unwrap();
+        let replacement = root.join("replaced-neighbor.txt");
+        fs::write(&replacement, b"new third neighbor\n").unwrap();
+        fs::rename(&replacement, source.join(c)).unwrap();
+        until(
+            || {
+                rank(c)
+                    .and_then(|position| from_model.item(position))
+                    .is_some_and(|item| item != old_model)
+            },
+            "watcher committed a replacement at the same native leaf",
+        );
+        let saved = selection.selected();
+        key("alt+Left");
+        pump_for(300);
+        at(c, "old third neighbor\n");
+        assert_eq!(selection.selected(), saved);
+
+        show_preview(c);
+        at(c, "new third neighbor\n");
+        key("alt+Left");
+        at(a, "first neighbor\n");
+        let old_model = from_model.item(rank(a).unwrap()).unwrap();
+        gtk::prelude::WidgetExt::activate_action(&from, "win.new-tab", None).unwrap();
+        until(
+            || {
+                rank(a)
+                    .and_then(|position| from_model.item(position))
+                    .is_some_and(|item| item != old_model)
+            },
+            "a different tab committed the same directory",
+        );
+        let saved = selection.selected();
+        focus_preview(&popup, &heading().unwrap());
+        key("alt+Right");
+        pump_for(300);
+        at(a, "first neighbor\n");
+        assert_eq!(selection.selected(), saved);
+        println!(
+            "GTK4 {backend_label} preview siblings: real Alt arrows skipped a symlink, stayed at the boundary, and rejected a replaced entry and a different tab"
         );
     }
 
