@@ -1,8 +1,7 @@
 //! Opt-in journal namespace whose readers and writers cooperate with retirement.
 use super::{
-    CopyJournalRecord, CopyJournalReservation, CopyJournalSnapshot, DirectoryHandle,
-    inspect_slots, invalid, open_dir, open_journal_at, private_error, reserve_intent, slot_name,
-    validate_intent,
+    CopyJournalRecord, CopyJournalReservation, CopyJournalSnapshot, DirectoryHandle, inspect_slots,
+    invalid, open_dir, open_journal_at, private_error, reserve_intent, slot_name, validate_intent,
 };
 use rustix::{
     fd::OwnedFd,
@@ -31,11 +30,7 @@ fn same_dir(first: &Stat, second: &Stat) -> bool {
         && second.st_mode & 0o7777 == 0o700
 }
 
-fn locked(
-    base: &DirectoryHandle,
-    create: bool,
-    operation: FlockOperation,
-) -> io::Result<OwnedFd> {
+fn locked(base: &DirectoryHandle, create: bool, operation: FlockOperation) -> io::Result<OwnedFd> {
     let journal = open_journal_at(base, MANAGED, create)?;
     fs::flock(&journal, operation)?;
     verify_named(&base.fd, MANAGED, &journal)?;
@@ -58,7 +53,9 @@ pub fn inspect_managed_copy_journal(base: &DirectoryHandle) -> io::Result<CopyJo
     let journal = match locked(base, false, FlockOperation::NonBlockingLockShared) {
         Ok(journal) => journal,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(CopyJournalSnapshot { occupied: Vec::new() });
+            return Ok(CopyJournalSnapshot {
+                occupied: Vec::new(),
+            });
         }
         Err(error) => return Err(error),
     };
@@ -252,8 +249,16 @@ mod tests {
             retire_managed_copy_journal(&root, selected).unwrap(),
             ManagedJournalRetirement::Retired
         ));
-        assert!(inspect_managed_copy_journal(&root).unwrap().occupied().is_empty());
-        assert_eq!(stdfs::read(f.0.join(MANAGED).join(".retired/intent")).unwrap(), old_frame);
+        assert!(
+            inspect_managed_copy_journal(&root)
+                .unwrap()
+                .occupied()
+                .is_empty()
+        );
+        assert_eq!(
+            stdfs::read(f.0.join(MANAGED).join(".retired/intent")).unwrap(),
+            old_frame
+        );
 
         let replacement = f.intent("replacement");
         drop(prepare_managed_copy_journal(&root, replacement.clone()).unwrap());
@@ -261,8 +266,14 @@ mod tests {
         let occupied = retire_managed_copy_journal(&root, selected).unwrap_err();
         assert_eq!(occupied.kind(), ErrorKind::AlreadyExists);
         let snapshot = inspect_managed_copy_journal(&root).unwrap();
-        assert_eq!(snapshot.occupied()[0].state, CopyJournalSlotState::Readable(replacement));
-        assert_eq!(crate::read_copy_journal(&root, legacy.slot()).unwrap(), f.intent("legacy"));
+        assert_eq!(
+            snapshot.occupied()[0].state,
+            CopyJournalSlotState::Readable(replacement)
+        );
+        assert_eq!(
+            crate::read_copy_journal(&root, legacy.slot()).unwrap(),
+            f.intent("legacy")
+        );
         assert_eq!(stdfs::read(original).unwrap(), b"target unchanged");
     }
 
@@ -289,7 +300,10 @@ mod tests {
         assert!(retire_managed_copy_journal(&root, before).is_err());
         assert!(!f.0.join(MANAGED).join(RETIRED).exists());
         let result = inspect_managed_copy_journal(&root).unwrap();
-        assert_eq!(result.occupied()[0].state, CopyJournalSlotState::Readable(record));
+        assert_eq!(
+            result.occupied()[0].state,
+            CopyJournalSlotState::Readable(record)
+        );
     }
 
     #[test]
@@ -308,7 +322,10 @@ mod tests {
         stdfs::write(old_name.join("other"), b"not our journal").unwrap();
         assert!(retire_managed_copy_journal(&root, selected).is_err());
         assert!(select_managed_copy_journal(&root, 0).is_err());
-        assert_eq!(stdfs::read(old_name.join("other")).unwrap(), b"not our journal");
+        assert_eq!(
+            stdfs::read(old_name.join("other")).unwrap(),
+            b"not our journal"
+        );
         assert!(journal.join("untouched-old/intent").is_file());
         assert!(!journal.join(RETIRED).exists());
     }

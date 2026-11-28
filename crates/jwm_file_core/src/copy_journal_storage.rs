@@ -283,7 +283,9 @@ pub fn inspect_copy_journal(base: &DirectoryHandle) -> io::Result<CopyJournalSna
     let journal = match open_dir(&root, JOURNAL, true) {
         Ok(journal) => journal,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(CopyJournalSnapshot { occupied: Vec::new() });
+            return Ok(CopyJournalSnapshot {
+                occupied: Vec::new(),
+            });
         }
         Err(error) => return Err(error),
     };
