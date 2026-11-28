@@ -665,7 +665,9 @@ fn open_window_with_tabs(
     drop_strip.set_margin_end(10);
     let drag_selected = gtk::Label::new(Some(drop_copy_ui::SOURCE));
     let drop_here = gtk::Label::new(Some(drop_copy_ui::TARGET));
-    drag_selected.set_tooltip_text(Some("先选择一个普通文件，再从这里拖到另一个 Files 窗口"));
+    drag_selected.set_tooltip_text(Some(
+        "先选择一个普通文件或文件夹，再从这里拖到另一个 Files 窗口",
+    ));
     drop_here.set_tooltip_text(Some("只复制到当前目录，不移动或覆盖原文件"));
     for label in [&drag_selected, &drop_here] {
         label.add_css_class("frame");
@@ -2167,6 +2169,71 @@ mod wayland_acceptance {
         assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
         println!(
             "GTK4 {backend_label} drag copy: real inter-window pointer copied exact native bytes and kept source and clipboard"
+        );
+
+        let folder_name = "00-folder";
+        let incoming = source.join(folder_name);
+        let outgoing = target.join(folder_name);
+        fs::create_dir(&incoming).unwrap();
+        fs::create_dir(incoming.join("nested")).unwrap();
+        fs::write(incoming.join("nested").join(raw), b"exact nested bytes").unwrap();
+        fs::create_dir(&outgoing).unwrap();
+        fs::write(outgoing.join("existing"), b"keep destination").unwrap();
+        let folder_identity = source_id(&incoming);
+        let conflict_identity = source_id(&outgoing);
+        let folder_row = || {
+            (0..from_model.n_items()).find(|&position| {
+                from_model
+                    .item(position)
+                    .and_downcast::<glib::BoxedAnyObject>()
+                    .is_some_and(|item| {
+                        let row = item.borrow::<row_model::RowPresentation>();
+                        row.kind == FileKind::Directory && row.name == folder_name
+                    })
+            })
+        };
+        until(
+            || from_model.n_items() == 2 && to_model.n_items() == 3 && folder_row().is_some(),
+            "folder drag source and occupied target settled",
+        );
+        selection.set_selected(folder_row().expect("committed directory row"));
+        hover();
+        assert!(!outgoing.join("nested").exists());
+        xd(&["mouseup", "1"]);
+        until(
+            || status(&|message| message.contains("同名")),
+            "folder drop reported the occupied destination",
+        );
+        assert_eq!(source_id(&outgoing), conflict_identity);
+        assert_eq!(
+            fs::read(outgoing.join("existing")).unwrap(),
+            b"keep destination"
+        );
+        assert!(!outgoing.join("nested").exists());
+        fs::remove_file(outgoing.join("existing")).unwrap();
+        fs::remove_dir(&outgoing).unwrap();
+        until(|| to_model.n_items() == 2, "folder drop target refreshed");
+
+        hover();
+        assert!(!outgoing.exists(), "hover must not create a directory");
+        xd(&["mouseup", "1"]);
+        until(
+            || status(&|message| message.starts_with("已复制文件夹：")),
+            "folder copy completed after physical drop",
+        );
+        assert_eq!(
+            fs::read(outgoing.join("nested").join(raw)).unwrap(),
+            b"exact nested bytes"
+        );
+        assert_eq!(source_id(&incoming), folder_identity);
+        assert_ne!(source_id(&outgoing), folder_identity);
+        assert_eq!(
+            fs::read(incoming.join("nested").join(raw)).unwrap(),
+            b"exact nested bytes"
+        );
+        assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
+        println!(
+            "GTK4 {backend_label} drag folder copy: physical drop kept existing tree, then copied exact nested bytes without moving source"
         );
     }
 

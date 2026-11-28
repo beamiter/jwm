@@ -267,7 +267,7 @@ fn paste_with_mode(
             if mode == PasteMode::Sibling {
                 notice(status, "文件夹复制不支持自动改名，请使用 Ctrl+V。");
             } else {
-                paste_tree(state, status, parent, path, source);
+                dispatch_tree_copy(state, status, parent, path, source);
             }
             return;
         }
@@ -619,16 +619,18 @@ fn tree_error(error: TreeCopyError, target: &std::path::Path) -> String {
 #[cfg(test)]
 pub(super) static TREE_COPY_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn paste_tree(
+/// Acknowledges only a worker dispatch, not publication of a copied tree.
+pub(super) fn dispatch_tree_copy(
     state: &Shared,
     status: &gtk::Label,
     parent: Arc<DirectoryHandle>,
     path: PathBuf,
     source: StashedCopy,
-) {
+) -> bool {
     let mut browser = state.borrow_mut();
     if browser.mutation.is_some() || browser.dialog_open {
-        return;
+        notice(status, "有文件操作正在进行，请稍候。");
+        return false;
     }
     let source_root = source.path.join(&source.name);
     let detail = format!(
@@ -647,6 +649,12 @@ fn paste_tree(
             let _notify = SignalOnDrop(wake);
             #[cfg(test)]
             let _test_gate = TREE_COPY_TEST_GATE.lock().unwrap();
+            if !DirectoryHandle::open(&source.path)
+                .is_ok_and(|current| current.identity() == source.parent.identity())
+            {
+                let _ = send.send(Err("源目录已变化，未写入目标文件夹。".into()));
+                return;
+            }
             let result = plan_tree_copy(&source_root, source.identity, &on_worker)
                 .map_err(plan_error)
                 .and_then(|plan| {
@@ -669,8 +677,12 @@ fn paste_tree(
                 copy: Some((cancellation, detail.clone())),
             });
             notice(status, &format!("正在复制文件夹：{detail}"));
+            true
         }
-        Err(error) => notice(status, &format!("无法启动文件夹复制：{error}")),
+        Err(error) => {
+            notice(status, &format!("无法启动文件夹复制：{error}"));
+            false
+        }
     }
 }
 
