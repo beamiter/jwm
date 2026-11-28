@@ -3239,7 +3239,7 @@ mod wayland_acceptance {
             live_frame
         );
         assert_eq!(
-            fs::read(payload).unwrap(),
+            fs::read(&payload).unwrap(),
             b"journal cleanup never touches data"
         );
         println!(
@@ -3247,6 +3247,94 @@ mod wayland_acceptance {
         );
         println!(
             "GTK4 Wayland managed journal cleanup: cancel preserved evidence; confirm removed only retired metadata"
+        );
+        let retire_button = || {
+            controls()
+                .into_iter()
+                .find(|button| button.is_visible() && button.label().as_deref() == Some("移出记录"))
+        };
+        let retire_dialog = || {
+            app.windows().into_iter().find_map(|window| {
+                let dialog = window.downcast::<gtk::Dialog>().ok()?;
+                (dialog.is_mapped()
+                    && dialog.title().as_deref() == Some("JWM Files · 移出复制记录"))
+                .then_some(dialog)
+            })
+        };
+        retire_button().unwrap().emit_clicked();
+        until(|| retire_dialog().is_some(), "live retirement confirmation");
+        let cancel = retire_dialog()
+            .unwrap()
+            .default_widget()
+            .and_downcast::<gtk::Button>()
+            .unwrap();
+        assert_eq!(cancel.label().as_deref(), Some("取消"));
+        assert!(
+            descendants(retire_dialog().unwrap().upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                .any(|label| label.text().contains("managed-new-visible.txt"))
+        );
+        cancel.emit_clicked();
+        until(
+            || journal_text(&["已取消，日志未改变。"]),
+            "retirement cancellation leaves live record",
+        );
+        let live_dir = managed_root.join("00");
+        assert_eq!(fs::read(live_dir.join("intent")).unwrap(), live_frame);
+        retire_button().unwrap().emit_clicked();
+        until(
+            || retire_dialog().is_some(),
+            "stale live retirement confirmation",
+        );
+        let detached_live = managed_root.join("private-detached-live");
+        fs::rename(&live_dir, &detached_live).unwrap();
+        let mut next_record = record;
+        next_record.name = "retirement-latest-visible.txt".into();
+        next_record.state = jwm_file_core::CopyJournalState::Prepared;
+        let next = jwm_file_core::prepare_managed_copy_journal(&state_root, next_record).unwrap();
+        assert_eq!(next.slot(), 0);
+        drop(next);
+        let latest_frame = fs::read(live_dir.join("intent")).unwrap();
+        retire_dialog().unwrap().response(gtk::ResponseType::Accept);
+        until(
+            || {
+                journal_text(&[
+                    "记录已变化或有旧日志待清理，未移出记录。",
+                    "retirement-latest-visible.txt",
+                ])
+            },
+            "refused to retire a replacement and refreshed the panel",
+        );
+        assert_eq!(fs::read(detached_live.join("intent")).unwrap(), live_frame);
+        assert_eq!(fs::read(live_dir.join("intent")).unwrap(), latest_frame);
+        assert!(!retired_frame.exists());
+        retire_button().unwrap().emit_clicked();
+        until(
+            || retire_dialog().is_some(),
+            "fresh live retirement confirmation",
+        );
+        retire_dialog().unwrap().response(gtk::ResponseType::Accept);
+        until(
+            || {
+                journal_text(&[
+                    "已移出记录，复制的文件未改变。",
+                    "托管记录 · 已占用 0/64",
+                    "有已移出的托管记录待清理",
+                    "旧版记录（只读） · 已占用 4/64",
+                ])
+            },
+            "only the confirmed live record moved into pending cleanup",
+        );
+        assert!(!live_dir.exists());
+        assert!(retire_button().is_none());
+        assert_eq!(fs::read(&retired_frame).unwrap(), latest_frame);
+        assert_eq!(
+            fs::read(&payload).unwrap(),
+            b"journal cleanup never touches data"
+        );
+        println!(
+            "GTK4 Wayland managed journal retirement: cancel, stale selection and exact live metadata move"
         );
         journal_panel().unwrap().close();
         println!(

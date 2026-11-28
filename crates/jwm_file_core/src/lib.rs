@@ -64,7 +64,7 @@ pub use copy_journal_storage::{
     cleanup_managed_retired, inspect_copy_journal, inspect_managed_copy_journal,
     inspect_managed_journal, managed_retired_state, prepare_copy_journal,
     prepare_managed_copy_journal, read_copy_journal, retire_managed_copy_journal,
-    select_managed_copy_journal, select_managed_retired,
+    select_managed_copy_journal, select_managed_retired, select_matching_managed_copy_journal,
 };
 #[cfg(target_os = "linux")]
 pub use index_walk::{IndexEntry, WalkOptions, WalkSummary, visit_local_index};
