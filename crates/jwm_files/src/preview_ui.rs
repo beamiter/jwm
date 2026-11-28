@@ -104,9 +104,66 @@ struct View {
     notice: glib::WeakRef<gtk::Label>,
     text: glib::WeakRef<gtk::TextView>,
     text_scroll: glib::WeakRef<gtk::ScrolledWindow>,
-    picture: glib::WeakRef<gtk::Picture>,
+    image: ImageView,
     source_toggle: glib::WeakRef<gtk::ToggleButton>,
     body: Rc<RefCell<Option<PreviewBody>>>,
+}
+
+#[derive(Clone)]
+struct ImageView {
+    stack: glib::WeakRef<gtk::Stack>,
+    fit: glib::WeakRef<gtk::Picture>,
+    original: glib::WeakRef<gtk::Picture>,
+    scroll: glib::WeakRef<gtk::ScrolledWindow>,
+    size_button: glib::WeakRef<gtk::ToggleButton>,
+}
+
+impl ImageView {
+    fn clear(&self) {
+        if let Some(button) = self.size_button.upgrade() {
+            button.set_visible(false);
+            button.set_active(false);
+        }
+        if let Some(stack) = self.stack.upgrade() {
+            stack.set_visible(false);
+            stack.set_visible_child_name("fit");
+        }
+        if let Some(scroll) = self.scroll.upgrade() {
+            for axis in [scroll.hadjustment(), scroll.vadjustment()] {
+                axis.set_value(axis.lower());
+            }
+        }
+        if let Some(original) = self.original.upgrade() {
+            original.set_size_request(-1, -1);
+        }
+        for picture in [&self.fit, &self.original]
+            .into_iter()
+            .filter_map(glib::WeakRef::upgrade)
+        {
+            picture.set_paintable(None::<&gtk::gdk::Paintable>);
+            picture.set_alternative_text(None);
+        }
+    }
+
+    fn show(&self, texture: &gtk::gdk::MemoryTexture, description: &str) {
+        if let Some(original) = self.original.upgrade() {
+            // Set the viewport minimum from decoded dimensions, not the fit request.
+            original.set_size_request(texture.width(), texture.height());
+        }
+        for picture in [&self.fit, &self.original]
+            .into_iter()
+            .filter_map(glib::WeakRef::upgrade)
+        {
+            picture.set_paintable(Some(texture));
+            picture.set_alternative_text(Some(description));
+        }
+        if let Some(stack) = self.stack.upgrade() {
+            stack.set_visible(true);
+        }
+        if let Some(button) = self.size_button.upgrade() {
+            button.set_visible(true);
+        }
+    }
 }
 
 impl View {
@@ -192,10 +249,7 @@ impl PreviewState {
         if let Some(notice) = view.notice.upgrade() {
             notice.set_text("正在读取预览…");
         }
-        if let Some(picture) = view.picture.upgrade() {
-            picture.set_paintable(None::<&gtk::gdk::Paintable>);
-            picture.set_visible(false);
-        }
+        view.image.clear();
         if let Some(scroll) = view.text_scroll.upgrade() {
             scroll.set_visible(true);
         }
@@ -296,9 +350,7 @@ impl PreviewState {
                 view.paint_body(false);
             }
             Ok(PreviewPayload::Image(image, format_name)) => {
-                if let (Some(picture), Some(scroll)) =
-                    (view.picture.upgrade(), view.text_scroll.upgrade())
-                {
+                if let Some(scroll) = view.text_scroll.upgrade() {
                     let description =
                         format!("{format_name} 图片 · {} × {}", image.width, image.height);
                     let texture = gtk::gdk::MemoryTexture::new(
@@ -308,11 +360,9 @@ impl PreviewState {
                         &glib::Bytes::from_owned(image.rgba),
                         image.width as usize * 4,
                     );
-                    picture.set_paintable(Some(&texture));
-                    picture.set_alternative_text(Some(&description));
                     notice.set_text(&description);
                     scroll.set_visible(false);
-                    picture.set_visible(true);
+                    view.image.show(&texture, &description);
                 }
             }
             Err(PreviewError::NotStaticPng) => notice.set_text("不是有效的静态 PNG，无法预览。"),
@@ -353,6 +403,12 @@ impl PreviewState {
         source_toggle.set_margin_start(12);
         source_toggle.set_visible(false);
         layout.append(&source_toggle);
+        let image_size = gtk::ToggleButton::with_label("原始尺寸（100%）");
+        image_size.set_tooltip_text(Some("按图像原始大小显示（GTK 逻辑像素）"));
+        image_size.set_halign(gtk::Align::Start);
+        image_size.set_margin_start(12);
+        image_size.set_visible(false);
+        layout.append(&image_size);
         let text = gtk::TextView::builder()
             .monospace(true)
             .editable(false)
@@ -367,13 +423,44 @@ impl PreviewState {
             .child(&text)
             .build();
         layout.append(&scroll);
-        let picture = gtk::Picture::builder()
+        let image_fit = gtk::Picture::builder()
+            .can_shrink(true)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build();
+        let image_original = gtk::Picture::builder()
+            .can_shrink(false)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build();
+        let image_scroll = gtk::ScrolledWindow::builder()
+            .propagate_natural_width(false)
+            .propagate_natural_height(false)
+            .child(&image_original)
+            .build();
+        let image_stack = gtk::Stack::builder()
             .hexpand(true)
             .vexpand(true)
-            .can_shrink(true)
+            .hhomogeneous(false)
+            .vhomogeneous(false)
             .visible(false)
             .build();
-        layout.append(&picture);
+        image_stack.add_named(&image_fit, Some("fit"));
+        image_stack.add_named(&image_scroll, Some("original"));
+        image_stack.set_visible_child_name("fit");
+        image_size.connect_toggled({
+            let stack = image_stack.downgrade();
+            move |button| {
+                if let Some(stack) = stack.upgrade() {
+                    stack.set_visible_child_name(if button.is_active() {
+                        "original"
+                    } else {
+                        "fit"
+                    });
+                }
+            }
+        });
+        layout.append(&image_stack);
         window.set_child(Some(&layout));
         window.connect_destroy({
             let state = self.clone();
@@ -389,11 +476,12 @@ impl PreviewState {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = window.downgrade();
-        let source_choice = source_toggle.downgrade();
+        let choices = [source_toggle.downgrade(), image_size.downgrade()];
         keys.connect_key_pressed(move |_, key, _, modifiers| {
-            let focused_toggle = source_choice
-                .upgrade()
-                .is_some_and(|button| button.is_mapped() && button.has_focus());
+            let focused_toggle = choices
+                .iter()
+                .filter_map(glib::WeakRef::upgrade)
+                .any(|button| button.is_mapped() && button.has_focus());
             // Let GTK activate the focused control instead of closing the preview.
             let dismiss =
                 key == gtk::gdk::Key::Escape || (key == gtk::gdk::Key::space && !focused_toggle);
@@ -415,7 +503,13 @@ impl PreviewState {
             notice: notice.downgrade(),
             text: text.downgrade(),
             text_scroll: scroll.downgrade(),
-            picture: picture.downgrade(),
+            image: ImageView {
+                stack: image_stack.downgrade(),
+                fit: image_fit.downgrade(),
+                original: image_original.downgrade(),
+                scroll: image_scroll.downgrade(),
+                size_button: image_size.downgrade(),
+            },
             source_toggle: source_toggle.downgrade(),
             body: Rc::default(),
         };
