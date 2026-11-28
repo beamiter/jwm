@@ -188,7 +188,7 @@ impl FolderRowTargets {
     }
 
     pub(super) fn unbind(&self, item: &gtk::ListItem) {
-        if let Some(hover) = self.hover.borrow_mut().as_mut()
+        let was_active = if let Some(hover) = self.hover.borrow_mut().as_mut()
             && hover
                 .active
                 .as_ref()
@@ -198,7 +198,24 @@ impl FolderRowTargets {
         {
             hover.invalidated = true;
             hover.active = None;
+            true
+        } else {
+            false
+        };
+        if !was_active {
+            return;
         }
+        let Some(label) = item.child() else {
+            return;
+        };
+        // The state borrow ended before invoking GTK, which may emit signals.
+        let controllers = label.observe_controllers();
+        let target = (0..controllers.n_items())
+            .find_map(|index| controllers.item(index)?.downcast::<gtk::DropTarget>().ok());
+        if let Some(target) = target {
+            target.reject();
+        }
+        label.unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
     }
 
     fn allows_epoch(&self, drag: &gdk::Drag, rows: &Arc<Vec<FileEntry>>) -> bool {

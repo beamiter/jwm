@@ -1974,7 +1974,8 @@ mod wayland_acceptance {
         }
 
         fn widget_center(window: &gtk::Window, label: &gtk::Label) -> (i32, i32) {
-            hit_center(window, label).expect("the pointer must hit the actual allocated drag control")
+            hit_center(window, label)
+                .expect("the pointer must hit the actual allocated drag control")
         }
 
         let backend = if wayland { "wayland" } else { "x11" };
@@ -2432,6 +2433,14 @@ mod wayland_acceptance {
                     && new_point == Some(old_point)
             },
             "destination-only refresh rebound the row under the stationary pointer",
+        );
+        until(
+            || {
+                folder_label(new_leaf).is_some_and(|label| {
+                    !label.state_flags().contains(gtk::StateFlags::DROP_ACTIVE)
+                })
+            },
+            "rebound destination clears acceptance before release",
         );
         xd(&["mouseup", "1"]);
         until(
