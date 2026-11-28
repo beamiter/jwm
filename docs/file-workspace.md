@@ -320,8 +320,15 @@ provider reports cleanup pending independently of numbered capacity. It can
 discard only preflighted journal artifacts in the exact retired directory
 selected for cleanup. Unsupported mounts, aliases, and changed selections
 are refused without changing numbered records or copy destinations. The
-application does not yet create managed records. The panel shows managed
-and prototype records in separate groups. **移出记录** is available only for
+application only creates managed records when the user chooses **粘贴并保留复制记录**
+after selecting one regular local file with **Ctrl+C** and opening a
+different destination directory. The action does not overwrite existing
+files. Ctrl+V, drag and drop, cut, folders, and batch copies do not use
+this mode. If the managed journal is full or unsafe, the action does not
+publish or fall back to a normal copy. The journal stores the destination
+name/path and basic identity evidence in private local state, not source or
+file contents. A saved start record does not guarantee that a copy completed.
+The panel shows managed and prototype records in separate groups. **移出记录** is available only for
 a readable managed row when no earlier retired log awaits cleanup. It
 confirms the displayed record and destination, defaults to Cancel, and
 only moves that exact log. It neither checks nor opens the destination and

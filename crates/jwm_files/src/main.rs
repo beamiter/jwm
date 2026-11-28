@@ -230,6 +230,7 @@ struct MutationWork {
 enum MutationOutcome {
     FileOperation,
     CopyAsSibling(OsString),
+    ManagedCopy(jwm_file_core::TrackedCopyReceipt),
     MoveUnverified,
     TrashMove(Option<OsString>),
     TreeCopy(jwm_file_core::TreeCopyReceipt),
@@ -1490,6 +1491,7 @@ fn open_window_with_tabs(
         {
             let mut batch = None;
             let mut tree = None;
+            let mut managed_copy = None;
             let mut move_unverified = false;
             let mut trash_unverified = None;
             let result = result.map(|outcome| match outcome {
@@ -1503,6 +1505,10 @@ fn open_window_with_tabs(
                 }
                 MutationOutcome::FileOperation => None,
                 MutationOutcome::CopyAsSibling(name) => Some(name),
+                MutationOutcome::ManagedCopy(receipt) => {
+                    managed_copy = Some(receipt);
+                    None
+                }
                 MutationOutcome::MoveUnverified => {
                     move_unverified = true;
                     None
@@ -1528,7 +1534,9 @@ fn open_window_with_tabs(
                     .parent
                     .as_ref()
                     .is_some_and(|p| p.identity() == work.parent.identity());
-            if let Some(report) = &batch {
+            if let Some(receipt) = managed_copy {
+                copy_ui::notice(&copy_status, &copy_ui::managed_copy_notice(receipt));
+            } else if let Some(report) = &batch {
                 copy_ui::notice(&copy_status, &report.summary);
             } else if let Some(receipt) = tree {
                 let mut text = format!(
@@ -3342,6 +3350,53 @@ mod wayland_acceptance {
         );
         println!(
             "GTK4 Wayland copy journal check: explicit probe only; refresh dismissed the delayed result"
+        );
+
+        let managed_source = root.parent().unwrap().join("managed-copy-source");
+        let plain_target = root.parent().unwrap().join("managed-copy-plain-target");
+        let managed_target = root.parent().unwrap().join("managed-copy-explicit-target");
+        for folder in [&managed_source, &plain_target, &managed_target] {
+            fs::create_dir(folder).unwrap();
+        }
+        let chosen = "带记录 文件.txt";
+        fs::write(managed_source.join(chosen), b"one explicit copy").unwrap();
+        navigate(&managed_source);
+        at(&managed_source, chosen);
+        source_selection.set_selected(0);
+        action("win.copy-file");
+        assert!(copy_noticed("已选定复制："));
+        navigate(&plain_target);
+        action("win.paste-file");
+        until(|| copy_noticed("已复制："), "ordinary paste completed without recording");
+        at(&plain_target, chosen);
+        assert!(!managed_root.join("00").exists());
+        assert_eq!(fs::read(plain_target.join(chosen)).unwrap(), b"one explicit copy");
+
+        navigate(&managed_target);
+        action("win.paste-with-record");
+        until(
+            || copy_noticed("已复制并保存记录 01。"),
+            "explicit tracked paste recorded its evidence",
+        );
+        at(&managed_target, chosen);
+        assert_eq!(fs::read(managed_target.join(chosen)).unwrap(), b"one explicit copy");
+        action("win.copy-journal");
+        until(
+            || journal_text(&["托管记录 · 已占用 1/64", "01 · 有保存的写入记录", chosen]),
+            "managed paste appears in existing journal panel",
+        );
+        journal_panel().unwrap().close();
+        action("win.paste-with-record");
+        until(
+            || copy_noticed("已留下开始记录 02"),
+            "explicit tracked copy refused to overwrite the same name",
+        );
+        assert_eq!(fs::read(managed_target.join(chosen)).unwrap(), b"one explicit copy");
+        assert_eq!(fs::read(managed_source.join(chosen)).unwrap(), b"one explicit copy");
+        assert!(!managed_root.join("01/published").exists());
+        assert_eq!(fs::read(&retired_frame).unwrap(), latest_frame);
+        println!(
+            "GTK4 Wayland managed copy: only explicit paste recorded; same-name target never replaced"
         );
 
         let xdg = glib::user_data_dir();

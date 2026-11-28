@@ -3,9 +3,11 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4::{gio, glib};
 use jwm_file_core::{
-    Cancellation, CopyDestination, CopyError, CopySource, DirectoryHandle, FileIdentity, FileKind,
+    Cancellation, CopyDestination, CopyError, CopyEvidence, CopySource, DirectoryHandle,
+    FileIdentity, FileKind,
     FolderMoveError, FolderMoveOutcome, FolderMoveSource, ListError, RegularMoveError,
-    RegularMoveOutcome, RegularMoveSource, TreeCopyError, TreeCopyPlanError, TreeCopyTargetError,
+    RegularMoveOutcome, RegularMoveSource, TrackedCopyError, TrackedCopyReceipt, TreeCopyError,
+    TreeCopyPlanError, TreeCopyTargetError,
     copy_tree_no_replace, move_folder_no_replace, move_regular_no_replace, plan_tree_copy,
 };
 use std::{
@@ -65,6 +67,14 @@ enum PasteMode {
     Main,
     Sibling,
     ComparisonCopy,
+    Managed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyPolicy {
+    NoReplace,
+    KeepBoth,
+    Managed,
 }
 
 fn stash(
@@ -221,7 +231,6 @@ fn paste_with_mode(
     path: PathBuf,
     mode: PasteMode,
 ) {
-    let keep_both = mode == PasteMode::Sibling;
     let browser = state.borrow();
     if browser.mutation.is_some() || browser.dialog_open {
         notice(status, "有文件操作正在进行，请稍候。");
@@ -231,6 +240,10 @@ fn paste_with_mode(
         notice(status, "请先复制或剪切要粘贴的项目。");
         return;
     };
+    if mode == PasteMode::Managed && !matches!(&source, StoredCopy::Single(_)) {
+        notice(status, "保留复制记录仅支持单个普通文件，不会执行剪切或批量操作。");
+        return;
+    }
     let source = match source {
         StoredCopy::Single(source) => source,
         StoredCopy::Cut(source, kind) => {
@@ -249,7 +262,7 @@ fn paste_with_mode(
         }
         StoredCopy::Tree(source) => {
             drop(browser);
-            if keep_both {
+            if mode == PasteMode::Sibling {
                 notice(status, "文件夹复制不支持自动改名，请使用 Ctrl+V。");
             } else {
                 paste_tree(state, status, parent, path, source);
@@ -258,7 +271,7 @@ fn paste_with_mode(
         }
         StoredCopy::Batch(source) => {
             drop(browser);
-            if keep_both {
+            if mode == PasteMode::Sibling {
                 notice(status, "批量复制仅支持跳过同名项目，请使用 Ctrl+V。");
             } else {
                 paste_batch(state, status, parent, path, source);
@@ -267,7 +280,12 @@ fn paste_with_mode(
         }
     };
     drop(browser);
-    let _ = dispatch_regular_copy(state, status, parent, path, source, keep_both);
+    let policy = match mode {
+        PasteMode::Managed => CopyPolicy::Managed,
+        PasteMode::Sibling => CopyPolicy::KeepBoth,
+        PasteMode::Main | PasteMode::ComparisonCopy => CopyPolicy::NoReplace,
+    };
+    let _ = dispatch_regular_copy_with_policy(state, status, parent, path, source, policy);
 }
 
 /// True indicates worker dispatch, not a disk result. A future internal
@@ -280,12 +298,28 @@ pub(super) fn dispatch_regular_copy(
     source: StashedCopy,
     keep_both: bool,
 ) -> bool {
+    let policy = if keep_both {
+        CopyPolicy::KeepBoth
+    } else {
+        CopyPolicy::NoReplace
+    };
+    dispatch_regular_copy_with_policy(state, status, parent, path, source, policy)
+}
+
+fn dispatch_regular_copy_with_policy(
+    state: &Shared,
+    status: &gtk::Label,
+    parent: Arc<DirectoryHandle>,
+    path: PathBuf,
+    source: StashedCopy,
+    policy: CopyPolicy,
+) -> bool {
     let mut browser = state.borrow_mut();
     if browser.mutation.is_some() || browser.dialog_open {
         notice(status, "有文件操作正在进行，请稍候。");
         return false;
     }
-    if !keep_both && parent.identity() == source.parent.identity() {
+    if policy != CopyPolicy::KeepBoth && parent.identity() == source.parent.identity() {
         notice(status, "请选择不同的目标目录。同名项目不会被覆盖。");
         return false;
     }
@@ -309,23 +343,25 @@ pub(super) fn dispatch_regular_copy(
                 name: &source.name,
                 expected_file: source.identity,
             };
-            let result = if keep_both {
-                target
+            let destination = CopyDestination {
+                displayed_parent: &target_path,
+                name: &source.name,
+            };
+            let result = match policy {
+                CopyPolicy::KeepBoth => target
                     .copy_regular_keep_both(from, &target_path, &on_worker)
                     .map(|receipt| MutationOutcome::CopyAsSibling(receipt.name))
-            } else {
-                target
-                    .copy_regular_no_replace(
-                        from,
-                        CopyDestination {
-                            displayed_parent: &target_path,
-                            name: &source.name,
-                        },
-                        &on_worker,
-                    )
+                    .map_err(copy_error_message),
+                CopyPolicy::NoReplace => target
+                    .copy_regular_no_replace(from, destination, &on_worker)
                     .map(|_| MutationOutcome::FileOperation)
+                    .map_err(copy_error_message),
+                CopyPolicy::Managed => {
+                    managed_copy(&target, from, destination, &on_worker)
+                        .map(MutationOutcome::ManagedCopy)
+                }
             };
-            let _ = send.send(result.map_err(copy_error_message));
+            let _ = send.send(result);
         }) {
         Ok(_) => {
             browser.mutation = Some(MutationWork {
@@ -341,6 +377,54 @@ pub(super) fn dispatch_regular_copy(
         Err(error) => {
             notice(status, &format!("无法启动复制：{error}"));
             false
+        }
+    }
+}
+
+fn managed_copy(
+    target: &DirectoryHandle,
+    source: CopySource<'_>,
+    destination: CopyDestination<'_>,
+    cancel: &Cancellation,
+) -> Result<TrackedCopyReceipt, String> {
+    if cancel.check().is_err() {
+        return Err(copy_error_message(CopyError::Cancelled));
+    }
+    let state = crate::copy_journal_ui::open_state(true)
+        .map_err(|_| String::from("无法打开私有复制记录，目标未写入。"))?;
+    target
+        .copy_regular_managed(source, destination, &state, cancel)
+        .map_err(|error| match error {
+            TrackedCopyError::Intent(error)
+                if error.kind() == std::io::ErrorKind::StorageFull =>
+            {
+                "复制记录已满。请先移出旧记录；目标未写入。".into()
+            }
+            TrackedCopyError::Intent(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                "另有复制日志操作正在进行，目标未写入。".into()
+            }
+            TrackedCopyError::Intent(_) => "无法保存复制开始记录，目标未写入。".into(),
+            TrackedCopyError::Copy { error, intent_slot } => {
+                let mut message = copy_error_message(error);
+                if let Some(slot) = intent_slot {
+                    message.push_str(&format!(
+                        " 已留下开始记录 {:02}，可在「查看复制记录」核对。",
+                        slot + 1
+                    ));
+                }
+                message
+            }
+        })
+}
+
+pub(super) fn managed_copy_notice(receipt: TrackedCopyReceipt) -> String {
+    let slot = receipt.slot + 1;
+    match receipt.evidence {
+        CopyEvidence::Recorded => format!("已复制并保存记录 {slot:02}。"),
+        CopyEvidence::Unattributed | CopyEvidence::RecordUnavailable(_) => {
+            format!("已写入目标，但记录 {slot:02} 未能确认结果。请检查目标，不要直接重试。")
         }
     }
 }
@@ -709,6 +793,7 @@ pub(super) fn install(
         ("copy-item-path", "复制完整路径（Ctrl+Shift+C）"),
         ("paste-file", "粘贴到当前目录（Ctrl+V）"),
         ("paste-as-copy", "粘贴为副本（Ctrl+Shift+V）"),
+        ("paste-with-record", "粘贴并保留复制记录"),
         ("cancel-file-copy", "取消正在进行的复制或移动"),
     ] {
         let action = gio::SimpleAction::new(name, None);
@@ -741,6 +826,7 @@ pub(super) fn install(
             }
             "paste-file" => paste(&state, &buffer, &status, PasteMode::Main),
             "paste-as-copy" => paste(&state, &buffer, &status, PasteMode::Sibling),
+            "paste-with-record" => paste(&state, &buffer, &status, PasteMode::Managed),
             _ => {
                 let browser = state.borrow();
                 if let Some(work) = &browser.mutation

@@ -18,9 +18,13 @@ struct JournalViews {
 }
 
 fn state_root() -> io::Result<DirectoryHandle> {
+    open_state(false)
+}
+
+pub(super) fn open_state(create: bool) -> io::Result<DirectoryHandle> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
-    open_files_state_root(home.as_deref(), state_home.as_deref(), false)
+    open_files_state_root(home.as_deref(), state_home.as_deref(), create)
 }
 
 fn load() -> io::Result<JournalViews> {
