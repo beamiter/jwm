@@ -208,13 +208,8 @@ impl FolderRowTargets {
         let Some(label) = item.child() else {
             return;
         };
-        // The state borrow ended before invoking GTK, which may emit signals.
-        let controllers = label.observe_controllers();
-        let target = (0..controllers.n_items())
-            .find_map(|index| controllers.item(index)?.downcast::<gtk::DropTarget>().ok());
-        if let Some(target) = target {
-            target.reject();
-        }
+        // Keep GTK's drop alive so release can report rejection back to X11.
+        // This clears only feedback; the invalidated witness cannot dispatch.
         label.unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
     }
 
