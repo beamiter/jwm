@@ -939,13 +939,7 @@ fn open_window_with_tabs(
     trash_move_ui::install(&window, &state, &selection, &copy_status);
     if drop_copy_ui::available() {
         drop_copy_ui::install(&drag_selected, &drop_here, &state, &selection, &copy_status);
-        drop_copy_ui::install_folder_target(
-            &list,
-            &model,
-            &state,
-            &copy_status,
-            folder_drop_rows,
-        );
+        drop_copy_ui::install_folder_target(&list, &model, &state, &copy_status, folder_drop_rows);
     }
     copy_ui::install(
         &window,
@@ -2486,11 +2480,17 @@ mod wayland_acceptance {
         pump_for(160);
         move_in("target", px + 4, py);
         pump_for(160);
-        assert!(!plain_label.state_flags().contains(gtk::StateFlags::DROP_ACTIVE));
+        assert!(
+            !plain_label
+                .state_flags()
+                .contains(gtk::StateFlags::DROP_ACTIVE)
+        );
         assert!(!to_list.state_flags().contains(gtk::StateFlags::DROP_ACTIVE));
-        assert!(drag_source.drag().is_some_and(|drag| {
-            drag.selected_action() != gtk::gdk::DragAction::COPY
-        }));
+        assert!(
+            drag_source
+                .drag()
+                .is_some_and(|drag| { drag.selected_action() != gtk::gdk::DragAction::COPY })
+        );
         finish_hover(&new_label, &drag_source);
         xd(&["mouseup", "1"]);
         until(

@@ -360,9 +360,8 @@ pub(super) fn install_folder_target(
         let (capture, targets) = (capture.clone(), targets.clone());
         move |target: &gtk::DropTarget, x: f64, y: f64| {
             let selected = target_drag(target).is_some_and(|drag| {
-                capture(target, &drag, x, y).is_some_and(|(item, _, folder)| {
-                    targets.update(&drag, &item, &folder.rows)
-                })
+                capture(target, &drag, x, y)
+                    .is_some_and(|(item, _, folder)| targets.update(&drag, &item, &folder.rows))
             });
             if selected {
                 gdk::DragAction::COPY
