@@ -193,11 +193,15 @@ pub fn read_copy_journal(base: &DirectoryHandle, slot: u8) -> io::Result<CopyJou
     let name = slot_name(slot)?;
     let journal = open_journal(base, false)?;
     let dir = open_dir(&journal, &name, true)?;
-    let intent = read_record(&dir, INTENT)?;
+    read_slot(&dir)
+}
+
+fn read_slot(dir: &OwnedFd) -> io::Result<CopyJournalRecord> {
+    let intent = read_record(dir, INTENT)?;
     if intent.state != CopyJournalState::Prepared {
         return Err(invalid("copy journal slot does not contain an intent"));
     }
-    match read_record(&dir, PUBLISHED) {
+    match read_record(dir, PUBLISHED) {
         Ok(record)
             if matches!(record.state, CopyJournalState::Published(_))
                 && same_location(&intent, &record) =>
@@ -208,6 +212,77 @@ pub fn read_copy_journal(base: &DirectoryHandle, slot: u8) -> io::Result<CopyJou
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(intent),
         Err(error) => Err(error),
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CopyJournalSlotState {
+    /// A compliant slot directory had no committed intent when inspected.
+    Incomplete,
+    /// An occupied name or frame could not be safely verified.
+    Unreadable,
+    /// A bounded, matching intent and optional publication record.
+    Readable(CopyJournalRecord),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CopyJournalSlot {
+    pub slot: u8,
+    pub state: CopyJournalSlotState,
+}
+
+/// A point-in-time report, not a reservation or a removal token. Absent slot
+/// numbers were not occupied when inspected. Non-canonical names are ignored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CopyJournalSnapshot {
+    occupied: Vec<CopyJournalSlot>,
+}
+
+impl CopyJournalSnapshot {
+    pub fn occupied(&self) -> &[CopyJournalSlot] {
+        &self.occupied
+    }
+
+    pub fn available(&self) -> usize {
+        usize::from(COPY_JOURNAL_SLOTS) - self.occupied.len()
+    }
+}
+
+/// Inspect at most 64 exact slot names without creating state, changing a
+/// record, opening a copy destination, or probing arbitrary siblings. Call
+/// this on a worker. It has no effect on active copies or on retention.
+pub fn inspect_copy_journal(base: &DirectoryHandle) -> io::Result<CopyJournalSnapshot> {
+    let mut view = CopyJournalSnapshot {
+        occupied: Vec::new(),
+    };
+    let root = open_dir(&base.fd, ".", false)?;
+    let journal = match open_dir(&root, JOURNAL, true) {
+        Ok(journal) => journal,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(view),
+        Err(error) => return Err(error),
+    };
+    for slot in 0..COPY_JOURNAL_SLOTS {
+        let name = slot_name(slot)?;
+        match fs::statat(&journal, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => {}
+            Err(Errno::NOENT) => continue,
+            Err(error) => return Err(error.into()),
+        }
+        let state = match open_dir(&journal, &name, true) {
+            Ok(dir) => match fs::statat(&dir, INTENT, AtFlags::SYMLINK_NOFOLLOW) {
+                Err(Errno::NOENT) => CopyJournalSlotState::Incomplete,
+                Ok(_) => match read_slot(&dir) {
+                    Ok(record) => CopyJournalSlotState::Readable(record),
+                    Err(_) => CopyJournalSlotState::Unreadable,
+                },
+                Err(_) => CopyJournalSlotState::Unreadable,
+            },
+            // We observed the name. A disappeared, non-directory, aliased,
+            // or unsafe entry cannot be counted as free from this result.
+            Err(_) => CopyJournalSlotState::Unreadable,
+        };
+        view.occupied.push(CopyJournalSlot { slot, state });
+    }
+    Ok(view)
 }
 
 #[cfg(test)]
@@ -282,6 +357,97 @@ mod tests {
     fn put_frame(path: &Path, record: &CopyJournalRecord) {
         stdfs::write(path, record.encode().unwrap()).unwrap();
         stdfs::set_permissions(path, stdfs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn journal_inspection_fresh_state_is_read_only() {
+        let f = Fixture::new();
+        let view = inspect_copy_journal(&f.open()).unwrap();
+        assert!(view.occupied().is_empty());
+        assert_eq!(view.available(), usize::from(COPY_JOURNAL_SLOTS));
+        assert!(!f.0.join(JOURNAL).exists());
+    }
+
+    #[test]
+    fn journal_inspection_keeps_occupied_without_evidence_distinct() {
+        let f = Fixture::new();
+        let intent = f.intent();
+        let reservation = prepare_copy_journal(&f.open(), intent.clone()).unwrap();
+        assert_eq!(reservation.slot(), 0);
+        let incomplete = f.slot(1);
+        stdfs::DirBuilder::new()
+            .mode(0o700)
+            .create(&incomplete)
+            .unwrap();
+        stdfs::write(incomplete.join(".intent.writing"), b"unfinished").unwrap();
+        let sentinel = f.0.join(&intent.name);
+        stdfs::write(&sentinel, b"unattributed").unwrap();
+        symlink(&sentinel, f.slot(2)).unwrap();
+        stdfs::write(f.0.join(JOURNAL).join("not-a-slot"), b"untouched").unwrap();
+
+        let view = inspect_copy_journal(&f.open()).unwrap();
+        assert_eq!(
+            view.occupied(),
+            &[
+                CopyJournalSlot {
+                    slot: 0,
+                    state: CopyJournalSlotState::Readable(intent),
+                },
+                CopyJournalSlot {
+                    slot: 1,
+                    state: CopyJournalSlotState::Incomplete,
+                },
+                CopyJournalSlot {
+                    slot: 2,
+                    state: CopyJournalSlotState::Unreadable,
+                },
+            ]
+        );
+        assert_eq!(view.available(), usize::from(COPY_JOURNAL_SLOTS) - 3);
+        assert_eq!(stdfs::read(sentinel).unwrap(), b"unattributed");
+        assert_eq!(
+            stdfs::read(incomplete.join(".intent.writing")).unwrap(),
+            b"unfinished"
+        );
+    }
+
+    #[test]
+    fn journal_inspection_at_capacity_can_have_zero_readable_records() {
+        let f = Fixture::new();
+        let journal = f.0.join(JOURNAL);
+        stdfs::DirBuilder::new()
+            .mode(0o700)
+            .create(&journal)
+            .unwrap();
+        for slot in 0..COPY_JOURNAL_SLOTS {
+            stdfs::DirBuilder::new()
+                .mode(0o700)
+                .create(f.slot(slot))
+                .unwrap();
+        }
+        let view = inspect_copy_journal(&f.open()).unwrap();
+        assert_eq!(view.available(), 0);
+        assert_eq!(view.occupied().len(), usize::from(COPY_JOURNAL_SLOTS));
+        assert!(
+            view.occupied()
+                .iter()
+                .all(|entry| entry.state == CopyJournalSlotState::Incomplete)
+        );
+        let error = prepare_copy_journal(&f.open(), f.intent()).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::StorageFull);
+        assert_eq!(
+            stdfs::read_dir(&journal).unwrap().count(),
+            usize::from(COPY_JOURNAL_SLOTS)
+        );
+    }
+
+    #[test]
+    fn journal_inspection_does_not_treat_an_aliased_root_as_empty() {
+        let f = Fixture::new();
+        let other = Fixture::new();
+        symlink(&other.0, f.0.join(JOURNAL)).unwrap();
+        assert!(inspect_copy_journal(&f.open()).is_err());
+        assert_eq!(stdfs::read_dir(&other.0).unwrap().count(), 0);
     }
 
     #[test]

@@ -58,7 +58,8 @@ pub use copy_journal::{
 };
 #[cfg(target_os = "linux")]
 pub use copy_journal_storage::{
-    COPY_JOURNAL_SLOTS, CopyJournalReservation, prepare_copy_journal, read_copy_journal,
+    COPY_JOURNAL_SLOTS, CopyJournalReservation, CopyJournalSlot, CopyJournalSlotState,
+    CopyJournalSnapshot, inspect_copy_journal, prepare_copy_journal, read_copy_journal,
 };
 #[cfg(target_os = "linux")]
 pub use index_walk::{IndexEntry, WalkOptions, WalkSummary, visit_local_index};
