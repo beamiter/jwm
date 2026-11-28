@@ -298,7 +298,10 @@ retryable copy error. The default copy worker and UI do not yet use this
 mode, and slots are not reused. A missing destination means currently absent, not that
 the copy never published; syncing the record is not proof of power-loss
 durability for the copied directory entry. Neither record permits any
-automatic retry, deletion, overwrite, or rollback.
+automatic retry, deletion, overwrite, or rollback. Provider inspection is
+read-only and reports occupied slots even when no usable records remain,
+for example after interruption during intent creation. It does not inspect
+copy destinations, clear slots, enable recording, or add a history panel.
 
 ### Find filenames in subdirectories
 
