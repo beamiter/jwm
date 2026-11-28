@@ -613,3 +613,38 @@ fn png_preview_keeps_native_filename_and_rejects_a_replacement_symlink() {
     symlink(&moved, &path).unwrap();
     assert!(matches!(read(), Err(PreviewError::NotRegular)));
 }
+
+#[test]
+fn listed_folder_target_never_follows_an_alias_or_accepts_a_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let root = Fixture::new();
+    let listed = OsStr::new("chosen");
+    let child = root.0.join(listed);
+    let original = root.0.join("retained");
+    fs::create_dir(&child).unwrap();
+    let (parent, expected) = scanned_child(&root, listed);
+    assert_eq!(
+        parent
+            .open_listed_child(&root.0, listed, expected)
+            .unwrap()
+            .identity(),
+        expected,
+    );
+
+    fs::rename(&child, &original).unwrap();
+    symlink(&original, &child).unwrap();
+    assert!(parent.open_listed_child(&root.0, listed, expected).is_err());
+    fs::remove_file(&child).unwrap();
+    fs::create_dir(&child).unwrap();
+    assert!(parent.open_listed_child(&root.0, listed, expected).is_err());
+
+    let other = Fixture::new();
+    assert!(
+        parent
+            .open_listed_child(&other.0, OsStr::new("retained"), expected)
+            .is_err()
+    );
+    assert_eq!(fs::read_dir(&child).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&original).unwrap().count(), 0);
+}

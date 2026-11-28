@@ -169,6 +169,252 @@ pub(super) fn install_row(
     });
 }
 
+#[derive(Default)]
+pub(super) struct FolderRowTargets {
+    list: glib::WeakRef<gtk::ListView>,
+    rows: RefCell<std::collections::HashMap<usize, glib::WeakRef<gtk::ListItem>>>,
+    hover: RefCell<Option<FolderHover>>,
+}
+
+struct FolderHover {
+    drag: glib::WeakRef<gdk::Drag>,
+    rows: std::sync::Weak<Vec<FileEntry>>,
+    active: Option<glib::WeakRef<gtk::ListItem>>,
+    invalidated: bool,
+}
+
+impl FolderRowTargets {
+    pub(super) fn setup(&self, item: &gtk::ListItem, label: &gtk::Label) {
+        let key = label.upcast_ref::<gtk::Widget>().as_ptr() as usize;
+        self.rows.borrow_mut().insert(key, item.downgrade());
+    }
+
+    pub(super) fn teardown(&self, item: &gtk::ListItem) {
+        if let Some(child) = item.child() {
+            self.rows.borrow_mut().remove(&(child.as_ptr() as usize));
+        }
+        self.unbind(item);
+    }
+
+    fn at(&self, list: &gtk::Widget, x: f64, y: f64) -> Option<gtk::ListItem> {
+        let rows = self.rows.borrow();
+        let mut hit = list.pick(x, y, gtk::PickFlags::DEFAULT)?;
+        while &hit != list {
+            if let Some(item) = rows
+                .get(&(hit.as_ptr() as usize))
+                .and_then(glib::WeakRef::upgrade)
+                && item.child().as_ref() == Some(&hit)
+            {
+                return Some(item);
+            }
+            hit = hit.parent()?;
+        }
+        None
+    }
+
+    fn set_highlight(item: &gtk::ListItem, active: bool) {
+        if let Some(label) = item.child() {
+            if active {
+                label.set_state_flags(gtk::StateFlags::DROP_ACTIVE, false);
+            } else {
+                label.unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
+            }
+        }
+    }
+
+    pub(super) fn unbind(&self, item: &gtk::ListItem) {
+        let active = {
+            let mut hover = self.hover.borrow_mut();
+            hover.as_mut().is_some_and(|hover| {
+                if hover
+                    .active
+                    .as_ref()
+                    .and_then(glib::WeakRef::upgrade)
+                    .as_ref()
+                    != Some(item)
+                {
+                    return false;
+                }
+                hover.invalidated = true;
+                hover.active = None;
+                true
+            })
+        };
+        if active {
+            Self::set_highlight(item, false);
+            if let Some(list) = self.list.upgrade() {
+                list.unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
+            }
+        }
+    }
+
+    fn clear_highlight(&self) {
+        let old = self
+            .hover
+            .borrow_mut()
+            .as_mut()
+            .and_then(|hover| hover.active.take())
+            .and_then(|item| item.upgrade());
+        if let Some(old) = old {
+            Self::set_highlight(&old, false);
+        }
+    }
+
+    fn update(&self, drag: &gdk::Drag, item: &gtk::ListItem, rows: &Arc<Vec<FileEntry>>) -> bool {
+        if self.accepts(drag, item, rows) {
+            return true;
+        }
+        let weak_rows = Arc::downgrade(rows);
+        let allowed = {
+            let mut hover = self.hover.borrow_mut();
+            if let Some(old) = hover.as_mut()
+                && old.drag.upgrade().as_ref() == Some(drag)
+            {
+                if !old.rows.ptr_eq(&weak_rows) {
+                    old.invalidated = true;
+                }
+                !old.invalidated
+            } else {
+                true
+            }
+        };
+        self.clear_highlight();
+        if !allowed {
+            return false;
+        }
+        self.hover.replace(Some(FolderHover {
+            drag: drag.downgrade(),
+            rows: weak_rows,
+            active: Some(item.downgrade()),
+            invalidated: false,
+        }));
+        Self::set_highlight(item, true);
+        true
+    }
+
+    fn accepts(&self, drag: &gdk::Drag, item: &gtk::ListItem, rows: &Arc<Vec<FileEntry>>) -> bool {
+        self.hover.borrow().as_ref().is_some_and(|hover| {
+            !hover.invalidated
+                && hover.drag.upgrade().as_ref() == Some(drag)
+                && hover.rows.ptr_eq(&Arc::downgrade(rows))
+                && hover
+                    .active
+                    .as_ref()
+                    .and_then(glib::WeakRef::upgrade)
+                    .as_ref()
+                    == Some(item)
+        })
+    }
+}
+
+fn live_offer_for(drag: &gdk::Drag, state: &Shared) -> bool {
+    ACTIVE.with_borrow(|active| {
+        active.as_ref().is_some_and(|offer| {
+            is_ours(offer, drag) && offer.pending.still_current_in_other_window(state)
+        })
+    })
+}
+
+fn target_drag(target: &gtk::DropTarget) -> Option<gdk::Drag> {
+    target.property::<Option<gdk::Drop>>("drop")?.drag()
+}
+
+pub(super) fn install_folder_target(
+    list: &gtk::ListView,
+    model: &crate::row_model::FileRowModel,
+    state: &Shared,
+    status: &gtk::Label,
+    targets: Rc<FolderRowTargets>,
+) {
+    // The list, unlike a recycled row, can still answer the native drop.
+    targets.list.set(Some(list));
+    let target = gtk::DropTarget::new(u64::static_type(), gdk::DragAction::COPY);
+    target.set_preload(true);
+    let state = Rc::downgrade(state);
+    target.connect_accept({
+        let state = state.clone();
+        move |_, drop| {
+            drop.actions() == gdk::DragAction::COPY
+                && drop.drag().is_some_and(|drag| {
+                    state
+                        .upgrade()
+                        .is_some_and(|state| live_offer_for(&drag, &state))
+                })
+        }
+    });
+    let capture = Rc::new({
+        let model = model.downgrade();
+        let targets = targets.clone();
+        move |target: &gtk::DropTarget, drag: &gdk::Drag, x: f64, y: f64| {
+            let (model, state) = (model.upgrade()?, state.upgrade()?);
+            if !live_offer_for(drag, &state) {
+                return None;
+            }
+            let item = targets.at(&target.widget()?, x, y)?;
+            let bound = item.item()?;
+            let folder = Pending::capture(&state, item.position(), None, Some((&model, &bound)))?;
+            (folder.kind == FileKind::Directory).then_some((item, state, folder))
+        }
+    });
+    let indicate = Rc::new({
+        let (capture, targets) = (capture.clone(), targets.clone());
+        move |target: &gtk::DropTarget, x: f64, y: f64| {
+            let selected = target_drag(target).is_some_and(|drag| {
+                capture(target, &drag, x, y).is_some_and(|(item, _, folder)| {
+                    targets.update(&drag, &item, &folder.rows)
+                })
+            });
+            if selected {
+                gdk::DragAction::COPY
+            } else {
+                targets.clear_highlight();
+                gdk::DragAction::empty()
+            }
+        }
+    });
+    target.connect_enter({
+        let indicate = indicate.clone();
+        move |target, x, y| indicate(target, x, y)
+    });
+    target.connect_motion(move |target, x, y| indicate(target, x, y));
+    target.connect_leave({
+        let targets = targets.clone();
+        move |_| targets.clear_highlight()
+    });
+    let status = status.downgrade();
+    target.connect_drop(move |target, marker, x, y| {
+        let dispatch = || {
+            if !marker.get::<u64>().is_ok_and(|value| value == OFFER) {
+                return None;
+            }
+            let drag = target_drag(target)?;
+            let (item, state, folder) = capture(target, &drag, x, y)?;
+            if !targets.accepts(&drag, &item, &folder.rows) {
+                return None;
+            }
+            let status = status.upgrade()?;
+            let offer = ACTIVE.with_borrow_mut(|active| {
+                if active.as_ref().is_some_and(|offer| is_ours(offer, &drag)) {
+                    active.take()
+                } else {
+                    None
+                }
+            })?;
+            Some(copy_ui::dispatch_drop_into_folder(
+                &state,
+                &status,
+                folder.source,
+                offer.pending.source,
+                offer.pending.kind,
+            ))
+        };
+        let accepted = dispatch().unwrap_or(false);
+        targets.clear_highlight();
+        accepted
+    });
+    list.add_controller(target);
+}
+
 pub(super) fn install(
     source_handle: &gtk::Label,
     destination: &gtk::Label,

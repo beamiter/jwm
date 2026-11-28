@@ -203,6 +203,7 @@ def run(args, root, log):
                 "GTK4 Wayland drag copy: real inter-window pointer copied exact native bytes and kept source and clipboard",
                 "GTK4 Wayland drag folder copy: physical drop kept existing tree, then copied exact nested bytes without moving source",
                 "GTK4 Wayland row drag copy: rebound native-name twin copied exactly; stale row drop wrote nothing",
+                "GTK4 Wayland folder row target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory",
             ):
                 assert output.count(marker) == 1, marker
                 print(marker)
