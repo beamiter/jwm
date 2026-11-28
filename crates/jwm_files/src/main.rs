@@ -2669,6 +2669,122 @@ mod wayland_acceptance {
                 );
             }
         }
+
+        let markdown = OsStr::new("keyboard-preview.md");
+        fs::write(source.join(markdown), b"# keyboard preview\n").unwrap();
+        until(
+            || model_position(markdown).is_some(),
+            "the Markdown keyboard fixture is listed",
+        );
+        selection.set_selected(model_position(markdown).unwrap());
+        let focus_preview = |popup: &gtk::Window, heading: &gtk::Label| {
+            if wayland {
+                popup.set_decorated(false);
+                until(
+                    || hit_center(popup, heading).is_some(),
+                    "mapped native preview heading",
+                );
+                pump_for(150);
+                let (x, y) = widget_center(popup, heading);
+                move_in("preview", x, y);
+                xd(&["click", "1"]);
+            } else {
+                let title = xd(&["search", "--onlyvisible", "--name", "^JWM Files · Preview$"]);
+                assert_eq!(title.lines().count(), 1);
+                assert_eq!(
+                    xd(&["getwindowpid", &title]),
+                    std::process::id().to_string()
+                );
+                xd(&["windowfocus", "--sync", &title]);
+            }
+            until(|| popup.is_active(), "native preview owns keyboard focus");
+        };
+        verify_preview_keyboard(&app, &from, &focus_preview, &|key| {
+            xd(&["key", "--clearmodifiers", key]);
+        });
+        println!(
+            "GTK4 {backend_label} preview keyboard: Space toggled focused Markdown source; Escape and ordinary Space closed"
+        );
+    }
+
+    fn verify_preview_keyboard(
+        app: &gtk::Application,
+        parent: &gtk::Window,
+        focus_preview: &impl Fn(&gtk::Window, &gtk::Label),
+        key: &impl Fn(&str),
+    ) {
+        let preview_widgets = || {
+            let popup = app.windows().into_iter().find(|window| {
+                window.is_mapped() && window.title().as_deref() == Some("JWM Files · Preview")
+            })?;
+            let widgets = descendants(popup.upcast_ref());
+            let source = widgets
+                .iter()
+                .filter_map(|widget| widget.downcast_ref::<gtk::ToggleButton>())
+                .find(|button| button.is_mapped() && button.label().as_deref() == Some("查看源码"))?
+                .clone();
+            let heading = widgets
+                .iter()
+                .filter_map(|widget| widget.downcast_ref::<gtk::Label>())
+                .find(|label| label.label().ends_with("/keyboard-preview.md"))?
+                .clone();
+            let buffer = widgets
+                .iter()
+                .find_map(|widget| widget.downcast_ref::<gtk::TextView>())?
+                .buffer();
+            (buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .trim()
+                == "keyboard preview")
+                .then_some((popup, heading, source, buffer))
+        };
+        let open = || {
+            gtk::prelude::WidgetExt::activate_action(parent, "win.quick-preview", None).unwrap();
+            until(
+                || preview_widgets().is_some(),
+                "native Markdown preview rendered",
+            );
+            preview_widgets().unwrap()
+        };
+        let (popup, heading, toggle, text) = open();
+        focus_preview(&popup, &heading);
+        assert!(heading.grab_focus());
+        until(|| heading.has_focus(), "the preview path owns GTK focus");
+        key("Tab");
+        until(
+            || toggle.has_focus(),
+            "native Tab reached the Markdown source button",
+        );
+        let body = || text.text(&text.start_iter(), &text.end_iter(), false);
+        assert!(!toggle.is_active());
+        key("space");
+        until(
+            || toggle.is_active() && body().as_str() == "# keyboard preview\n",
+            "native Space showed exact Markdown source without dismissing",
+        );
+        assert!(popup.is_mapped() && toggle.has_focus());
+        key("space");
+        until(
+            || !toggle.is_active() && body().trim() == "keyboard preview",
+            "second native Space restored rendered Markdown",
+        );
+        assert!(popup.is_mapped() && toggle.has_focus());
+        key("Escape");
+        until(
+            || !popup.is_mapped(),
+            "Escape still closes on the focused button",
+        );
+
+        let (popup, heading, toggle, _) = open();
+        focus_preview(&popup, &heading);
+        assert!(heading.grab_focus());
+        until(
+            || heading.has_focus(),
+            "the reopened preview path owns GTK focus",
+        );
+        assert!(!toggle.has_focus());
+        key("space");
+        until(|| !popup.is_mapped(), "Space on non-button content closes");
     }
 
     #[test]
