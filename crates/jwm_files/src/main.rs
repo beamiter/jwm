@@ -2807,8 +2807,15 @@ mod wayland_acceptance {
         let texture = fit.paintable().unwrap();
         assert_eq!(original.paintable().as_ref(), Some(&texture));
         focus_preview(&popup, &heading);
-        assert!(toggle.grab_focus());
-        until(|| toggle.has_focus(), "image size toggle owns native focus");
+        assert!(heading.grab_focus());
+        until(|| heading.has_focus(), "the image path owns GTK focus");
+        // A Wayland focus click can still be en route to the path label.
+        // Follow it with real Tab instead of racing it with a direct focus grab.
+        key("Tab");
+        until(
+            || toggle.has_focus(),
+            "native Tab reached the image size toggle",
+        );
         let viewport_size = (popup.width(), popup.height());
         key("space");
         until(
@@ -2850,11 +2857,29 @@ mod wayland_acceptance {
         assert_eq!((popup.width(), popup.height()), viewport_size);
         assert!(!fit.is_mapped());
         assert_eq!(original.paintable().as_ref(), Some(&texture));
+        let viewport = scroll.child().and_downcast::<gtk::Viewport>().unwrap();
+        let initial = original.compute_bounds(&viewport).unwrap();
+        let start = axes.each_ref().map(|axis| axis.value());
         for axis in &axes {
+            assert_eq!(axis.value(), axis.lower());
             axis.set_value(axis.upper() - axis.page_size());
             assert!((axis.value() + axis.page_size() - axis.upper()).abs() < 1.0);
             assert!(axis.value() > axis.lower());
         }
+        let [dx, dy] = std::array::from_fn(|axis| axes[axis].value() - start[axis]);
+        until(
+            || {
+                original.compute_bounds(&viewport).is_some_and(|bounds| {
+                    (f64::from(initial.x() - bounds.x()) - dx).abs() <= 1.0
+                        && (f64::from(initial.y() - bounds.y()) - dy).abs() <= 1.0
+                        && (f64::from(bounds.x() + bounds.width()) - axes[0].page_size()).abs()
+                            <= 1.0
+                        && (f64::from(bounds.y() + bounds.height()) - axes[1].page_size()).abs()
+                            <= 1.0
+                })
+            },
+            "both far image edges reached the live viewport after panning",
+        );
         let (same_popup, _, stack, fit, _, _, toggle) = open("small-zoom.png", (32, 17));
         assert_eq!(same_popup, popup);
         assert_eq!(stack.visible_child_name().as_deref(), Some("fit"));
