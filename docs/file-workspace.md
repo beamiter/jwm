@@ -277,7 +277,7 @@ so the repository's path bookkeeping is updated. A general file-manager
 move does not update it. If a linked worktree has already been moved, see
 the manual's `repair` command.
 
-### Copy interruption review (core only)
+### Read-only copy interruption records
 
 The local provider has a bounded record for one copy intent or an observed
 publication. The record retains native path bytes. Review reopens the
@@ -285,7 +285,7 @@ destination directory without following symlinks and checks metadata only.
 A file present with an intent but no publication record is indeterminate.
 Matching metadata is a point-in-time observation, not proof of identity or
 permission to delete, overwrite, or roll back a file. The application does not
-yet write these records or offer copy history or recovery in the UI.
+yet record ordinary copies or offer automatic recovery in the UI.
 
 The provider has a separate owner-only local state store for at most 64
 copy intents. Reading never initializes the store. Each slot has an immutable
@@ -301,7 +301,11 @@ durability for the copied directory entry. Neither record permits any
 automatic retry, deletion, overwrite, or rollback. Provider inspection is
 read-only and reports occupied slots even when no usable records remain,
 for example after interruption during intent creation. It does not inspect
-copy destinations, clear slots, enable recording, or add a history panel.
+copy destinations or clear slots. **操作 → 查看复制记录** opens this bounded
+journal-only view without creating state. It shows used capacity, exact stored
+record labels and incomplete/unreadable slots in slot order, not chronological
+order. The panel does not check destination paths, start any copy or clear
+records. Ordinary copies still do not create these records.
 
 ### Find filenames in subdirectories
 

@@ -701,6 +701,7 @@ pub(super) fn install(
     menu.append(Some("选择多个文件复制"), Some("win.pick-batch-copy"));
     crate::batch_copy_picker::install(window, state, buffer, status);
     menu.append(Some("查看批量复制结果"), Some("win.batch-copy-result"));
+    menu.append(Some("查看复制记录"), Some("win.copy-journal"));
     crate::batch_copy_result::install(window, state, status);
     for (name, label) in [
         ("copy-file", "复制选中项目（Ctrl+C）"),
