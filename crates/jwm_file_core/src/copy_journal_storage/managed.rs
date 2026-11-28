@@ -5,7 +5,9 @@ use super::{
 };
 use rustix::{
     fd::OwnedFd,
-    fs::{self, AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, Stat},
+    fs::{
+        self, AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, Stat,
+    },
     process::geteuid,
 };
 use std::{
@@ -209,11 +211,7 @@ fn unmounted_private_child(parent: &OwnedFd, name: &str) -> io::Result<OwnedFd> 
     Ok(child)
 }
 
-fn revalidate_unmounted(
-    parent: &OwnedFd,
-    name: &str,
-    held: &OwnedFd,
-) -> io::Result<()> {
+fn revalidate_unmounted(parent: &OwnedFd, name: &str, held: &OwnedFd) -> io::Result<()> {
     let fresh = unmounted_private_child(parent, name)?;
     if !same_dir(&fs::fstat(held)?, &fs::fstat(&fresh)?) {
         return Err(invalid("managed retired selection changed"));
@@ -221,10 +219,7 @@ fn revalidate_unmounted(
     Ok(())
 }
 
-fn acquire_retired_root(
-    base: &DirectoryHandle,
-    operation: FlockOperation,
-) -> io::Result<OwnedFd> {
+fn acquire_retired_root(base: &DirectoryHandle, operation: FlockOperation) -> io::Result<OwnedFd> {
     let journal = unmounted_private_child(&base.fd, MANAGED)?;
     fs::flock(&journal, operation)?;
     revalidate_unmounted(&base.fd, MANAGED, &journal)?;
@@ -236,7 +231,9 @@ fn acquire_retired_root(
 pub fn managed_retired_state(base: &DirectoryHandle) -> io::Result<ManagedRetiredState> {
     let journal = match acquire_retired_root(base, FlockOperation::NonBlockingLockShared) {
         Ok(journal) => journal,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(ManagedRetiredState::Absent),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(ManagedRetiredState::Absent);
+        }
         Err(error) => return Err(error),
     };
     match unmounted_private_child(&journal, RETIRED) {
@@ -375,7 +372,10 @@ mod tests {
     fn managed_cleanup_reports_pending_separately_and_preserves_reused_slot() {
         let f = Fixture::new();
         let root = f.open();
-        assert_eq!(managed_retired_state(&root).unwrap(), ManagedRetiredState::Absent);
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::Absent
+        );
         assert!(!f.0.join(MANAGED).exists());
         drop(prepare_managed_copy_journal(&root, f.intent("old")).unwrap());
         let selected = select_managed_copy_journal(&root, 0).unwrap();
@@ -403,9 +403,15 @@ mod tests {
             cleanup_managed_retired(&root, cleanup).unwrap(),
             ManagedRetiredCleanup::Cleaned
         ));
-        assert_eq!(managed_retired_state(&root).unwrap(), ManagedRetiredState::Absent);
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::Absent
+        );
         let after = inspect_managed_copy_journal(&root).unwrap();
-        assert_eq!(after.occupied()[0].state, CopyJournalSlotState::Readable(new));
+        assert_eq!(
+            after.occupied()[0].state,
+            CopyJournalSlotState::Readable(new)
+        );
         assert_eq!(stdfs::read(old).unwrap(), b"old destination untouched");
     }
 
@@ -421,7 +427,10 @@ mod tests {
         let guarded = non_journal.0.join("intent");
         stdfs::write(&guarded, b"outside").unwrap();
         symlink(&non_journal.0, &retired).unwrap();
-        assert_eq!(managed_retired_state(&root).unwrap(), ManagedRetiredState::Unsafe);
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::Unsafe
+        );
         assert!(select_managed_retired(&root).is_err());
         assert_eq!(stdfs::read(&guarded).unwrap(), b"outside");
         stdfs::remove_file(&retired).unwrap();
@@ -435,7 +444,10 @@ mod tests {
         let intact = stdfs::read(retired.join("intent")).unwrap();
         stdfs::write(retired.join("unrelated"), b"unknown").unwrap();
         assert!(cleanup_managed_retired(&root, cleanup).is_err());
-        assert_eq!(managed_retired_state(&root).unwrap(), ManagedRetiredState::Unsafe);
+        assert_eq!(
+            managed_retired_state(&root).unwrap(),
+            ManagedRetiredState::Unsafe
+        );
         assert_eq!(stdfs::read(retired.join("intent")).unwrap(), intact);
         assert_eq!(stdfs::read(retired.join("unrelated")).unwrap(), b"unknown");
     }
@@ -451,7 +463,10 @@ mod tests {
         let journal = f.0.join(MANAGED);
         let retired = journal.join(RETIRED);
         stdfs::rename(&retired, journal.join("prior-retired")).unwrap();
-        stdfs::DirBuilder::new().mode(0o700).create(&retired).unwrap();
+        stdfs::DirBuilder::new()
+            .mode(0o700)
+            .create(&retired)
+            .unwrap();
         assert!(cleanup_managed_retired(&root, cleanup).is_err());
         assert!(retired.is_dir());
         assert!(journal.join("prior-retired/intent").exists());
