@@ -320,10 +320,12 @@ provider reports cleanup pending independently of numbered capacity. It can
 discard only preflighted journal artifacts in the exact retired directory
 selected for cleanup. Unsupported mounts, aliases, and changed selections
 are refused without changing numbered records or copy destinations. The
-application does not yet create managed records or expose retirement or
-cleanup actions. The same read-only panel shows managed and prototype
-records in separate groups, and reports retired cleanup independently of
-numbered capacity. Both managed observations use the same shared lock so
+application does not yet create managed records or expose retirement from
+the active list. The panel shows managed and prototype records in separate
+groups. When a managed record has already been moved out of the list,
+**清理已移出的日志** can remove only that retired metadata after confirmation.
+The default response cancels; no copy destination or active record can be
+removed by that action. Pending cleanup and numbered capacity stay separate. Both managed observations use the same shared lock so
 retirement and cleanup cannot intervene between them. Active shared writers
 can still update numbered entries. This is not a network-filesystem locking
 or a global transaction guarantee.
