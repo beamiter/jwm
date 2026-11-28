@@ -2709,7 +2709,10 @@ mod wayland_acceptance {
         let image_fixtures = include_str!("../tests/fixtures/preview-zoom.hex")
             .lines()
             .filter(|line| !line.starts_with('#'));
-        for (name, hex) in ["small-zoom.png", "large-zoom.png"].into_iter().zip(image_fixtures) {
+        for (name, hex) in ["small-zoom.png", "large-zoom.png"]
+            .into_iter()
+            .zip(image_fixtures)
+        {
             let pixels: Vec<_> = (0..hex.len())
                 .step_by(2)
                 .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
@@ -2718,7 +2721,10 @@ mod wayland_acceptance {
         }
         let show_image = |name: &str| {
             let name = OsStr::new(name);
-            until(|| model_position(name).is_some(), "image in the source model");
+            until(
+                || model_position(name).is_some(),
+                "image in the source model",
+            );
             selection.set_selected(model_position(name).unwrap());
             gtk::prelude::WidgetExt::activate_action(&from, "win.quick-preview", None).unwrap();
         };
@@ -2744,7 +2750,10 @@ mod wayland_acceptance {
                 .filter_map(|widget| widget.downcast_ref::<gtk::Stack>())
                 .find(|stack| stack.is_mapped() && stack.child_by_name("fit").is_some())?
                 .clone();
-            let fit = stack.child_by_name("fit")?.downcast::<gtk::Picture>().ok()?;
+            let fit = stack
+                .child_by_name("fit")?
+                .downcast::<gtk::Picture>()
+                .ok()?;
             let scroll = stack
                 .child_by_name("original")?
                 .downcast::<gtk::ScrolledWindow>()
@@ -2802,17 +2811,38 @@ mod wayland_acceptance {
         until(|| toggle.has_focus(), "image size toggle owns native focus");
         let viewport_size = (popup.width(), popup.height());
         key("space");
+        until(
+            || toggle.is_active() || !popup.is_mapped(),
+            "native Space activated the image size toggle",
+        );
+        assert!(popup.is_mapped(), "Space dismissed the image preview");
+        assert_eq!(stack.visible_child_name().as_deref(), Some("original"));
         let axes = [scroll.hadjustment(), scroll.vadjustment()];
         let has_range = |axis: &gtk::Adjustment| {
             axis.page_size() > 0.0 && axis.upper() - axis.page_size() > axis.lower()
         };
+        let deadline = Instant::now() + Duration::from_secs(5);
         until(
             || {
-                toggle.is_active()
-                    && original.is_mapped()
+                if original.is_mapped()
                     && original.width() == 1500
                     && original.height() == 1100
                     && axes.iter().all(has_range)
+                {
+                    return true;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "100% layout: mapped={}, image={}x{}, viewport={}x{}, scroll={:?}",
+                    original.is_mapped(),
+                    original.width(),
+                    original.height(),
+                    scroll.width(),
+                    scroll.height(),
+                    axes.each_ref()
+                        .map(|axis| (axis.lower(), axis.upper(), axis.page_size())),
+                );
+                false
             },
             "100% matches the decoded logical size and can pan in both directions",
         );

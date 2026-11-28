@@ -133,6 +133,9 @@ impl ImageView {
                 axis.set_value(axis.lower());
             }
         }
+        if let Some(original) = self.original.upgrade() {
+            original.set_size_request(-1, -1);
+        }
         for picture in [&self.fit, &self.original]
             .into_iter()
             .filter_map(glib::WeakRef::upgrade)
@@ -143,6 +146,10 @@ impl ImageView {
     }
 
     fn show(&self, texture: &gtk::gdk::MemoryTexture, description: &str) {
+        if let Some(original) = self.original.upgrade() {
+            // Set the viewport minimum from decoded dimensions, not the fit request.
+            original.set_size_request(texture.width(), texture.height());
+        }
         for picture in [&self.fit, &self.original]
             .into_iter()
             .filter_map(glib::WeakRef::upgrade)
