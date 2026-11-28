@@ -1,6 +1,6 @@
 //! Read-only, bounded copy-journal records for a Files window.
-use gtk4 as gtk;
 use gtk::{gio, glib, prelude::*};
+use gtk4 as gtk;
 use jwm_file_core::{
     COPY_JOURNAL_SLOTS, CopyJournalSlotState, CopyJournalSnapshot, CopyJournalState,
     inspect_copy_journal, open_files_state_root,
@@ -42,7 +42,10 @@ fn populate(rows: &gtk::Box, status: &gtk::Label, snapshot: Option<CopyJournalSn
                     CopyJournalState::Published(_) => "有写入记录，未检查当前文件",
                 };
                 let target = record.destination_parent.join(&record.name);
-                format!("{state} · {}", crate::trash_ui::display_path(target.as_os_str()))
+                format!(
+                    "{state} · {}",
+                    crate::trash_ui::display_path(target.as_os_str())
+                )
             }
         };
         let line = format!("{:02} · {state}", entry.slot + 1);

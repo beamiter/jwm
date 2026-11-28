@@ -2986,7 +2986,10 @@ mod wayland_acceptance {
         let detached = root.join("offline-destination-do-not-probe");
         let mut record = jwm_file_core::CopyJournalRecord {
             destination_parent: detached.clone(),
-            parent: FileIdentity { device: 7, inode: 9 },
+            parent: FileIdentity {
+                device: 7,
+                inode: 9,
+            },
             name: OsString::from_vec(b"not-current-\x80.txt".to_vec()),
             state: jwm_file_core::CopyJournalState::Prepared,
         };
@@ -2996,7 +2999,10 @@ mod wayland_acceptance {
         let observed = jwm_file_core::prepare_copy_journal(&state_root, record.clone()).unwrap();
         assert_eq!(observed.slot(), 1);
         record.state = jwm_file_core::CopyJournalState::Published(jwm_file_core::CopyObservation {
-            file: FileIdentity { device: 7, inode: 10 },
+            file: FileIdentity {
+                device: 7,
+                inode: 10,
+            },
             size: 15,
             mtime_seconds: 1,
             mtime_nanos: 0,
@@ -3032,7 +3038,9 @@ mod wayland_acceptance {
             b"not a slot directory"
         );
         journal_panel().unwrap().close();
-        println!("GTK4 Wayland copy journal: fresh state left untouched; saved, incomplete and unreadable records shown without destination check");
+        println!(
+            "GTK4 Wayland copy journal: fresh state left untouched; saved, incomplete and unreadable records shown without destination check"
+        );
 
         let xdg = glib::user_data_dir();
         assert_eq!(xdg, root.parent().unwrap().join("data"));
