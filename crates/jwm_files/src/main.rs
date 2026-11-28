@@ -3017,6 +3017,10 @@ mod wayland_acceptance {
             .unwrap();
         fs::write(journal_root.join("03"), b"not a slot directory").unwrap();
 
+        let (check_reached, resume_check) = copy_journal_ui::check_test_gate::arm(
+            detached.clone(),
+            OsString::from_vec(b"not-current-\x80.txt".to_vec()),
+        );
         action("win.copy-journal");
         until(
             || {
@@ -3024,10 +3028,10 @@ mod wayland_acceptance {
                     "已占用 4/64",
                     "01 · 只有开始记录，复制结果未知",
                     "not-current-\\x80.txt",
-                    "02 · 有写入记录，未检查当前文件",
+                    "02 · 有保存的写入记录",
                     "03 · 记录未写完",
                     "04 · 记录无法读取",
-                    "按记录编号排列，不检查当前目标文件",
+                    "按记录编号排列，不自动检查当前目标文件",
                 ])
             },
             "native record types and capacity without looking at destinations",
@@ -3037,9 +3041,75 @@ mod wayland_acceptance {
             fs::read(journal_root.join("03")).unwrap(),
             b"not a slot directory"
         );
+        assert!(matches!(
+            check_reached.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        let controls = || {
+            descendants(journal_panel().unwrap().upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+                .collect::<Vec<_>>()
+        };
+        let row_check = || {
+            controls()
+                .into_iter()
+                .find(|button| {
+                    button.label().as_deref() == Some("检查当前目标")
+                        && button.parent().is_some_and(|row| {
+                            row.first_child()
+                                .and_downcast::<gtk::Label>()
+                                .is_some_and(|label| label.text().contains("not-current-"))
+                        })
+                })
+                .unwrap()
+        };
+        let previous = row_check();
+        let previous_text = previous
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .last_child()
+            .and_downcast::<gtk::Label>()
+            .unwrap();
+        previous.emit_clicked();
+        until(
+            || check_reached.try_recv().is_ok(),
+            "explicit destination check reached private worker barrier",
+        );
+        assert!(!previous.is_sensitive());
+        let refresh = controls()
+            .into_iter()
+            .find(|b| b.label().as_deref() == Some("刷新复制记录"))
+            .unwrap();
+        refresh.emit_clicked();
+        until(
+            || refresh.is_sensitive() && row_check() != previous,
+            "journal refreshed independently of blocked destination probe",
+        );
+        let current = row_check();
+        resume_check.send(()).unwrap();
+        until(
+            || {
+                if journal_text(&["当前无法打开记录中的目标目录。"]) {
+                    return true;
+                }
+                if current.is_sensitive() {
+                    current.emit_clicked();
+                }
+                false
+            },
+            "fresh row received explicit check result",
+        );
+        assert_eq!(previous_text.text(), "正在检查当前目标…");
+        assert!(!detached.exists());
         journal_panel().unwrap().close();
         println!(
             "GTK4 Wayland copy journal: fresh state left untouched; saved, incomplete and unreadable records shown without destination check"
+        );
+        println!(
+            "GTK4 Wayland copy journal check: explicit probe only; refresh dismissed the delayed result"
         );
 
         let xdg = glib::user_data_dir();

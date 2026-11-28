@@ -80,5 +80,6 @@ grep -Fx 'GTK4 Wayland cut focus: a focused sidebar could neither arm nor consum
 grep -Fx 'GTK4 Wayland cut and paste: native identity retained, no overwrite, cancel, no replay' "$client_log"
 grep -Fx 'GTK4 Wayland folder cut: descendant and conflict refused, held destination got the exact folder once' "$client_log"
 grep -Fx 'GTK4 Wayland copy journal: fresh state left untouched; saved, incomplete and unreadable records shown without destination check' "$client_log"
+grep -Fx 'GTK4 Wayland copy journal check: explicit probe only; refresh dismissed the delayed result' "$client_log"
 grep -F 'GTK4 Wayland find: exact selected row and stale snapshot rejection verified' "$client_log"
 grep -F 'GTK4 Wayland find: one early Enter applied once and an edited query discarded it' "$client_log"

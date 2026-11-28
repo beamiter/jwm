@@ -2,8 +2,8 @@
 use gtk::{gio, glib, prelude::*};
 use gtk4 as gtk;
 use jwm_file_core::{
-    COPY_JOURNAL_SLOTS, CopyJournalSlotState, CopyJournalSnapshot, CopyJournalState,
-    inspect_copy_journal, open_files_state_root,
+    COPY_JOURNAL_SLOTS, CopyJournalRecord, CopyJournalSlotState, CopyJournalSnapshot,
+    CopyJournalState, CopyReview, inspect_copy_journal, open_files_state_root,
 };
 use std::{cell::Cell, io, path::PathBuf, rc::Rc};
 
@@ -20,7 +20,95 @@ fn load() -> io::Result<Option<CopyJournalSnapshot>> {
     inspect_copy_journal(&root).map(Some)
 }
 
-fn populate(rows: &gtk::Box, status: &gtk::Label, snapshot: Option<CopyJournalSnapshot>) {
+fn review_text(result: CopyReview) -> &'static str {
+    match result {
+        CopyReview::InvalidRecord => "记录不完整，无法核对。",
+        CopyReview::ParentUnavailable => "当前无法打开记录中的目标目录。",
+        CopyReview::ParentChanged => "记录中的目标目录已变化。",
+        CopyReview::DestinationMissing => "当前目标不存在，不能据此确定是否曾复制。",
+        CopyReview::DestinationUnavailable => "当前无法读取目标的属性。",
+        CopyReview::DestinationNotRegular => "当前目标不是普通文件。",
+        CopyReview::PresentWithoutPublicationRecord => "目标目前存在，但没有记录能确认是本次复制。",
+        CopyReview::DestinationChanged => "当前目标与已保存的属性不同。",
+        CopyReview::MetadataMatches => "当前目标属性与记录一致，不代表文件内容已重新验证。",
+    }
+}
+
+fn append_check(
+    container: &gtk::Box,
+    row: &gtk::Box,
+    window: &gtk::Window,
+    record: CopyJournalRecord,
+    reviewing: &Rc<Cell<bool>>,
+) {
+    let button = gtk::Button::with_label("检查当前目标");
+    let details = gtk::Label::new(None);
+    details.set_xalign(0.0);
+    details.set_wrap(true);
+    details.set_visible(false);
+    container.append(&details);
+    let (weak_window, details, reviewing) =
+        (window.downgrade(), details.downgrade(), reviewing.clone());
+    button.connect_clicked(move |button| {
+        let Some(label) = details.upgrade() else {
+            return;
+        };
+        label.set_visible(true);
+        if reviewing.replace(true) {
+            label.set_text("另一条记录正在检查，请稍后再试。");
+            return;
+        }
+        label.set_text("正在检查当前目标…");
+        let (send, receive) = futures_channel::oneshot::channel();
+        let record = record.clone();
+        let launched = std::thread::Builder::new()
+            .name("jwm-files-journal-check".into())
+            .spawn(move || {
+                #[cfg(test)]
+                check_test_gate::before(&record);
+                let _ = send.send(record.review());
+            });
+        if launched.is_err() {
+            reviewing.set(false);
+            label.set_text("无法启动目标检查。");
+            return;
+        }
+        button.set_sensitive(false);
+        let (window, details, button, reviewing) = (
+            weak_window.clone(),
+            details.clone(),
+            button.downgrade(),
+            reviewing.clone(),
+        );
+        glib::spawn_future_local(async move {
+            let result = receive.await;
+            reviewing.set(false);
+            let Some(window) = window.upgrade().filter(|window| window.is_visible()) else {
+                return;
+            };
+            let Some((label, button)) = details.upgrade().zip(button.upgrade()) else {
+                return;
+            };
+            if !label.root().is_some_and(|root| {
+                root.downcast::<gtk::Window>()
+                    .is_ok_and(|root| root == window)
+            }) {
+                return;
+            }
+            button.set_sensitive(true);
+            label.set_text(result.map_or("未收到目标检查结果。", review_text));
+        });
+    });
+    row.append(&button);
+}
+
+fn populate(
+    rows: &gtk::Box,
+    status: &gtk::Label,
+    window: &gtk::Window,
+    snapshot: Option<CopyJournalSnapshot>,
+    reviewing: &Rc<Cell<bool>>,
+) {
     while let Some(child) = rows.first_child() {
         rows.remove(&child);
     }
@@ -39,7 +127,7 @@ fn populate(rows: &gtk::Box, status: &gtk::Label, snapshot: Option<CopyJournalSn
             CopyJournalSlotState::Readable(record) => {
                 let state = match record.state {
                     CopyJournalState::Prepared => "只有开始记录，复制结果未知",
-                    CopyJournalState::Published(_) => "有写入记录，未检查当前文件",
+                    CopyJournalState::Published(_) => "有保存的写入记录",
                 };
                 let target = record.destination_parent.join(&record.name);
                 format!(
@@ -49,12 +137,20 @@ fn populate(rows: &gtk::Box, status: &gtk::Label, snapshot: Option<CopyJournalSn
             }
         };
         let line = format!("{:02} · {state}", entry.slot + 1);
-        let row = gtk::Label::new(Some(&line));
-        row.set_xalign(0.0);
-        row.set_selectable(true);
-        row.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        row.set_tooltip_text(Some(&line));
-        rows.append(&row);
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let label = gtk::Label::new(Some(&line));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.set_selectable(true);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        label.set_tooltip_text(Some(&line));
+        row.append(&label);
+        container.append(&row);
+        if let CopyJournalSlotState::Readable(record) = &entry.state {
+            append_check(&container, &row, window, record.clone(), reviewing);
+        }
+        rows.append(&container);
     }
 }
 
@@ -63,6 +159,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
     let weak_parent = parent.downgrade();
     let popup = glib::WeakRef::<gtk::Window>::new();
     let busy = Rc::new(Cell::new(false));
+    let reviewing = Rc::new(Cell::new(false));
     action.connect_activate(move |_, _| {
         let Some(parent) = weak_parent.upgrade() else {
             return;
@@ -92,7 +189,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         toolbar.append(&status);
         toolbar.append(&refresh);
         layout.append(&toolbar);
-        let note = gtk::Label::new(Some("只读 · 按记录编号排列，不检查当前目标文件"));
+        let note = gtk::Label::new(Some("只读 · 按记录编号排列，不自动检查当前目标文件"));
         note.set_xalign(0.0);
         note.add_css_class("dim-label");
         layout.append(&note);
@@ -111,6 +208,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
             rows.downgrade(),
             busy.clone(),
         );
+        let reviewing = reviewing.clone();
         refresh.connect_clicked(move |refresh| {
             let Some(status) = weak_status.upgrade() else {
                 return;
@@ -139,12 +237,13 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                 refresh.downgrade(),
                 busy.clone(),
             );
+            let reviewing = reviewing.clone();
             glib::spawn_future_local(async move {
                 let result = receive.await;
                 busy.set(false);
-                if !window.upgrade().is_some_and(|window| window.is_visible()) {
+                let Some(window) = window.upgrade().filter(|window| window.is_visible()) else {
                     return;
-                }
+                };
                 let Some(((status, rows), refresh)) =
                     status.upgrade().zip(rows.upgrade()).zip(refresh.upgrade())
                 else {
@@ -152,7 +251,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                 };
                 refresh.set_sensitive(true);
                 match result {
-                    Ok(Ok(view)) => populate(&rows, &status, view),
+                    Ok(Ok(view)) => populate(&rows, &status, &window, view, &reviewing),
                     Ok(Err(_)) | Err(_) => {
                         while let Some(child) = rows.first_child() {
                             rows.remove(&child);
@@ -167,4 +266,54 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         refresh.emit_clicked();
     });
     parent.add_action(&action);
+}
+
+#[cfg(test)]
+pub(super) mod check_test_gate {
+    use super::CopyJournalRecord;
+    use std::{
+        ffi::OsString,
+        path::PathBuf,
+        sync::{Mutex, mpsc},
+        time::Duration,
+    };
+
+    struct Gate {
+        parent: PathBuf,
+        name: OsString,
+        reached: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+
+    pub fn arm(parent: PathBuf, name: OsString) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (reached, observed) = mpsc::channel();
+        let (resume, release) = mpsc::channel();
+        let old = GATE.lock().unwrap().replace(Gate {
+            parent,
+            name,
+            reached,
+            release,
+        });
+        assert!(old.is_none(), "only one held destination check");
+        (observed, resume)
+    }
+
+    pub(super) fn before(record: &CopyJournalRecord) {
+        let gate = {
+            let mut gate = GATE.lock().unwrap();
+            if gate.as_ref().is_some_and(|armed| {
+                armed.parent == record.destination_parent && armed.name == record.name
+            }) {
+                gate.take()
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            let _ = gate.release.recv_timeout(Duration::from_secs(8));
+        }
+    }
 }
