@@ -1,4 +1,4 @@
-//! A process-local, one-use, COPY-only transfer between Files windows.
+//! A process-local, one-use transfer of a regular file or directory (COPY only).
 use crate::{Shared, copy_ui, trash_ui};
 use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
@@ -10,7 +10,7 @@ use std::{
 };
 
 const OFFER: u64 = 1;
-pub(super) const SOURCE: &str = "拖拽复制所选文件";
+pub(super) const SOURCE: &str = "拖拽复制所选项目";
 pub(super) const TARGET: &str = "拖到这里复制到当前目录";
 
 pub(super) fn available() -> bool {
@@ -28,6 +28,7 @@ struct Pending {
     rows: Arc<Vec<FileEntry>>,
     index: u32,
     source: copy_ui::StashedCopy,
+    kind: FileKind,
 }
 
 impl Pending {
@@ -38,7 +39,7 @@ impl Pending {
         }
         let index = selection.selected();
         let entry = browser.entries.get(index as usize)?;
-        if entry.kind != FileKind::Regular {
+        if !matches!(entry.kind, FileKind::Regular | FileKind::Directory) {
             return None;
         }
         Some(Self {
@@ -46,6 +47,7 @@ impl Pending {
             selection: selection.downgrade(),
             rows: browser.entries.clone(),
             index,
+            kind: entry.kind,
             source: copy_ui::StashedCopy {
                 parent: browser.parent.as_ref()?.clone(),
                 path: browser.path().clone(),
@@ -196,14 +198,27 @@ pub(super) fn install(
                 return false;
             };
             // true only acknowledges enqueue; the terminal receipt is separate.
-            copy_ui::dispatch_regular_copy(
-                &state,
-                &status,
-                parent,
-                path,
-                offer.pending.source,
-                false,
-            )
+            match offer.pending.kind {
+                FileKind::Regular => copy_ui::dispatch_regular_copy(
+                    &state,
+                    &status,
+                    parent,
+                    path,
+                    offer.pending.source,
+                    false,
+                ),
+                FileKind::Directory => {
+                    if parent.identity() == offer.pending.source.parent.identity() {
+                        copy_ui::notice(
+                            &status,
+                            "请选择不同的目标目录。同名项目不会被覆盖。",
+                        );
+                        return false;
+                    }
+                    copy_ui::dispatch_tree_copy(&state, &status, parent, path, offer.pending.source)
+                }
+                _ => false,
+            }
         }
     });
     destination.add_controller(target);

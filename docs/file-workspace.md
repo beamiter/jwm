@@ -236,9 +236,10 @@ is cancelled before the rename, you must cut again to retry. **Ctrl+Shift+V** an
 copy button do not move a cut item. Multi-item and cross-mount moves
 and move undo are not supported.
 
-### Drag-copy a single regular file between Files windows
+### Drag-copy one local file or folder between Files windows
 
-On X11 or Wayland, select a regular file and use **拖拽复制所选文件**.
+On X11 or Wayland, select a regular file or a supported local folder and
+use **拖拽复制所选项目**.
 Release it on **拖到这里复制到当前目录** in a second window of the same
 Files instance. No destination is changed by hovering, and only a
 released drop queues a copy. Check the destination window's status for
@@ -246,8 +247,10 @@ the actual result; an accepted gesture does not mean the copy finished.
 An existing name is never replaced. The source and clipboard remain
 unchanged. The target is the committed directory at drop time.
 
-This first slice does not move or link, import external drops, or accept
-directories or multiple files. Keyboard and menu copy remain available.
+A folder uses the bounded folder-copy path and does not merge with an
+existing destination or copy into itself. The drag handles copy only:
+no move, link, external drops, multiple items, or direct row dragging.
+Keyboard and menu copy remain available.
 
 ### Move an ordinary directory on one mount
 
