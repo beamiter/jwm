@@ -24,7 +24,7 @@ pub(super) fn available() -> bool {
 
 struct Pending {
     view: Weak<RefCell<crate::Browser>>,
-    selection: glib::WeakRef<gtk::SingleSelection>,
+    selection: Option<glib::WeakRef<gtk::SingleSelection>>,
     rows: Arc<Vec<FileEntry>>,
     index: u32,
     source: copy_ui::StashedCopy,
@@ -32,19 +32,32 @@ struct Pending {
 }
 
 impl Pending {
-    fn capture(state: &Shared, selection: &gtk::SingleSelection) -> Option<Self> {
+    fn capture_selection(state: &Shared, selection: &gtk::SingleSelection) -> Option<Self> {
+        Self::capture(state, selection.selected(), Some(selection), None)
+    }
+
+    fn capture(
+        state: &Shared,
+        index: u32,
+        selection: Option<&gtk::SingleSelection>,
+        bound: Option<(&crate::row_model::FileRowModel, &glib::Object)>,
+    ) -> Option<Self> {
         let browser = state.try_borrow().ok()?;
         if browser.pending.is_some() || browser.dialog_open || browser.mutation.is_some() {
             return None;
         }
-        let index = selection.selected();
+        if let Some((model, bound)) = bound
+            && (!model.represents(&browser.entries) || model.item(index).as_ref() != Some(bound))
+        {
+            return None;
+        }
         let entry = browser.entries.get(index as usize)?;
         if !matches!(entry.kind, FileKind::Regular | FileKind::Directory) {
             return None;
         }
         Some(Self {
             view: Rc::downgrade(state),
-            selection: selection.downgrade(),
+            selection: selection.map(|selection| selection.downgrade()),
             rows: browser.entries.clone(),
             index,
             kind: entry.kind,
@@ -57,11 +70,15 @@ impl Pending {
         })
     }
 
-    fn still_selected_in_other_window(&self, target: &Shared) -> bool {
-        let (Some(view), Some(selection)) = (self.view.upgrade(), self.selection.upgrade()) else {
+    fn still_current_in_other_window(&self, target: &Shared) -> bool {
+        let Some(view) = self.view.upgrade() else {
             return false;
         };
-        if Rc::ptr_eq(&view, target) || selection.selected() != self.index {
+        if Rc::ptr_eq(&view, target)
+            || self.selection.as_ref().is_some_and(|selected| {
+                selected.upgrade().is_none_or(|selected| selected.selected() != self.index)
+            })
+        {
             return false;
         }
         let Ok(browser) = view.try_borrow() else {
@@ -100,20 +117,14 @@ fn clear(drag: &gdk::Drag) {
     });
 }
 
-pub(super) fn install(
-    source_handle: &gtk::Label,
-    destination: &gtk::Label,
-    state: &Shared,
-    selection: &gtk::SingleSelection,
-    status: &gtk::Label,
-) {
+fn install_source(widget: &impl IsA<gtk::Widget>, prepare: impl Fn() -> Option<Pending> + 'static) {
     let source = gtk::DragSource::new();
     source.set_actions(gdk::DragAction::COPY);
     let prepared = Rc::new(RefCell::new(None::<Pending>));
     source.connect_prepare({
-        let (state, selection, prepared) = (state.clone(), selection.clone(), prepared.clone());
+        let prepared = prepared.clone();
         move |_, _, _| {
-            let pending = Pending::capture(&state, &selection);
+            let pending = prepare();
             let content = pending
                 .as_ref()
                 .map(|_| gdk::ContentProvider::for_value(&OFFER.to_value()));
@@ -136,7 +147,38 @@ pub(super) fn install(
         false
     });
     source.connect_drag_end(|_, drag, _| clear(drag));
-    source_handle.add_controller(source);
+    widget.add_controller(source);
+}
+
+pub(super) type RowDragView = Rc<RefCell<Weak<RefCell<crate::Browser>>>>;
+
+pub(super) fn install_row(
+    label: &gtk::Label,
+    item: &gtk::ListItem,
+    model: &crate::row_model::FileRowModel,
+    view: RowDragView,
+) {
+    let item = item.downgrade();
+    let model = model.downgrade();
+    install_source(label, move || {
+        let (item, model, view) = (item.upgrade()?, model.upgrade()?, view.borrow().upgrade()?);
+        let bound = item.item()?;
+        Pending::capture(&view, item.position(), None, Some((&model, &bound)))
+    });
+}
+
+pub(super) fn install(
+    source_handle: &gtk::Label,
+    destination: &gtk::Label,
+    state: &Shared,
+    selection: &gtk::SingleSelection,
+    status: &gtk::Label,
+) {
+    install_source(source_handle, {
+        let state = Rc::downgrade(state);
+        let selection = selection.downgrade();
+        move || Pending::capture_selection(&state.upgrade()?, &selection.upgrade()?)
+    });
 
     let target = gtk::DropTarget::new(u64::static_type(), gdk::DragAction::COPY);
     target.connect_accept({
@@ -147,7 +189,7 @@ pub(super) fn install(
                     ACTIVE.with_borrow(|active| {
                         active.as_ref().is_some_and(|offer| {
                             is_ours(offer, &drag)
-                                && offer.pending.still_selected_in_other_window(&state)
+                                && offer.pending.still_current_in_other_window(&state)
                         })
                     })
                 })
@@ -179,7 +221,7 @@ pub(super) fn install(
             let Some(offer) = offered else {
                 return false;
             };
-            if !offer.pending.still_selected_in_other_window(&state) {
+            if !offer.pending.still_current_in_other_window(&state) {
                 return false;
             }
             let target = {
@@ -230,7 +272,7 @@ pub(super) fn install(
             if let (Some(handle), Some(state), Some(selection)) =
                 (handle.upgrade(), state.upgrade(), selection.upgrade())
             {
-                let text = Pending::capture(&state, &selection).map_or_else(
+                let text = Pending::capture_selection(&state, &selection).map_or_else(
                     || SOURCE.to_owned(),
                     |pending| format!("{SOURCE}：{}", trash_ui::display_path(&pending.source.name)),
                 );

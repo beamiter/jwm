@@ -697,17 +697,26 @@ fn open_window_with_tabs(
     // A reveal can outlive the first map tick. Track only its target's
     // realized list item so an action submission is never mistaken for visibility.
     let reveal_widget = reveal.as_ref().map(|_| Rc::new(RevealWidget::default()));
+    let row_drag_view = Rc::new(RefCell::new(std::rc::Weak::new()));
+    let row_drag_enabled = drop_copy_ui::available();
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, object| {
-        if let Ok(item) = object.clone().downcast::<gtk::ListItem>() {
-            let label = gtk::Label::new(None);
-            label.set_xalign(0.0);
-            label.set_margin_start(8);
-            label.set_margin_end(8);
-            label.set_margin_top(5);
-            label.set_margin_bottom(5);
-            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            item.set_child(Some(&label));
+    factory.connect_setup({
+        let model = model.downgrade();
+        let row_drag_view = row_drag_view.clone();
+        move |_, object| {
+            if let Ok(item) = object.clone().downcast::<gtk::ListItem>() {
+                let label = gtk::Label::new(None);
+                label.set_xalign(0.0);
+                label.set_margin_start(8);
+                label.set_margin_end(8);
+                label.set_margin_top(5);
+                label.set_margin_bottom(5);
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                if row_drag_enabled && let Some(model) = model.upgrade() {
+                    drop_copy_ui::install_row(&label, &item, &model, row_drag_view.clone());
+                }
+                item.set_child(Some(&label));
+            }
         }
     });
     factory.connect_bind({
@@ -871,6 +880,7 @@ fn open_window_with_tabs(
         reload_due: None,
         dialog_open: false,
     }));
+    row_drag_view.replace(Rc::downgrade(&state));
     tabs.sync(&state.borrow().tabs);
     let mounts = volumes::install({
         let (state, address, status) = (state.clone(), address.clone(), status.clone());
@@ -2077,12 +2087,14 @@ mod wayland_acceptance {
         };
         let handle = control(&from, drop_copy_ui::SOURCE);
         let drop_label = control(&to, drop_copy_ui::TARGET);
-        let controllers = handle.observe_controllers();
-        let drag_source = (0..controllers.n_items())
-            .find_map(|i| controllers.item(i)?.downcast::<gtk::DragSource>().ok())
-            .expect("native drag source on the hit widget");
-        let hover = || {
-            let (sx, sy) = widget_center(&from, &handle);
+        let drag_controller = |label: &gtk::Label| {
+            let controllers = label.observe_controllers();
+            (0..controllers.n_items())
+                .find_map(|i| controllers.item(i)?.downcast::<gtk::DragSource>().ok())
+        };
+        let drag_source = drag_controller(&handle).expect("native drag source on the handle");
+        let hover_from = |label: &gtk::Label, drag_source: &gtk::DragSource| {
+            let (sx, sy) = widget_center(&from, label);
             let (tx, ty) = widget_center(&to, &drop_label);
             move_in("source", sx, sy);
             pump_for(60);
@@ -2106,6 +2118,8 @@ mod wayland_acceptance {
                 "the other Files window negotiated COPY with the live drag",
             );
         };
+
+        let hover = || hover_from(&handle, &drag_source);
 
         hover();
         assert!(!output.exists(), "hover must not publish a file");
@@ -2234,6 +2248,86 @@ mod wayland_acceptance {
         assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
         println!(
             "GTK4 {backend_label} drag folder copy: physical drop kept existing tree, then copied exact nested bytes without moving source"
+        );
+
+        let first = OsStr::from_bytes(b"row-%\x80");
+        let second = OsStr::from_bytes(b"row-%\x81");
+        fs::write(source.join(first), b"unrelated visible twin").unwrap();
+        fs::write(source.join(second), b"the clicked native leaf").unwrap();
+        let second_identity = source_id(&source.join(second));
+        let model_position = |name: &OsStr| {
+            (0..from_model.n_items()).find(|&index| {
+                from_model.native_name_at(index).as_deref() == Some(name)
+            })
+        };
+        let row_label = |name: &OsStr| {
+            let index = model_position(name)?;
+            let first_index = model_position(first)?;
+            let second_index = model_position(second)?;
+            let display_name = name.to_string_lossy().escape_debug().to_string();
+            let mut labels: Vec<_> = descendants(from.upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                .filter_map(|label| {
+                    if !label.is_mapped()
+                        || label.label().as_str() != display_name
+                        || drag_controller(&label).is_none()
+                    {
+                        return None;
+                    }
+                    let y = label.compute_bounds(&from)?.y();
+                    Some((y, label))
+                })
+                .collect();
+            labels.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if labels.len() != 2 {
+                return None;
+            }
+            let visible_index = usize::from(index != first_index.min(second_index));
+            Some(labels.remove(visible_index).1)
+        };
+        until(
+            || row_label(second).is_some(),
+            "both identically presented native rows are realized",
+        );
+        let stale_index = model_position(second).unwrap();
+        let stale_object = from_model.item(stale_index).unwrap();
+        let stale_label = row_label(second).unwrap();
+        let stale_drag = drag_controller(&stale_label).unwrap();
+        selection.set_selected(model_position(first).unwrap());
+        hover_from(&stale_label, &stale_drag);
+        fs::write(source.join("00-rebind.txt"), b"force a new directory snapshot").unwrap();
+        until(
+            || {
+                model_position(OsStr::new("00-rebind.txt")).is_some()
+                    && model_position(second)
+                        .and_then(|index| from_model.item(index))
+                        .is_some_and(|item| item != stale_object)
+            },
+            "source committed a new model while the row gesture was held",
+        );
+        xd(&["mouseup", "1"]);
+        until(|| stale_drag.drag().is_none(), "stale row drag ended");
+        pump_for(200);
+        assert!(!target.join(first).exists());
+        assert!(!target.join(second).exists());
+
+        until(|| row_label(second).is_some(), "newly bound twin rows");
+        let fresh_label = row_label(second).unwrap();
+        let fresh_drag = drag_controller(&fresh_label).unwrap();
+        selection.set_selected(model_position(first).unwrap());
+        hover_from(&fresh_label, &fresh_drag);
+        xd(&["mouseup", "1"]);
+        until(
+            || status(&|message| message.starts_with("已复制：") && message.contains(r"\x81")),
+            "rebound row copied the exact clicked native leaf",
+        );
+        assert_eq!(fs::read(target.join(second)).unwrap(), b"the clicked native leaf");
+        assert!(!target.join(first).exists());
+        assert_eq!(source_id(&source.join(second)), second_identity);
+        assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
+        println!(
+            "GTK4 {backend_label} row drag copy: rebound native-name twin copied exactly; stale row drop wrote nothing"
         );
     }
 
