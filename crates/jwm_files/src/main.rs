@@ -2691,7 +2691,10 @@ mod wayland_acceptance {
             } else {
                 let title = xd(&["search", "--onlyvisible", "--name", "^JWM Files · Preview$"]);
                 assert_eq!(title.lines().count(), 1);
-                assert_eq!(xd(&["getwindowpid", &title]), std::process::id().to_string());
+                assert_eq!(
+                    xd(&["getwindowpid", &title]),
+                    std::process::id().to_string()
+                );
                 xd(&["windowfocus", "--sync", &title]);
             }
             until(|| popup.is_active(), "native preview owns keyboard focus");
@@ -2729,13 +2732,18 @@ mod wayland_acceptance {
                 .iter()
                 .find_map(|widget| widget.downcast_ref::<gtk::TextView>())?
                 .buffer();
-            (buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim()
+            (buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .trim()
                 == "keyboard preview")
                 .then_some((popup, heading, source, buffer))
         };
         let open = || {
             gtk::prelude::WidgetExt::activate_action(parent, "win.quick-preview", None).unwrap();
-            until(|| preview_widgets().is_some(), "native Markdown preview rendered");
+            until(
+                || preview_widgets().is_some(),
+                "native Markdown preview rendered",
+            );
             preview_widgets().unwrap()
         };
         let (popup, heading, toggle, text) = open();
@@ -2743,7 +2751,10 @@ mod wayland_acceptance {
         assert!(heading.grab_focus());
         until(|| heading.has_focus(), "the preview path owns GTK focus");
         key("Tab");
-        until(|| toggle.has_focus(), "native Tab reached the Markdown source button");
+        until(
+            || toggle.has_focus(),
+            "native Tab reached the Markdown source button",
+        );
         let body = || text.text(&text.start_iter(), &text.end_iter(), false);
         assert!(!toggle.is_active());
         key("space");
@@ -2759,12 +2770,18 @@ mod wayland_acceptance {
         );
         assert!(popup.is_mapped() && toggle.has_focus());
         key("Escape");
-        until(|| !popup.is_mapped(), "Escape still closes on the focused button");
+        until(
+            || !popup.is_mapped(),
+            "Escape still closes on the focused button",
+        );
 
         let (popup, heading, toggle, _) = open();
         focus_preview(&popup, &heading);
         assert!(heading.grab_focus());
-        until(|| heading.has_focus(), "the reopened preview path owns GTK focus");
+        until(
+            || heading.has_focus(),
+            "the reopened preview path owns GTK focus",
+        );
         assert!(!toggle.has_focus());
         key("space");
         until(|| !popup.is_mapped(), "Space on non-button content closes");

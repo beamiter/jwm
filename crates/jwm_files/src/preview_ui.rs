@@ -395,8 +395,8 @@ impl PreviewState {
                 .upgrade()
                 .is_some_and(|button| button.is_mapped() && button.has_focus());
             // Let GTK activate the focused control instead of closing the preview.
-            let dismiss = key == gtk::gdk::Key::Escape
-                || (key == gtk::gdk::Key::space && !focused_toggle);
+            let dismiss =
+                key == gtk::gdk::Key::Escape || (key == gtk::gdk::Key::space && !focused_toggle);
             if dismiss
                 && !modifiers.intersects(
                     gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::ALT_MASK,
