@@ -320,9 +320,12 @@ provider reports cleanup pending independently of numbered capacity. It can
 discard only preflighted journal artifacts in the exact retired directory
 selected for cleanup. Unsupported mounts, aliases, and changed selections
 are refused without changing numbered records or copy destinations. The
-application does not yet create managed records or expose retirement from
-the active list. The panel shows managed and prototype records in separate
-groups. When a managed record has already been moved out of the list,
+application does not yet create managed records. The panel shows managed
+and prototype records in separate groups. **移出记录** is available only for
+a readable managed row when no earlier retired log awaits cleanup. It
+confirms the displayed record and destination, defaults to Cancel, and
+only moves that exact log. It neither checks nor opens the destination and
+does not undo a file copy. When a record has been moved out of the list,
 **清理已移出的日志** can remove only that retired metadata after confirmation.
 The default response cancels; no copy destination or active record can be
 removed by that action. Pending cleanup and numbered capacity stay separate. Both managed observations use the same shared lock so

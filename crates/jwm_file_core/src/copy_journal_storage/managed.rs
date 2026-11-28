@@ -1,7 +1,8 @@
 //! Opt-in journal namespace whose readers and writers cooperate with retirement.
 use super::{
     CopyJournalRecord, CopyJournalReservation, CopyJournalSnapshot, DirectoryHandle, inspect_slots,
-    invalid, open_dir, open_journal_at, private_error, reserve_intent, slot_name, validate_intent,
+    invalid, open_dir, open_journal_at, private_error, read_slot, reserve_intent, slot_name,
+    validate_intent,
 };
 use rustix::{
     fd::OwnedFd,
@@ -138,10 +139,37 @@ pub fn select_managed_copy_journal(
     base: &DirectoryHandle,
     slot: u8,
 ) -> io::Result<ManagedCopyJournalSelection> {
+    select_managed_slot(base, slot, None)
+}
+
+/// Select only a readable managed record that still matches the displayed row.
+///
+/// A managed writer can publish under a shared lock. Require the artifact
+/// revisions to bracket the read unchanged; retirement rechecks them again
+/// under an exclusive lock. The recorded destination is not opened.
+pub fn select_matching_managed_copy_journal(
+    base: &DirectoryHandle,
+    slot: u8,
+    expected: &CopyJournalRecord,
+) -> io::Result<ManagedCopyJournalSelection> {
+    select_managed_slot(base, slot, Some(expected))
+}
+
+fn select_managed_slot(
+    base: &DirectoryHandle,
+    slot: u8,
+    expected: Option<&CopyJournalRecord>,
+) -> io::Result<ManagedCopyJournalSelection> {
     let name = slot_name(slot)?;
     let journal = locked(base, false, FlockOperation::NonBlockingLockShared)?;
     let dir = open_dir(&journal, &name, true)?;
     let snapshot = artifacts(&dir)?;
+    if let Some(expected) = expected
+        && (&read_slot(&dir)? != expected || artifacts(&dir)? != snapshot)
+    {
+        return Err(invalid("managed journal row no longer matches"));
+    }
+    verify_named(&base.fd, MANAGED, &journal)?;
     verify_named(&journal, &name, &dir)?;
     // Drop the lock, not the pin; final confirmation must independently lock
     // and revalidate both identities rather than upgrade or reuse this lock.
@@ -612,6 +640,37 @@ mod tests {
             result.occupied()[0].state,
             CopyJournalSlotState::Readable(record)
         );
+    }
+
+    #[test]
+    fn managed_journal_matching_selection_rejects_old_row_and_active_writer() {
+        let f = Fixture::new();
+        let root = f.open();
+        let old = f.intent("old");
+        let former = prepare_managed_copy_journal(&root, old.clone()).unwrap();
+        let stale = select_matching_managed_copy_journal(&root, former.slot(), &old).unwrap();
+        assert!(matches!(
+            retire_managed_copy_journal(&root, stale),
+            Err(error) if error.kind() == ErrorKind::WouldBlock
+        ));
+        drop(former);
+        let selected = select_matching_managed_copy_journal(&root, 0, &old).unwrap();
+        assert!(matches!(
+            retire_managed_copy_journal(&root, selected).unwrap(),
+            ManagedJournalRetirement::Retired
+        ));
+
+        let current = f.intent("new");
+        let replacement = prepare_managed_copy_journal(&root, current.clone()).unwrap();
+        assert_eq!(replacement.slot(), 0);
+        assert!(select_matching_managed_copy_journal(&root, 0, &old).is_err());
+        assert!(select_matching_managed_copy_journal(&root, 0, &current).is_ok());
+        drop(replacement);
+        assert_eq!(
+            inspect_managed_copy_journal(&root).unwrap().occupied()[0].state,
+            CopyJournalSlotState::Readable(current)
+        );
+        assert!(f.0.join(MANAGED).join(RETIRED).is_dir());
     }
 
     #[test]

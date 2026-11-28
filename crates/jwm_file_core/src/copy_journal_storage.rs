@@ -7,7 +7,7 @@ pub use managed::{
     ManagedRetiredCleanup, ManagedRetiredSelection, ManagedRetiredState, cleanup_managed_retired,
     inspect_managed_copy_journal, inspect_managed_journal, managed_retired_state,
     prepare_managed_copy_journal, retire_managed_copy_journal, select_managed_copy_journal,
-    select_managed_retired,
+    select_managed_retired, select_matching_managed_copy_journal,
 };
 use rustix::{
     fd::{AsRawFd, OwnedFd},

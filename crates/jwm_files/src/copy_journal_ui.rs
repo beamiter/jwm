@@ -128,6 +128,7 @@ fn append_group(
     title: &str,
     snapshot: io::Result<Option<CopyJournalSnapshot>>,
     reviewing: &Rc<Cell<bool>>,
+    mutations: Option<&retired_action::Controls>,
 ) {
     let header = gtk::Label::new(None);
     header.set_xalign(0.0);
@@ -176,6 +177,14 @@ fn append_group(
         container.append(&row);
         if let CopyJournalSlotState::Readable(record) = &entry.state {
             append_check(&container, &row, window, record.clone(), reviewing);
+            if let Some(mutations) = mutations {
+                let retire = gtk::Button::with_label(retired_action::RETIRE_BUTTON);
+                mutations.install(
+                    &retire,
+                    retired_action::Action::Retire(entry.slot, record.clone()),
+                );
+                row.append(&retire);
+            }
         }
         rows.append(&container);
     }
@@ -188,6 +197,7 @@ fn populate(
     clean: &gtk::Button,
     view: JournalViews,
     reviewing: &Rc<Cell<bool>>,
+    mutations: &retired_action::Controls,
 ) {
     while let Some(child) = rows.first_child() {
         rows.remove(&child);
@@ -198,6 +208,7 @@ fn populate(
             .map_or(ManagedRetiredState::Absent, |s| s.retired)
     });
     clean.set_visible(matches!(retired, Ok(ManagedRetiredState::PendingCleanup)));
+    let can_retire = matches!(retired, Ok(ManagedRetiredState::Absent));
     let summary = match retired {
         Ok(ManagedRetiredState::Absent) => "没有待清理的托管记录。",
         Ok(ManagedRetiredState::PendingCleanup) => "有已移出的托管记录待清理，不占用复制记录编号。",
@@ -208,8 +219,15 @@ fn populate(
     let managed = view
         .managed
         .map(|snapshot| snapshot.map(|view| view.numbered));
-    append_group(rows, window, "托管记录", managed, reviewing);
-    append_group(rows, window, "旧版记录（只读）", view.legacy, reviewing);
+    append_group(
+        rows,
+        window,
+        "托管记录",
+        managed,
+        reviewing,
+        can_retire.then_some(mutations),
+    );
+    append_group(rows, window, "旧版记录（只读）", view.legacy, reviewing, None);
 }
 
 pub(super) fn install(parent: &gtk::ApplicationWindow) {
@@ -259,14 +277,14 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         actions.append(&feedback);
         layout.append(&actions);
         let refresh_after_read = Rc::new(Cell::new(false));
-        retired_action::install(
+        let mutations = retired_action::Controls::new(
             &window,
-            &clean,
             &feedback,
             &refresh,
-            &cleaning,
-            &refresh_after_read,
+            cleaning.clone(),
+            refresh_after_read.clone(),
         );
+        mutations.install(&clean, retired_action::Action::Cleanup);
         let note = gtk::Label::new(Some("按记录编号排列，不自动检查当前目标文件或清理日志"));
         note.set_xalign(0.0);
         note.add_css_class("dim-label");
@@ -324,6 +342,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
             );
             let (reviewing, clean) = (reviewing.clone(), weak_clean.clone());
             let refresh_after_read = refresh_after_read.clone();
+            let mutations = mutations.clone();
             glib::spawn_future_local(async move {
                 let result = receive.await;
                 busy.set(false);
@@ -346,7 +365,9 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                     return;
                 };
                 match result {
-                    Ok(Ok(view)) => populate(&rows, &status, &window, &clean, view, &reviewing),
+                    Ok(Ok(view)) => {
+                        populate(&rows, &status, &window, &clean, view, &reviewing, &mutations)
+                    }
                     Ok(Err(_)) | Err(_) => {
                         while let Some(child) = rows.first_child() {
                             rows.remove(&child);
