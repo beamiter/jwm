@@ -227,7 +227,14 @@ fn populate(
         reviewing,
         can_retire.then_some(mutations),
     );
-    append_group(rows, window, "旧版记录（只读）", view.legacy, reviewing, None);
+    append_group(
+        rows,
+        window,
+        "旧版记录（只读）",
+        view.legacy,
+        reviewing,
+        None,
+    );
 }
 
 pub(super) fn install(parent: &gtk::ApplicationWindow) {
@@ -365,9 +372,9 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                     return;
                 };
                 match result {
-                    Ok(Ok(view)) => {
-                        populate(&rows, &status, &window, &clean, view, &reviewing, &mutations)
-                    }
+                    Ok(Ok(view)) => populate(
+                        &rows, &status, &window, &clean, view, &reviewing, &mutations,
+                    ),
                     Ok(Err(_)) | Err(_) => {
                         while let Some(child) = rows.first_child() {
                             rows.remove(&child);

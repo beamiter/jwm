@@ -148,7 +148,10 @@ impl Controls {
                 return;
             }
             let lease = Lease(busy.clone());
-            if refresh.upgrade().is_some_and(|button| !button.is_sensitive()) {
+            if refresh
+                .upgrade()
+                .is_some_and(|button| !button.is_sensitive())
+            {
                 label.set_text("列表正在刷新，请稍后再试。");
                 return;
             }
@@ -177,15 +180,19 @@ impl Controls {
                 let Some(window) = window.upgrade().filter(|window| window.is_visible()) else {
                     return;
                 };
-                let Some((feedback_label, source_button)) = feedback.upgrade().zip(button.upgrade())
+                let Some((feedback_label, source_button)) =
+                    feedback.upgrade().zip(button.upgrade())
                 else {
                     return;
                 };
                 if !source_button.is_visible()
                     || !source_button.root().is_some_and(|root| {
-                        root.downcast::<gtk::Window>().is_ok_and(|root| root == window)
+                        root.downcast::<gtk::Window>()
+                            .is_ok_and(|root| root == window)
                     })
-                    || refresh.upgrade().is_some_and(|button| !button.is_sensitive())
+                    || refresh
+                        .upgrade()
+                        .is_some_and(|button| !button.is_sensitive())
                 {
                     feedback_label.set_text("列表已变化，请刷新后再核对。");
                     return;
