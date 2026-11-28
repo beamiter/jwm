@@ -2482,7 +2482,8 @@ mod wayland_acceptance {
             fs::rename(&prepared_dest, &new_dest).unwrap();
             until(
                 || {
-                    let new_point = folder_label(&new_leaf).and_then(|label| hit_center(&to, &label));
+                    let new_point =
+                        folder_label(&new_leaf).and_then(|label| hit_center(&to, &label));
                     folder_model_row(&old_leaf).is_none()
                         && folder_model_row(&new_leaf) == Some(old_pos)
                         && new_point == Some(old_point)
@@ -2492,7 +2493,9 @@ mod wayland_acceptance {
             until(
                 || {
                     folder_label(&new_leaf).is_some_and(|label| {
-                        !highlight(&label).state_flags().contains(gtk::StateFlags::DROP_ACTIVE)
+                        !highlight(&label)
+                            .state_flags()
+                            .contains(gtk::StateFlags::DROP_ACTIVE)
                     }) && !view.state_flags().contains(gtk::StateFlags::DROP_ACTIVE)
                 },
                 "rebound destination and view clear acceptance before release",
@@ -2530,7 +2533,11 @@ mod wayland_acceptance {
             finish_hover_at(&new_label, &highlight(&new_label), &drag_source);
             xd(&["mouseup", "1"]);
             until(
-                || status(&|message| message.starts_with("已复制：") && message.contains(&new_leaf)),
+                || {
+                    status(&|message| {
+                        message.starts_with("已复制：") && message.contains(&new_leaf)
+                    })
+                },
                 "fresh regular drop completed inside the new target folder",
             );
             assert_eq!(fs::read(new_dest.join(raw)).unwrap(), b"exact raw source");
@@ -2618,9 +2625,9 @@ mod wayland_acceptance {
                 );
                 until(
                     || {
-                        [&a_tile, &b_tile, view]
-                            .into_iter()
-                            .all(|widget| !widget.state_flags().contains(gtk::StateFlags::DROP_ACTIVE))
+                        [&a_tile, &b_tile, view].into_iter().all(|widget| {
+                            !widget.state_flags().contains(gtk::StateFlags::DROP_ACTIVE)
+                        })
                     },
                     "the stale tile and grid clear acceptance before release",
                 );
