@@ -138,7 +138,9 @@ fn append_group(
         ""
     };
     let used = occupied.len();
-    header.set_text(&format!("{title} · 已占用 {used}/{COPY_JOURNAL_SLOTS}{suffix}"));
+    header.set_text(&format!(
+        "{title} · 已占用 {used}/{COPY_JOURNAL_SLOTS}{suffix}"
+    ));
     for entry in occupied {
         let state = match &entry.state {
             CopyJournalSlotState::Incomplete => "记录未写完".into(),
@@ -183,10 +185,11 @@ fn populate(
     while let Some(child) = rows.first_child() {
         rows.remove(&child);
     }
-    let retired = view
-        .managed
-        .as_ref()
-        .map(|snapshot| snapshot.as_ref().map_or(ManagedRetiredState::Absent, |s| s.retired));
+    let retired = view.managed.as_ref().map(|snapshot| {
+        snapshot
+            .as_ref()
+            .map_or(ManagedRetiredState::Absent, |s| s.retired)
+    });
     let summary = match retired {
         Ok(ManagedRetiredState::Absent) => "没有待清理的托管记录。",
         Ok(ManagedRetiredState::PendingCleanup) => "有已移出的托管记录待清理，不占用复制记录编号。",
@@ -194,7 +197,9 @@ fn populate(
         Err(_) => "暂时无法确认是否有托管记录待清理。",
     };
     status.set_text(summary);
-    let managed = view.managed.map(|snapshot| snapshot.map(|view| view.numbered));
+    let managed = view
+        .managed
+        .map(|snapshot| snapshot.map(|view| view.numbered));
     append_group(rows, window, "托管记录", managed, reviewing);
     append_group(rows, window, "旧版记录（只读）", view.legacy, reviewing);
 }

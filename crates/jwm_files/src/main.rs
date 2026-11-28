@@ -3022,13 +3022,11 @@ mod wayland_acceptance {
         let mut managed_record = record.clone();
         managed_record.name = "retired-not-a-live-row.txt".into();
         managed_record.state = jwm_file_core::CopyJournalState::Prepared;
-        let managed = jwm_file_core::prepare_managed_copy_journal(
-            &state_root,
-            managed_record.clone(),
-        )
-        .unwrap();
-        let selected = jwm_file_core::select_managed_copy_journal(&state_root, managed.slot())
-            .unwrap();
+        let managed =
+            jwm_file_core::prepare_managed_copy_journal(&state_root, managed_record.clone())
+                .unwrap();
+        let selected =
+            jwm_file_core::select_managed_copy_journal(&state_root, managed.slot()).unwrap();
         drop(managed);
         assert!(matches!(
             jwm_file_core::retire_managed_copy_journal(&state_root, selected).unwrap(),
@@ -3078,7 +3076,9 @@ mod wayland_acceptance {
         ]));
         assert!(!journal_text(&["retired-not-a-live-row.txt"]));
         assert_eq!(fs::read(retired_frame).unwrap(), untouched);
-        println!("GTK4 Wayland managed journal: new numbered record and pending retired cleanup shown separately");
+        println!(
+            "GTK4 Wayland managed journal: new numbered record and pending retired cleanup shown separately"
+        );
         let controls = || {
             descendants(journal_panel().unwrap().upcast_ref())
                 .into_iter()
