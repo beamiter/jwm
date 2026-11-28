@@ -761,7 +761,9 @@ fn open_window_with_tabs(
         }
     });
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
-    let grid = grid::new(&selection);
+    let folder_drop_tiles =
+        row_drag_enabled.then(|| Rc::new(drop_copy_ui::FolderRowTargets::default()));
+    let grid = grid::new(&selection, folder_drop_tiles.clone());
     for view in [list.upcast_ref::<gtk::Widget>(), grid.upcast_ref()] {
         let enter = gtk::EventControllerKey::new();
         enter.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -940,6 +942,9 @@ fn open_window_with_tabs(
     if drop_copy_ui::available() {
         drop_copy_ui::install(&drag_selected, &drop_here, &state, &selection, &copy_status);
         drop_copy_ui::install_folder_target(&list, &model, &state, &copy_status, folder_drop_rows);
+        if let Some(targets) = folder_drop_tiles {
+            drop_copy_ui::install_folder_target(&grid, &model, &state, &copy_status, targets);
+        }
     }
     copy_ui::install(
         &window,
@@ -2154,28 +2159,29 @@ mod wayland_acceptance {
             move_in("source", sx + 32, sy);
             until(|| drag_source.drag().is_some(), "XTEST started a GTK drag");
         };
-        let finish_hover = |destination: &gtk::Label, drag_source: &gtk::DragSource| {
-            let (tx, ty) = widget_center(&to, destination);
-            move_in("target", tx, ty);
-            pump_for(160);
-            move_in("target", tx + 4, ty);
-            until(
-                || {
-                    destination
-                        .state_flags()
-                        .contains(gtk::StateFlags::DROP_ACTIVE)
-                        && drag_source.drag().is_some_and(|drag| {
-                            drag.selected_action() == gtk::gdk::DragAction::COPY
-                        })
-                },
-                "the other Files window negotiated COPY with the live drag",
-            );
-        };
+        let finish_hover_at =
+            |destination: &gtk::Label, highlight: &gtk::Widget, drag_source: &gtk::DragSource| {
+                let (tx, ty) = widget_center(&to, destination);
+                move_in("target", tx, ty);
+                pump_for(160);
+                move_in("target", tx + 4, ty);
+                until(
+                    || {
+                        highlight
+                            .state_flags()
+                            .contains(gtk::StateFlags::DROP_ACTIVE)
+                            && drag_source.drag().is_some_and(|drag| {
+                                drag.selected_action() == gtk::gdk::DragAction::COPY
+                            })
+                    },
+                    "the other Files window negotiated COPY with the live drag",
+                );
+            };
 
         let hover_to =
             |label: &gtk::Label, drag_source: &gtk::DragSource, destination: &gtk::Label| {
                 start_drag(label, drag_source);
-                finish_hover(destination, drag_source);
+                finish_hover_at(destination, destination.upcast_ref(), drag_source);
             };
         let hover_from = |label: &gtk::Label, drag_source: &gtk::DragSource| {
             hover_to(label, drag_source, &drop_label);
@@ -2398,131 +2404,271 @@ mod wayland_acceptance {
         );
 
         let existing_tree = source_id(&outgoing);
-        let old_leaf = "01-destination-old";
-        let new_leaf = "01-destination-new";
-        let old_dest = target.join(old_leaf);
-        let new_dest = target.join(new_leaf);
-        let moved_dest = root.join("held-old-destination");
-        let prepared_dest = root.join("prepared-new-destination");
-        fs::create_dir(&old_dest).unwrap();
-        fs::create_dir(&prepared_dest).unwrap();
-        let old_identity = source_id(&old_dest);
-        let new_identity = source_id(&prepared_dest);
         let folder_model_row = |name: &str| {
             (0..to_model.n_items())
                 .find(|&row| to_model.native_name_at(row).as_deref() == Some(OsStr::new(name)))
         };
-        let folder_label = |name: &str| {
-            let marker = format!("▸ {name}");
-            descendants(to.upcast_ref())
-                .into_iter()
-                .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
-                .find(|label| {
-                    label.is_mapped()
-                        && label.label().as_str() == marker
-                        && hit_center(&to, label).is_some()
-                })
-        };
-        until(
-            || folder_model_row(old_leaf).is_some() && folder_label(old_leaf).is_some(),
-            "old target folder row is committed and visible",
-        );
-        let old_pos = folder_model_row(old_leaf).unwrap();
         fs::remove_file(&output).unwrap();
         until(
             || {
                 (0..to_model.n_items())
                     .all(|row| to_model.native_name_at(row).as_deref() != Some(raw))
-                    && folder_label(old_leaf).is_some()
             },
-            "parent leaf removed before the drop-target test",
+            "parent leaf removed before the folder target tests",
         );
-        let old_label = folder_label(old_leaf).unwrap();
-        let old_point = widget_center(&to, &old_label);
-        selection.set_selected(model_position(raw).unwrap());
-        hover_to(&handle, &drag_source, &old_label);
-        assert!(!old_dest.join(raw).exists(), "hover does not write a file");
-        fs::rename(&old_dest, &moved_dest).unwrap();
-        fs::rename(&prepared_dest, &new_dest).unwrap();
-        until(
-            || {
-                let new_point = folder_label(new_leaf).and_then(|label| hit_center(&to, &label));
-                folder_model_row(old_leaf).is_none()
-                    && folder_model_row(new_leaf) == Some(old_pos)
-                    && new_point == Some(old_point)
-            },
-            "destination-only refresh rebound the row under the stationary pointer",
-        );
-        until(
-            || {
-                folder_label(new_leaf).is_some_and(|label| {
-                    !label.state_flags().contains(gtk::StateFlags::DROP_ACTIVE)
-                }) && !to_list.state_flags().contains(gtk::StateFlags::DROP_ACTIVE)
-            },
-            "rebound destination and list clear acceptance before release",
-        );
-        xd(&["mouseup", "1"]);
-        until(
-            || drag_source.drag().is_none(),
-            "old folder-target drag ended",
-        );
-        pump_for(200);
-        assert!(!moved_dest.join(raw).exists());
-        assert!(!new_dest.join(raw).exists());
-        assert!(!output.exists());
-        assert_eq!(source_id(&moved_dest), old_identity);
+        let to_grid = descendants(to.upcast_ref())
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::GridView>().ok())
+            .expect("target primary grid");
+        for (kind, icons, view) in [
+            ("row", false, to_list.upcast_ref::<gtk::Widget>()),
+            ("icon", true, to_grid.upcast_ref()),
+        ] {
+            if icons {
+                gtk::prelude::WidgetExt::activate_action(&to, "win.show-grid", None).unwrap();
+                until(|| view.is_mapped(), "target switched to icon view");
+            }
+            let old_leaf = format!("01-{kind}-destination-a");
+            let new_leaf = format!("01-{kind}-destination-b");
+            let old_dest = target.join(&old_leaf);
+            let new_dest = target.join(&new_leaf);
+            let moved_dest = root.join(format!("held-{kind}-destination"));
+            let prepared_dest = root.join(format!("prepared-{kind}-destination"));
+            fs::create_dir(&old_dest).unwrap();
+            fs::create_dir(&prepared_dest).unwrap();
+            let old_identity = source_id(&old_dest);
+            let new_identity = source_id(&prepared_dest);
+            let visible_label = |marker: &str| {
+                descendants(view)
+                    .into_iter()
+                    .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+                    .find(|label| {
+                        label.is_mapped()
+                            && label.label().as_str() == marker
+                            && hit_center(&to, label).is_some()
+                    })
+            };
+            let folder_label = |name: &str| {
+                if icons {
+                    visible_label(name)
+                } else {
+                    visible_label(&format!("▸ {name}"))
+                }
+            };
+            let highlight = |label: &gtk::Label| {
+                if icons {
+                    label
+                        .parent()
+                        .expect("the grid label is inside its registered tile")
+                } else {
+                    label.clone().upcast()
+                }
+            };
+            let hover_folder = |label: &gtk::Label| {
+                start_drag(&handle, &drag_source);
+                finish_hover_at(label, &highlight(label), &drag_source);
+            };
+            until(
+                || folder_model_row(&old_leaf).is_some() && folder_label(&old_leaf).is_some(),
+                "old target folder is committed and visible",
+            );
+            let old_pos = folder_model_row(&old_leaf).unwrap();
+            let old_label = folder_label(&old_leaf).unwrap();
+            let old_point = widget_center(&to, &old_label);
+            selection.set_selected(model_position(raw).unwrap());
+            hover_folder(&old_label);
+            assert!(!old_dest.join(raw).exists(), "hover does not write a file");
+            fs::rename(&old_dest, &moved_dest).unwrap();
+            fs::rename(&prepared_dest, &new_dest).unwrap();
+            until(
+                || {
+                    let new_point =
+                        folder_label(&new_leaf).and_then(|label| hit_center(&to, &label));
+                    folder_model_row(&old_leaf).is_none()
+                        && folder_model_row(&new_leaf) == Some(old_pos)
+                        && new_point == Some(old_point)
+                },
+                "destination-only refresh rebound the item under the stationary pointer",
+            );
+            until(
+                || {
+                    folder_label(&new_leaf).is_some_and(|label| {
+                        !highlight(&label)
+                            .state_flags()
+                            .contains(gtk::StateFlags::DROP_ACTIVE)
+                    }) && !view.state_flags().contains(gtk::StateFlags::DROP_ACTIVE)
+                },
+                "rebound destination and view clear acceptance before release",
+            );
+            xd(&["mouseup", "1"]);
+            until(
+                || drag_source.drag().is_none(),
+                "old folder-target drag ended",
+            );
+            pump_for(200);
+            assert!(!moved_dest.join(raw).exists());
+            assert!(!new_dest.join(raw).exists());
+            assert!(!output.exists());
+            assert_eq!(source_id(&moved_dest), old_identity);
 
-        let new_label = folder_label(new_leaf).unwrap();
-        let plain_label = control(&to, "notes %�.txt");
-        start_drag(&handle, &drag_source);
-        let (px, py) = widget_center(&to, &plain_label);
-        move_in("target", px, py);
-        pump_for(160);
-        move_in("target", px + 4, py);
-        pump_for(160);
-        assert!(
-            !plain_label
-                .state_flags()
-                .contains(gtk::StateFlags::DROP_ACTIVE)
-        );
-        assert!(!to_list.state_flags().contains(gtk::StateFlags::DROP_ACTIVE));
-        assert!(
-            drag_source
-                .drag()
-                .is_some_and(|drag| { drag.selected_action() != gtk::gdk::DragAction::COPY })
-        );
-        finish_hover(&new_label, &drag_source);
-        xd(&["mouseup", "1"]);
-        until(
-            || status(&|message| message.starts_with("已复制：") && message.contains(new_leaf)),
-            "fresh regular drop completed inside the new target folder",
-        );
-        assert_eq!(fs::read(new_dest.join(raw)).unwrap(), b"exact raw source");
-        assert!(!output.exists());
-        assert_eq!(source_id(&input), original);
+            let new_label = folder_label(&new_leaf).unwrap();
+            let plain_label = visible_label("notes %�.txt").expect("visible ordinary file");
+            start_drag(&handle, &drag_source);
+            let (px, py) = widget_center(&to, &plain_label);
+            move_in("target", px, py);
+            pump_for(160);
+            move_in("target", px + 4, py);
+            pump_for(160);
+            assert!(
+                !highlight(&plain_label)
+                    .state_flags()
+                    .contains(gtk::StateFlags::DROP_ACTIVE)
+            );
+            assert!(!view.state_flags().contains(gtk::StateFlags::DROP_ACTIVE));
+            assert!(
+                drag_source
+                    .drag()
+                    .is_some_and(|drag| { drag.selected_action() != gtk::gdk::DragAction::COPY })
+            );
+            finish_hover_at(&new_label, &highlight(&new_label), &drag_source);
+            xd(&["mouseup", "1"]);
+            until(
+                || {
+                    status(&|message| {
+                        message.starts_with("已复制：") && message.contains(&new_leaf)
+                    })
+                },
+                "fresh regular drop completed inside the new target folder",
+            );
+            assert_eq!(fs::read(new_dest.join(raw)).unwrap(), b"exact raw source");
+            assert!(!output.exists());
+            assert_eq!(source_id(&input), original);
 
-        selection.set_selected(folder_row().unwrap());
-        hover_to(&handle, &drag_source, &new_label);
-        xd(&["mouseup", "1"]);
-        until(
-            || {
-                status(&|message| {
-                    message.starts_with("已复制文件夹：") && message.contains(new_leaf)
-                })
-            },
-            "fresh tree drop completed inside the new target folder",
-        );
-        assert_eq!(
-            fs::read(new_dest.join(folder_name).join("nested").join(raw)).unwrap(),
-            b"exact nested bytes"
-        );
-        assert_eq!(source_id(&incoming), folder_identity);
-        assert_eq!(source_id(&new_dest), new_identity);
-        assert_eq!(source_id(&outgoing), existing_tree);
-        assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
-        println!(
-            "GTK4 {backend_label} folder row target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory"
-        );
+            selection.set_selected(folder_row().unwrap());
+            hover_folder(&new_label);
+            xd(&["mouseup", "1"]);
+            until(
+                || {
+                    status(&|message| {
+                        message.starts_with("已复制文件夹：") && message.contains(&new_leaf)
+                    })
+                },
+                "fresh tree drop completed inside the new target folder",
+            );
+            assert_eq!(
+                fs::read(new_dest.join(folder_name).join("nested").join(raw)).unwrap(),
+                b"exact nested bytes"
+            );
+            assert_eq!(source_id(&incoming), folder_identity);
+            assert_eq!(source_id(&new_dest), new_identity);
+            assert_eq!(source_id(&outgoing), existing_tree);
+            assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
+            println!(
+                "GTK4 {backend_label} folder {kind} target: stationary rebound drop wrote nothing; fresh file and folder copies stayed inside the chosen directory"
+            );
+            if icons {
+                let reflow_source = OsStr::new("reflow-source.txt");
+                fs::write(source.join(reflow_source), b"geometry witness").unwrap();
+                for name in ["00a-reflow", "00b-reflow", "00c-reflow"] {
+                    fs::create_dir(target.join(name)).unwrap();
+                }
+                let bound_at = |position| {
+                    let name = to_model.native_name_at(position)?;
+                    let label = folder_label(name.to_str()?)?;
+                    Some((name, label, to_model.item(position)?))
+                };
+                to_grid.set_max_columns(2);
+                to_grid.set_min_columns(2);
+                until(
+                    || {
+                        model_position(reflow_source).is_some()
+                            && folder_label("00c-reflow").is_some()
+                            && bound_at(2).is_some()
+                            && bound_at(3).is_some()
+                    },
+                    "the two-column grid realizes both reflow folders",
+                );
+                let (a, a_label, a_object) = bound_at(2).unwrap();
+                let (b, b_label, b_object) = bound_at(3).unwrap();
+                let a_tile = highlight(&a_label);
+                let b_tile = highlight(&b_label);
+                let (x, y) = widget_center(&to, &a_label);
+                let selects_b = || {
+                    let (tx, ty) = to.surface_transform();
+                    let mut hit = to.pick(
+                        f64::from(x + 4) + tx,
+                        f64::from(y) + ty,
+                        gtk::PickFlags::DEFAULT,
+                    );
+                    while let Some(widget) = hit {
+                        if widget == b_tile {
+                            return true;
+                        }
+                        hit = widget.parent();
+                    }
+                    false
+                };
+                selection.set_selected(model_position(reflow_source).unwrap());
+                hover_folder(&a_label);
+                assert!(!selects_b());
+                to_grid.set_max_columns(3);
+                to_grid.set_min_columns(3);
+                until(
+                    || {
+                        to_model.item(2).as_ref() == Some(&a_object)
+                            && to_model.item(3).as_ref() == Some(&b_object)
+                            && a_label.parent().as_ref() == Some(&a_tile)
+                            && b_label.parent().as_ref() == Some(&b_tile)
+                            && selects_b()
+                    },
+                    "the same bound tiles reflow and place B under the stationary pointer",
+                );
+                until(
+                    || {
+                        [&a_tile, &b_tile, view].into_iter().all(|widget| {
+                            !widget.state_flags().contains(gtk::StateFlags::DROP_ACTIVE)
+                        })
+                    },
+                    "the stale tile and grid clear acceptance before release",
+                );
+                xd(&["mouseup", "1"]);
+                until(
+                    || drag_source.drag().is_none(),
+                    "geometry-invalidated drag ended",
+                );
+                pump_for(200);
+                let in_a = target.join(&a).join(reflow_source);
+                let in_b = target.join(&b).join(reflow_source);
+                let in_parent = target.join(reflow_source);
+                assert!(!in_a.exists());
+                assert!(!in_b.exists());
+                assert!(!in_parent.exists());
+
+                hover_folder(&b_label);
+                xd(&["mouseup", "1"]);
+                until(
+                    || {
+                        status(&|message| {
+                            message.starts_with("已复制：")
+                                && message.contains(b.to_str().unwrap())
+                                && message.contains("reflow-source.txt")
+                        })
+                    },
+                    "a fresh drop into the reflowed tile reported completion",
+                );
+                assert_eq!(fs::read(&in_b).unwrap(), b"geometry witness");
+                assert!(!in_a.exists());
+                assert!(!in_parent.exists());
+                assert_eq!(
+                    fs::read(source.join(reflow_source)).unwrap(),
+                    b"geometry witness"
+                );
+                assert_eq!(text_clipboard(&display), "unchanged independent clipboard");
+                println!(
+                    "GTK4 {backend_label} folder icon target: reflow of live tiles cleared acceptance, stale release wrote nothing"
+                );
+            }
+        }
     }
 
     #[test]

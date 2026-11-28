@@ -241,17 +241,17 @@ and move undo are not supported.
 On X11 or Wayland, drag a regular file or a supported local folder
 directly from its row in the main file list. You can also select it and
 drag the **拖拽复制所选项目** handle, including in icon view.
-Drop onto a folder row in the other window's main list to copy inside
-that folder without opening it. To copy into the directory the other
+Drop onto a folder row or icon in the other window to copy inside that
+folder without opening it. To copy into the directory the other
 window is already showing, use **拖到这里复制到当前目录** instead. Both
 windows must belong to the same Files instance. Nothing is written on
 hover, and an accepted gesture does not mean the copy has finished.
 Check the destination window's status for the actual result.
 
 An existing name is never replaced. The source and clipboard remain
-unchanged. If the source list refreshes, or the folder row changes after
-it accepts the hover, start a new drag. A symbolic link is not a folder
-drop target. A folder uses the bounded folder-copy path: no merging or
+unchanged. If the source refreshes or the target folder's row or icon
+changes or moves after it accepts the hover, start a new drag. A symbolic
+link is not a folder drop target. A folder uses the bounded folder-copy path: no merging or
 copying into itself. Dragging here is always single-item copy, not move,
 link, or a drop from an external app.
 Keyboard and menu copy remain available.

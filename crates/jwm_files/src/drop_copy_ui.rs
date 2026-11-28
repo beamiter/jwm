@@ -4,7 +4,7 @@ use gtk::{gdk, glib, prelude::*};
 use gtk4 as gtk;
 use jwm_file_core::{FileEntry, FileKind};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::{Rc, Weak},
     sync::Arc,
 };
@@ -171,21 +171,23 @@ pub(super) fn install_row(
 
 #[derive(Default)]
 pub(super) struct FolderRowTargets {
-    list: glib::WeakRef<gtk::ListView>,
+    view: glib::WeakRef<gtk::Widget>,
     rows: RefCell<std::collections::HashMap<usize, glib::WeakRef<gtk::ListItem>>>,
     hover: RefCell<Option<FolderHover>>,
+    watching_geometry: Cell<bool>,
 }
 
 struct FolderHover {
     drag: glib::WeakRef<gdk::Drag>,
     rows: std::sync::Weak<Vec<FileEntry>>,
     active: Option<glib::WeakRef<gtk::ListItem>>,
+    bounds: (f32, f32, f32, f32),
     invalidated: bool,
 }
 
 impl FolderRowTargets {
-    pub(super) fn setup(&self, item: &gtk::ListItem, label: &gtk::Label) {
-        let key = label.upcast_ref::<gtk::Widget>().as_ptr() as usize;
+    pub(super) fn setup(&self, item: &gtk::ListItem, child: &impl IsA<gtk::Widget>) {
+        let key = child.upcast_ref::<gtk::Widget>().as_ptr() as usize;
         self.rows.borrow_mut().insert(key, item.downgrade());
     }
 
@@ -242,8 +244,8 @@ impl FolderRowTargets {
         };
         if active {
             Self::set_highlight(item, false);
-            if let Some(list) = self.list.upgrade() {
-                list.unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
+            if let Some(view) = self.view.upgrade() {
+                view.unset_state_flags(gtk::StateFlags::DROP_ACTIVE);
             }
         }
     }
@@ -260,7 +262,57 @@ impl FolderRowTargets {
         }
     }
 
-    fn update(&self, drag: &gdk::Drag, item: &gtk::ListItem, rows: &Arc<Vec<FileEntry>>) -> bool {
+    fn bounds(item: &gtk::ListItem, view: &gtk::Widget) -> Option<(f32, f32, f32, f32)> {
+        let bounds = item.child()?.compute_bounds(view)?;
+        Some((bounds.x(), bounds.y(), bounds.width(), bounds.height()))
+    }
+
+    fn invalidate_moved(&self, view: &gtk::Widget) -> bool {
+        let active = self
+            .hover
+            .borrow()
+            .as_ref()
+            .and_then(|hover| Some((hover.active.as_ref()?.upgrade()?, hover.bounds)));
+        if let Some((item, bounds)) = active {
+            if Self::bounds(&item, view) == Some(bounds) {
+                return true;
+            }
+            // Scrolling or GridView reflow can move an already bound target.
+            self.unbind(&item);
+        }
+        false
+    }
+
+    fn watch_geometry(self: &Rc<Self>, view: &gtk::Widget) {
+        if self.watching_geometry.replace(true) {
+            return;
+        }
+        let targets = Rc::downgrade(self);
+        view.add_tick_callback(move |view, _| {
+            if let Some(targets) = targets.upgrade() {
+                if targets.invalidate_moved(view) {
+                    return glib::ControlFlow::Continue;
+                }
+                targets.watching_geometry.set(false);
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn update(
+        self: &Rc<Self>,
+        drag: &gdk::Drag,
+        item: &gtk::ListItem,
+        rows: &Arc<Vec<FileEntry>>,
+    ) -> bool {
+        let Some(view) = self.view.upgrade() else {
+            return false;
+        };
+        self.invalidate_moved(&view);
+        let Some(bounds) = Self::bounds(item, &view) else {
+            self.clear_highlight();
+            return false;
+        };
         if self.accepts(drag, item, rows) {
             return true;
         }
@@ -286,9 +338,11 @@ impl FolderRowTargets {
             drag: drag.downgrade(),
             rows: weak_rows,
             active: Some(item.downgrade()),
+            bounds,
             invalidated: false,
         }));
         Self::set_highlight(item, true);
+        self.watch_geometry(&view);
         true
     }
 
@@ -320,14 +374,14 @@ fn target_drag(target: &gtk::DropTarget) -> Option<gdk::Drag> {
 }
 
 pub(super) fn install_folder_target(
-    list: &gtk::ListView,
+    view: &impl IsA<gtk::Widget>,
     model: &crate::row_model::FileRowModel,
     state: &Shared,
     status: &gtk::Label,
     targets: Rc<FolderRowTargets>,
 ) {
-    // The list, unlike a recycled row, can still answer the native drop.
-    targets.list.set(Some(list));
+    // The view, unlike a recycled row or tile, can still answer the native drop.
+    targets.view.set(Some(view.upcast_ref()));
     let target = gtk::DropTarget::new(u64::static_type(), gdk::DragAction::COPY);
     target.set_preload(true);
     let state = Rc::downgrade(state);
@@ -388,7 +442,9 @@ pub(super) fn install_folder_target(
             }
             let drag = target_drag(target)?;
             let (item, state, folder) = capture(target, &drag, x, y)?;
-            if !targets.accepts(&drag, &item, &folder.rows) {
+            if !targets.invalidate_moved(&target.widget()?)
+                || !targets.accepts(&drag, &item, &folder.rows)
+            {
                 return None;
             }
             let status = status.upgrade()?;
@@ -411,7 +467,7 @@ pub(super) fn install_folder_target(
         targets.clear_highlight();
         accepted
     });
-    list.add_controller(target);
+    view.add_controller(target);
 }
 
 pub(super) fn install(
