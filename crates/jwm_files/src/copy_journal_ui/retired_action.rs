@@ -39,7 +39,9 @@ pub(super) fn install(
     feedback: &gtk::Label,
     refresh: &gtk::Button,
     busy: &Rc<Cell<bool>>,
+    refresh_after_read: &Rc<Cell<bool>>,
 ) {
+    let refresh_after_read = refresh_after_read.clone();
     let (window, feedback, refresh, busy) = (
         window.downgrade(),
         feedback.downgrade(),
@@ -73,6 +75,7 @@ pub(super) fn install(
             refresh.clone(),
             button.downgrade(),
         );
+        let refresh_after_read = refresh_after_read.clone();
         glib::spawn_future_local(async move {
             let result = receive.await;
             let Some(window) = window.upgrade().filter(|window| window.is_visible()) else {
@@ -134,7 +137,10 @@ pub(super) fn install(
                     label.set_text("已取消，日志未改变。");
                     return;
                 }
-                if !weak_window.upgrade().is_some_and(|window| window.is_visible()) {
+                if !weak_window
+                    .upgrade()
+                    .is_some_and(|window| window.is_visible())
+                {
                     return;
                 }
                 label.set_text("正在清理旧日志…");
@@ -142,6 +148,8 @@ pub(super) fn install(
                 let worker = std::thread::Builder::new()
                     .name("jwm-clean-retired-journal".into())
                     .spawn(move || {
+                        #[cfg(test)]
+                        super::refresh_test_gate::before_cleanup();
                         let clean = super::state_root()
                             .and_then(|root| cleanup_managed_retired(&root, selected));
                         let _ = send.send(clean);
@@ -152,6 +160,7 @@ pub(super) fn install(
                 }
                 let (window, feedback, refresh) =
                     (weak_window.clone(), feedback.clone(), refresh.clone());
+                let refresh_after_read = refresh_after_read.clone();
                 glib::spawn_future_local(async move {
                     let result = receive.await;
                     drop(lease);
@@ -164,6 +173,8 @@ pub(super) fn install(
                     if let Some(refresh) = refresh.upgrade() {
                         if refresh.is_sensitive() {
                             refresh.emit_clicked();
+                        } else {
+                            refresh_after_read.set(true);
                         }
                     }
                 });

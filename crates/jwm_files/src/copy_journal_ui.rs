@@ -258,7 +258,15 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
         actions.append(&clean);
         actions.append(&feedback);
         layout.append(&actions);
-        retired_action::install(&window, &clean, &feedback, &refresh, &cleaning);
+        let refresh_after_read = Rc::new(Cell::new(false));
+        retired_action::install(
+            &window,
+            &clean,
+            &feedback,
+            &refresh,
+            &cleaning,
+            &refresh_after_read,
+        );
         let note = gtk::Label::new(Some("按记录编号排列，不自动检查当前目标文件或清理日志"));
         note.set_xalign(0.0);
         note.add_css_class("dim-label");
@@ -296,7 +304,10 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
             let spawned = std::thread::Builder::new()
                 .name("jwm-files-copy-records".into())
                 .spawn(move || {
-                    let _ = send.send(load());
+                    let result = load();
+                    #[cfg(test)]
+                    refresh_test_gate::after_read();
+                    let _ = send.send(result);
                 });
             if spawned.is_err() {
                 busy.set(false);
@@ -312,6 +323,7 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                 busy.clone(),
             );
             let (reviewing, clean) = (reviewing.clone(), weak_clean.clone());
+            let refresh_after_read = refresh_after_read.clone();
             glib::spawn_future_local(async move {
                 let result = receive.await;
                 busy.set(false);
@@ -324,6 +336,12 @@ pub(super) fn install(parent: &gtk::ApplicationWindow) {
                     return;
                 };
                 refresh.set_sensitive(true);
+                if refresh_after_read.replace(false) {
+                    // A confirmed write finished after this read was requested.
+                    // Never render this possibly obsolete snapshot.
+                    refresh.emit_clicked();
+                    return;
+                }
                 let Some(clean) = clean.upgrade() else {
                     return;
                 };
@@ -392,5 +410,53 @@ pub(super) mod check_test_gate {
             let _ = gate.reached.send(());
             let _ = gate.release.recv_timeout(Duration::from_secs(8));
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod refresh_test_gate {
+    use std::{
+        sync::{Mutex, mpsc},
+        time::Duration,
+    };
+
+    struct Gate {
+        reached: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    static READ: Mutex<Option<Gate>> = Mutex::new(None);
+    static CLEANUP: Mutex<Option<Gate>> = Mutex::new(None);
+
+    fn arm(slot: &Mutex<Option<Gate>>) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (reached, observed) = mpsc::channel();
+        let (resume, release) = mpsc::channel();
+        let old = slot.lock().unwrap().replace(Gate { reached, release });
+        assert!(old.is_none(), "only one held action of each kind");
+        (observed, resume)
+    }
+
+    fn wait(slot: &Mutex<Option<Gate>>) {
+        let gate = slot.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            let _ = gate.release.recv_timeout(Duration::from_secs(8));
+        }
+    }
+
+    pub fn arm_read() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        arm(&READ)
+    }
+
+    pub fn arm_cleanup() -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        arm(&CLEANUP)
+    }
+
+    pub(super) fn after_read() {
+        wait(&READ);
+    }
+
+    pub(super) fn before_cleanup() {
+        wait(&CLEANUP);
     }
 }
